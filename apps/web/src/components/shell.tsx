@@ -22,7 +22,7 @@ function Dropdown({ open, onClose, children, style }: { open: boolean; onClose: 
   }, [open, onClose]);
   return <AnimatePresence>{open && (
     <motion.div ref={ref} initial={{ opacity: 0, y: -8, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -8, scale: 0.95 }} transition={{ duration: 0.15 }}
-      style={{ position: 'absolute', top: '100%', right: 0, marginTop: 8, background: 'var(--card-bg, #1e1e2e)', border: '1px solid var(--border)', borderRadius: 12, padding: 6, minWidth: 180, zIndex: 100, boxShadow: '0 8px 32px rgba(0,0,0,0.3)', ...style }>
+      style={{ position: 'absolute', top: '100%', right: 0, marginTop: 8, background: 'var(--card-bg, #1e1e2e)', border: '1px solid var(--border)', borderRadius: 12, padding: 6, minWidth: 180, zIndex: 100, boxShadow: '0 8px 32px rgba(0,0,0,0.3)', ...style }}>
       {children}
     </motion.div>
   )}</AnimatePresence>;
