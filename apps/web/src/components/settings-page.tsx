@@ -4,6 +4,7 @@ import { Save, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
 
 type Runtime = { id: string; name: string; adapterType: string; config: Record<string, unknown>; isActive?: boolean };
+type RuntimeHealth = { runtimeId: string; name: string; adapterType: string; status: string; isActive: boolean; agents: number; activeAgents: number; busyAgents: number; lastRunAt?: string | null; lastRunStatus?: string | null; lastError?: string | null; capabilities?: string[] };
 type Company = { id: string; name: string; slug: string; mission?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean };
 type Department = { id: string; companyId: string; name: string; slug: string };
 
@@ -43,6 +44,7 @@ function configFields(adapterType: string): Array<[string, string]> {
 
 export function SettingsPage() {
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
+  const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealth[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [runtimeId, setRuntimeId] = useState('');
@@ -60,12 +62,14 @@ export function SettingsPage() {
   const [toast, setToast] = useState('');
 
   async function refresh() {
-    const [nextRuntimes, nextCompanies, nextDepartments] = await Promise.all([
+    const [nextRuntimes, nextHealth, nextCompanies, nextDepartments] = await Promise.all([
       api<Runtime[]>('/api/agent-runtimes'),
+      api<RuntimeHealth[]>('/api/agent-runtimes/health'),
       api<Company[]>('/api/companies'),
       api<Department[]>('/api/departments'),
     ]);
     setRuntimes(nextRuntimes);
+    setRuntimeHealth(nextHealth);
     setCompanies(nextCompanies);
     setDepartments(nextDepartments);
     const company = nextCompanies.find((item) => item.id === companyId) ?? nextCompanies[0];
@@ -151,6 +155,23 @@ export function SettingsPage() {
             <b>{runtime.name}</b><p>{runtime.adapterType} / {runtime.isActive === false ? 'inactive' : 'active'}</p>
             <div className="action-row"><button className="btn" onClick={() => selectRuntime(runtime)}>Edit</button><button className="btn" style={{ color: 'var(--danger)' }} onClick={() => deleteRuntime(runtime)}><Trash2 size={14} /> Delete</button></div>
           </div>)}
+        </div>
+      </section>
+
+      <section className="card section-card">
+        <div className="panel-title"><h2>Runtime health</h2><span className="status-pill">{runtimeHealth.length} runtimes</span></div>
+        <div className="table-list">
+          {runtimeHealth.map((runtime) => <div className="list-row" key={runtime.runtimeId}>
+            <b>{runtime.name}</b>
+            <p>{runtime.status} / {runtime.adapterType} / agents {runtime.activeAgents}/{runtime.agents} active / {runtime.busyAgents} busy</p>
+            <div className="meta-grid">
+              <span>Last run <b>{runtime.lastRunAt ? new Date(runtime.lastRunAt).toLocaleString() : 'none'}</b></span>
+              <span>Last status <b>{runtime.lastRunStatus ?? 'none'}</b></span>
+              <span>Capabilities <b>{runtime.capabilities?.join(', ') || 'none'}</b></span>
+              <span>Error <b>{runtime.lastError ?? 'none'}</b></span>
+            </div>
+          </div>)}
+          {runtimeHealth.length === 0 && <p style={{ color: 'var(--muted)' }}>No runtime presets yet.</p>}
         </div>
       </section>
 

@@ -1,6 +1,6 @@
 import { desc } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { requireAuth } from './auth.ts';
+import { requireAuth, requireRole } from './auth.ts';
 import { db } from './db/client.ts';
 import { cronRuns } from './db/schema.ts';
 import { getDispatchCronStatus, runDispatchCronTick } from './dispatch.ts';
@@ -19,7 +19,7 @@ export async function registerCronRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/cron/run', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const result = await runDispatchCronTick(app, 'manual');
     if (result.status === 'failed') return reply.code(500).send(result);
     if (result.status === 'skipped') return reply.code(409).send(result);

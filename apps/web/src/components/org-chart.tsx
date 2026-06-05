@@ -354,20 +354,23 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
     {loading ? <p style={{ textAlign: 'center', opacity: 0.5 }}>Loading...</p> : (
       <div style={{ display: 'grid', gap: 16 }}>
         <div style={{ display: 'grid', gap: 14 }}>
-          {companyDepartments.map((department) => <section key={department.id} className="card" style={{ padding: 14 }}>
-            <h3 style={{ margin: '0 0 12px' }}>{department.name}</h3>
-            <div className="org-node-list">
+          {companyDepartments.map((department) => <section key={department.id} className="card org-chart-lane">
+            <div className="panel-title"><h3>{department.name}</h3><span className="status-pill">{visibleAgents.filter((agent) => agent.departmentId === department.id).length} members</span></div>
+            <div className="org-chart-scroll" aria-label={`${department.name} organization chart`}>
               <AnimatePresence>
                 {(roots.filter((agent) => agent.departmentId === department.id).length ? roots.filter((agent) => agent.departmentId === department.id) : visibleAgents.filter((agent) => agent.departmentId === department.id)).map((agent) => <AgentNode key={agent.id} agent={agent} agents={visibleAgents} selectedId={selected?.id} onSelect={setSelected} />)}
               </AnimatePresence>
             </div>
           </section>)}
         </div>
-        <div className="org-node-list">
+        <section className="card org-chart-lane">
+          <div className="panel-title"><h3>Unassigned department</h3><span className="status-pill">{visibleAgents.filter((agent) => !agent.departmentId).length} members</span></div>
+          <div className="org-chart-scroll" aria-label="Unassigned department organization chart">
           <AnimatePresence>
             {(roots.filter((agent) => !agent.departmentId).length ? roots.filter((agent) => !agent.departmentId) : visibleAgents.filter((agent) => !agent.departmentId)).map((agent) => <AgentNode key={agent.id} agent={agent} agents={visibleAgents} selectedId={selected?.id} onSelect={setSelected} />)}
           </AnimatePresence>
-        </div>
+          </div>
+        </section>
         {selected && (
           <motion.section className="card" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} style={{ padding: 18, display: 'grid', gap: 12 }}>
             <div className="panel-title">
@@ -435,19 +438,19 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
 
 function AgentNode({ agent, agents, selectedId, onSelect }: { agent: Agent; agents: Agent[]; selectedId?: string; onSelect: (agent: Agent) => void }) {
   const children = agents.filter((item) => item.bossId === agent.id);
-  return <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95 }} style={{ display: 'grid', gap: 10 }}>
-    <button className="card agent-node-card" onClick={() => onSelect(agent)} style={{ borderColor: selectedId === agent.id ? 'var(--primary)' : 'var(--border)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-        <span style={{ width: 10, height: 10, borderRadius: 99, background: agent.isBusy ? '#16a34a' : agent.isActive ? '#3b82f6' : '#94a3b8' }} />
+  return <motion.div className={`org-tree-node${children.length ? ' has-children' : ''}`} initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95 }}>
+    <button className="agent-node-card org-agent-node" onClick={() => onSelect(agent)} style={{ borderColor: selectedId === agent.id ? 'var(--primary)' : 'var(--border)' }}>
+      <div className="org-agent-head">
+        <span className={`org-agent-dot ${agent.isBusy ? 'busy' : agent.isActive ? 'active' : 'offline'}`} />
         <b>{agent.name}</b>
-        {!agent.isActive && <Ban size={14} style={{ marginLeft: 'auto', color: '#dc2626' }} />}
+        {!agent.isActive && <Ban size={14} style={{ marginLeft: 'auto', color: 'var(--danger)' }} />}
       </div>
-      <div style={{ fontSize: 13, opacity: 0.72, display: 'grid', gap: 4 }}>
+      <div className="org-agent-meta">
         <span>{agent.role} / {agent.adapterType ?? 'hermes'}</span>
         <span>{agent.hermesProfile ?? 'no-profile'}</span>
       </div>
     </button>
-    {children.length > 0 && <div className="agent-children" style={{ marginLeft: 28, paddingLeft: 16, borderLeft: '1px solid var(--border)', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+    {children.length > 0 && <div className="agent-children org-children">
       {children.map((child) => <AgentNode key={child.id} agent={child} agents={agents} selectedId={selectedId} onSelect={onSelect} />)}
     </div>}
   </motion.div>;

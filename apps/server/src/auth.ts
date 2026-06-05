@@ -22,3 +22,17 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply):
     return null;
   }
 }
+
+const roleRank: Record<string, number> = { viewer: 0, operator: 1, admin: 2 };
+
+export async function requireRole(request: FastifyRequest, reply: FastifyReply, minimumRole: 'viewer' | 'operator' | 'admin'): Promise<AuthUser | null> {
+  const user = await requireAuth(request, reply);
+  if (!user) return null;
+  const actual = roleRank[user.role] ?? 0;
+  const required = roleRank[minimumRole] ?? 0;
+  if (actual < required) {
+    await reply.code(403).send({ error: 'forbidden', requiredRole: minimumRole });
+    return null;
+  }
+  return user;
+}

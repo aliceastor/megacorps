@@ -14,8 +14,8 @@ The current local stack runs with Docker:
 
 Latest verified baseline:
 
-- Phase 1-11 operational MVP flows are implemented.
-- Company registry page, department setup, O-chart, runtime presets, adapter endpoint configuration, direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, heartbeat runs, cron run history, budget policies, approvals, and automatic dispatch heartbeat are implemented.
+- Phase 1-13 operational MVP flows are implemented.
+- Company registry page, department setup, real top-down O-chart tree canvas, runtime presets, runtime health summaries, adapter endpoint configuration, direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
 - Deployment is user-managed. Local-only Docker was used for QA in this pass; NAS/server deployment remains user-managed.
 - Browser plugin QA verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text.
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
@@ -23,6 +23,8 @@ Latest verified baseline:
 - Sidebar navigation now keeps Help and Settings in the bottom utility area, with the collapse toggle inside the sidebar.
 - Hermes SSH adapter is implemented for direct `ssh -> hermes chat --profile {profile}` dispatch against the Hermes host, defaulting to `root@192.168.1.172`.
 - Browser API fallback now tries the current browser hostname on port `4000` before falling back to baked `NEXT_PUBLIC_API_URL`, which avoids NAS deployments accidentally calling unreachable `localhost` or stale IPs.
+- In-app rate limiting is enabled by default, and API Help now includes required roles for endpoints.
+- Mutation/manual execution APIs now require operator/admin role checks.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 
 ## Paperclip Research Summary
@@ -174,7 +176,7 @@ Implemented:
 - Department creation.
 - Agent can belong to a department.
 - Agent can report to another agent through `bossId`.
-- Companies/Agents pages group the O-chart by department and reporting line.
+- Companies/Agents pages group the O-chart by department and render a real top-down tree with connector lines for reporting lines.
 - Member identity labels are free text; hierarchy is controlled by `bossId` and direct reports.
 - Clicking a member opens editing for identity label, department, reports-to relation, runtime, adapter, and budget.
 - Agent runtime presets are managed in `Settings -> Agent runtimes`.
@@ -280,10 +282,12 @@ Implemented:
   - reviewed cards
   - skipped cards
   - errors
+- The monthly budget reset cron also writes a `budget-monthly-reset` row to `cron_runs` and `budget.monthly_reset` activity events.
 - API endpoints:
   - `GET /api/cron/status`
   - `GET /api/cron/runs`
   - `POST /api/cron/run`
+  - `GET /api/agent-runtimes/health`
 - Logs page includes cron heartbeat status, recent run history, and a manual `Run now` button.
 
 ### Phase 8: Execution Safety
@@ -316,6 +320,7 @@ Implemented:
   - hard-stop flag
 - Dispatch preflight blocks and pauses agents that are already over monthly budget.
 - Dispatch/review completion records cost events and can pause agents if hard-stop limits are exceeded.
+- Monthly budget reset clears `agents.spent_this_month` on `BUDGET_RESET_DAY` UTC, default day 1, and is guarded by a `cron_runs` month marker.
 - Budget hard stops create pending `budget_override_required` approvals.
 - Tasks that require approval create pending approval records.
 - Reviewer or board approval updates approval state and task stage.
@@ -339,6 +344,7 @@ Configuration model:
 - Runtime presets live in `agent_runtimes`.
 - Agent-specific overrides live in `agents.adapter_config`.
 - Effective adapter config is `env fallback -> runtime preset -> agent override`.
+- Runtime health summaries are available in `Settings` and `GET /api/agent-runtimes/health`.
 
 Where to configure:
 
@@ -371,6 +377,29 @@ Gaps:
 - Queue-based concurrency is not yet implemented.
 - Secrets are stored as JSON config in the local MVP database; production should encrypt or externalize them.
 - The server image includes `openssh-client`, but production deployments must mount/provide an SSH key readable by the `megacorps` container user when `hermes-ssh` uses key auth.
+
+### Production Controls Added
+
+Implemented:
+
+- `requireRole` helper with viewer/operator/admin rank.
+- Operator/admin required for mutation-heavy routes, manual run/review/decompose, adapter tests, runtime edits, budget changes, approval decisions, and manual cron.
+- IP-based in-app rate limiter:
+  - auth: 12/min
+  - chat: 40/min
+  - webhook: 120/min
+  - operator actions: 20/min
+  - writes: 120/min
+  - reads: 600/min
+- Webhook shared-secret guard when `WEBHOOK_SHARED_SECRET` is set.
+- Runtime health API and Settings panel.
+- Next.js error boundary with retry/dashboard recovery.
+
+Limits:
+
+- RBAC is route-level only; it is not yet company-membership scoped.
+- Rate limiting is in-memory per API process; production should still use reverse-proxy limits.
+- Runtime health is based on configuration, attached agents, and recent runs; it is not yet an active external heartbeat probe.
 
 ### Logs and Audit Trail
 
@@ -433,6 +462,9 @@ Verified on 2026-06-06:
   - task dispatch/review/decomposition
   - adapter registry including `hermes-ssh`
   - API Help response schema/example and rate-limit coverage
+  - RBAC role helper and rate-limit policy classification
+  - runtime health endpoint type coverage
+  - monthly budget reset cron compile coverage
 - Web route smoke:
   - `/dashboard`
   - `/companies`
@@ -444,6 +476,7 @@ Verified on 2026-06-06:
   - `/knowledge`
   - `/workspaces`
   - `/settings`
+  - `/help`
 
 Known local warning:
 
@@ -460,11 +493,11 @@ Recent log review:
 Implemented or partially implemented:
 
 - Company control plane.
-- Department and O-chart basics.
+- Real department-aware O-chart tree.
 - Kanban/ticket board.
 - Heartbeat dispatch.
 - Bring-your-own-agent adapter shape.
-- Runtime registry and adapter endpoint configuration.
+- Runtime registry, adapter endpoint configuration, and runtime health summaries.
 - Basic budgets on agents.
 - Pause/resume/fire governance.
 - Task comments and intervention.
@@ -480,7 +513,7 @@ Still missing:
 - Strong multi-company data isolation enforcement in every endpoint.
 - Async worker sidecar for long-running Hermes jobs.
 - Queue and retries with BullMQ/Redis or equivalent.
-- Runtime health checks, last heartbeat, versions, and capabilities.
+- Active external runtime probes, runtime versions, and adapter-reported capabilities.
 - A richer event bus/streaming layer beyond the current `activity_log`.
 - Multi-stage approval policy UI.
 - Project git worktrees, branches, commits, and merge/review flow.
@@ -490,19 +523,19 @@ Still missing:
 - Secret encryption/external secret store for adapter credentials.
 - End-to-end browser test suite.
 - WebSocket/SSE realtime updates for chat, task progress, logs, and dashboard counters.
-- In-app rate limits and abuse controls on auth, chat, webhook, adapter test, delete, and manual cron endpoints. `/api/help` now discloses that rate limits are not enforced yet.
-- Role-based authorization beyond basic authenticated access.
+- Multi-process/distributed rate limiting and advanced abuse controls.
+- Company-membership RBAC beyond route-level authenticated/operator access.
 - Versioned migrations with rollback strategy; current migration is idempotent bootstrap SQL.
 - Backup/restore, disaster recovery, and retention policies.
 
 ## Production Readiness Review
 
-The Phase 1-12 operational MVP is usable for controlled local/NAS debugging, but it is not production-complete yet. The next work should harden it for real unattended operation:
+The Phase 1-13 operational MVP is usable for controlled local/NAS debugging, but it is not production-complete yet. The next work should harden it for real unattended operation:
 
 1. Runtime health:
-   - runtime status
+   - active runtime probe, not only last-run summary
    - last heartbeat
-   - version/capabilities
+   - version/capabilities reported by runtime adapters
    - disable routing to offline runtimes
 
 2. Secret handling:
@@ -512,8 +545,8 @@ The Phase 1-12 operational MVP is usable for controlled local/NAS debugging, but
 
 3. Authorization and tenancy:
    - enforce company scoping in every endpoint
-   - introduce RBAC for admin/operator/viewer actions
-   - restrict manual cron, adapter tests, budget override, and delete operations
+   - introduce company membership tables
+   - expand route-level RBAC into per-company admin/operator/viewer/service-agent roles
 
 4. Workspaces:
    - project workspace path

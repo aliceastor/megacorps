@@ -7,6 +7,7 @@ type ApiEndpoint = {
   path: string;
   group: string;
   auth: 'none' | 'session';
+  requiredRole?: 'none' | 'viewer' | 'operator' | 'admin';
   summary: string;
   query?: Record<string, string>;
   params?: Record<string, string>;
@@ -22,9 +23,10 @@ type ApiHelpEndpoint = ApiEndpoint & {
   responseSchema: unknown;
   responseExample: unknown;
   rateLimit: string;
+  requiredRole: 'none' | 'viewer' | 'operator' | 'admin';
 };
 
-const defaultRateLimit = 'No dedicated in-app rate limiter is currently enforced. For production, place MegaCorps behind reverse-proxy limits for auth, chat, webhooks, adapter tests, and manual cron until the built-in limiter is added.';
+const defaultRateLimit = 'In-app IP-based rate limiting is enforced by route bucket unless RATE_LIMIT_ENABLED=false. Defaults: auth 12/min, chat 40/min, webhook 120/min, operator 20/min, writes 120/min, reads 600/min.';
 
 const endpoints: ApiEndpoint[] = [
   { method: 'GET', path: '/health', group: 'System', auth: 'none', summary: 'Read server health.', response: '{ ok: true }' },
@@ -67,6 +69,7 @@ const endpoints: ApiEndpoint[] = [
   { method: 'POST', path: '/api/agents/:id/reset-session', group: 'Agents', auth: 'session', summary: 'Clear an agent session id.', params: { id: 'Agent UUID.' } },
   { method: 'POST', path: '/api/agents/:id/test-connection', group: 'Agents', auth: 'session', summary: 'Test the selected adapter/runtime connection.', params: { id: 'Agent UUID.' } },
   { method: 'GET', path: '/api/agent-runtimes', group: 'Agents', auth: 'none', summary: 'List runtime presets.' },
+  { method: 'GET', path: '/api/agent-runtimes/health', group: 'Agents', auth: 'session', summary: 'Read runtime health summaries, attached agent counts, last run status, and adapter capabilities.' },
   { method: 'POST', path: '/api/agent-runtimes', group: 'Agents', auth: 'session', summary: 'Create a runtime preset.', body: { name: 'Hermes SSH', adapterType: 'hermes-ssh', isActive: true, config: { sshHost: '192.168.1.172', sshUser: 'root', sshPort: 22, sshKeyPath: '/app/data/keys/hermes_id_ed25519', hermesCommand: 'hermes', publicApiUrl: 'http://host:4000' } } },
   { method: 'PUT', path: '/api/agent-runtimes/:id', group: 'Agents', auth: 'session', summary: 'Update a runtime preset.', params: { id: 'Runtime UUID.' } },
   { method: 'DELETE', path: '/api/agent-runtimes/:id', group: 'Agents', auth: 'session', summary: 'Delete a runtime preset.', params: { id: 'Runtime UUID.' } },
@@ -118,17 +121,27 @@ function entityFromEndpoint(endpoint: ApiEndpoint): string {
   return 'object';
 }
 
-function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'responseSchema' | 'responseExample' | 'rateLimit'> {
+function roleDefault(endpoint: ApiEndpoint): 'none' | 'viewer' | 'operator' | 'admin' {
+  if (endpoint.auth === 'none') return 'none';
+  if (endpoint.requiredRole) return endpoint.requiredRole;
+  if (endpoint.path === '/api/auth/logout') return 'viewer';
+  if (endpoint.method !== 'GET') return 'operator';
+  if (endpoint.path.endsWith('/test-connection') || endpoint.path.includes('/cron/run')) return 'operator';
+  return 'viewer';
+}
+
+function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'responseSchema' | 'responseExample' | 'rateLimit' | 'requiredRole'> {
   if (endpoint.responseSchema !== undefined && endpoint.responseExample !== undefined) {
     return {
       responseSchema: endpoint.responseSchema,
       responseExample: endpoint.responseExample,
       rateLimit: endpoint.rateLimit ?? defaultRateLimit,
+      requiredRole: roleDefault(endpoint),
     };
   }
 
   if (endpoint.path === '/health') {
-    return { responseSchema: { ok: 'boolean' }, responseExample: { ok: true }, rateLimit: endpoint.rateLimit ?? defaultRateLimit };
+    return { responseSchema: { ok: 'boolean' }, responseExample: { ok: true }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path === '/api/dashboard') {
@@ -136,62 +149,64 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
       responseSchema: { stats: 'object', stageCounts: 'Record<CardStatus, number>', recentTaskLogs: 'TaskLog[]', recentApiEvents: 'ApiEvent[]' },
       responseExample: { stats: { cards: 12, agents: 5, activeAgents: 4 }, stageCounts: { todo: 3, in_progress: 2, in_review: 1, done: 7, blocked: 1 }, recentTaskLogs: [], recentApiEvents: [] },
       rateLimit: endpoint.rateLimit ?? defaultRateLimit,
+      requiredRole: roleDefault(endpoint),
     };
   }
 
   if (endpoint.path === '/api/me') {
-    return { responseSchema: { id: 'uuid', email: 'string', name: 'string', role: 'string' }, responseExample: { id: 'user-uuid', email: 'user@example.com', name: 'Operator', role: 'admin' }, rateLimit: endpoint.rateLimit ?? defaultRateLimit };
+    return { responseSchema: { id: 'uuid', email: 'string', name: 'string', role: 'string' }, responseExample: { id: 'user-uuid', email: 'user@example.com', name: 'Operator', role: 'admin' }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/auth/signup') || endpoint.path.includes('/auth/login')) {
-    return { responseSchema: { user: { id: 'uuid', email: 'string', name: 'string', role: 'string' } }, responseExample: { user: { id: 'user-uuid', email: 'user@example.com', name: 'Operator', role: 'admin' } }, rateLimit: endpoint.rateLimit ?? defaultRateLimit };
+    return { responseSchema: { user: { id: 'uuid', email: 'string', name: 'string', role: 'string' } }, responseExample: { user: { id: 'user-uuid', email: 'user@example.com', name: 'Operator', role: 'admin' } }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.method === 'DELETE' || endpoint.path.includes('/auth/logout')) {
-    return { responseSchema: { ok: 'boolean' }, responseExample: { ok: true }, rateLimit: endpoint.rateLimit ?? defaultRateLimit };
+    return { responseSchema: { ok: 'boolean' }, responseExample: { ok: true }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.endsWith('/test-connection')) {
-    return { responseSchema: { success: 'boolean', output: 'string', sessionId: 'string', tokensUsed: 'number', costUsd: 'number', durationSeconds: 'number' }, responseExample: { success: true, output: 'OK', sessionId: '20260606_120000_alice', tokensUsed: 24, costUsd: 0.000072, durationSeconds: 3 }, rateLimit: endpoint.rateLimit ?? defaultRateLimit };
+    return { responseSchema: { success: 'boolean', output: 'string', sessionId: 'string', tokensUsed: 'number', costUsd: 'number', durationSeconds: 'number' }, responseExample: { success: true, output: 'OK', sessionId: '20260606_120000_alice', tokensUsed: 24, costUsd: 0.000072, durationSeconds: 3 }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/cards/:id/logs')) {
-    return { responseSchema: { type: 'array', items: { cardId: 'uuid', agentId: 'uuid | null', type: 'string', status: 'queued | running | success | failed', message: 'string', output: 'string | null' } }, responseExample: [{ cardId: 'card-uuid', type: 'stage', status: 'success', message: 'Stage changed from todo to in_progress.' }], rateLimit: endpoint.rateLimit ?? defaultRateLimit };
+    return { responseSchema: { type: 'array', items: { cardId: 'uuid', agentId: 'uuid | null', type: 'string', status: 'queued | running | success | failed', message: 'string', output: 'string | null' } }, responseExample: [{ cardId: 'card-uuid', type: 'stage', status: 'success', message: 'Stage changed from todo to in_progress.' }], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/cards/:id/comments')) {
     const comment = { id: 'comment-uuid', cardId: 'card-uuid', authorType: 'user | agent | system', body: 'Comment body', action: 'comment', createdAt: '2026-06-06T00:00:00.000Z' };
-    if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: comment }, responseExample: [comment], rateLimit: endpoint.rateLimit ?? defaultRateLimit };
-    return { responseSchema: comment, responseExample: comment, rateLimit: endpoint.rateLimit ?? defaultRateLimit };
+    if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: comment }, responseExample: [comment], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: comment, responseExample: comment, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/chat/sessions/:id/messages')) {
     const message = { id: 'message-uuid', sessionId: 'session-uuid', role: 'user | agent | system', body: 'Message body', createdAt: '2026-06-06T00:00:00.000Z' };
-    if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: message }, responseExample: [message], rateLimit: endpoint.rateLimit ?? defaultRateLimit };
-    return { responseSchema: { userMessage: message, agentMessage: message }, responseExample: { userMessage: { ...message, role: 'user' }, agentMessage: { ...message, role: 'agent', body: 'Agent reply' } }, rateLimit: endpoint.rateLimit ?? defaultRateLimit };
+    if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: message }, responseExample: [message], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: { userMessage: message, agentMessage: message }, responseExample: { userMessage: { ...message, role: 'user' }, agentMessage: { ...message, role: 'agent', body: 'Agent reply' } }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/cron/status')) {
-    return { responseSchema: { enabled: 'boolean', running: 'boolean', intervalMs: 'number', lastRunAt: 'string | null', companyTicks: 'Array<{ companyId, lastTickMs }>' }, responseExample: { enabled: true, running: false, intervalMs: 30000, lastRunAt: '2026-06-06T00:00:00.000Z', companyTicks: [] }, rateLimit: endpoint.rateLimit ?? defaultRateLimit };
+    return { responseSchema: { enabled: 'boolean', running: 'boolean', intervalMs: 'number', lastRunAt: 'string | null', companyTicks: 'Array<{ companyId, lastTickMs }>' }, responseExample: { enabled: true, running: false, intervalMs: 30000, lastRunAt: '2026-06-06T00:00:00.000Z', companyTicks: [] }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/cron/run')) {
-    return { responseSchema: { name: 'string', status: 'success | failed', dispatched: 'number', reviewed: 'number', decomposed: 'number', error: 'string | null' }, responseExample: { name: 'dispatch-heartbeat', status: 'success', dispatched: 1, reviewed: 0, decomposed: 0, error: null }, rateLimit: endpoint.rateLimit ?? defaultRateLimit };
+    return { responseSchema: { name: 'string', status: 'success | failed', dispatched: 'number', reviewed: 'number', decomposed: 'number', error: 'string | null' }, responseExample: { name: 'dispatch-heartbeat', status: 'success', dispatched: 1, reviewed: 0, decomposed: 0, error: null }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   const entity = entityFromEndpoint(endpoint);
   if (endpoint.method === 'GET' && !endpoint.path.includes(':id')) {
-    return { responseSchema: { type: 'array', items: { type: entity, id: 'uuid', createdAt: 'ISO datetime' } }, responseExample: [], rateLimit: endpoint.rateLimit ?? defaultRateLimit };
+    return { responseSchema: { type: 'array', items: { type: entity, id: 'uuid', createdAt: 'ISO datetime' } }, responseExample: [], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/webhook/task-complete')) {
-    return { responseSchema: { ok: 'boolean' }, responseExample: { ok: true }, rateLimit: endpoint.rateLimit ?? defaultRateLimit };
+    return { responseSchema: { ok: 'boolean' }, responseExample: { ok: true }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   return {
     responseSchema: { type: entity, id: 'uuid', createdAt: 'ISO datetime', updatedAt: 'ISO datetime optional' },
     responseExample: { id: `${entity}-uuid`, createdAt: '2026-06-06T00:00:00.000Z' },
     rateLimit: endpoint.rateLimit ?? defaultRateLimit,
+    requiredRole: roleDefault(endpoint),
   };
 }
 
@@ -209,14 +224,14 @@ export function apiHelpCatalog() {
       ui: '/help',
     },
     auth: {
-      mode: 'Cookie session. Most write/admin operations require login; read-only agent bootstrap endpoints are intentionally public where noted.',
+      mode: 'Cookie session with role checks. Viewer can read authenticated UI data; operator/admin is required for mutation, manual run/review/decompose, adapter tests, runtime edits, budget decisions, and manual cron.',
       login: 'POST /api/auth/login',
       signup: 'POST /api/auth/signup',
     },
     rateLimits: {
-      enforced: false,
+      enforced: process.env.RATE_LIMIT_ENABLED !== 'false',
       summary: defaultRateLimit,
-      productionRecommendation: 'Use reverse-proxy limits now; planned in-app limits should cover auth, chat, webhooks, adapter tests, delete operations, and manual cron.',
+      productionRecommendation: 'Keep reverse-proxy limits in front of the in-app limiter for production defense in depth, especially for auth, chat, webhooks, adapter tests, delete operations, and manual cron.',
     },
     kanban: {
       stages: cardStatuses,
@@ -260,7 +275,7 @@ export function apiHelpMarkdown(): string {
   for (const group of groups) {
     lines.push('', `### ${group}`);
     for (const endpoint of catalog.endpoints.filter((item) => item.group === group)) {
-      lines.push('', `#### ${endpoint.method} ${endpoint.path}`, endpoint.summary, `Auth: ${endpoint.auth}`);
+      lines.push('', `#### ${endpoint.method} ${endpoint.path}`, endpoint.summary, `Auth: ${endpoint.auth}`, `Required role: ${endpoint.requiredRole}`);
       if (endpoint.params) lines.push(`Params: ${JSON.stringify(endpoint.params)}`);
       if (endpoint.query) lines.push(`Query: ${JSON.stringify(endpoint.query)}`);
       if (endpoint.body) lines.push('Body:', jsonBlock(endpoint.body));

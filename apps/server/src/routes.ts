@@ -2,7 +2,7 @@ import bcrypt from 'bcryptjs';
 import { and, desc, eq, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { approvalDecisionSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema } from '@megacorps/shared';
-import { signSession, requireAuth } from './auth.ts';
+import { signSession, requireAuth, requireRole } from './auth.ts';
 import { db } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, apiEvents, approvals, budgetPolicies, cardComments, companies, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, users } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
@@ -100,7 +100,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return db.select().from(approvals).where(filters.length ? and(...filters) : undefined).orderBy(desc(approvals.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
   });
   app.put('/api/approvals/:id', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = approvalDecisionSchema.parse(request.body);
     const [approval] = await db.select().from(approvals).where(eq(approvals.id, id)).limit(1);
@@ -134,7 +134,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return db.select().from(budgetPolicies).where(filters.length ? and(...filters) : undefined).orderBy(desc(budgetPolicies.createdAt));
   });
   app.post('/api/budget-policies', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createBudgetPolicySchema.parse(request.body);
     const [policy] = await db.insert(budgetPolicies).values({
       companyId: input.companyId,
@@ -150,7 +150,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(policy);
   });
   app.put('/api/budget-policies/:id', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = createBudgetPolicySchema.partial().parse(request.body);
     const [policy] = await db.update(budgetPolicies).set({
@@ -169,7 +169,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return policy;
   });
   app.delete('/api/budget-policies/:id', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const [policy] = await db.delete(budgetPolicies).where(eq(budgetPolicies.id, id)).returning();
     if (policy) await db.insert(activityLog).values({ companyId: policy.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'budget_policy.deleted', entityType: 'budget_policy', entityId: policy.id, details: { name: policy.name } });
@@ -224,7 +224,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/companies', async () => db.select().from(companies).orderBy(desc(companies.createdAt)));
   app.post('/api/companies', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createCompanySchema.parse(request.body);
     const [company] = await db.insert(companies).values({
       name: input.name,
@@ -236,7 +236,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(company);
   });
   app.put('/api/companies/:id', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = createCompanySchema.partial().parse(request.body);
     const [company] = await db.update(companies).set({
@@ -255,7 +255,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return db.select().from(departments).where(query.companyId ? eq(departments.companyId, query.companyId) : undefined).orderBy(desc(departments.createdAt));
   });
   app.post('/api/departments', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createDepartmentSchema.parse(request.body);
     const [department] = await db.insert(departments).values(input).returning();
     return reply.code(201).send(department);
@@ -275,7 +275,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/cards', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createCardSchema.parse(request.body);
     const [card] = await db.insert(kanbanCards).values({
       companyId: input.companyId ?? await defaultCompanyId(),
@@ -300,7 +300,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.put('/api/cards/:id', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = updateCardSchema.parse(request.body);
     const [existing] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
@@ -338,7 +338,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.delete('/api/cards/:id', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const [existing] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
     await db.update(kanbanCards).set({ parentCardId: null }).where(eq(kanbanCards.parentCardId, id));
@@ -351,7 +351,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/cards/:id/logs', async (request) => getTaskLogs((request.params as { id: string }).id));
   app.get('/api/cards/:id/comments', async (request) => db.select().from(cardComments).where(eq(cardComments.cardId, (request.params as { id: string }).id)).orderBy(desc(cardComments.createdAt)));
   app.post('/api/cards/:id/comments', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = createCardCommentSchema.parse(request.body);
     const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
@@ -391,26 +391,31 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(comment);
   });
   app.post('/api/cards/:id/run', async (request, reply) => {
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     try { return await dispatchCard((request.params as { id: string }).id, 'manual'); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'dispatch_failed' }); }
   });
   app.post('/api/cards/:id/review', async (request, reply) => {
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     try { return await reviewCard((request.params as { id: string }).id); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'review_failed' }); }
   });
   app.post('/api/cards/:id/decompose', async (request, reply) => {
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     try { return reply.code(201).send(await decomposeCard((request.params as { id: string }).id)); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'decompose_failed' }); }
   });
 
   app.get('/api/agents', async () => db.select().from(agents));
   app.post('/api/agents', async (request, reply) => {
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createAgentSchema.parse(request.body);
     const [agent] = await db.insert(agents).values({ companyId: input.companyId ?? await defaultCompanyId(), departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
     if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
     return reply.code(201).send(agent);
   });
-  app.delete('/api/agents/:id', async (request) => {
+  app.delete('/api/agents/:id', async (request, reply) => {
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const [agent] = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
     await db.update(kanbanCards).set({ assigneeId: null }).where(eq(kanbanCards.assigneeId, id));
@@ -419,6 +424,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { ok: true };
   });
   app.post('/api/agents/:id/pause', async (request, reply) => {
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const [agent] = await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
@@ -426,6 +432,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return agent;
   });
   app.post('/api/agents/:id/resume', async (request, reply) => {
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const [agent] = await db.update(agents).set({ isActive: true }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
@@ -433,6 +440,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return agent;
   });
   app.post('/api/agents/:id/reset-session', async (request, reply) => {
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const [agent] = await db.update(agents).set({ currentSessionId: null, isBusy: false }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
@@ -440,6 +448,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return agent;
   });
   app.put('/api/agents/:id', async (request, reply) => {
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = createAgentSchema.partial().parse(request.body);
     const [agent] = await db.update(agents).set({
@@ -462,14 +471,52 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/api/agent-runtimes', async () => db.select().from(agentRuntimes).orderBy(desc(agentRuntimes.createdAt)));
-  app.post('/api/agent-runtimes', async (request, reply) => {
+  app.get('/api/agent-runtimes/health', async (request, reply) => {
     const user = await requireAuth(request, reply); if (!user) return reply;
+    const [runtimeRows, agentRows, recentRuns] = await Promise.all([
+      db.select().from(agentRuntimes).orderBy(desc(agentRuntimes.createdAt)),
+      db.select().from(agents),
+      db.select().from(heartbeatRuns).orderBy(desc(heartbeatRuns.createdAt)).limit(300),
+    ]);
+    return runtimeRows.map((runtime) => {
+      const attachedAgents = agentRows.filter((agent) => agent.runtimeId === runtime.id);
+      const attachedIds = new Set(attachedAgents.map((agent) => agent.id));
+      const run = recentRuns.find((item) => item.agentId && attachedIds.has(item.agentId));
+      const activeAgents = attachedAgents.filter((agent) => agent.isActive !== false);
+      const busyAgents = attachedAgents.filter((agent) => agent.isBusy);
+      const failedRecently = run?.status === 'failed';
+      return {
+        runtimeId: runtime.id,
+        name: runtime.name,
+        adapterType: runtime.adapterType,
+        status: runtime.isActive === false ? 'disabled' : failedRecently ? 'degraded' : busyAgents.length > 0 ? 'busy' : 'ready',
+        isActive: runtime.isActive !== false,
+        agents: attachedAgents.length,
+        activeAgents: activeAgents.length,
+        busyAgents: busyAgents.length,
+        lastRunAt: run?.completedAt ?? run?.startedAt ?? null,
+        lastRunStatus: run?.status ?? null,
+        lastError: run?.error ?? null,
+        capabilities: runtime.adapterType === 'hermes-ssh'
+          ? ['ssh', 'hermes-cli', 'stdout-capture']
+          : runtime.adapterType === 'hermes'
+            ? ['portainer-exec', 'hermes-cli']
+            : runtime.adapterType === 'hermes-gateway'
+              ? ['http-dispatch', 'polling']
+              : runtime.adapterType === 'mock'
+                ? ['local-debug']
+                : ['webhook'],
+      };
+    });
+  });
+  app.post('/api/agent-runtimes', async (request, reply) => {
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createAgentRuntimeSchema.parse(request.body);
     const [row] = await db.insert(agentRuntimes).values(input).returning();
     return reply.code(201).send(row);
   });
   app.put('/api/agent-runtimes/:id', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = createAgentRuntimeSchema.partial().parse(request.body);
     const [row] = await db.update(agentRuntimes).set({
@@ -483,7 +530,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return row;
   });
   app.delete('/api/agent-runtimes/:id', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     await db.update(agents).set({ runtimeId: null }).where(eq(agents.runtimeId, id));
     await db.delete(agentRuntimes).where(eq(agentRuntimes.id, id));
@@ -491,6 +538,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/agents/:id/test-connection', async (request, reply) => {
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const [agent] = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
@@ -516,7 +564,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return db.select().from(projects).where(query.companyId ? eq(projects.companyId, query.companyId) : undefined).orderBy(desc(projects.createdAt));
   });
   app.post('/api/projects', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createProjectSchema.parse(request.body);
     const [row] = await db.insert(projects).values({ companyId: input.companyId ?? await defaultCompanyId(), name: input.name, description: input.description }).returning();
     return reply.code(201).send(row);
@@ -526,7 +574,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return db.select().from(goals).where(query.companyId ? eq(goals.companyId, query.companyId) : undefined).orderBy(desc(goals.createdAt));
   });
   app.post('/api/goals', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createGoalSchema.parse(request.body);
     const [row] = await db.insert(goals).values({ companyId: input.companyId ?? await defaultCompanyId(), title: input.title, body: input.body }).returning();
     return reply.code(201).send(row);
@@ -540,13 +588,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return db.select().from(knowledgeDocs).where(filters.length ? and(...filters) : undefined).orderBy(desc(knowledgeDocs.updatedAt));
   });
   app.post('/api/knowledge-docs', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createKnowledgeDocSchema.parse(request.body);
     const [row] = await db.insert(knowledgeDocs).values({ ...input, createdBy: user.id }).returning();
     return reply.code(201).send(row);
   });
   app.put('/api/knowledge-docs/:id', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = createKnowledgeDocSchema.partial().parse(request.body);
     const [row] = await db.update(knowledgeDocs).set({ ...input, updatedAt: new Date() }).where(eq(knowledgeDocs.id, id)).returning();
@@ -554,12 +602,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return row;
   });
   app.delete('/api/knowledge-docs/:id', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     await db.delete(knowledgeDocs).where(eq(knowledgeDocs.id, (request.params as { id: string }).id));
     return { ok: true };
   });
 
   app.post('/api/webhook/task-complete', async (request, reply) => {
+    const expectedSecret = process.env.WEBHOOK_SHARED_SECRET;
+    if (expectedSecret) {
+      const headerSecret = request.headers['x-megacorps-webhook-secret'];
+      const bearer = typeof request.headers.authorization === 'string' && request.headers.authorization.startsWith('Bearer ')
+        ? request.headers.authorization.slice('Bearer '.length)
+        : undefined;
+      const providedSecret = Array.isArray(headerSecret) ? headerSecret[0] : headerSecret;
+      if (providedSecret !== expectedSecret && bearer !== expectedSecret) return reply.code(401).send({ error: 'webhook_auth_required' });
+    }
     const body = request.body as { cardId?: string; status?: string; summary?: string; output?: string; costUsd?: number };
     if (!body.cardId || !body.status) return reply.code(400).send({ error: 'missing_fields' });
     const nextStatus = normalizeCardStatus(body.status);

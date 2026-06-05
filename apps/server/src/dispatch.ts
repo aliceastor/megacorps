@@ -16,6 +16,7 @@ const KANBAN_CONTEXT_RECORD_LIMIT = Number(process.env.DISPATCH_CONTEXT_RECORD_L
 const MESSAGE_BOARD_COMMENT_LIMIT = Number(process.env.MESSAGE_BOARD_COMMENT_LIMIT ?? 20_000);
 const TASK_BODY_CHAR_LIMIT = Number(process.env.DISPATCH_TASK_BODY_CHAR_LIMIT ?? 12_000);
 const KNOWLEDGE_DOC_CHAR_LIMIT = Number(process.env.DISPATCH_KNOWLEDGE_DOC_CHAR_LIMIT ?? 4_000);
+const BUDGET_RESET_DAY = Number(process.env.BUDGET_RESET_DAY ?? 1);
 let loopRunning = false;
 const companyLastTick = new Map<string, number>();
 const cronState = {
@@ -584,6 +585,7 @@ export type DispatchCronResult = {
   reviewed: number;
   skipped: number;
   errors: number;
+  budgetResetAgents: number;
   durationSeconds: number;
   error?: string | null;
 };
@@ -593,6 +595,47 @@ export function getDispatchCronStatus(): DispatchCronStatus {
     ...cronState,
     companyTicks: [...companyLastTick.entries()].map(([companyId, lastTickMs]) => ({ companyId, lastTickMs })),
   };
+}
+
+async function resetMonthlyBudgetsIfDue(app: FastifyInstance, now: Date): Promise<number> {
+  if (process.env.BUDGET_RESET_ENABLED === 'false') return 0;
+  if (now.getUTCDate() !== BUDGET_RESET_DAY) return 0;
+
+  const monthKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  const [existing] = await db.select().from(cronRuns).where(and(
+    eq(cronRuns.name, 'budget-monthly-reset'),
+    drizzleSql`${cronRuns.details}->>'monthKey' = ${monthKey}`,
+  )).limit(1);
+  if (existing) return 0;
+
+  const agentRows = await db.select().from(agents);
+  const resetRows = agentRows.filter((agent) => Number(agent.spentThisMonth ?? 0) !== 0);
+  await db.update(agents).set({ spentThisMonth: '0', isBusy: false });
+
+  const [run] = await db.insert(cronRuns).values({
+    name: 'budget-monthly-reset',
+    source: 'loop',
+    status: 'success',
+    startedAt: now,
+    completedAt: new Date(),
+    durationSeconds: 0,
+    details: { monthKey, resetAgents: resetRows.length },
+  }).returning();
+
+  const companyIds = Array.from(new Set(agentRows.map((agent) => agent.companyId)));
+  for (const companyId of companyIds) {
+    await addActivity({
+      companyId,
+      actorType: 'system',
+      actorId: 'budget-reset',
+      action: 'budget.monthly_reset',
+      entityType: 'company',
+      entityId: companyId,
+      details: { monthKey, resetAgents: resetRows.filter((agent) => agent.companyId === companyId).length, cronRunId: run?.id },
+    });
+  }
+  app.log.info({ monthKey, resetAgents: resetRows.length }, 'monthly agent budgets reset');
+  return resetRows.length;
 }
 
 export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' | 'manual' | 'startup' = 'manual'): Promise<DispatchCronResult> {
@@ -609,6 +652,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
       reviewed: 0,
       skipped: 1,
       errors: 0,
+      budgetResetAgents: 0,
       durationSeconds: 0,
       error: 'dispatch_cron_already_running',
     };
@@ -645,12 +689,14 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
     reviewed: 0,
     skipped: 0,
     errors: 0,
+    budgetResetAgents: 0,
     durationSeconds: 0,
     error: null,
   };
 
   try {
     const now = new Date();
+    result.budgetResetAgents = await resetMonthlyBudgetsIfDue(app, now);
     await recoverStaleExecutionLocks(app);
     const companyRows = await db.select().from(companies);
     const nowMs = Date.now();
@@ -716,6 +762,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
         reviewed: result.reviewed,
         skipped: result.skipped,
         errors: result.errors,
+        budgetResetAgents: result.budgetResetAgents,
       },
     }).where(eq(cronRuns.id, run.id));
     loopRunning = false;

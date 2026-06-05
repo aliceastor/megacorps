@@ -7,6 +7,7 @@ import { migrate } from './db/migrate.ts';
 import { registerRoutes } from './routes.ts';
 import { startDispatchLoop } from './dispatch.ts';
 import { registerRequestLogging } from './request-log.ts';
+import { registerRateLimit } from './rate-limit.ts';
 
 export async function buildServer() {
   const app = Fastify({ logger: true });
@@ -14,6 +15,7 @@ export async function buildServer() {
   await app.register(cors, { origin: process.env.WEB_ORIGIN ?? 'http://localhost:3000', credentials: true });
   await app.register(cookie);
   registerRequestLogging(app);
+  registerRateLimit(app);
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ZodError) {
       request.log.warn({ issues: error.issues }, 'validation failed');

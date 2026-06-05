@@ -2,6 +2,24 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.0 - Production Hardening and Real O-chart
+
+Date: 2026-06-06
+
+Completed in this pass:
+
+- Reviewed the architecture checklist and converted the highest-impact remaining production gaps into working MVP features.
+- Rebuilt the Companies/Agents O-chart into a real top-down tree canvas with connector lines, department lanes, clickable member nodes, and preserved member edit behavior.
+- Added role helper `requireRole` and enforced operator/admin access for mutation-heavy control actions: cards create/update/delete/run/review/decompose, comments/interventions, agents CRUD/actions/tests, runtime CRUD, budget policy CRUD, approval decisions, company/department changes, projects/goals/knowledge writes, and manual cron.
+- Added in-app IP-based rate limiting with configurable buckets for auth, chat, webhooks, operator actions, writes, and reads.
+- Added webhook shared-secret validation when `WEBHOOK_SHARED_SECRET` is configured.
+- Added `GET /api/agent-runtimes/health` runtime health summary with attached agent counts, last run status/error, and adapter capabilities.
+- Added Settings UI runtime health panel.
+- Added monthly budget reset cron behavior, marked durably in `cron_runs`, defaulting to UTC day 1.
+- Added Next.js error boundary with retry/dashboard recovery.
+- Updated API Help with `requiredRole` and current enforced rate-limit notes.
+- Updated Docker compose and `.env.example` with rate-limit, webhook-secret, and budget-reset knobs.
+
 ## Architecture Update v0.9 - Hermes SSH and Agent-Facing API Schemas
 
 Date: 2026-06-06
@@ -17,7 +35,7 @@ Completed in this pass:
 - The web API client now tries the current browser host on port `4000` before falling back to the baked `NEXT_PUBLIC_API_URL`, which fixes NAS/browser deployments where a baked IP or `localhost` is unreachable from the current browser.
 - `GET /api/help` and `GET /api/help?format=markdown` now include response schemas, response examples, and explicit rate-limit notes for every endpoint.
 - Help UI displays response schema/example and rate-limit status.
-- Current rate-limit status is explicit: no in-app rate limiter is enforced yet; production should use reverse-proxy limits until the built-in limiter is added.
+- Current rate-limit status is explicit in Help. v1.0 added the in-app limiter; production should still keep reverse-proxy limits for defense in depth.
 
 ## Architecture Update v0.8 - API Help, Stage Merge, and Checklist Reconciliation
 
@@ -114,12 +132,12 @@ The older phase checklist later in this document is kept as historical design no
 - [x] `cost_events`, `budget_policies`, and `approvals` tables.
 - [x] Cost recording per dispatch/chat/webhook.
 - [x] Agent monthly spend accumulation.
+- [x] Monthly budget reset cron.
 - [x] Budget policy CRUD.
 - [x] Budget hard-stop behavior and approval creation.
 - [x] Approval decision API.
 - [x] Pause/resume/fire/reset agent actions.
 - [x] Budget page with cost events, policies, pending approvals, and approval actions.
-- [ ] Monthly budget reset cron.
 
 #### Phase 6 - Collaboration and Context
 
@@ -142,9 +160,10 @@ The older phase checklist later in this document is kept as historical design no
 - [x] Activity log table and activity recording.
 - [x] Cron status/history/manual tick API.
 - [x] Cron status/history UI.
+- [x] Runtime health summary API and Settings UI.
 - [ ] WebSocket/SSE realtime updates.
 - [ ] Notification bell/panel.
-- [ ] Runtime health/version/capability heartbeat.
+- [~] Runtime health/version/capability heartbeat.
 
 #### Phase 8 - Execution Safety
 
@@ -168,14 +187,14 @@ The older phase checklist later in this document is kept as historical design no
 - [x] Settings page for runtime presets, adapter endpoints, companies, and departments.
 - [x] Help page and machine-readable API catalog.
 - [~] Audit log via `activity_log` and `api_events`.
-- [ ] Strong company-scoped authorization on every endpoint.
-- [ ] RBAC for admin/operator/viewer/agent-service actions.
+- [~] Strong company-scoped authorization on every endpoint.
+- [~] RBAC for admin/operator/viewer/agent-service actions.
 - [ ] Encrypted or externalized adapter secrets.
 - [ ] Company template import/export with secret scrubbing.
-- [ ] Rate limiting/API throttling.
+- [x] Rate limiting/API throttling.
 - [ ] Backup/restore runbook and implementation.
 - [ ] Onboarding wizard.
-- [ ] Error boundary and fallback UI.
+- [x] Error boundary and fallback UI.
 
 #### Phase 10 - Direct Agent Chat
 

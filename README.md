@@ -1,4 +1,4 @@
-# MegaCorps Phase 1-12 Control Plane MVP
+# MegaCorps Phase 1-13 Control Plane MVP
 
 Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm workspaces.
 
@@ -64,6 +64,7 @@ For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
 - `Workspaces`: project and goal setup for task context.
 - `Settings`: company heartbeat settings, departments, runtime presets, adapter endpoints.
+  Runtime health summaries show adapter status, attached agents, last run status, and capabilities.
 
 ## Current scope
 
@@ -79,10 +80,11 @@ For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or
 - Phase 10: direct agent chat sessions, per-session adapter resume ids, cron status/history/manual tick APIs, and chat UI.
 - Phase 11: per-task agent/user message boards and bounded Kanban context injection for every agent invocation.
 - Phase 12: Hermes SSH adapter, API Help response schema/examples, rate-limit disclosure, and browser-host API fallback.
+- Phase 13: real O-chart tree canvas, operator RBAC for mutations/manual execution, in-app rate limiting, runtime health summary, webhook shared-secret guard, monthly budget reset cron, and UI error boundary.
 
 ## Paperclip-inspired loop
 
-MegaCorps follows the same control-plane idea as Paperclip: manage goals and an org chart, not individual terminal sessions. A company owns departments, agents, tasks, goals, and dispatch settings. Agents report through an O-chart (`bossId`) and can be grouped by department.
+MegaCorps follows the same control-plane idea as Paperclip: manage goals and an org chart, not individual terminal sessions. A company owns departments, agents, tasks, goals, and dispatch settings. Agents report through an O-chart (`bossId`) and can be grouped by department. The Companies and Agents pages render this as a real top-down tree canvas with connector lines; clicking any member opens the edit panel for identity, runtime, department, budget, and reporting relation.
 
 The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds with `DISPATCH_LOOP_INTERVAL_MS=10000`; each company also has `dispatchIntervalSeconds` and `autoDispatchEnabled`. On each company heartbeat:
 
@@ -98,6 +100,7 @@ Cron/debug endpoints:
 
 - `GET /api/help`: machine-readable API catalog for agents and integrations, including response schema examples and rate-limit notes.
 - `GET /api/help?format=markdown`: Markdown API catalog with body examples, response examples, and rate-limit notes.
+- `GET /api/agent-runtimes/health`: runtime status, attached agent counts, last run state, and adapter capabilities.
 - `GET /api/cron/status`: in-memory scheduler state plus recent durable cron runs.
 - `GET /api/cron/runs`: cron run history.
 - `POST /api/cron/run`: manually run one dispatch heartbeat.
@@ -173,8 +176,22 @@ Phase 8/9 safety behavior:
 - Member hierarchy is based on `bossId`: the identity label is free text, while the important control-plane relation is who a member reports to and who reports to them.
 - Decomposed sub-tasks are delegated to direct reports when the parent task is assigned to a member with subordinates.
 - Work completed by a subordinate moves to `in_review` for the reporting manager by default, creating a bottom-up review path back toward the top-level member.
+- In-app IP rate limiting is enabled by default. Tune `RATE_LIMIT_*` env vars or set `RATE_LIMIT_ENABLED=false` for local stress tests.
+- Mutation/manual execution routes require operator/admin roles. Viewer role can read authenticated UI data.
+- If `WEBHOOK_SHARED_SECRET` is set, task completion webhooks must send either `X-MegaCorps-Webhook-Secret` or `Authorization: Bearer`.
+- Monthly agent spend resets on `BUDGET_RESET_DAY` UTC, default day 1, and the reset is marked in `cron_runs`.
 
 No pnpm. No Redis.
+
+## Production launch checklist
+
+- Put the app behind TLS, a reverse proxy, and external rate limits in addition to the in-app limiter.
+- Set strong `JWT_SECRET`, `WEBHOOK_SHARED_SECRET`, SSH keys, and external database credentials.
+- Encrypt or externalize adapter/runtime secrets before multi-user production.
+- Add durable async worker/queue for long-running Hermes jobs instead of doing every run inside the API process.
+- Add WebSocket/SSE consumers for live task/chat/log updates.
+- Add company-scoped membership/RBAC tables if multiple human tenants share one deployment.
+- Add database backup/restore, retention, migration rollback, metrics, alerts, and incident runbooks.
 
 ## Latest local verification
 

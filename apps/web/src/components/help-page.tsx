@@ -8,6 +8,7 @@ type ApiEndpoint = {
   path: string;
   group: string;
   auth: 'none' | 'session';
+  requiredRole?: string;
   summary: string;
   query?: Record<string, string>;
   params?: Record<string, string>;
@@ -39,6 +40,7 @@ function EndpointCard({ endpoint }: { endpoint: ApiEndpoint }) {
       <span className={`method-pill method-${endpoint.method.toLowerCase()}`}>{endpoint.method}</span>
       <code>{endpoint.path}</code>
       <span className="status-pill">{endpoint.auth}</span>
+      <span className="status-pill">{endpoint.requiredRole ?? 'none'}</span>
     </div>
     <p>{endpoint.summary}</p>
     {endpoint.params && <><b>Params</b><CodeBlock value={endpoint.params} /></>}
