@@ -1,0 +1,14 @@
+node_modules
+npm-debug.log*
+.next/cache
+.turbo
+.git
+.gitignore
+.github
+Dockerfile*
+docker-compose*.yml
+README.md
+.env
+.env.*
+coverage
+.DS_Store

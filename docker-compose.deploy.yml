@@ -1,0 +1,42 @@
+services:
+  server:
+    image: ghcr.io/meaadore1221-afk/megacorps-server:latest
+    container_name: megacorps-server
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: ${DATABASE_URL:?Set external PostgreSQL connection string}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://192.168.1.180:3000}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      PORTAINER_URL: ${PORTAINER_URL:-https://192.168.1.180:31015}
+      PORTAINER_USER: ${PORTAINER_USER:-}
+      PORTAINER_PASS: ${PORTAINER_PASS:-}
+      PORTAINER_ENDPOINT_ID: ${PORTAINER_ENDPOINT_ID:-4}
+      HERMES_CONTAINER: ${HERMES_CONTAINER:-hermes-suite}
+    ports:
+      - "3100:4000"
+    volumes:
+      - /mnt/Rklink_pool/VM/_Self_Docker/megacorps/server:/app/data
+    networks:
+      - megacorps
+
+  web:
+    image: ghcr.io/meaadore1221-afk/megacorps-web:latest
+    container_name: megacorps-web
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://192.168.1.180:3100}
+    ports:
+      - "3000:3000"
+    volumes:
+      - /mnt/Rklink_pool/VM/_Self_Docker/megacorps/web-cache:/app/apps/web/.next/cache
+    networks:
+      - megacorps
+
+networks:
+  megacorps:
+    driver: bridge

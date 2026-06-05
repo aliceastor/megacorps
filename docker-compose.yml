@@ -1,0 +1,70 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: megacorps-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-megacorps}
+      POSTGRES_USER: ${POSTGRES_USER:-megacorps}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-megacorps_dev_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - megacorps
+
+  server:
+    image: ghcr.io/meaadore1221-afk/megacorps-server:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: megacorps-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: ${DATABASE_URL:-postgresql://megacorps:megacorps_dev_password@postgres:5432/megacorps}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      PORTAINER_URL: ${PORTAINER_URL:-https://192.168.1.180:31015}
+      PORTAINER_USER: ${PORTAINER_USER:-}
+      PORTAINER_PASS: ${PORTAINER_PASS:-}
+      PORTAINER_ENDPOINT_ID: ${PORTAINER_ENDPOINT_ID:-4}
+      HERMES_CONTAINER: ${HERMES_CONTAINER:-hermes-suite}
+    ports:
+      - "4000:4000"
+    networks:
+      - megacorps
+
+  web:
+    image: ghcr.io/meaadore1221-afk/megacorps-web:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+    container_name: megacorps-web
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+    ports:
+      - "3000:3000"
+    networks:
+      - megacorps
+
+volumes:
+  postgres_data:
+
+networks:
+  megacorps:
+    driver: bridge

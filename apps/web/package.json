@@ -1,0 +1,22 @@
+{
+  "name": "@megacorps/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "next dev", "build": "next build", "start": "next start", "lint": "next lint || true", "test": "node --test --import tsx src/**/*.test.ts", "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": {
+    "@dnd-kit/core": "latest",
+    "@dnd-kit/sortable": "latest",
+    "@dnd-kit/utilities": "latest",
+    "clsx": "latest",
+    "framer-motion": "latest",
+    "lucide-react": "latest",
+    "next": "latest",
+    "next-intl": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "recharts": "latest",
+    "tailwind-merge": "latest"
+  },
+  "devDependencies": { "@types/node": "latest", "@types/react": "latest", "@types/react-dom": "latest", "autoprefixer": "latest", "postcss": "latest", "tailwindcss": "latest", "typescript": "latest", "tsx": "latest" }
+}

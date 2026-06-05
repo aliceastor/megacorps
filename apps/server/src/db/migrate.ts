@@ -1,0 +1,16 @@
+import { sql } from './client.ts';
+
+export async function migrate(): Promise<void> {
+  await sql.unsafe(`CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE TABLE IF NOT EXISTS users (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT, avatar_url TEXT, role TEXT DEFAULT 'viewer', locale TEXT DEFAULT 'zh-TW', theme TEXT DEFAULT 'system', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE IF NOT EXISTS groups (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE IF NOT EXISTS companies (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), group_id UUID REFERENCES groups(id), name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, created_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE IF NOT EXISTS departments (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, slug TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE IF NOT EXISTS projects (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, description TEXT, created_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE IF NOT EXISTS goals (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), title TEXT NOT NULL, body TEXT, created_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE IF NOT EXISTS agents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), department_id UUID REFERENCES departments(id), slug TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL, title TEXT, adapter_type TEXT NOT NULL DEFAULT 'hermes', adapter_config JSONB DEFAULT '{}', hermes_profile TEXT, boss_id UUID REFERENCES agents(id), budget_per_task NUMERIC(10,4), budget_monthly NUMERIC(10,4), spent_this_month NUMERIC(10,4) DEFAULT 0, capabilities TEXT[] DEFAULT '{}', is_busy BOOLEAN DEFAULT false, is_active BOOLEAN DEFAULT true, current_session_id TEXT, created_at TIMESTAMPTZ DEFAULT now(), UNIQUE(company_id, slug));
+CREATE TABLE IF NOT EXISTS agent_runtimes (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, adapter_type TEXT NOT NULL, config JSONB DEFAULT '{}', is_active BOOLEAN DEFAULT true, created_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE IF NOT EXISTS kanban_cards (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), department_id UUID REFERENCES departments(id), project_id UUID REFERENCES projects(id), goal_id UUID REFERENCES goals(id), parent_card_id UUID REFERENCES kanban_cards(id), title TEXT NOT NULL, body TEXT NOT NULL, column_status TEXT DEFAULT 'backlog', priority INTEGER DEFAULT 0, tags TEXT[] DEFAULT '{}', assignee_id UUID REFERENCES agents(id), reviewer_id UUID REFERENCES agents(id), dependency_card_ids UUID[] DEFAULT '{}', requires_approval BOOLEAN DEFAULT false, created_by UUID REFERENCES users(id), execution_log TEXT, session_id TEXT, cost_usd NUMERIC(10,4), created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());`);
+  const companies = await sql`SELECT id FROM companies WHERE slug = 'default' LIMIT 1`;
+  if (companies.length === 0) await sql`INSERT INTO companies (name, slug) VALUES ('Default Company', 'default')`;
+}
