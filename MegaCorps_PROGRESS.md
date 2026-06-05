@@ -16,7 +16,8 @@ Latest verified baseline:
 
 - Phase 1-11 operational MVP flows are implemented.
 - Company registry page, department setup, O-chart, runtime presets, adapter endpoint configuration, direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, heartbeat runs, cron run history, budget policies, approvals, and automatic dispatch heartbeat are implemented.
-- Deployment is user-managed; this pass verified code, tests, and production build without starting Docker.
+- Deployment is user-managed. Local-only Docker was used for QA in this pass; NAS/server deployment remains user-managed.
+- Browser plugin QA verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 
 ## Paperclip Research Summary
@@ -86,6 +87,8 @@ Implemented:
   - API lifecycle logs
   - sub-tasks
   - comments
+- Kanban cards expose `data-card-id`, open from click or keyboard, and wrap into responsive columns so tasks are not clipped in desktop or mobile narrow viewports.
+- The task detail drawer is wider on desktop and becomes full-screen on narrow mobile viewports.
 - Manual actions:
   - Save task
   - Run now
@@ -521,10 +524,11 @@ The Phase 1-10 operational MVP is usable for controlled local/NAS debugging, but
    - reconnect and backfill behavior
 
 8. Browser QA:
-   - logged-in Playwright flows
-   - task drawer interaction tests
-   - settings/agent runtime form tests
-   - dark-mode contrast snapshots
+   - manual Browser plugin pass is complete for the current UI
+   - still need automated logged-in browser flows in CI
+   - still need task drawer interaction tests
+   - still need settings/agent runtime form tests
+   - still need dark-mode contrast snapshots
 
 9. Operations:
    - backup/restore runbook

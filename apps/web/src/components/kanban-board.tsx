@@ -90,38 +90,44 @@ function DraggableCard({ card, onSelect }: { card: Card; onSelect: (card: Card) 
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: card.id });
   return <motion.article
     ref={setNodeRef}
+    data-card-id={card.id}
+    tabIndex={0}
+    aria-label={`Open task ${card.title}`}
     layout
     initial={{ opacity: 0, scale: 0.96, y: 8 }}
     animate={{ opacity: isDragging ? 0.65 : 1, scale: 1, y: 0 }}
     exit={{ opacity: 0, scale: 0.94 }}
     transition={{ duration: 0.2 }}
-    className="card"
+    className="card kanban-card"
     style={{
-      padding: 12,
-      marginBottom: 10,
-      cursor: 'pointer',
       transform: CSS.Translate.toString(transform),
       borderLeft: `4px solid ${card.priority >= 3 ? '#ef4444' : card.priority >= 2 ? '#f97316' : card.priority <= -1 ? '#60a5fa' : statusColor(card.columnStatus)}`,
-      borderRadius: 8,
     }}
     onClick={() => onSelect(card)}
+    onKeyDown={(event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        onSelect(card);
+      }
+    }}
   >
-    <div style={{ display: 'flex', gap: 8, alignItems: 'start' }}>
-      <b style={{ fontSize: 14, flex: 1 }}>{card.title}</b>
+    <div className="kanban-card-head">
+      <b className="kanban-card-title">{card.title}</b>
       <button
         className="drag-handle"
         aria-label="Drag task"
+        title="Drag task"
         onClick={(event) => event.stopPropagation()}
         {...listeners}
         {...attributes}
       >
         <GripVertical size={14} />
       </button>
-      <span style={{ fontSize: 10, border: '1px solid var(--border)', borderRadius: 99, padding: '1px 6px' }}>{priorityLabel(card.priority)}</span>
+      <span className="kanban-priority">{priorityLabel(card.priority)}</span>
     </div>
-    <div style={{ marginTop: 4, fontSize: 10, opacity: 0.55, fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace' }}>{card.id}</div>
-    <p style={{ fontSize: 12, opacity: 0.72, margin: '6px 0 0' }}>{card.body.slice(0, 100)}{card.body.length > 100 ? '...' : ''}</p>
-    <div style={{ marginTop: 8, display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center' }}>
+    <div className="kanban-card-id">{card.id}</div>
+    <p className="kanban-card-body">{card.body.slice(0, 100)}{card.body.length > 100 ? '...' : ''}</p>
+    <div className="kanban-card-badges">
       {card.requiresApproval && <span className="badge">Review</span>}
       {card.retryCount ? <span className="badge">Retry {card.retryCount}/{card.maxRetries ?? 3}</span> : null}
       {card.costUsd && <span className="badge">${card.costUsd}</span>}

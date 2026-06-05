@@ -404,10 +404,10 @@ button.card {
 
 .detail-panel {
   position: fixed;
-  right: 18px;
-  top: 90px;
-  width: min(860px, calc(100vw - 36px));
-  bottom: 18px;
+  right: 16px;
+  top: 76px;
+  width: min(980px, calc(100vw - 32px));
+  bottom: 16px;
   padding: 20px;
   overflow: auto;
   z-index: 50;
@@ -480,14 +480,74 @@ button.card {
 
 .kanban-columns {
   display: grid;
-  grid-template-columns: repeat(6, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
   gap: 12px;
-  overflow-x: auto;
+  align-items: start;
+  overflow-x: visible;
   padding-bottom: 8px;
 }
 
-.kanban-column { min-height: 520px; min-width: 0; }
+.kanban-column { min-height: 520px; min-width: min(230px, 100%); }
 .kanban-column-dropzone { padding: 10px; min-height: 470px; border-radius: 8px; }
+
+.kanban-card {
+  padding: 12px;
+  margin-bottom: 10px;
+  cursor: pointer;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.kanban-card:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--primary) 42%, transparent);
+  outline-offset: 2px;
+}
+
+.kanban-card-head {
+  display: flex;
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+}
+
+.kanban-card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.kanban-priority {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: 1px 6px;
+  font-size: 10px;
+}
+
+.kanban-card-id {
+  margin-top: 4px;
+  opacity: 0.55;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.kanban-card-body {
+  margin: 6px 0 0;
+  opacity: 0.72;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.kanban-card-badges {
+  margin-top: 8px;
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  align-items: center;
+}
 
 .agent-create-grid {
   padding: 16px;
