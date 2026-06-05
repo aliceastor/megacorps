@@ -34,6 +34,9 @@ button, input, textarea, select { font: inherit; }
 .field-label .input { font-weight: 400; color: var(--foreground); }
 .log-meta { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
 .log-meta span { border: 1px solid var(--border); border-radius: 99px; padding: 2px 7px; font-size: 11px; opacity: 0.72; }
+.drag-handle { width: 26px; height: 26px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--foreground); display: inline-grid; place-items: center; cursor: grab; opacity: 0.72; flex: 0 0 auto; }
+.drag-handle:active { cursor: grabbing; }
+.drag-handle:hover { opacity: 1; border-color: var(--primary); }
 .spin { animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 760px) {

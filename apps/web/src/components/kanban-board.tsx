@@ -3,7 +3,7 @@ import { DndContext, type DragEndEvent, useDraggable, useDroppable } from '@dnd-
 import { CSS } from '@dnd-kit/utilities';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useMemo, useState } from 'react';
-import { GitBranch, ListChecks, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, X } from 'lucide-react';
+import { GitBranch, GripVertical, ListChecks, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
@@ -87,19 +87,27 @@ function DraggableCard({ card, onSelect }: { card: Card; onSelect: (card: Card) 
     style={{
       padding: 12,
       marginBottom: 10,
-      cursor: 'grab',
+      cursor: 'pointer',
       transform: CSS.Translate.toString(transform),
       borderLeft: `4px solid ${card.priority >= 3 ? '#ef4444' : card.priority >= 2 ? '#f97316' : card.priority <= -1 ? '#60a5fa' : statusColor(card.columnStatus)}`,
       borderRadius: 8,
     }}
     onClick={() => onSelect(card)}
-    {...listeners}
-    {...attributes}
   >
     <div style={{ display: 'flex', gap: 8, alignItems: 'start' }}>
       <b style={{ fontSize: 14, flex: 1 }}>{card.title}</b>
+      <button
+        className="drag-handle"
+        aria-label="Drag task"
+        onClick={(event) => event.stopPropagation()}
+        {...listeners}
+        {...attributes}
+      >
+        <GripVertical size={14} />
+      </button>
       <span style={{ fontSize: 10, border: '1px solid var(--border)', borderRadius: 99, padding: '1px 6px' }}>{priorityLabel(card.priority)}</span>
     </div>
+    <div style={{ marginTop: 4, fontSize: 10, opacity: 0.55, fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace' }}>{card.id}</div>
     <p style={{ fontSize: 12, opacity: 0.72, margin: '6px 0 0' }}>{card.body.slice(0, 100)}{card.body.length > 100 ? '...' : ''}</p>
     <div style={{ marginTop: 8, display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center' }}>
       {card.requiresApproval && <span className="badge">Review</span>}

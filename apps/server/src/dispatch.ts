@@ -38,6 +38,16 @@ async function addTaskLog(input: {
   });
 }
 
+async function addStageLog(cardId: string, agentId: string | null, from: string | null, to: string, actor = 'system') {
+  await addTaskLog({
+    cardId,
+    agentId,
+    type: 'stage',
+    status: 'success',
+    message: `Stage changed from ${from ?? 'backlog'} to ${to} by ${actor}.`,
+  });
+}
+
 async function dependenciesMet(card: CardRow): Promise<boolean> {
   const ids = card.dependencyCardIds ?? [];
   if (ids.length === 0) return true;
@@ -54,7 +64,9 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
   if (!parentCardId) return;
   const children = await db.select().from(kanbanCards).where(eq(kanbanCards.parentCardId, parentCardId));
   if (children.length === 0 || !children.every((child) => child.columnStatus === 'done')) return;
+  const [parent] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, parentCardId)).limit(1);
   await db.update(kanbanCards).set({ columnStatus: 'done', completedAt: new Date(), updatedAt: new Date() }).where(eq(kanbanCards.id, parentCardId));
+  if (parent?.columnStatus !== 'done') await addStageLog(parentCardId, null, parent?.columnStatus ?? null, 'done', 'cascade');
   await addTaskLog({ cardId: parentCardId, type: 'cascade', status: 'success', message: 'All sub-tasks completed; parent card marked done.' });
 }
 
@@ -71,6 +83,7 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
     updatedAt: new Date(),
   }).where(eq(kanbanCards.id, card.id)).returning();
   await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
+  await addStageLog(card.id, agent.id, card.columnStatus, blocked ? 'blocked' : 'todo', 'retry');
   await addTaskLog({
     cardId: card.id,
     agentId: agent.id,
@@ -96,6 +109,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
 
   await db.update(agents).set({ isBusy: true }).where(eq(agents.id, agent.id));
   await db.update(kanbanCards).set({ columnStatus: 'in_progress', startedAt: new Date(), lastError: null, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
+  if (card.columnStatus !== 'in_progress') await addStageLog(card.id, agent.id, card.columnStatus, 'in_progress', source);
   await addTaskLog({ cardId: card.id, agentId: agent.id, type: source, status: 'running', message: `Dispatch started via ${source}.` });
 
   try {
@@ -120,6 +134,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       completedAt: nextStatus === 'done' ? new Date() : null,
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, card.id)).returning();
+    await addStageLog(card.id, agent.id, 'in_progress', nextStatus, 'dispatch');
     await addTaskLog({
       cardId: card.id,
       agentId: agent.id,
@@ -143,6 +158,7 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
   if (!card) throw new Error('card_not_found');
   if (!card.reviewerId) {
     const [updated] = await db.update(kanbanCards).set({ columnStatus: 'done', completedAt: new Date(), updatedAt: new Date() }).where(eq(kanbanCards.id, card.id)).returning();
+    if (card.columnStatus !== 'done') await addStageLog(card.id, null, card.columnStatus, 'done', 'review');
     await addTaskLog({ cardId: card.id, type: 'review', status: 'success', message: 'No reviewer configured; card approved automatically.' });
     if (!updated) throw new Error('card_update_failed');
     await cascadeParentStatus(updated.parentCardId);
@@ -169,6 +185,7 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
       completedAt: rejected ? null : new Date(),
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, card.id)).returning();
+    await addStageLog(card.id, reviewer.id, card.columnStatus, rejected ? 'todo' : 'done', 'review');
     await addTaskLog({
       cardId: card.id,
       agentId: reviewer.id,

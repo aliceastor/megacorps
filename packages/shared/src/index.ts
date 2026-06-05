@@ -54,7 +54,7 @@ export const createAgentSchema = z.object({
   budgetMonthly: z.number().nonnegative().optional(),
 });
 
-export const taskLogTypes = ['dispatch', 'retry', 'review', 'decomposition', 'cascade', 'webhook', 'manual'] as const;
+export const taskLogTypes = ['dispatch', 'retry', 'review', 'decomposition', 'cascade', 'webhook', 'manual', 'stage'] as const;
 export type TaskLogType = (typeof taskLogTypes)[number];
 
 export const taskLogSchema = z.object({

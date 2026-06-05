@@ -15,6 +15,7 @@ async function defaultCompanyId(): Promise<string> {
 }
 
 function priorityToNumber(priority: string | undefined): number { return priority === 'urgent' ? 3 : priority === 'high' ? 2 : priority === 'low' ? -1 : 0; }
+function actorLabel(user: { email?: string; id?: string } | null): string { return user?.email ?? user?.id ?? 'system'; }
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/health', async () => ({ ok: true }));
@@ -72,10 +73,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       maxRetries: input.maxRetries,
       createdBy: user.id,
     }).returning();
+    if (card) await db.insert(taskLogs).values({ cardId: card.id, type: 'stage', status: 'success', message: `Stage set to ${card.columnStatus ?? 'backlog'} by ${actorLabel(user)}` });
     return reply.code(201).send(card);
   });
 
   app.put('/api/cards/:id', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = updateCardSchema.parse(request.body);
     const [existing] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
@@ -98,6 +101,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       completedAt: input.columnStatus === 'done' ? new Date() : undefined,
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, id)).returning();
+    if (card && input.columnStatus && input.columnStatus !== existing.columnStatus) {
+      await db.insert(taskLogs).values({
+        cardId: card.id,
+        agentId: card.assigneeId,
+        type: 'stage',
+        status: 'success',
+        message: `Stage changed from ${existing.columnStatus ?? 'backlog'} to ${input.columnStatus} by ${actorLabel(user)}`,
+      });
+    }
     return card;
   });
 
@@ -192,6 +204,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
     const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
     await db.update(kanbanCards).set({ columnStatus: body.status, executionLog, costUsd: body.costUsd?.toString(), completedAt: body.status === 'done' ? new Date() : undefined, updatedAt: new Date() }).where(eq(kanbanCards.id, body.cardId));
+    if (body.status !== card.columnStatus) await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'backlog'} to ${body.status} by webhook` });
     await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'webhook', status: body.status === 'blocked' ? 'failed' : 'success', message: body.summary ?? `Webhook marked card ${body.status}`, output: body.output, costUsd: body.costUsd?.toString() });
     if (card.assigneeId && body.costUsd) {
       await db.update(agents).set({ spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${body.costUsd}` }).where(eq(agents.id, card.assigneeId));
