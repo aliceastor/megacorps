@@ -2,6 +2,183 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v0.8 - API Help, Stage Merge, and Checklist Reconciliation
+
+Date: 2026-06-06
+
+This pass reconciles the implementation checklist with the current codebase.
+
+Completed in this pass:
+
+- Kanban now uses one canonical intake stage: `todo`.
+- Legacy `backlog` API input is accepted only as an alias and normalized to `todo`.
+- Existing `backlog` rows are migrated to `todo`.
+- `GET /api/help` returns a structured machine-readable API catalog.
+- `GET /api/help?format=markdown` returns an agent-readable Markdown API catalog.
+- Web UI includes a `Help` page and dashboard API Help entrypoint.
+- Sidebar utility navigation now keeps `Help` and `Settings` at the bottom.
+- Sidebar collapse toggle now lives inside the sidebar, with a compact icon-rail interaction.
+- Browser QA verified Help, Kanban, Settings, desktop collapse, and narrow mobile layout.
+
+Checklist convention in this document:
+
+- `[x]` means implemented and locally verified.
+- `[~]` means partially implemented or implemented in a simpler MVP form.
+- `[ ]` means still pending.
+
+### Reconciled Implementation Checklist
+
+The older phase checklist later in this document is kept as historical design notes. This clear-text checklist is the current source of truth for implemented work.
+
+#### Phase 1 - Foundation
+
+- [x] Monorepo/workspaces for `apps/web`, `apps/server`, and `packages/shared`.
+- [x] Fastify API server with TypeScript.
+- [x] PostgreSQL + Drizzle schema.
+- [x] Idempotent bootstrap migration for users, companies, departments, agents, cards, logs, budgets, approvals, chat, cron, and knowledge docs.
+- [x] Signup/login/logout with password auth.
+- [x] JWT session stored in an httpOnly cookie.
+- [x] Auth guard and validation/error handling.
+- [x] API lifecycle request/response logging with sensitive-key redaction.
+- [x] Next.js web app with authenticated shell.
+- [x] Collapsible sidebar, topbar, and content layout.
+- [x] Dark/light theme with CSS variables and localStorage.
+- [~] Locale foundation for zh-TW/en/ja labels.
+- [x] Login and signup pages with readable validation errors.
+- [~] Loading states, Framer Motion page transitions, and local toast feedback.
+
+#### Phase 2 - Kanban Task Board
+
+- [x] `kanban_cards`, `projects`, and `goals` tables.
+- [x] Card list/create/update/delete API.
+- [x] One canonical card stage field with five stages: `todo`, `in_progress`, `in_review`, `done`, `blocked`.
+- [x] Legacy `backlog` input normalized to `todo`.
+- [x] Status/assignee/tag/priority/limit/offset filtering API.
+- [~] Project and goal create/list API.
+- [x] Kanban board page with responsive columns.
+- [x] Drag and drop between columns with `@dnd-kit/core`.
+- [x] Card component with UUID, priority, tags, cost, approval/retry badges, and keyboard-open support.
+- [x] Task detail drawer with full details, metadata, logs, comments/message board, sub-tasks, save/run/review/split/pause/delete actions.
+- [x] New card modal.
+- [~] Filter bar with search, status, and assignee filters.
+- [x] Desktop and mobile responsive Kanban QA.
+
+#### Phase 3 - Agent System and Adapters
+
+- [x] `agents` and `agent_runtimes` tables.
+- [x] Agent CRUD API.
+- [x] Runtime preset CRUD API.
+- [x] Adapter registry for `mock`, Hermes Portainer, Hermes HTTP API, Webhook, and OpenClaw.
+- [x] Hermes Portainer adapter.
+- [x] Hermes HTTP API adapter.
+- [x] Webhook/OpenClaw adapter.
+- [x] Agent connection test API.
+- [x] Card assignment via task update and auto-assignment.
+- [x] Agents page with company context, department, reporting line, runtime selection, adapter config, edit, pause/resume/reset/fire behavior.
+- [x] Companies page with O-chart/reporting structure and clickable members.
+
+#### Phase 4 - Dispatch Engine and Review Loop
+
+- [x] `task_logs` table.
+- [x] Dispatch heartbeat loop with global and per-company intervals.
+- [x] Auto-assignment for `todo` tasks.
+- [x] Dependency preflight.
+- [x] Retry and block handling.
+- [x] Review loop with `in_review`, reviewer output, approval records, and rejection back to `todo`.
+- [x] Task decomposition into sub-tasks.
+- [x] Parent cascade to `done` when children complete.
+- [x] Prompt/context construction for company/project/goal/knowledge/task context.
+- [x] Execution log, cost, duration, stage, and activity recording.
+- [x] Manual `Run Now`, `Review`, and `Split into Sub-tasks` buttons.
+
+#### Phase 5 - Budget and Governance
+
+- [x] `cost_events`, `budget_policies`, and `approvals` tables.
+- [x] Cost recording per dispatch/chat/webhook.
+- [x] Agent monthly spend accumulation.
+- [x] Budget policy CRUD.
+- [x] Budget hard-stop behavior and approval creation.
+- [x] Approval decision API.
+- [x] Pause/resume/fire/reset agent actions.
+- [x] Budget page with cost events, policies, pending approvals, and approval actions.
+- [ ] Monthly budget reset cron.
+
+#### Phase 6 - Collaboration and Context
+
+- [x] `card_comments` and `knowledge_docs` tables.
+- [x] Task message board API and UI.
+- [x] User comments and agent-authored notes.
+- [x] Intervention actions: comment, send to agent, pause agent, continue run.
+- [x] Knowledge docs CRUD and Knowledge page.
+- [x] Bounded Kanban context injection for task dispatch, review, and direct chat.
+- [x] Context includes recent task messages, logs, board snapshot, activity, runs, and matching knowledge docs.
+- [~] Workspaces page and project/goal context.
+- [ ] Git worktree/branch/commit/merge automation.
+- [ ] Work product/artifact attachment tracking.
+
+#### Phase 7 - Dashboard and Observability
+
+- [x] Dashboard API with operational stats, stage counts, task logs, and API events.
+- [x] Dashboard page with stat cards and recent activity/API events.
+- [x] Logs page with task activity, API lifecycle, heartbeat runs, and cron runs.
+- [x] Activity log table and activity recording.
+- [x] Cron status/history/manual tick API.
+- [x] Cron status/history UI.
+- [ ] WebSocket/SSE realtime updates.
+- [ ] Notification bell/panel.
+- [ ] Runtime health/version/capability heartbeat.
+
+#### Phase 8 - Execution Safety
+
+- [x] `heartbeat_runs` table.
+- [x] Task execution locks.
+- [x] Agent busy-state locking.
+- [x] Stale-lock recovery.
+- [x] Run duration/cost/error recording.
+- [x] Safer adapter failure handling.
+- [ ] Dedicated async worker sidecar.
+- [ ] BullMQ/Redis queue.
+- [ ] Long-running job progress streaming.
+
+#### Phase 9 - Multi-Tenant and Polish
+
+- [x] Multi-company data model and company registry.
+- [x] Company settings and per-company dispatch interval/enable switch.
+- [x] Department setup and department-aware assignment.
+- [x] Mobile responsive pass for Kanban, Agents, Companies, Chat, Settings, and Help.
+- [x] Sidebar polish with bottom Help/Settings utility nav and compact icon rail.
+- [x] Settings page for runtime presets, adapter endpoints, companies, and departments.
+- [x] Help page and machine-readable API catalog.
+- [~] Audit log via `activity_log` and `api_events`.
+- [ ] Strong company-scoped authorization on every endpoint.
+- [ ] RBAC for admin/operator/viewer/agent-service actions.
+- [ ] Encrypted or externalized adapter secrets.
+- [ ] Company template import/export with secret scrubbing.
+- [ ] Rate limiting/API throttling.
+- [ ] Backup/restore runbook and implementation.
+- [ ] Onboarding wizard.
+- [ ] Error boundary and fallback UI.
+
+#### Phase 10 - Direct Agent Chat
+
+- [x] `chat_sessions` and `chat_messages` tables.
+- [x] Direct Chat sidebar page.
+- [x] Company -> agent -> session chat workflow.
+- [x] New chat session creation.
+- [x] Adapter-backed direct chat responses.
+- [x] Chat session adapter resume IDs.
+- [x] Chat cost, activity, and heartbeat recording.
+
+#### Phase 11 - Agent Message Boards and API Help
+
+- [x] Per-task agent/user message boards.
+- [x] Agent dispatch/review/webhook updates written back to the task board.
+- [x] Bounded context budget controls for agent invocations.
+- [x] `GET /api/help` JSON API catalog.
+- [x] `GET /api/help?format=markdown` agent-readable catalog.
+- [x] Web Help page and dashboard API Help entrypoint.
+- [x] Canonical Kanban intake stage merge: `backlog` -> `todo`.
+
 ## Architecture Update v0.7 - Task Message Boards and Bounded Kanban Context
 
 Date: 2026-06-05
@@ -180,7 +357,6 @@ Implemented:
 
 Production hardening still needed:
 
-- Atomic execution locks and stale-lock recovery.
 - Dedicated async worker/queue for long-running Hermes jobs.
 - Runtime health checks, versions, capabilities, and offline routing.
 - Immutable event bus separate from task/API logs.
@@ -188,18 +364,19 @@ Production hardening still needed:
 - Secret encryption or external secret references for adapter credentials.
 - Git worktree/branch/commit/merge workflow.
 - Work products and attachments.
-- Approval queue UI and richer budget policy enforcement.
+- Richer budget policy enforcement.
 
 ### Latest Verification
 
-Local verification completed on 2026-06-05:
+Local verification completed on 2026-06-06:
 
 - `npm run typecheck`
 - `npm test`
 - `npm run build`
 - `docker compose up -d --build`
-- Authenticated API smoke for runtime, department, agent, project, goal, knowledge doc, task, comment, manual run, dashboard, and logs.
-- Web route smoke for `/dashboard`, `/kanban`, `/agents`, `/budget`, `/logs`, `/knowledge`, `/workspaces`, and `/settings`.
+- API smoke for `/health`, `/api/help`, `/api/help?format=markdown`, Kanban stage alias normalization, and database stage migration.
+- Browser plugin QA for `/dashboard`, `/help`, `/kanban`, and `/settings`.
+- Browser plugin QA for sidebar collapse, bottom `Help`/`Settings` utility nav, and narrow mobile overflow.
 
 ## Architecture Update v0.5 - Phase 8-9 Execution Safety and Governance
 
