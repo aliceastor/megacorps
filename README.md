@@ -2,6 +2,11 @@
 
 Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm workspaces.
 
+## Documentation
+
+- [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md): current progress, Paperclip research, implemented features, gap analysis, and next phase plan.
+- [MegaCorps_ARCHITECTURE.md](./MegaCorps_ARCHITECTURE.md): long-form architecture notes and implementation updates.
+
 ## Run locally
 
 1. Copy `.env.example` to `.env` and set `PORTAINER_PASS`.

@@ -1,5 +1,7 @@
 # MegaCorps — Architecture Design v0.3
 
+> Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
+
 > AI Agent 團隊編排與管理平台
 > 調度層 + 任務板 = MegaCorps Core
 > Agent 執行層 = 多種 Agent 後端（Hermes / OpenClaw / ...）
