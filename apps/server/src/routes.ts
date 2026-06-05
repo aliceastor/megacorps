@@ -104,4 +104,43 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/projects', async (request, reply) => { const body = request.body as { name?: string; description?: string }; if (!body.name) return reply.code(400).send({ error: 'name_required' }); const [row] = await db.insert(projects).values({ companyId: await defaultCompanyId(), name: body.name, description: body.description }).returning(); return reply.code(201).send(row); });
   app.get('/api/goals', async () => db.select().from(goals));
   app.post('/api/goals', async (request, reply) => { const body = request.body as { title?: string; body?: string }; if (!body.title) return reply.code(400).send({ error: 'title_required' }); const [row] = await db.insert(goals).values({ companyId: await defaultCompanyId(), title: body.title, body: body.body }).returning(); return reply.code(201).send(row); });
+
+  app.post('/api/webhook/task-complete', async (request, reply) => {
+    const body = request.body as { cardId?: string; status?: string; summary?: string; output?: string; costUsd?: number };
+    if (!body.cardId || !body.status) return reply.code(400).send({ error: 'missing_fields' });
+    const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, body.cardId)).limit(1);
+    if (!card) return reply.code(404).send({ error: 'card_not_found' });
+    const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
+    await db.update(kanbanCards).set({ columnStatus: body.status, executionLog, costUsd: body.costUsd?.toString(), updatedAt: new Date() }).where(eq(kanbanCards.id, body.cardId));
+    if (card.assigneeId && body.costUsd) {
+      await db.update(agents).set({ spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${body.costUsd}` }).where(eq(agents.id, card.assigneeId));
+    }
+    return { ok: true, cardId: body.cardId, newStatus: body.status };
+  });
+
+  app.get('/api/help', async () => {
+    return `MegaCorps API Documentation
+===========================
+
+Endpoints:
+- GET /api/cards
+- POST /api/cards
+- PUT /api/cards/:id
+- DELETE /api/cards/:id
+- POST /api/cards/:id/run
+- GET /api/agents
+- POST /api/agents
+- DELETE /api/agents/:id
+- POST /api/webhook/task-complete
+
+Webhook Payload:
+{
+  "cardId": "uuid",
+  "status": "done" | "blocked" | "in_review",
+  "summary": "...",
+  "output": "...",
+  "costUsd": 0.05
+}
+`;
+  });
 }

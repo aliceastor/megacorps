@@ -84,12 +84,40 @@ export function extractSessionId(stdout: string): string {
 export function estimateTokens(text: string): number { return Math.ceil(text.length / 4); }
 export function estimateCost(tokens: number): number { return Number(((tokens / 1_000_000) * 3).toFixed(6)); }
 
+export function buildAgentPrompt(agent: AgentLike, task: TaskContext): string {
+  const apiUrl = process.env.MEGACORPS_PUBLIC_URL ?? 'http://192.168.1.180:4000';
+  return `You are now working under PLATFORM MegaCorps at ${apiUrl}.
+
+=== Common API Endpoints ===
+- GET  ${apiUrl}/api/cards              — List all kanban cards
+- POST ${apiUrl}/api/cards              — Create a new card
+- PUT  ${apiUrl}/api/cards/:id          — Update a card (status, body, assignee)
+- GET  ${apiUrl}/api/agents             — List all agents
+- POST ${apiUrl}/api/cards/:id/run      — Dispatch a card to its assigned agent
+- POST ${apiUrl}/api/webhook/task-complete — Report task completion
+
+=== Your Identity ===
+Agent: ${agent.hermesProfile ?? 'unknown'}
+Card ID: ${task.id}
+Card Title: ${task.title}
+
+=== Task ===
+${task.body}
+
+=== Instructions ===
+When you complete this task, POST your results to:
+POST ${apiUrl}/api/webhook/task-complete
+Body: { "cardId": "${task.id}", "status": "done", "summary": "...", "output": "..." }
+
+If you encounter errors, POST to the same endpoint with status "blocked".
+
+For full API documentation, fetch: GET ${apiUrl}/api/help
+`;
+}
+
 export async function dispatchToHermes(agent: AgentLike, task: TaskContext): Promise<TaskResult> {
   if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
-  const prompt = `MegaCorps task ${task.id}
-Title: ${task.title}
-
-${task.body}`;
+  const prompt = buildAgentPrompt(agent, task);
   const cmd = ['hermes', 'chat', '-q', `--profile=${agent.hermesProfile}`, ...(agent.currentSessionId ? ['--resume', agent.currentSessionId] : []), '--max-turns=60', '--reasoning-effort=medium', prompt];
   const result = await portainerExec(cmd, task.timeoutSeconds ?? 300);
   const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
