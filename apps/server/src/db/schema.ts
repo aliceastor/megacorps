@@ -14,7 +14,16 @@ export const users = pgTable('users', {
 });
 
 export const groups = pgTable('groups', { id: uuid('id').primaryKey().defaultRandom(), name: text('name').notNull(), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
-export const companies = pgTable('companies', { id: uuid('id').primaryKey().defaultRandom(), groupId: uuid('group_id').references(() => groups.id), name: text('name').notNull(), slug: text('slug').notNull().unique(), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
+export const companies = pgTable('companies', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  groupId: uuid('group_id').references(() => groups.id),
+  name: text('name').notNull(),
+  slug: text('slug').notNull().unique(),
+  mission: text('mission'),
+  dispatchIntervalSeconds: integer('dispatch_interval_seconds').default(10),
+  autoDispatchEnabled: boolean('auto_dispatch_enabled').default(true),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
 export const departments = pgTable('departments', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), name: text('name').notNull(), slug: text('slug').notNull(), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
 export const projects = pgTable('projects', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), name: text('name').notNull(), description: text('description'), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
 export const goals = pgTable('goals', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), title: text('title').notNull(), body: text('body'), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
@@ -84,6 +93,16 @@ export const taskLogs = pgTable('task_logs', {
   output: text('output'),
   costUsd: numeric('cost_usd', { precision: 10, scale: 4 }),
   durationSeconds: integer('duration_seconds'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+export const cardComments = pgTable('card_comments', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
+  authorType: text('author_type').notNull().default('user'),
+  authorId: uuid('author_id').references(() => users.id),
+  body: text('body').notNull(),
+  action: text('action').notNull().default('comment'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 

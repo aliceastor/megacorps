@@ -1862,3 +1862,88 @@ CREATE TABLE context_snapshots (
 > **v0.4 — 2026-06-04**
 > 新增：異步調度 + Message Queue + Agent Registry + Health Check + Context Manager
 > 完整架構：L1~L7 + 5 個補充模組 + Web UI + User System
+
+---
+
+## 2026-06-05 Implementation Update
+
+This section records the current working implementation in clear text because parts of the original architecture note were encoded incorrectly on Windows.
+
+### Paperclip Reference
+
+MegaCorps now follows the same product direction as `paperclipai/paperclip`: a control plane for AI-agent companies. The core product model is:
+
+- Company: mission, dispatch heartbeat, auto-dispatch switch.
+- Department: grouping unit for agents and tasks.
+- O-chart: agents report to other agents via `bossId`; agents can also belong to departments.
+- Kanban: every task has one UUID and one stage: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`.
+- Logs: task lifecycle logs plus API lifecycle logs.
+- Intervention: users can comment, stop an agent, send instructions to agent context, and continue a run.
+
+### Current Dispatch Loop
+
+The server starts one heartbeat loop. The global tick defaults to 10 seconds:
+
+```bash
+DISPATCH_LOOP_INTERVAL_MS=10000
+```
+
+Each company has its own settings:
+
+- `autoDispatchEnabled`
+- `dispatchIntervalSeconds`
+
+On each eligible company heartbeat, MegaCorps:
+
+1. Scans `backlog` and `todo` cards.
+2. Auto-assigns unassigned cards to an idle active agent.
+3. Prefers same department, then tag/capability/role match.
+4. Moves assigned work to `todo`, then `in_progress`.
+5. Runs the agent adapter.
+6. Moves work to `in_review` when approval/reviewer is required, otherwise `done`.
+7. Reviews `in_review` cards automatically when a reviewer is configured.
+8. Cascades parent cards to `done` when all sub-tasks are done.
+
+### Task Comments
+
+`card_comments` supports user intervention:
+
+- `comment`: audit/context only.
+- `pause_agent`: pause the assigned agent, mark the task `blocked`, and write stage/comment logs.
+- `send_to_agent`: store the instruction and inject it into the next dispatch prompt.
+- `continue_run`: reactivate the assigned agent and move the task back to `todo`.
+
+The dispatch prompt now includes recent comments so a continued run can act on new instructions.
+
+### Logging
+
+`task_logs` records task-local events:
+
+- stage changes
+- dispatch/review/decomposition
+- retries and cascade
+- comments and user interventions
+
+`api_events` records request/response/error lifecycle:
+
+- method and path
+- user id when authenticated
+- request body
+- response body
+- status code
+- error string
+- duration
+
+Sensitive keys matching password/pass/token/secret/jwt are redacted.
+
+### Next Phase
+
+The next implementation phase should deepen the Paperclip-like control plane:
+
+- company template import/export,
+- project/goal alignment in dispatch prompts,
+- richer department-scoped Kanban filters,
+- queue/worker sidecar for long-running Hermes jobs,
+- agent runtime health checks,
+- immutable audit/event bus,
+- budget policies and approval queue.

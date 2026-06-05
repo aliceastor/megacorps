@@ -22,20 +22,37 @@ function parseResponse(text: string): unknown {
 }
 
 function errorMessage(data: unknown): string {
+  if (Array.isArray(data)) return data.map(formatIssue).join('\n');
+  if (data && typeof data === 'object' && 'issues' in data && Array.isArray((data as { issues?: unknown }).issues)) {
+    return (data as { issues: unknown[] }).issues.map(formatIssue).join('\n');
+  }
   if (data && typeof data === 'object' && 'error' in data) return String((data as { error?: unknown }).error);
   return typeof data === 'string' ? data : 'request_failed';
+}
+
+function formatIssue(issue: unknown): string {
+  if (!issue || typeof issue !== 'object') return String(issue);
+  const row = issue as { path?: unknown[]; code?: string; minimum?: number; message?: string };
+  const field = row.path?.length ? String(row.path.join('.')) : 'field';
+  if (row.code === 'too_small' && typeof row.minimum === 'number') return `${field} must be at least ${row.minimum} characters.`;
+  return `${field}: ${row.message ?? 'invalid value'}`;
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = init.method?.toUpperCase();
   const shouldSendEmptyJson = method && !['GET', 'HEAD'].includes(method) && init.body === undefined;
-  const response = await fetch(`${API_URL}${path}`, {
-    ...init,
-    body: shouldSendEmptyJson ? '{}' : init.body,
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}) },
-    cache: 'no-store',
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      ...init,
+      body: shouldSendEmptyJson ? '{}' : init.body,
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}) },
+      cache: 'no-store',
+    });
+  } catch (error) {
+    throw new ApiError(`API unreachable at ${API_URL}. Check that the server container is running.`, 0, error);
+  }
   const text = await response.text();
   const data = parseResponse(text);
   if (!response.ok) {

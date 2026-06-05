@@ -1,15 +1,16 @@
 import { and, desc, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { db } from './db/client.ts';
-import { agents, kanbanCards, taskLogs } from './db/schema.ts';
+import { agents, cardComments, companies, kanbanCards, taskLogs } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
 type LogStatus = 'queued' | 'running' | 'success' | 'failed';
 
-const LOOP_INTERVAL_MS = Number(process.env.DISPATCH_LOOP_INTERVAL_MS ?? 30_000);
+const LOOP_INTERVAL_MS = Number(process.env.DISPATCH_LOOP_INTERVAL_MS ?? 10_000);
 let loopRunning = false;
+const companyLastTick = new Map<string, number>();
 
 function nextBackoff(retryCount: number): Date {
   const seconds = Math.min(300, 10 * 2 ** Math.max(0, retryCount));
@@ -60,6 +61,47 @@ async function budgetOk(agent: AgentRow): Promise<boolean> {
   return Number(agent.spentThisMonth ?? 0) < Number(agent.budgetMonthly);
 }
 
+function matchScore(card: CardRow, agent: AgentRow): number {
+  let score = 0;
+  if (card.departmentId && agent.departmentId === card.departmentId) score += 50;
+  const haystack = `${agent.role} ${agent.title ?? ''} ${(agent.capabilities ?? []).join(' ')}`.toLowerCase();
+  for (const tag of card.tags ?? []) if (haystack.includes(tag.toLowerCase())) score += 10;
+  if (/review|qa|audit/i.test(card.title + card.body) && /review|qa|audit/i.test(agent.role + agent.title)) score += 8;
+  if (/design|ui|ux/i.test(card.title + card.body) && /design|ui|ux/i.test(agent.role + agent.title)) score += 8;
+  if (/code|api|backend|frontend|bug|build/i.test(card.title + card.body) && /engineer|developer|coder/i.test(agent.role + agent.title)) score += 8;
+  score += Math.max(0, 10 - Number(agent.spentThisMonth ?? 0));
+  return score;
+}
+
+async function selectBestAgent(card: CardRow): Promise<AgentRow | null> {
+  const rows = await db.select().from(agents).where(eq(agents.companyId, card.companyId));
+  const available = [];
+  for (const agent of rows) {
+    if (!agent.isActive || agent.isBusy) continue;
+    if (!(await budgetOk(agent))) continue;
+    available.push(agent);
+  }
+  return available.sort((a, b) => matchScore(card, b) - matchScore(card, a))[0] ?? null;
+}
+
+async function ensureAssigned(card: CardRow, source: string): Promise<CardRow | null> {
+  if (card.assigneeId) return card;
+  const agent = await selectBestAgent(card);
+  if (!agent) {
+    await addTaskLog({ cardId: card.id, type: source, status: 'queued', message: 'No available agent found for auto-assignment.' });
+    return null;
+  }
+  const [updated] = await db.update(kanbanCards).set({
+    assigneeId: agent.id,
+    departmentId: card.departmentId ?? agent.departmentId,
+    columnStatus: 'todo',
+    updatedAt: new Date(),
+  }).where(eq(kanbanCards.id, card.id)).returning();
+  await addTaskLog({ cardId: card.id, agentId: agent.id, type: source, status: 'queued', message: `Auto-assigned to ${agent.name}.` });
+  if (card.columnStatus !== 'todo') await addStageLog(card.id, agent.id, card.columnStatus, 'todo', 'auto-assignment');
+  return updated ?? null;
+}
+
 export async function cascadeParentStatus(parentCardId: string | null): Promise<void> {
   if (!parentCardId) return;
   const children = await db.select().from(kanbanCards).where(eq(kanbanCards.parentCardId, parentCardId));
@@ -97,8 +139,13 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
 }
 
 export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = 'manual'): Promise<CardRow> {
-  const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  let [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
   if (!card) throw new Error('card_not_found');
+  if (!card.assigneeId) {
+    const assigned = await ensureAssigned(card, source);
+    if (!assigned) throw new Error('card_has_no_available_agent');
+    card = assigned;
+  }
   if (!card.assigneeId) throw new Error('card_has_no_assignee');
   const [agent] = await db.select().from(agents).where(eq(agents.id, card.assigneeId)).limit(1);
   if (!agent) throw new Error('agent_not_found');
@@ -116,7 +163,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const adapter = getAdapter(agent.adapterType ?? 'hermes');
     const result = await adapter.dispatch(
       { hermesProfile: agent.hermesProfile, currentSessionId: agent.currentSessionId, adapterConfig: agent.adapterConfig as Record<string, unknown> | null },
-      { id: card.id, title: card.title, body: buildTaskPrompt(card), timeoutSeconds: 300 },
+      { id: card.id, title: card.title, body: await buildTaskPrompt(card), timeoutSeconds: 300 },
     );
     const nextStatus = card.requiresApproval || card.reviewerId ? 'in_review' : 'done';
     await db.update(agents).set({
@@ -246,12 +293,26 @@ export function startDispatchLoop(app: FastifyInstance): void {
     loopRunning = true;
     try {
       const now = new Date();
-      const cards = await db.select().from(kanbanCards).where(inArray(kanbanCards.columnStatus, ['todo', 'in_review']));
+      const companyRows = await db.select().from(companies);
+      const nowMs = Date.now();
+      const activeCompanyIds = companyRows.filter((company) => {
+        if (company.autoDispatchEnabled === false) return false;
+        const intervalMs = Math.max(5, company.dispatchIntervalSeconds ?? 10) * 1000;
+        const last = companyLastTick.get(company.id) ?? 0;
+        if (nowMs - last < intervalMs) return false;
+        companyLastTick.set(company.id, nowMs);
+        return true;
+      }).map((company) => company.id);
+      if (activeCompanyIds.length === 0) return;
+      const cards = await db.select().from(kanbanCards).where(inArray(kanbanCards.companyId, activeCompanyIds));
       for (const card of cards) {
-        if (card.columnStatus === 'todo') {
+        if (card.columnStatus === 'backlog' || card.columnStatus === 'todo') {
           if (card.nextRunAt && card.nextRunAt > now) continue;
-          if (!card.assigneeId || !(await dependenciesMet(card))) continue;
-          try { await dispatchCard(card.id, 'loop'); } catch (error) { app.log.warn({ error, cardId: card.id }, 'dispatch loop skipped card'); }
+          if (!(await dependenciesMet(card))) continue;
+          try {
+            const assigned = await ensureAssigned(card, 'loop');
+            if (assigned || card.assigneeId) await dispatchCard(card.id, 'loop');
+          } catch (error) { app.log.warn({ error, cardId: card.id }, 'dispatch loop skipped card'); }
         } else if (card.columnStatus === 'in_review') {
           try { await reviewCard(card.id); } catch (error) { app.log.warn({ error, cardId: card.id }, 'review loop skipped card'); }
         }
@@ -265,12 +326,14 @@ export function startDispatchLoop(app: FastifyInstance): void {
   void tick();
 }
 
-function buildTaskPrompt(card: CardRow): string {
+async function buildTaskPrompt(card: CardRow): Promise<string> {
+  const comments = await db.select().from(cardComments).where(eq(cardComments.cardId, card.id)).orderBy(desc(cardComments.createdAt)).limit(20);
   return [
     `Card: ${card.title}`,
     `Status: ${card.columnStatus}`,
     `Priority: ${card.priority ?? 0}`,
     card.reviewFeedback ? `Previous review feedback:\n${card.reviewFeedback}` : '',
+    comments.length ? `User comments and instructions:\n${comments.reverse().map((comment) => `- [${comment.action}] ${comment.body}`).join('\n')}` : '',
     'Task body:',
     card.body,
   ].filter(Boolean).join('\n\n');

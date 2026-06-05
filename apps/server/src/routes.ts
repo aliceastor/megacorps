@@ -1,10 +1,10 @@
 import bcrypt from 'bcryptjs';
 import { and, desc, eq, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { createAgentSchema, createCardSchema, loginSchema, signupSchema, updateCardSchema, canTransitionCard, type CardStatus } from '@megacorps/shared';
+import { createAgentSchema, createCardCommentSchema, createCardSchema, createCompanySchema, createDepartmentSchema, loginSchema, signupSchema, updateCardSchema } from '@megacorps/shared';
 import { signSession, requireAuth } from './auth.ts';
 import { db } from './db/client.ts';
-import { agentRuntimes, agents, apiEvents, companies, goals, kanbanCards, projects, taskLogs, users } from './db/schema.ts';
+import { agentRuntimes, agents, apiEvents, cardComments, companies, departments, goals, kanbanCards, projects, taskLogs, users } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { cascadeParentStatus, decomposeCard, dispatchCard, getTaskLogs, reviewCard } from './dispatch.ts';
 
@@ -48,6 +48,45 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return db.select().from(apiEvents).orderBy(desc(apiEvents.createdAt)).limit(limit);
   });
 
+  app.get('/api/companies', async () => db.select().from(companies).orderBy(desc(companies.createdAt)));
+  app.post('/api/companies', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const input = createCompanySchema.parse(request.body);
+    const [company] = await db.insert(companies).values({
+      name: input.name,
+      slug: input.slug,
+      mission: input.mission ?? null,
+      dispatchIntervalSeconds: input.dispatchIntervalSeconds,
+      autoDispatchEnabled: input.autoDispatchEnabled,
+    }).returning();
+    return reply.code(201).send(company);
+  });
+  app.put('/api/companies/:id', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const id = (request.params as { id: string }).id;
+    const input = createCompanySchema.partial().parse(request.body);
+    const [company] = await db.update(companies).set({
+      name: input.name,
+      slug: input.slug,
+      mission: input.mission,
+      dispatchIntervalSeconds: input.dispatchIntervalSeconds,
+      autoDispatchEnabled: input.autoDispatchEnabled,
+    }).where(eq(companies.id, id)).returning();
+    if (!company) return reply.code(404).send({ error: 'company_not_found' });
+    return company;
+  });
+
+  app.get('/api/departments', async (request) => {
+    const query = request.query as { companyId?: string };
+    return db.select().from(departments).where(query.companyId ? eq(departments.companyId, query.companyId) : undefined).orderBy(desc(departments.createdAt));
+  });
+  app.post('/api/departments', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const input = createDepartmentSchema.parse(request.body);
+    const [department] = await db.insert(departments).values(input).returning();
+    return reply.code(201).send(department);
+  });
+
   app.get('/api/cards', async (request) => {
     const query = request.query as { status?: string; assigneeId?: string; tag?: string; priority?: string; limit?: string; offset?: string };
     const filters = [
@@ -64,11 +103,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireAuth(request, reply); if (!user) return reply;
     const input = createCardSchema.parse(request.body);
     const [card] = await db.insert(kanbanCards).values({
-      companyId: await defaultCompanyId(),
+      companyId: input.companyId ?? await defaultCompanyId(),
       title: input.title,
       body: input.body,
       priority: priorityToNumber(input.priority),
       tags: input.tags,
+      departmentId: input.departmentId ?? null,
       assigneeId: input.assigneeId ?? null,
       reviewerId: input.reviewerId ?? null,
       projectId: input.projectId ?? null,
@@ -96,6 +136,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       columnStatus: input.columnStatus,
       priority: input.priority ? priorityToNumber(input.priority) : undefined,
       tags: input.tags,
+      departmentId: input.departmentId,
       assigneeId: input.assigneeId,
       reviewerId: input.reviewerId,
       projectId: input.projectId,
@@ -119,8 +160,38 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return card;
   });
 
-  app.delete('/api/cards/:id', async (request) => { const id = (request.params as { id: string }).id; await db.delete(kanbanCards).where(eq(kanbanCards.id, id)); return { ok: true }; });
+  app.delete('/api/cards/:id', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const id = (request.params as { id: string }).id;
+    await db.update(kanbanCards).set({ parentCardId: null }).where(eq(kanbanCards.parentCardId, id));
+    await db.delete(cardComments).where(eq(cardComments.cardId, id));
+    await db.delete(taskLogs).where(eq(taskLogs.cardId, id));
+    await db.delete(kanbanCards).where(eq(kanbanCards.id, id));
+    return { ok: true };
+  });
   app.get('/api/cards/:id/logs', async (request) => getTaskLogs((request.params as { id: string }).id));
+  app.get('/api/cards/:id/comments', async (request) => db.select().from(cardComments).where(eq(cardComments.cardId, (request.params as { id: string }).id)).orderBy(desc(cardComments.createdAt)));
+  app.post('/api/cards/:id/comments', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const id = (request.params as { id: string }).id;
+    const input = createCardCommentSchema.parse(request.body);
+    const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
+    if (!card) return reply.code(404).send({ error: 'card_not_found' });
+    const [comment] = await db.insert(cardComments).values({ cardId: id, authorType: 'user', authorId: user.id, body: input.body, action: input.action }).returning();
+    await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'comment', status: 'success', message: `${actorLabel(user)} added a ${input.action} comment.`, output: input.body });
+    if (input.action === 'pause_agent') {
+      if (card.assigneeId) await db.update(agents).set({ isBusy: false, isActive: false }).where(eq(agents.id, card.assigneeId));
+      await db.update(kanbanCards).set({ columnStatus: 'blocked', lastError: `Paused by ${actorLabel(user)}: ${input.body}`, updatedAt: new Date() }).where(eq(kanbanCards.id, id));
+      await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'backlog'} to blocked by ${actorLabel(user)}.` });
+    } else if (input.action === 'continue_run') {
+      if (card.assigneeId) await db.update(agents).set({ isActive: true, isBusy: false }).where(eq(agents.id, card.assigneeId));
+      await db.update(kanbanCards).set({ columnStatus: 'todo', lastError: null, nextRunAt: null, updatedAt: new Date() }).where(eq(kanbanCards.id, id));
+      await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'backlog'} to todo by ${actorLabel(user)}.` });
+    } else if (input.action === 'send_to_agent') {
+      await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'comment', status: 'queued', message: 'Comment queued for agent context on the next run.', output: input.body });
+    }
+    return reply.code(201).send(comment);
+  });
   app.post('/api/cards/:id/run', async (request, reply) => {
     try { return await dispatchCard((request.params as { id: string }).id, 'manual'); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'dispatch_failed' }); }
@@ -137,7 +208,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/agents', async () => db.select().from(agents));
   app.post('/api/agents', async (request, reply) => {
     const input = createAgentSchema.parse(request.body);
-    const [agent] = await db.insert(agents).values({ companyId: await defaultCompanyId(), slug: input.slug, name: input.name, role: input.role, title: input.title, adapterType: input.adapterType, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
+    const [agent] = await db.insert(agents).values({ companyId: input.companyId ?? await defaultCompanyId(), departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, adapterType: input.adapterType, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
     return reply.code(201).send(agent);
   });
   app.delete('/api/agents/:id', async (request) => {
@@ -172,6 +243,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       slug: input.slug,
       role: input.role,
       title: input.title,
+      departmentId: input.departmentId,
       adapterType: input.adapterType,
       hermesProfile: input.hermesProfile,
       bossId: input.bossId,

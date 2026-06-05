@@ -309,7 +309,7 @@ button.card {
   position: fixed;
   right: 18px;
   top: 90px;
-  width: min(520px, calc(100vw - 36px));
+  width: min(760px, calc(100vw - 36px));
   bottom: 18px;
   padding: 20px;
   overflow: auto;

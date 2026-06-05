@@ -3,7 +3,7 @@ import { DndContext, type DragEndEvent, useDraggable, useDroppable } from '@dnd-
 import { CSS } from '@dnd-kit/utilities';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useMemo, useState } from 'react';
-import { GitBranch, GripVertical, ListChecks, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, X } from 'lucide-react';
+import { GitBranch, GripVertical, ListChecks, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, StopCircle, Trash2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
@@ -42,6 +42,7 @@ type Card = {
 type Agent = { id: string; name: string; adapterType?: string; isBusy?: boolean };
 type TaskLog = { id: string; type: string; status: string; message: string; output?: string; costUsd?: string; durationSeconds?: number; createdAt?: string };
 type ApiEvent = { id: string; method: string; path: string; statusCode?: number; requestBody?: unknown; responseBody?: unknown; error?: string | null; durationMs?: number; createdAt?: string };
+type CardComment = { id: string; body: string; action: string; authorType: string; createdAt?: string };
 
 function statusColor(status: string) {
   if (status === 'done') return '#16a34a';
@@ -135,7 +136,10 @@ export function KanbanBoard() {
   const [draft, setDraft] = useState<Partial<Card> | null>(null);
   const [logs, setLogs] = useState<TaskLog[]>([]);
   const [apiLogs, setApiLogs] = useState<ApiEvent[]>([]);
-  const [tab, setTab] = useState<'details' | 'logs' | 'subtasks'>('details');
+  const [comments, setComments] = useState<CardComment[]>([]);
+  const [tab, setTab] = useState<'details' | 'comments' | 'logs' | 'subtasks'>('details');
+  const [commentBody, setCommentBody] = useState('');
+  const [commentAction, setCommentAction] = useState<'comment' | 'pause_agent' | 'send_to_agent' | 'continue_run'>('comment');
   const [modalOpen, setModalOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newBody, setNewBody] = useState('');
@@ -176,6 +180,7 @@ export function KanbanBoard() {
       maxRetries: selected.maxRetries ?? 3,
     });
     api<TaskLog[]>(`/api/cards/${selected.id}/logs`).then(setLogs).catch(() => setLogs([]));
+    api<CardComment[]>(`/api/cards/${selected.id}/comments`).then(setComments).catch(() => setComments([]));
     api<ApiEvent[]>('/api/system-logs?limit=250')
       .then((events) => setApiLogs(events.filter((event) => event.path.includes(selected.id) || JSON.stringify(event.requestBody ?? {}).includes(selected.id) || JSON.stringify(event.responseBody ?? {}).includes(selected.id))))
       .catch(() => setApiLogs([]));
@@ -300,6 +305,40 @@ export function KanbanBoard() {
     }
   }
 
+  async function deleteSelected() {
+    if (!selected) return;
+    const confirmed = window.confirm(`Delete task "${selected.title}"?`);
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      await api(`/api/cards/${selected.id}`, { method: 'DELETE' });
+      setCards(cards.filter((card) => card.id !== selected.id).map((card) => (card.parentCardId === selected.id ? { ...card, parentCardId: null } : card)));
+      setSelected(null);
+      setToast({ message: 'Task deleted', type: 'success' });
+    } catch (err) {
+      setToast({ message: err instanceof Error ? err.message : 'Failed to delete task', type: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addComment() {
+    if (!selected || !commentBody.trim()) return;
+    setBusy(true);
+    try {
+      const comment = await api<CardComment>(`/api/cards/${selected.id}/comments`, { method: 'POST', body: JSON.stringify({ body: commentBody.trim(), action: commentAction }) });
+      setComments([comment, ...comments]);
+      setCommentBody('');
+      setToast({ message: commentAction === 'pause_agent' ? 'Agent paused and task blocked' : commentAction === 'continue_run' ? 'Task queued to continue' : 'Comment added', type: 'success' });
+      await refresh();
+      setLogs(await api<TaskLog[]>(`/api/cards/${selected.id}/logs`));
+    } catch (err) {
+      setToast({ message: err instanceof Error ? err.message : 'Failed to add comment', type: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return <>
     <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14, flexWrap: 'wrap' }}>
       <div className="input-wrap" style={{ flex: '1 1 260px' }}><Search size={15} /><input placeholder="Search" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
@@ -350,7 +389,7 @@ export function KanbanBoard() {
             <button className="btn" onClick={() => setSelected(null)}><X size={16} /></button>
           </div>
           <div className="tab-row">
-            {(['details', 'logs', 'subtasks'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => setTab(next)}>{next}</button>)}
+            {(['details', 'comments', 'logs', 'subtasks'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => setTab(next)}>{next}</button>)}
           </div>
           {tab === 'details' && <div style={{ display: 'grid', gap: 12 }}>
             <label className="field-label">Title<input className="input" value={String(draft?.title ?? '')} onChange={(e) => setDraft({ ...(draft ?? {}), title: e.target.value })} /></label>
@@ -382,8 +421,29 @@ export function KanbanBoard() {
               <button className="btn" disabled={busy} onClick={resetDraft}><RotateCcw size={15} /> Revert</button>
               <button className="btn btn-primary" disabled={busy} onClick={() => action(`/api/cards/${selected.id}/run`, 'Task dispatched')}><Play size={15} /> Run Now</button>
               <button className="btn" disabled={busy} onClick={() => action(`/api/cards/${selected.id}/review`, 'Review completed')}><ShieldCheck size={15} /> Review</button>
-              <button className="btn" disabled={busy} onClick={() => action(`/api/cards/${selected.id}/decompose`, 'Sub-tasks created')}><GitBranch size={15} /> Decompose</button>
+              <button className="btn" title="Split this task into smaller sub-tasks from its detail text." disabled={busy} onClick={() => action(`/api/cards/${selected.id}/decompose`, 'Sub-tasks created')}><GitBranch size={15} /> Split into Sub-tasks</button>
+              <button className="btn" disabled={busy} onClick={() => { setTab('comments'); setCommentAction('pause_agent'); }}><StopCircle size={15} /> Pause with Comment</button>
+              <button className="btn" disabled={busy} onClick={deleteSelected} style={{ color: 'var(--danger)' }}><Trash2 size={15} /> Delete Task</button>
             </div>
+          </div>}
+          {tab === 'comments' && <div style={{ display: 'grid', gap: 12 }}>
+            <label className="field-label">Action
+              <select className="input" value={commentAction} onChange={(event) => setCommentAction(event.target.value as typeof commentAction)}>
+                <option value="comment">Comment only</option>
+                <option value="pause_agent">Stop agent now and block task</option>
+                <option value="send_to_agent">Send comment to agent context</option>
+                <option value="continue_run">Continue run with comment</option>
+              </select>
+            </label>
+            <label className="field-label">Comment
+              <textarea className="input" rows={5} value={commentBody} onChange={(event) => setCommentBody(event.target.value)} placeholder="Write the instruction, blocker, correction, or context for this task." />
+            </label>
+            <button className="btn btn-primary" disabled={busy || !commentBody.trim()} onClick={addComment}><MessageSquare size={15} /> Add Comment</button>
+            {comments.length === 0 ? <p style={{ opacity: 0.6 }}>No comments yet.</p> : comments.map((comment) => <article className="log-item" key={comment.id}>
+              <b>{comment.action} / {comment.authorType}</b>
+              <span>{comment.createdAt ? new Date(comment.createdAt).toLocaleString() : ''}</span>
+              <p>{comment.body}</p>
+            </article>)}
           </div>}
           {tab === 'logs' && <div style={{ display: 'grid', gap: 10 }}>
             {selected.executionLog && <article className="log-item">
