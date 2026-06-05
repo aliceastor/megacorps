@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "scripts": { "dev": "next dev", "build": "next build", "start": "next start", "lint": "next lint || true", "test": "node --test --import tsx src/**/*.test.ts", "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "scripts": { "dev": "next dev", "build": "next build --webpack", "start": "next start", "lint": "next lint || true", "test": "node --test --import tsx src/**/*.test.ts", "typecheck": "tsc -p tsconfig.json --noEmit" },
   "dependencies": {
     "@dnd-kit/core": "latest",
     "@dnd-kit/sortable": "latest",

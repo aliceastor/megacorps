@@ -1,11 +1,12 @@
 import bcrypt from 'bcryptjs';
 import { and, desc, eq, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { createAgentSchema, createCardSchema, loginSchema, updateCardSchema, canTransitionCard, type CardStatus } from '@megacorps/shared';
+import { createAgentSchema, createCardSchema, loginSchema, signupSchema, updateCardSchema, canTransitionCard, type CardStatus } from '@megacorps/shared';
 import { signSession, requireAuth } from './auth.ts';
 import { db } from './db/client.ts';
-import { agents, companies, goals, kanbanCards, projects, users } from './db/schema.ts';
+import { agentRuntimes, agents, companies, goals, kanbanCards, projects, taskLogs, users } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
+import { cascadeParentStatus, decomposeCard, dispatchCard, getTaskLogs, reviewCard } from './dispatch.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
@@ -19,7 +20,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/health', async () => ({ ok: true }));
 
   app.post('/api/auth/signup', async (request, reply) => {
-    const input = loginSchema.extend({ name: createCardSchema.shape.title }).parse(request.body);
+    const input = signupSchema.parse(request.body);
     const passwordHash = await bcrypt.hash(input.password, 12);
     const [user] = await db.insert(users).values({ email: input.email, name: input.name, passwordHash, role: 'admin' }).returning();
     if (!user) return reply.code(500).send({ error: 'signup_failed' });
@@ -41,15 +42,36 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/me', async (request, reply) => { const user = await requireAuth(request, reply); return user ? { user } : reply; });
 
   app.get('/api/cards', async (request) => {
-    const query = request.query as { status?: string; assigneeId?: string; tag?: string; limit?: string; offset?: string };
-    const where = query.status ? eq(kanbanCards.columnStatus, query.status) : undefined;
+    const query = request.query as { status?: string; assigneeId?: string; tag?: string; priority?: string; limit?: string; offset?: string };
+    const filters = [
+      query.status ? eq(kanbanCards.columnStatus, query.status) : undefined,
+      query.assigneeId ? eq(kanbanCards.assigneeId, query.assigneeId) : undefined,
+      query.priority ? eq(kanbanCards.priority, priorityToNumber(query.priority)) : undefined,
+      query.tag ? drizzleSql`${query.tag} = ANY(${kanbanCards.tags})` : undefined,
+    ].filter(Boolean);
+    const where = filters.length ? and(...filters) : undefined;
     return db.select().from(kanbanCards).where(where).orderBy(desc(kanbanCards.updatedAt)).limit(Number(query.limit ?? 100)).offset(Number(query.offset ?? 0));
   });
 
   app.post('/api/cards', async (request, reply) => {
     const user = await requireAuth(request, reply); if (!user) return reply;
     const input = createCardSchema.parse(request.body);
-    const [card] = await db.insert(kanbanCards).values({ companyId: await defaultCompanyId(), title: input.title, body: input.body, priority: priorityToNumber(input.priority), tags: input.tags, assigneeId: input.assigneeId ?? null, createdBy: user.id }).returning();
+    const [card] = await db.insert(kanbanCards).values({
+      companyId: await defaultCompanyId(),
+      title: input.title,
+      body: input.body,
+      priority: priorityToNumber(input.priority),
+      tags: input.tags,
+      assigneeId: input.assigneeId ?? null,
+      reviewerId: input.reviewerId ?? null,
+      projectId: input.projectId ?? null,
+      goalId: input.goalId ?? null,
+      parentCardId: input.parentCardId ?? null,
+      dependencyCardIds: input.dependencyCardIds,
+      requiresApproval: input.requiresApproval,
+      maxRetries: input.maxRetries,
+      createdBy: user.id,
+    }).returning();
     return reply.code(201).send(card);
   });
 
@@ -60,11 +82,40 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!existing) return reply.code(404).send({ error: 'card_not_found' });
     if (input.updatedAt && existing.updatedAt && new Date(input.updatedAt).getTime() !== existing.updatedAt.getTime()) return reply.code(409).send({ error: 'card_modified' });
     if (input.columnStatus && !canTransitionCard(existing.columnStatus as CardStatus, input.columnStatus)) return reply.code(400).send({ error: 'invalid_status_transition' });
-    const [card] = await db.update(kanbanCards).set({ title: input.title, body: input.body, columnStatus: input.columnStatus, priority: priorityToNumber(input.priority), tags: input.tags, assigneeId: input.assigneeId, updatedAt: new Date() }).where(eq(kanbanCards.id, id)).returning();
+    const [card] = await db.update(kanbanCards).set({
+      title: input.title,
+      body: input.body,
+      columnStatus: input.columnStatus,
+      priority: input.priority ? priorityToNumber(input.priority) : undefined,
+      tags: input.tags,
+      assigneeId: input.assigneeId,
+      reviewerId: input.reviewerId,
+      projectId: input.projectId,
+      goalId: input.goalId,
+      parentCardId: input.parentCardId,
+      dependencyCardIds: input.dependencyCardIds,
+      requiresApproval: input.requiresApproval,
+      maxRetries: input.maxRetries,
+      completedAt: input.columnStatus === 'done' ? new Date() : undefined,
+      updatedAt: new Date(),
+    }).where(eq(kanbanCards.id, id)).returning();
     return card;
   });
 
   app.delete('/api/cards/:id', async (request) => { const id = (request.params as { id: string }).id; await db.delete(kanbanCards).where(eq(kanbanCards.id, id)); return { ok: true }; });
+  app.get('/api/cards/:id/logs', async (request) => getTaskLogs((request.params as { id: string }).id));
+  app.post('/api/cards/:id/run', async (request, reply) => {
+    try { return await dispatchCard((request.params as { id: string }).id, 'manual'); }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'dispatch_failed' }); }
+  });
+  app.post('/api/cards/:id/review', async (request, reply) => {
+    try { return await reviewCard((request.params as { id: string }).id); }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'review_failed' }); }
+  });
+  app.post('/api/cards/:id/decompose', async (request, reply) => {
+    try { return reply.code(201).send(await decomposeCard((request.params as { id: string }).id)); }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'decompose_failed' }); }
+  });
 
   app.get('/api/agents', async () => db.select().from(agents));
   app.post('/api/agents', async (request, reply) => {
@@ -78,6 +129,49 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await db.delete(agents).where(eq(agents.id, id));
     return { ok: true };
   });
+  app.post('/api/agents/:id/pause', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const [agent] = await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, id)).returning();
+    if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    return agent;
+  });
+  app.post('/api/agents/:id/resume', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const [agent] = await db.update(agents).set({ isActive: true }).where(eq(agents.id, id)).returning();
+    if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    return agent;
+  });
+  app.post('/api/agents/:id/reset-session', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const [agent] = await db.update(agents).set({ currentSessionId: null, isBusy: false }).where(eq(agents.id, id)).returning();
+    if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    return agent;
+  });
+  app.put('/api/agents/:id', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const input = createAgentSchema.partial().parse(request.body);
+    const [agent] = await db.update(agents).set({
+      name: input.name,
+      slug: input.slug,
+      role: input.role,
+      title: input.title,
+      adapterType: input.adapterType,
+      hermesProfile: input.hermesProfile,
+      bossId: input.bossId,
+      budgetPerTask: input.budgetPerTask?.toString(),
+      budgetMonthly: input.budgetMonthly?.toString(),
+    }).where(eq(agents.id, id)).returning();
+    if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    return agent;
+  });
+
+  app.get('/api/agent-runtimes', async () => db.select().from(agentRuntimes));
+  app.post('/api/agent-runtimes', async (request, reply) => {
+    const body = request.body as { name?: string; adapterType?: string; config?: Record<string, unknown> };
+    if (!body.name || !body.adapterType) return reply.code(400).send({ error: 'name_and_adapter_required' });
+    const [row] = await db.insert(agentRuntimes).values({ name: body.name, adapterType: body.adapterType, config: body.config ?? {} }).returning();
+    return reply.code(201).send(row);
+  });
 
   app.post('/api/agents/:id/test-connection', async (request, reply) => {
     const id = (request.params as { id: string }).id;
@@ -85,19 +179,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     try { const adapter = getAdapter(agent.adapterType ?? 'hermes'); return await adapter.dispatch({ hermesProfile: agent.hermesProfile, currentSessionId: agent.currentSessionId, adapterConfig: {} }, { id: 'test', title: 'Connection test', body: 'Return OK.', timeoutSeconds: 30 }); }
     catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : 'connection_failed' }); }
-  });
-
-  app.post('/api/cards/:id/run', async (request, reply) => {
-    const id = (request.params as { id: string }).id;
-    const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
-    if (!card?.assigneeId) return reply.code(400).send({ error: 'card_has_no_assignee' });
-    const [agent] = await db.select().from(agents).where(eq(agents.id, card.assigneeId)).limit(1);
-    if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
-    const adapter = getAdapter(agent.adapterType ?? 'hermes');
-    const result = await adapter.dispatch({ hermesProfile: agent.hermesProfile, currentSessionId: agent.currentSessionId, adapterConfig: {} }, { id: card.id, title: card.title, body: card.body, timeoutSeconds: 300 });
-    await db.update(agents).set({ currentSessionId: result.sessionId, spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${result.costUsd}` }).where(eq(agents.id, agent.id));
-    const [updated] = await db.update(kanbanCards).set({ executionLog: result.output, sessionId: result.sessionId, costUsd: result.costUsd.toString(), updatedAt: new Date() }).where(eq(kanbanCards.id, id)).returning();
-    return updated;
   });
 
   app.get('/api/projects', async () => db.select().from(projects));
@@ -111,10 +192,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, body.cardId)).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
     const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
-    await db.update(kanbanCards).set({ columnStatus: body.status, executionLog, costUsd: body.costUsd?.toString(), updatedAt: new Date() }).where(eq(kanbanCards.id, body.cardId));
+    await db.update(kanbanCards).set({ columnStatus: body.status, executionLog, costUsd: body.costUsd?.toString(), completedAt: body.status === 'done' ? new Date() : undefined, updatedAt: new Date() }).where(eq(kanbanCards.id, body.cardId));
+    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'webhook', status: body.status === 'blocked' ? 'failed' : 'success', message: body.summary ?? `Webhook marked card ${body.status}`, output: body.output, costUsd: body.costUsd?.toString() });
     if (card.assigneeId && body.costUsd) {
       await db.update(agents).set({ spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${body.costUsd}` }).where(eq(agents.id, card.assigneeId));
     }
+    if (body.status === 'done') await cascadeParentStatus(card.parentCardId);
     return { ok: true, cardId: body.cardId, newStatus: body.status };
   });
 

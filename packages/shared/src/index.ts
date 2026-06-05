@@ -2,6 +2,8 @@ import { z } from 'zod';
 
 export const cardStatuses = ['backlog', 'todo', 'in_progress', 'in_review', 'done', 'blocked'] as const;
 export type CardStatus = (typeof cardStatuses)[number];
+export const agentAdapterTypes = ['hermes', 'hermes-gateway', 'openclaw', 'webhook', 'mock'] as const;
+export type AgentAdapterType = (typeof agentAdapterTypes)[number];
 
 const allowedTransitions: Record<CardStatus, CardStatus[]> = {
   backlog: ['todo', 'blocked'],
@@ -26,6 +28,13 @@ export const createCardSchema = z.object({
   priority: prioritySchema.default('normal'),
   tags: z.array(z.string().trim().min(1).max(40)).default([]),
   assigneeId: z.string().uuid().nullable().optional(),
+  reviewerId: z.string().uuid().nullable().optional(),
+  projectId: z.string().uuid().nullable().optional(),
+  goalId: z.string().uuid().nullable().optional(),
+  parentCardId: z.string().uuid().nullable().optional(),
+  dependencyCardIds: z.array(z.string().uuid()).default([]),
+  requiresApproval: z.boolean().default(false),
+  maxRetries: z.number().int().min(1).max(10).default(3),
 });
 
 export const updateCardSchema = createCardSchema.partial().extend({
@@ -38,11 +47,25 @@ export const createAgentSchema = z.object({
   slug: z.string().trim().regex(/^[a-z0-9-]+$/).max(80),
   role: z.string().trim().min(1).max(80),
   title: z.string().trim().max(120).optional(),
-  adapterType: z.enum(['hermes', 'openclaw', 'webhook']).default('hermes'),
+  adapterType: z.enum(agentAdapterTypes).default('hermes'),
   hermesProfile: z.string().trim().min(1).max(80).optional(),
   bossId: z.string().uuid().nullable().optional(),
   budgetPerTask: z.number().nonnegative().optional(),
   budgetMonthly: z.number().nonnegative().optional(),
+});
+
+export const taskLogTypes = ['dispatch', 'retry', 'review', 'decomposition', 'cascade', 'webhook', 'manual'] as const;
+export type TaskLogType = (typeof taskLogTypes)[number];
+
+export const taskLogSchema = z.object({
+  cardId: z.string().uuid(),
+  agentId: z.string().uuid().nullable().optional(),
+  type: z.enum(taskLogTypes),
+  status: z.enum(['queued', 'running', 'success', 'failed']),
+  message: z.string().trim().min(1).max(2000),
+  output: z.string().optional(),
+  costUsd: z.number().nonnegative().optional(),
+  durationSeconds: z.number().nonnegative().optional(),
 });
 
 export const signupSchema = z.object({
@@ -59,3 +82,4 @@ export const loginSchema = z.object({
 export type CreateCardInput = z.infer<typeof createCardSchema>;
 export type UpdateCardInput = z.infer<typeof updateCardSchema>;
 export type CreateAgentInput = z.infer<typeof createAgentSchema>;
+export type TaskLogInput = z.infer<typeof taskLogSchema>;

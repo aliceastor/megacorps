@@ -1,0 +1,271 @@
+import { and, desc, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
+import type { FastifyInstance } from 'fastify';
+import { db } from './db/client.ts';
+import { agents, kanbanCards, taskLogs } from './db/schema.ts';
+import { getAdapter } from './adapters/registry.ts';
+
+type CardRow = typeof kanbanCards.$inferSelect;
+type AgentRow = typeof agents.$inferSelect;
+type LogStatus = 'queued' | 'running' | 'success' | 'failed';
+
+const LOOP_INTERVAL_MS = Number(process.env.DISPATCH_LOOP_INTERVAL_MS ?? 30_000);
+let loopRunning = false;
+
+function nextBackoff(retryCount: number): Date {
+  const seconds = Math.min(300, 10 * 2 ** Math.max(0, retryCount));
+  return new Date(Date.now() + seconds * 1000);
+}
+
+async function addTaskLog(input: {
+  cardId: string;
+  agentId?: string | null;
+  type: string;
+  status: LogStatus;
+  message: string;
+  output?: string;
+  costUsd?: number;
+  durationSeconds?: number;
+}) {
+  await db.insert(taskLogs).values({
+    cardId: input.cardId,
+    agentId: input.agentId ?? null,
+    type: input.type,
+    status: input.status,
+    message: input.message,
+    output: input.output,
+    costUsd: input.costUsd?.toString(),
+    durationSeconds: input.durationSeconds,
+  });
+}
+
+async function dependenciesMet(card: CardRow): Promise<boolean> {
+  const ids = card.dependencyCardIds ?? [];
+  if (ids.length === 0) return true;
+  const rows = await db.select({ id: kanbanCards.id, columnStatus: kanbanCards.columnStatus }).from(kanbanCards).where(inArray(kanbanCards.id, ids));
+  return rows.length === ids.length && rows.every((row) => row.columnStatus === 'done');
+}
+
+async function budgetOk(agent: AgentRow): Promise<boolean> {
+  if (!agent.budgetMonthly) return true;
+  return Number(agent.spentThisMonth ?? 0) < Number(agent.budgetMonthly);
+}
+
+export async function cascadeParentStatus(parentCardId: string | null): Promise<void> {
+  if (!parentCardId) return;
+  const children = await db.select().from(kanbanCards).where(eq(kanbanCards.parentCardId, parentCardId));
+  if (children.length === 0 || !children.every((child) => child.columnStatus === 'done')) return;
+  await db.update(kanbanCards).set({ columnStatus: 'done', completedAt: new Date(), updatedAt: new Date() }).where(eq(kanbanCards.id, parentCardId));
+  await addTaskLog({ cardId: parentCardId, type: 'cascade', status: 'success', message: 'All sub-tasks completed; parent card marked done.' });
+}
+
+async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unknown): Promise<CardRow> {
+  const retryCount = (card.retryCount ?? 0) + 1;
+  const maxRetries = card.maxRetries ?? 3;
+  const message = error instanceof Error ? error.message : 'dispatch_failed';
+  const blocked = retryCount >= maxRetries;
+  const [updated] = await db.update(kanbanCards).set({
+    columnStatus: blocked ? 'blocked' : 'todo',
+    retryCount,
+    nextRunAt: blocked ? null : nextBackoff(retryCount),
+    lastError: message,
+    updatedAt: new Date(),
+  }).where(eq(kanbanCards.id, card.id)).returning();
+  await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
+  await addTaskLog({
+    cardId: card.id,
+    agentId: agent.id,
+    type: 'retry',
+    status: 'failed',
+    message: blocked ? `Dispatch failed after ${retryCount} attempt(s); card blocked.` : `Dispatch failed; retry ${retryCount}/${maxRetries} scheduled.`,
+    output: message,
+  });
+  if (!updated) throw new Error('card_update_failed');
+  return updated;
+}
+
+export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = 'manual'): Promise<CardRow> {
+  const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  if (!card) throw new Error('card_not_found');
+  if (!card.assigneeId) throw new Error('card_has_no_assignee');
+  const [agent] = await db.select().from(agents).where(eq(agents.id, card.assigneeId)).limit(1);
+  if (!agent) throw new Error('agent_not_found');
+  if (!agent.isActive) throw new Error('agent_paused');
+  if (agent.isBusy) throw new Error('agent_busy');
+  if (!(await budgetOk(agent))) throw new Error('agent_budget_exceeded');
+  if (!(await dependenciesMet(card))) throw new Error('card_dependencies_not_met');
+
+  await db.update(agents).set({ isBusy: true }).where(eq(agents.id, agent.id));
+  await db.update(kanbanCards).set({ columnStatus: 'in_progress', startedAt: new Date(), lastError: null, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
+  await addTaskLog({ cardId: card.id, agentId: agent.id, type: source, status: 'running', message: `Dispatch started via ${source}.` });
+
+  try {
+    const adapter = getAdapter(agent.adapterType ?? 'hermes');
+    const result = await adapter.dispatch(
+      { hermesProfile: agent.hermesProfile, currentSessionId: agent.currentSessionId, adapterConfig: agent.adapterConfig as Record<string, unknown> | null },
+      { id: card.id, title: card.title, body: buildTaskPrompt(card), timeoutSeconds: 300 },
+    );
+    const nextStatus = card.requiresApproval || card.reviewerId ? 'in_review' : 'done';
+    await db.update(agents).set({
+      currentSessionId: result.sessionId,
+      spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${result.costUsd}`,
+      isBusy: false,
+    }).where(eq(agents.id, agent.id));
+    const [updated] = await db.update(kanbanCards).set({
+      columnStatus: nextStatus,
+      executionLog: result.output,
+      sessionId: result.sessionId,
+      costUsd: result.costUsd.toString(),
+      retryCount: 0,
+      nextRunAt: null,
+      completedAt: nextStatus === 'done' ? new Date() : null,
+      updatedAt: new Date(),
+    }).where(eq(kanbanCards.id, card.id)).returning();
+    await addTaskLog({
+      cardId: card.id,
+      agentId: agent.id,
+      type: 'dispatch',
+      status: result.success ? 'success' : 'failed',
+      message: nextStatus === 'in_review' ? 'Dispatch completed; card moved to review.' : 'Dispatch completed; card marked done.',
+      output: result.output,
+      costUsd: result.costUsd,
+      durationSeconds: result.durationSeconds,
+    });
+    if (!updated) throw new Error('card_update_failed');
+    if (nextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
+    return updated;
+  } catch (error) {
+    return handleDispatchFailure(card, agent, error);
+  }
+}
+
+export async function reviewCard(cardId: string): Promise<CardRow> {
+  const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  if (!card) throw new Error('card_not_found');
+  if (!card.reviewerId) {
+    const [updated] = await db.update(kanbanCards).set({ columnStatus: 'done', completedAt: new Date(), updatedAt: new Date() }).where(eq(kanbanCards.id, card.id)).returning();
+    await addTaskLog({ cardId: card.id, type: 'review', status: 'success', message: 'No reviewer configured; card approved automatically.' });
+    if (!updated) throw new Error('card_update_failed');
+    await cascadeParentStatus(updated.parentCardId);
+    return updated;
+  }
+
+  const [reviewer] = await db.select().from(agents).where(eq(agents.id, card.reviewerId)).limit(1);
+  if (!reviewer) throw new Error('reviewer_not_found');
+  if (reviewer.isBusy) throw new Error('reviewer_busy');
+
+  await db.update(agents).set({ isBusy: true }).where(eq(agents.id, reviewer.id));
+  await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'running', message: 'Review started.' });
+  try {
+    const adapter = getAdapter(reviewer.adapterType ?? 'hermes');
+    const result = await adapter.dispatch(
+      { hermesProfile: reviewer.hermesProfile, currentSessionId: reviewer.currentSessionId, adapterConfig: reviewer.adapterConfig as Record<string, unknown> | null },
+      { id: card.id, title: `Review: ${card.title}`, body: buildReviewPrompt(card), timeoutSeconds: 180 },
+    );
+    const rejected = /\b(reject|rejected|fail|failed|blocked)\b/i.test(result.output);
+    await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
+    const [updated] = await db.update(kanbanCards).set({
+      columnStatus: rejected ? 'todo' : 'done',
+      reviewFeedback: result.output,
+      completedAt: rejected ? null : new Date(),
+      updatedAt: new Date(),
+    }).where(eq(kanbanCards.id, card.id)).returning();
+    await addTaskLog({
+      cardId: card.id,
+      agentId: reviewer.id,
+      type: 'review',
+      status: result.success ? 'success' : 'failed',
+      message: rejected ? 'Review rejected; card returned to todo.' : 'Review passed; card marked done.',
+      output: result.output,
+      costUsd: result.costUsd,
+      durationSeconds: result.durationSeconds,
+    });
+    if (!updated) throw new Error('card_update_failed');
+    if (!rejected) await cascadeParentStatus(updated.parentCardId);
+    return updated;
+  } catch (error) {
+    await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
+    await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'failed', message: error instanceof Error ? error.message : 'review_failed' });
+    throw error;
+  }
+}
+
+export async function decomposeCard(cardId: string): Promise<CardRow[]> {
+  const [parent] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  if (!parent) throw new Error('card_not_found');
+  const items = parent.body
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[-*#\d.\s]+/, '').trim())
+    .filter((line) => line.length > 0)
+    .slice(0, 8);
+  const titles = items.length > 1 ? items : [`Plan ${parent.title}`, `Execute ${parent.title}`, `Review ${parent.title}`];
+  const rows = await db.insert(kanbanCards).values(titles.map((title) => ({
+    companyId: parent.companyId,
+    departmentId: parent.departmentId,
+    projectId: parent.projectId,
+    goalId: parent.goalId,
+    parentCardId: parent.id,
+    title,
+    body: `Sub-task for ${parent.title}\n\n${title}`,
+    columnStatus: 'todo',
+    priority: parent.priority,
+    tags: [...(parent.tags ?? []), 'subtask'],
+    assigneeId: parent.assigneeId,
+    reviewerId: parent.reviewerId,
+    requiresApproval: parent.requiresApproval,
+    createdBy: parent.createdBy,
+  }))).returning();
+  await addTaskLog({ cardId: parent.id, type: 'decomposition', status: 'success', message: `Created ${rows.length} sub-task(s).` });
+  return rows;
+}
+
+export async function getTaskLogs(cardId: string) {
+  return db.select().from(taskLogs).where(eq(taskLogs.cardId, cardId)).orderBy(desc(taskLogs.createdAt));
+}
+
+export function startDispatchLoop(app: FastifyInstance): void {
+  if (process.env.DISPATCH_LOOP_ENABLED === 'false') return;
+  const tick = async () => {
+    if (loopRunning) return;
+    loopRunning = true;
+    try {
+      const now = new Date();
+      const cards = await db.select().from(kanbanCards).where(inArray(kanbanCards.columnStatus, ['todo', 'in_review']));
+      for (const card of cards) {
+        if (card.columnStatus === 'todo') {
+          if (card.nextRunAt && card.nextRunAt > now) continue;
+          if (!card.assigneeId || !(await dependenciesMet(card))) continue;
+          try { await dispatchCard(card.id, 'loop'); } catch (error) { app.log.warn({ error, cardId: card.id }, 'dispatch loop skipped card'); }
+        } else if (card.columnStatus === 'in_review') {
+          try { await reviewCard(card.id); } catch (error) { app.log.warn({ error, cardId: card.id }, 'review loop skipped card'); }
+        }
+      }
+    } finally {
+      loopRunning = false;
+    }
+  };
+  const timer = setInterval(() => { void tick(); }, LOOP_INTERVAL_MS);
+  app.addHook('onClose', async () => clearInterval(timer));
+  void tick();
+}
+
+function buildTaskPrompt(card: CardRow): string {
+  return [
+    `Card: ${card.title}`,
+    `Status: ${card.columnStatus}`,
+    `Priority: ${card.priority ?? 0}`,
+    card.reviewFeedback ? `Previous review feedback:\n${card.reviewFeedback}` : '',
+    'Task body:',
+    card.body,
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildReviewPrompt(card: CardRow): string {
+  return [
+    `Review the completed work for card ${card.id}: ${card.title}.`,
+    'Return PASS if it is acceptable, or REJECT with feedback if it needs more work.',
+    'Original task:',
+    card.body,
+    'Execution output:',
+    card.executionLog ?? 'No execution log was captured.',
+  ].join('\n\n');
+}

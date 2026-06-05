@@ -4,6 +4,7 @@ import helmet from '@fastify/helmet';
 import cookie from '@fastify/cookie';
 import { migrate } from './db/migrate.ts';
 import { registerRoutes } from './routes.ts';
+import { startDispatchLoop } from './dispatch.ts';
 
 export async function buildServer() {
   const app = Fastify({ logger: true });
@@ -17,6 +18,7 @@ export async function buildServer() {
     reply.code(status).send({ error: err.message });
   });
   await registerRoutes(app);
+  startDispatchLoop(app);
   return app;
 }
 
