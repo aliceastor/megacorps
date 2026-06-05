@@ -3,7 +3,7 @@ import { DndContext, type DragEndEvent, useDraggable, useDroppable } from '@dnd-
 import { CSS } from '@dnd-kit/utilities';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useMemo, useState } from 'react';
-import { GitBranch, ListChecks, Play, Plus, RefreshCw, Search, ShieldCheck, X } from 'lucide-react';
+import { GitBranch, ListChecks, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
@@ -123,6 +123,7 @@ export function KanbanBoard() {
   const [cards, setCards] = useState<Card[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selected, setSelected] = useState<Card | null>(null);
+  const [draft, setDraft] = useState<Partial<Card> | null>(null);
   const [logs, setLogs] = useState<TaskLog[]>([]);
   const [tab, setTab] = useState<'details' | 'logs' | 'subtasks'>('details');
   const [modalOpen, setModalOpen] = useState(false);
@@ -155,6 +156,15 @@ export function KanbanBoard() {
   useEffect(() => { void refresh(); }, []);
   useEffect(() => {
     if (!selected) return;
+    setDraft({
+      title: selected.title,
+      body: selected.body,
+      columnStatus: selected.columnStatus,
+      assigneeId: selected.assigneeId ?? null,
+      reviewerId: selected.reviewerId ?? null,
+      requiresApproval: selected.requiresApproval ?? false,
+      maxRetries: selected.maxRetries ?? 3,
+    });
     api<TaskLog[]>(`/api/cards/${selected.id}/logs`).then(setLogs).catch(() => setLogs([]));
   }, [selected?.id]);
 
@@ -201,7 +211,50 @@ export function KanbanBoard() {
     const updated = await api<Card>(`/api/cards/${card.id}`, { method: 'PUT', body: JSON.stringify({ ...patch, updatedAt: card.updatedAt }) });
     setCards(cards.map((item) => (item.id === updated.id ? updated : item)));
     setSelected(updated);
+    setDraft({
+      title: updated.title,
+      body: updated.body,
+      columnStatus: updated.columnStatus,
+      assigneeId: updated.assigneeId ?? null,
+      reviewerId: updated.reviewerId ?? null,
+      requiresApproval: updated.requiresApproval ?? false,
+      maxRetries: updated.maxRetries ?? 3,
+    });
     return updated;
+  }
+
+  async function saveSelected() {
+    if (!selected || !draft) return;
+    setBusy(true);
+    try {
+      await updateCard(selected, {
+        title: String(draft.title ?? selected.title),
+        body: String(draft.body ?? selected.body),
+        columnStatus: String(draft.columnStatus ?? selected.columnStatus),
+        assigneeId: draft.assigneeId ?? null,
+        reviewerId: draft.reviewerId ?? null,
+        requiresApproval: Boolean(draft.requiresApproval),
+        maxRetries: Number(draft.maxRetries ?? selected.maxRetries ?? 3),
+      });
+      setToast({ message: 'Card saved', type: 'success' });
+    } catch (err) {
+      setToast({ message: err instanceof Error ? err.message : 'Failed to save card', type: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function resetDraft() {
+    if (!selected) return;
+    setDraft({
+      title: selected.title,
+      body: selected.body,
+      columnStatus: selected.columnStatus,
+      assigneeId: selected.assigneeId ?? null,
+      reviewerId: selected.reviewerId ?? null,
+      requiresApproval: selected.requiresApproval ?? false,
+      maxRetries: selected.maxRetries ?? 3,
+    });
   }
 
   async function onDragEnd(event: DragEndEvent) {
@@ -287,10 +340,20 @@ export function KanbanBoard() {
             {(['details', 'logs', 'subtasks'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => setTab(next)}>{next}</button>)}
           </div>
           {tab === 'details' && <div style={{ display: 'grid', gap: 12 }}>
-            <p style={{ opacity: 0.82, whiteSpace: 'pre-wrap', margin: 0 }}>{selected.body}</p>
+            <label className="field-label">Title<input className="input" value={String(draft?.title ?? '')} onChange={(e) => setDraft({ ...(draft ?? {}), title: e.target.value })} /></label>
+            <label className="field-label">Stage
+              <select className="input" value={String(draft?.columnStatus ?? selected.columnStatus)} onChange={(e) => setDraft({ ...(draft ?? {}), columnStatus: e.target.value })}>
+                {statuses.map((status) => <option value={status} key={status}>{statusLabels[status]?.en ?? status}</option>)}
+              </select>
+            </label>
+            <label className="field-label">Full Detail<textarea className="input" rows={8} value={String(draft?.body ?? '')} onChange={(e) => setDraft({ ...(draft ?? {}), body: e.target.value })} /></label>
             <div className="form-grid">
-              <select className="input" value={selected.assigneeId ?? ''} onChange={(e) => void updateCard(selected, { assigneeId: e.target.value || null })}><option value="">Assignee</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
-              <select className="input" value={selected.reviewerId ?? ''} onChange={(e) => void updateCard(selected, { reviewerId: e.target.value || null, requiresApproval: Boolean(e.target.value) })}><option value="">Reviewer</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
+              <label className="field-label">Assignee<select className="input" value={draft?.assigneeId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), assigneeId: e.target.value || null })}><option value="">Assignee</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
+              <label className="field-label">Reviewer<select className="input" value={draft?.reviewerId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), reviewerId: e.target.value || null, requiresApproval: Boolean(e.target.value) })}><option value="">Reviewer</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
+            </div>
+            <div className="form-grid">
+              <label className="field-label">Max retries<input className="input" type="number" min={1} max={10} value={Number(draft?.maxRetries ?? 3)} onChange={(e) => setDraft({ ...(draft ?? {}), maxRetries: Number(e.target.value) })} /></label>
+              <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={Boolean(draft?.requiresApproval)} onChange={(e) => setDraft({ ...(draft ?? {}), requiresApproval: e.target.checked })} /> Requires approval</label>
             </div>
             <div className="meta-grid">
               <span>Priority <b>{priorityLabel(selected.priority)}</b></span>
@@ -300,16 +363,27 @@ export function KanbanBoard() {
             </div>
             {selected.reviewFeedback && <pre className="log-block">{selected.reviewFeedback}</pre>}
             <div className="action-row">
+              <button className="btn btn-primary" disabled={busy} onClick={saveSelected}><Save size={15} /> Save</button>
+              <button className="btn" disabled={busy} onClick={resetDraft}><RotateCcw size={15} /> Revert</button>
               <button className="btn btn-primary" disabled={busy} onClick={() => action(`/api/cards/${selected.id}/run`, 'Task dispatched')}><Play size={15} /> Run Now</button>
               <button className="btn" disabled={busy} onClick={() => action(`/api/cards/${selected.id}/review`, 'Review completed')}><ShieldCheck size={15} /> Review</button>
               <button className="btn" disabled={busy} onClick={() => action(`/api/cards/${selected.id}/decompose`, 'Sub-tasks created')}><GitBranch size={15} /> Decompose</button>
             </div>
           </div>}
           {tab === 'logs' && <div style={{ display: 'grid', gap: 10 }}>
+            {selected.executionLog && <article className="log-item">
+              <b>latest execution / output</b>
+              <span>{selected.completedAt ? new Date(selected.completedAt).toLocaleString() : selected.updatedAt ? new Date(selected.updatedAt).toLocaleString() : ''}</span>
+              <pre className="log-block">{selected.executionLog}</pre>
+            </article>}
             {logs.length === 0 ? <p style={{ opacity: 0.6 }}>No logs yet.</p> : logs.map((log) => <article className="log-item" key={log.id}>
               <b>{log.type} / {log.status}</b>
               <span>{log.createdAt ? new Date(log.createdAt).toLocaleString() : ''}</span>
               <p>{log.message}</p>
+              <div className="log-meta">
+                {log.costUsd && <span>cost ${log.costUsd}</span>}
+                {log.durationSeconds !== undefined && <span>{log.durationSeconds}s</span>}
+              </div>
               {log.output && <pre className="log-block">{log.output}</pre>}
             </article>)}
           </div>}

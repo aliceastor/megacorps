@@ -81,7 +81,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [existing] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
     if (!existing) return reply.code(404).send({ error: 'card_not_found' });
     if (input.updatedAt && existing.updatedAt && new Date(input.updatedAt).getTime() !== existing.updatedAt.getTime()) return reply.code(409).send({ error: 'card_modified' });
-    if (input.columnStatus && !canTransitionCard(existing.columnStatus as CardStatus, input.columnStatus)) return reply.code(400).send({ error: 'invalid_status_transition' });
     const [card] = await db.update(kanbanCards).set({
       title: input.title,
       body: input.body,

@@ -1,7 +1,7 @@
 'use client';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useState } from 'react';
-import { Ban, CheckCircle2, Loader2, Pause, Plus, RotateCcw, Trash2, Wifi } from 'lucide-react';
+import { Ban, CheckCircle2, Loader2, Pause, Plus, RotateCcw, Save, Trash2, Wifi } from 'lucide-react';
 import { api } from '@/lib/api';
 
 type Agent = {
@@ -31,6 +31,7 @@ function Toast({ message, type, onClose }: { message: string; type: 'success' | 
 export function OrgChart() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selected, setSelected] = useState<Agent | null>(null);
+  const [agentDraft, setAgentDraft] = useState<Partial<Agent> | null>(null);
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');
   const [profile, setProfile] = useState('local-debug');
@@ -56,6 +57,19 @@ export function OrgChart() {
   }
 
   useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    if (!selected) return;
+    setAgentDraft({
+      name: selected.name,
+      slug: selected.slug,
+      role: selected.role,
+      title: selected.title ?? '',
+      hermesProfile: selected.hermesProfile ?? '',
+      adapterType: selected.adapterType ?? 'mock',
+      bossId: selected.bossId ?? '',
+      budgetMonthly: selected.budgetMonthly ?? '',
+    });
+  }, [selected?.id]);
   useEffect(() => {
     setSlug(name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
   }, [name]);
@@ -105,6 +119,32 @@ export function OrgChart() {
     }
   }
 
+  async function saveAgent() {
+    if (!selected || !agentDraft) return;
+    setTesting(selected.id);
+    try {
+      const payload = {
+        name: String(agentDraft.name ?? selected.name),
+        slug: String(agentDraft.slug ?? selected.slug),
+        role: String(agentDraft.role ?? selected.role),
+        title: String(agentDraft.title ?? ''),
+        adapterType: String(agentDraft.adapterType ?? selected.adapterType ?? 'mock'),
+        hermesProfile: agentDraft.hermesProfile ? String(agentDraft.hermesProfile) : undefined,
+        bossId: agentDraft.bossId || null,
+        budgetMonthly: agentDraft.budgetMonthly ? Number(agentDraft.budgetMonthly) : undefined,
+      };
+      const updated = await api<Agent>(`/api/agents/${selected.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+      setAgents(agents.map((agent) => (agent.id === updated.id ? updated : agent)));
+      setSelected(updated);
+      setToast({ message: 'Agent saved', type: 'success' });
+      await refresh();
+    } catch (err) {
+      setToast({ message: err instanceof Error ? err.message : 'Failed to save agent', type: 'error' });
+    } finally {
+      setTesting(null);
+    }
+  }
+
   const roots = agents.filter((agent) => !agent.bossId);
 
   return <>
@@ -143,7 +183,24 @@ export function OrgChart() {
               <span>Session <b>{selected.currentSessionId ?? 'none'}</b></span>
               <span>Budget <b>${selected.spentThisMonth ?? '0'} / ${selected.budgetMonthly ?? 'none'}</b></span>
             </div>
+            <div className="form-grid">
+              <label className="field-label">Name<input className="input" value={String(agentDraft?.name ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), name: e.target.value })} /></label>
+              <label className="field-label">Slug<input className="input" value={String(agentDraft?.slug ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), slug: e.target.value })} /></label>
+              <label className="field-label">Role<select className="input" value={String(agentDraft?.role ?? 'worker')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), role: e.target.value })}><option value="worker">Worker</option><option value="reviewer">Reviewer</option><option value="ceo">CEO</option></select></label>
+              <label className="field-label">Title<input className="input" value={String(agentDraft?.title ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), title: e.target.value })} /></label>
+              <label className="field-label">Profile<input className="input" value={String(agentDraft?.hermesProfile ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), hermesProfile: e.target.value })} /></label>
+              <label className="field-label">Adapter<select className="input" value={String(agentDraft?.adapterType ?? 'mock')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), adapterType: e.target.value })}>
+                <option value="mock">Mock</option>
+                <option value="hermes">Hermes Portainer</option>
+                <option value="hermes-gateway">Hermes HTTP API</option>
+                <option value="webhook">Webhook</option>
+                <option value="openclaw">OpenClaw</option>
+              </select></label>
+              <label className="field-label">Boss<select className="input" value={String(agentDraft?.bossId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), bossId: e.target.value || null })}><option value="">No boss</option>{agents.filter((agent) => agent.id !== selected.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
+              <label className="field-label">Monthly budget<input className="input" type="number" min={0} step="0.01" value={String(agentDraft?.budgetMonthly ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), budgetMonthly: e.target.value })} /></label>
+            </div>
             <div className="action-row">
+              <button className="btn btn-primary" disabled={testing === selected.id} onClick={saveAgent}><Save size={14} /> Save</button>
               <button className="btn" disabled={testing === selected.id} onClick={() => agentAction(selected.id, `/api/agents/${selected.id}/test-connection`, 'Connection successful')}><Wifi size={14} /> Test</button>
               {selected.isActive ? <button className="btn" onClick={() => agentAction(selected.id, `/api/agents/${selected.id}/pause`, 'Agent paused')}><Pause size={14} /> Pause</button> : <button className="btn" onClick={() => agentAction(selected.id, `/api/agents/${selected.id}/resume`, 'Agent resumed')}><CheckCircle2 size={14} /> Resume</button>}
               <button className="btn" onClick={() => agentAction(selected.id, `/api/agents/${selected.id}/reset-session`, 'Session reset')}><RotateCcw size={14} /> Reset Session</button>
