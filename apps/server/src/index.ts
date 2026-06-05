@@ -5,12 +5,14 @@ import cookie from '@fastify/cookie';
 import { migrate } from './db/migrate.ts';
 import { registerRoutes } from './routes.ts';
 import { startDispatchLoop } from './dispatch.ts';
+import { registerRequestLogging } from './request-log.ts';
 
 export async function buildServer() {
   const app = Fastify({ logger: true });
   await app.register(helmet);
   await app.register(cors, { origin: process.env.WEB_ORIGIN ?? 'http://localhost:3000', credentials: true });
   await app.register(cookie);
+  registerRequestLogging(app);
   app.setErrorHandler((error, _request, reply) => {
     app.log.error(error);
     const err = error as Error & { statusCode?: number };

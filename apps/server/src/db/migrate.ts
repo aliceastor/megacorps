@@ -20,6 +20,9 @@ ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS last_error TEXT;
 ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS review_feedback TEXT;
 CREATE TABLE IF NOT EXISTS task_logs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), card_id UUID NOT NULL REFERENCES kanban_cards(id), agent_id UUID REFERENCES agents(id), type TEXT NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL, output TEXT, cost_usd NUMERIC(10,4), duration_seconds INTEGER, created_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS task_logs_card_id_created_at_idx ON task_logs(card_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS api_events (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id), method TEXT NOT NULL, path TEXT NOT NULL, status_code INTEGER, request_body JSONB, response_body JSONB, error TEXT, duration_ms INTEGER, created_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX IF NOT EXISTS api_events_created_at_idx ON api_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS api_events_user_id_created_at_idx ON api_events(user_id, created_at DESC);
 INSERT INTO task_logs (card_id, type, status, message, created_at)
 SELECT kc.id, 'stage', 'success', 'Initial stage recorded: ' || kc.column_status, kc.created_at
 FROM kanban_cards kc

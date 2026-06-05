@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { createAgentSchema, createCardSchema, loginSchema, signupSchema, updateCardSchema, canTransitionCard, type CardStatus } from '@megacorps/shared';
 import { signSession, requireAuth } from './auth.ts';
 import { db } from './db/client.ts';
-import { agentRuntimes, agents, companies, goals, kanbanCards, projects, taskLogs, users } from './db/schema.ts';
+import { agentRuntimes, agents, apiEvents, companies, goals, kanbanCards, projects, taskLogs, users } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { cascadeParentStatus, decomposeCard, dispatchCard, getTaskLogs, reviewCard } from './dispatch.ts';
 
@@ -41,6 +41,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/auth/logout', async (_request, reply) => { reply.clearCookie('session', { path: '/' }); return { ok: true }; });
   app.get('/api/me', async (request, reply) => { const user = await requireAuth(request, reply); return user ? { user } : reply; });
+  app.get('/api/system-logs', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const query = request.query as { limit?: string };
+    const limit = Math.min(Math.max(Number(query.limit ?? 100), 1), 500);
+    return db.select().from(apiEvents).orderBy(desc(apiEvents.createdAt)).limit(limit);
+  });
 
   app.get('/api/cards', async (request) => {
     const query = request.query as { status?: string; assigneeId?: string; tag?: string; priority?: string; limit?: string; offset?: string };

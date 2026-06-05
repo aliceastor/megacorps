@@ -86,3 +86,16 @@ export const taskLogs = pgTable('task_logs', {
   durationSeconds: integer('duration_seconds'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
+
+export const apiEvents = pgTable('api_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id),
+  method: text('method').notNull(),
+  path: text('path').notNull(),
+  statusCode: integer('status_code'),
+  requestBody: jsonb('request_body'),
+  responseBody: jsonb('response_body'),
+  error: text('error'),
+  durationMs: integer('duration_ms'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});

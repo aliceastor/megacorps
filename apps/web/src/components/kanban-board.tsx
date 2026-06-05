@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 import { DndContext, type DragEndEvent, useDraggable, useDroppable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -9,8 +9,8 @@ import { useLocale } from '@/lib/locale-context';
 
 const statuses = ['backlog', 'todo', 'in_progress', 'in_review', 'done', 'blocked'] as const;
 const statusLabels: Record<string, Record<string, string>> = {
-  backlog: { 'zh-TW': '待整理', en: 'Backlog', ja: 'バックログ' },
-  todo: { 'zh-TW': '待辦', en: 'Todo', ja: 'ToDo' },
+  backlog: { 'zh-TW': '待整理', en: 'Backlog', ja: '整理待ち' },
+  todo: { 'zh-TW': '待辦', en: 'Todo', ja: '未着手' },
   in_progress: { 'zh-TW': '執行中', en: 'In Progress', ja: '進行中' },
   in_review: { 'zh-TW': '審核中', en: 'In Review', ja: 'レビュー中' },
   done: { 'zh-TW': '完成', en: 'Done', ja: '完了' },
@@ -41,6 +41,7 @@ type Card = {
 };
 type Agent = { id: string; name: string; adapterType?: string; isBusy?: boolean };
 type TaskLog = { id: string; type: string; status: string; message: string; output?: string; costUsd?: string; durationSeconds?: number; createdAt?: string };
+type ApiEvent = { id: string; method: string; path: string; statusCode?: number; requestBody?: unknown; responseBody?: unknown; error?: string | null; durationMs?: number; createdAt?: string };
 
 function statusColor(status: string) {
   if (status === 'done') return '#16a34a';
@@ -133,6 +134,7 @@ export function KanbanBoard() {
   const [selected, setSelected] = useState<Card | null>(null);
   const [draft, setDraft] = useState<Partial<Card> | null>(null);
   const [logs, setLogs] = useState<TaskLog[]>([]);
+  const [apiLogs, setApiLogs] = useState<ApiEvent[]>([]);
   const [tab, setTab] = useState<'details' | 'logs' | 'subtasks'>('details');
   const [modalOpen, setModalOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
@@ -174,6 +176,9 @@ export function KanbanBoard() {
       maxRetries: selected.maxRetries ?? 3,
     });
     api<TaskLog[]>(`/api/cards/${selected.id}/logs`).then(setLogs).catch(() => setLogs([]));
+    api<ApiEvent[]>('/api/system-logs?limit=250')
+      .then((events) => setApiLogs(events.filter((event) => event.path.includes(selected.id) || JSON.stringify(event.requestBody ?? {}).includes(selected.id) || JSON.stringify(event.responseBody ?? {}).includes(selected.id))))
+      .catch(() => setApiLogs([]));
   }, [selected?.id]);
 
   const visibleCards = useMemo(() => cards.filter((card) => {
@@ -364,6 +369,8 @@ export function KanbanBoard() {
               <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={Boolean(draft?.requiresApproval)} onChange={(e) => setDraft({ ...(draft ?? {}), requiresApproval: e.target.checked })} /> Requires approval</label>
             </div>
             <div className="meta-grid">
+              <span>UUID <b>{selected.id}</b></span>
+              <span>Stage <b>{selected.columnStatus}</b></span>
               <span>Priority <b>{priorityLabel(selected.priority)}</b></span>
               <span>Cost <b>{selected.costUsd ?? '0.0000'}</b></span>
               <span>Session <b>{selected.sessionId ?? 'none'}</b></span>
@@ -394,6 +401,16 @@ export function KanbanBoard() {
               </div>
               {log.output && <pre className="log-block">{log.output}</pre>}
             </article>)}
+            <article className="log-item">
+              <b>API lifecycle</b>
+              <span>{apiLogs.length} related operations</span>
+              {apiLogs.length === 0 ? <p>No related API events yet.</p> : apiLogs.map((event) => <div className="log-item" key={event.id} style={{ marginTop: 8 }}>
+                <b>{event.method} {event.path}</b>
+                <span>{event.createdAt ? new Date(event.createdAt).toLocaleString() : ''} / {event.statusCode ?? '-'} / {event.durationMs ?? 0}ms</span>
+                {event.error && <p className="form-error">{event.error}</p>}
+                <pre className="log-block">{JSON.stringify({ request: event.requestBody, response: event.responseBody }, null, 2)}</pre>
+              </div>)}
+            </article>
           </div>}
           {tab === 'subtasks' && <div style={{ display: 'grid', gap: 10 }}>
             {subtasks.length === 0 ? <p style={{ opacity: 0.6 }}>No sub-tasks yet.</p> : subtasks.map((card) => <button className="subtask-row" key={card.id} onClick={() => { setSelected(card); setTab('details'); }}>
