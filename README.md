@@ -55,7 +55,7 @@ For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or
 - `Dashboard`: operating overview, stage counts, recent task logs, recent API lifecycle events.
 - `Companies`: company registry, company settings, department settings, reporting structure, and delegation closure.
 - `Direct Chat`: company -> agent -> session direct messaging with resumable adapter sessions.
-- `Kanban`: task UUIDs, stage, details, comments, sub-tasks, logs, run/review/decompose/delete.
+- `Kanban`: task UUIDs, stage, details, per-task message board, sub-tasks, logs, run/review/decompose/delete.
 - `Agents`: member hierarchy, agent CRUD, pause/resume/fire/reset, runtime and adapter configuration.
 - `Budget`: spend and budget visibility for agents and tasks.
 - `Logs`: cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
@@ -75,6 +75,7 @@ For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or
 - Phase 8: execution locks, heartbeat run records, stale-lock recovery, safer adapter failure handling.
 - Phase 9: activity log, cost events, budget policies, budget hard stops, pending approvals and approval decisions.
 - Phase 10: direct agent chat sessions, per-session adapter resume ids, cron status/history/manual tick APIs, and chat UI.
+- Phase 11: per-task agent/user message boards and bounded Kanban context injection for every agent invocation.
 
 ## Paperclip-inspired loop
 
@@ -107,16 +108,42 @@ Open `Direct Chat` in the sidebar:
 
 Every chat session stores its own `agentSessionId`, so a user can keep several separate conversations with the same agent. Chat messages are stored in `chat_messages`, sessions in `chat_sessions`, and every agent reply is also recorded through `heartbeat_runs`, `activity_log`, and `cost_events`.
 
-## Task comments and intervention
+## Task message board and intervention
 
-Open a task and use the Comments tab:
+Open a task and use the Message Board tab:
 
 - `Comment only`: add audit/context.
+- `Agent note`: leave a task message as a specific agent.
 - `Stop agent now and block task`: mark the task blocked and pause the assignee.
 - `Send comment to agent context`: queue the instruction for the next run prompt.
 - `Continue run with comment`: reactivate the assignee and move the task back to `todo`.
 
+Dispatch/review/webhook completions now also create agent-authored messages on the task board, so task discussion is not hidden only in logs.
+
 `Split into Sub-tasks` decomposes a larger task into child Kanban tasks. It uses the task body lines when available, otherwise it creates Plan / Execute / Review sub-tasks.
+
+## Agent invocation context
+
+Every task dispatch, review, and direct chat invocation receives a bounded Kanban context snapshot:
+
+- company mission/settings,
+- compact same-company Kanban board snapshot,
+- focus task details,
+- parent/child/dependency task context,
+- focus agent open work and review queue,
+- latest task message board entries,
+- latest task lifecycle logs,
+- recent company activity,
+- recent heartbeat runs.
+
+Context budget env vars:
+
+- `DISPATCH_CONTEXT_CHAR_BUDGET`
+- `DISPATCH_CONTEXT_CARD_LIMIT`
+- `DISPATCH_CONTEXT_RECORD_LIMIT`
+- `DISPATCH_TASK_BODY_CHAR_LIMIT`
+- `DISPATCH_KNOWLEDGE_DOC_CHAR_LIMIT`
+- `MESSAGE_BOARD_COMMENT_LIMIT`
 
 ## Logs
 
@@ -129,6 +156,7 @@ MegaCorps stores two complementary log streams:
 - `cost_events`: immutable cost records by company, agent, task, project, goal, provider, and model.
 - `cron_runs`: every dispatch heartbeat tick with source, status, counts, duration, and errors.
 - `chat_sessions` / `chat_messages`: direct agent conversation lifecycle and agent reply metadata.
+- `card_comments`: per-task message board entries from users, agents, system/webhook completions, and intervention actions.
 
 Phase 8/9 safety behavior:
 

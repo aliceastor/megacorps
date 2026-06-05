@@ -3,7 +3,7 @@ import { DndContext, type DragEndEvent, useDraggable, useDroppable } from '@dnd-
 import { CSS } from '@dnd-kit/utilities';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useMemo, useState } from 'react';
-import { GitBranch, GripVertical, ListChecks, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, StopCircle, Trash2, X } from 'lucide-react';
+import { Bot, GitBranch, GripVertical, ListChecks, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, StopCircle, Trash2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
@@ -45,14 +45,14 @@ type Card = {
   completedAt?: string | null;
   updatedAt?: string;
 };
-type Agent = { id: string; name: string; adapterType?: string; isBusy?: boolean };
+type Agent = { id: string; companyId?: string; name: string; role?: string; adapterType?: string; isBusy?: boolean };
 type Company = { id: string; name: string };
 type Department = { id: string; companyId: string; name: string };
 type Project = { id: string; companyId: string; name: string };
 type Goal = { id: string; companyId: string; title: string };
 type TaskLog = { id: string; type: string; status: string; message: string; output?: string; costUsd?: string; durationSeconds?: number; createdAt?: string };
 type ApiEvent = { id: string; method: string; path: string; statusCode?: number; requestBody?: unknown; responseBody?: unknown; error?: string | null; durationMs?: number; createdAt?: string };
-type CardComment = { id: string; body: string; action: string; authorType: string; createdAt?: string };
+type CardComment = { id: string; body: string; action: string; authorType: string; agentId?: string | null; authorId?: string | null; createdAt?: string };
 
 function statusColor(status: string) {
   if (status === 'done') return '#16a34a';
@@ -153,7 +153,8 @@ export function KanbanBoard() {
   const [comments, setComments] = useState<CardComment[]>([]);
   const [tab, setTab] = useState<'details' | 'comments' | 'logs' | 'subtasks'>('details');
   const [commentBody, setCommentBody] = useState('');
-  const [commentAction, setCommentAction] = useState<'comment' | 'pause_agent' | 'send_to_agent' | 'continue_run'>('comment');
+  const [commentAction, setCommentAction] = useState<'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run'>('comment');
+  const [commentAgentId, setCommentAgentId] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newBody, setNewBody] = useState('');
@@ -368,10 +369,11 @@ export function KanbanBoard() {
     if (!selected || !commentBody.trim()) return;
     setBusy(true);
     try {
-      const comment = await api<CardComment>(`/api/cards/${selected.id}/comments`, { method: 'POST', body: JSON.stringify({ body: commentBody.trim(), action: commentAction }) });
+      const effectiveAction = commentAgentId ? 'agent_note' : commentAction;
+      const comment = await api<CardComment>(`/api/cards/${selected.id}/comments`, { method: 'POST', body: JSON.stringify({ body: commentBody.trim(), action: effectiveAction, agentId: commentAgentId || null }) });
       setComments([comment, ...comments]);
       setCommentBody('');
-      setToast({ message: commentAction === 'pause_agent' ? 'Agent paused and task blocked' : commentAction === 'continue_run' ? 'Task queued to continue' : 'Comment added', type: 'success' });
+      setToast({ message: effectiveAction === 'pause_agent' ? 'Agent paused and task blocked' : effectiveAction === 'continue_run' ? 'Task queued to continue' : 'Message added', type: 'success' });
       await refresh();
       setLogs(await api<TaskLog[]>(`/api/cards/${selected.id}/logs`));
     } catch (err) {
@@ -435,7 +437,7 @@ export function KanbanBoard() {
             <button className="btn" onClick={() => setSelected(null)}><X size={16} /></button>
           </div>
           <div className="tab-row">
-            {(['details', 'comments', 'logs', 'subtasks'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => setTab(next)}>{next}</button>)}
+            {(['details', 'comments', 'logs', 'subtasks'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => setTab(next)}>{next === 'comments' ? 'message board' : next}</button>)}
           </div>
           {tab === 'details' && <div style={{ display: 'grid', gap: 12 }}>
             <label className="field-label">Title<input className="input" value={String(draft?.title ?? '')} onChange={(e) => setDraft({ ...(draft ?? {}), title: e.target.value })} /></label>
@@ -478,23 +480,49 @@ export function KanbanBoard() {
             </div>
           </div>}
           {tab === 'comments' && <div style={{ display: 'grid', gap: 12 }}>
-            <label className="field-label">Action
-              <select className="input" value={commentAction} onChange={(event) => setCommentAction(event.target.value as typeof commentAction)}>
-                <option value="comment">Comment only</option>
-                <option value="pause_agent">Stop agent now and block task</option>
-                <option value="send_to_agent">Send comment to agent context</option>
-                <option value="continue_run">Continue run with comment</option>
-              </select>
-            </label>
-            <label className="field-label">Comment
+            <div className="panel-title">
+              <div><h2>Task Message Board</h2><span className="status-pill">{comments.length} messages</span></div>
+            </div>
+            <div className="form-grid">
+              <label className="field-label">Author
+                <select className="input" value={commentAgentId} onChange={(event) => {
+                  setCommentAgentId(event.target.value);
+                  if (event.target.value) setCommentAction('agent_note');
+                }}>
+                  <option value="">You</option>
+                  {agents.filter((agent) => !selected.companyId || agent.companyId === selected.companyId).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}{agent.role ? ` / ${agent.role}` : ''}</option>)}
+                </select>
+              </label>
+              <label className="field-label">Action
+                <select className="input" value={commentAgentId ? 'agent_note' : commentAction} disabled={Boolean(commentAgentId)} onChange={(event) => setCommentAction(event.target.value as typeof commentAction)}>
+                  <option value="comment">Comment only</option>
+                  <option value="agent_note">Agent note</option>
+                  <option value="pause_agent">Stop agent now and block task</option>
+                  <option value="send_to_agent">Send comment to agent context</option>
+                  <option value="continue_run">Continue run with comment</option>
+                </select>
+              </label>
+            </div>
+            <label className="field-label">Message
               <textarea className="input" rows={5} value={commentBody} onChange={(event) => setCommentBody(event.target.value)} placeholder="Write the instruction, blocker, correction, or context for this task." />
             </label>
-            <button className="btn btn-primary" disabled={busy || !commentBody.trim()} onClick={addComment}><MessageSquare size={15} /> Add Comment</button>
-            {comments.length === 0 ? <p style={{ opacity: 0.6 }}>No comments yet.</p> : comments.map((comment) => <article className="log-item" key={comment.id}>
-              <b>{comment.action} / {comment.authorType}</b>
-              <span>{comment.createdAt ? new Date(comment.createdAt).toLocaleString() : ''}</span>
-              <p>{comment.body}</p>
-            </article>)}
+            <button className="btn btn-primary" disabled={busy || !commentBody.trim()} onClick={addComment}><MessageSquare size={15} /> Add Message</button>
+            <div className="task-message-board">
+              {comments.length === 0 ? <p style={{ opacity: 0.6 }}>No messages yet.</p> : comments.map((comment) => {
+                const authorAgent = comment.agentId ? agents.find((agent) => agent.id === comment.agentId) : undefined;
+                const isAgent = comment.authorType === 'agent' || Boolean(comment.agentId);
+                return <article className={`task-message ${isAgent ? 'agent' : comment.authorType === 'system' ? 'system' : 'user'}`} key={comment.id}>
+                  <div className="task-message-author">
+                    <span className="chat-avatar">{isAgent ? <Bot size={14} /> : 'U'}</span>
+                    <div>
+                      <b>{authorAgent?.name ?? (isAgent ? 'Agent' : comment.authorType)}</b>
+                      <span>{comment.action} / {comment.createdAt ? new Date(comment.createdAt).toLocaleString() : ''}</span>
+                    </div>
+                  </div>
+                  <p>{comment.body}</p>
+                </article>;
+              })}
+            </div>
           </div>}
           {tab === 'logs' && <div style={{ display: 'grid', gap: 10 }}>
             {selected.executionLog && <article className="log-item">

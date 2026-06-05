@@ -5,7 +5,7 @@ import { requireAuth } from './auth.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { db } from './db/client.ts';
 import { activityLog, agents, chatMessages, chatSessions, companies, costEvents, heartbeatRuns } from './db/schema.ts';
-import { buildExecutionAgent } from './dispatch.ts';
+import { buildCompanyKanbanContext, buildExecutionAgent } from './dispatch.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -16,7 +16,7 @@ function titleFromMessage(body: string, agentName: string): string {
   return firstLine || `Chat with ${agentName}`;
 }
 
-function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[]): string {
+function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string): string {
   return [
     company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
     [
@@ -25,6 +25,7 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
       `Title: ${agent.title ?? 'none'}`,
       `Adapter: ${agent.adapterType}`,
     ].join('\n'),
+    `Kanban context snapshot:\n${kanbanContext}`,
     'Conversation history:',
     history.map((message) => `[${message.authorType}] ${message.body}`).join('\n\n'),
   ].filter(Boolean).join('\n\n');
@@ -165,7 +166,8 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
 
     try {
       const recent = await db.select().from(chatMessages).where(eq(chatMessages.sessionId, session.id)).orderBy(desc(chatMessages.createdAt)).limit(30);
-      const prompt = buildChatPrompt(company, agent, recent.reverse());
+      const kanbanContext = await buildCompanyKanbanContext(session.companyId, { focusAgentId: agent.id, budgetChars: 20_000 });
+      const prompt = buildChatPrompt(company, agent, recent.reverse(), kanbanContext);
       const adapter = getAdapter(agent.adapterType ?? 'hermes');
       const result = await adapter.dispatch(
         await buildExecutionAgent(agent, session.agentSessionId ?? null),

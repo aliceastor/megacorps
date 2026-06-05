@@ -37,6 +37,7 @@ CREATE INDEX IF NOT EXISTS cron_runs_name_created_at_idx ON cron_runs(name, crea
 CREATE TABLE IF NOT EXISTS task_logs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), card_id UUID NOT NULL REFERENCES kanban_cards(id), agent_id UUID REFERENCES agents(id), type TEXT NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL, output TEXT, cost_usd NUMERIC(10,4), duration_seconds INTEGER, created_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS task_logs_card_id_created_at_idx ON task_logs(card_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS card_comments (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), card_id UUID NOT NULL REFERENCES kanban_cards(id), author_type TEXT NOT NULL DEFAULT 'user', author_id UUID REFERENCES users(id), body TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'comment', created_at TIMESTAMPTZ DEFAULT now());
+ALTER TABLE card_comments ADD COLUMN IF NOT EXISTS agent_id UUID REFERENCES agents(id);
 CREATE INDEX IF NOT EXISTS card_comments_card_id_created_at_idx ON card_comments(card_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS chat_sessions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), agent_id UUID NOT NULL REFERENCES agents(id), user_id UUID REFERENCES users(id), title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', agent_session_id TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS chat_sessions_company_agent_updated_at_idx ON chat_sessions(company_id, agent_id, updated_at DESC);

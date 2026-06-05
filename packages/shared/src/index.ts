@@ -83,7 +83,8 @@ export const createAgentRuntimeSchema = z.object({
 
 export const createCardCommentSchema = z.object({
   body: z.string().trim().min(1).max(5000),
-  action: z.enum(['comment', 'pause_agent', 'send_to_agent', 'continue_run']).default('comment'),
+  action: z.enum(['comment', 'agent_note', 'pause_agent', 'send_to_agent', 'continue_run']).default('comment'),
+  agentId: z.string().uuid().nullable().optional(),
 });
 
 export const createChatSessionSchema = z.object({

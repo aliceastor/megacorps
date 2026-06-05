@@ -14,8 +14,8 @@ The current local stack runs with Docker:
 
 Latest verified baseline:
 
-- Phase 1-10 operational MVP flows are implemented.
-- Company registry page, department setup, O-chart, runtime presets, adapter endpoint configuration, direct agent chat, comments, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, heartbeat runs, cron run history, budget policies, approvals, and automatic dispatch heartbeat are implemented.
+- Phase 1-11 operational MVP flows are implemented.
+- Company registry page, department setup, O-chart, runtime presets, adapter endpoint configuration, direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, heartbeat runs, cron run history, budget policies, approvals, and automatic dispatch heartbeat are implemented.
 - Deployment is user-managed; this pass verified code, tests, and production build without starting Docker.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 
@@ -100,16 +100,54 @@ Implemented:
 - Otherwise generate Plan / Execute / Review sub-tasks.
 - Child tasks are shown on the Kanban and linked through `parentCardId`.
 
-### Task Comments and Intervention
+### Task Message Boards and Intervention
 
 Implemented `card_comments` with these actions:
 
 - `comment`: record context only.
+- `agent_note`: record a message authored by a specific agent.
 - `pause_agent`: pause the assigned agent, mark the task blocked, write logs.
 - `send_to_agent`: store instruction and queue it for agent context.
 - `continue_run`: reactivate the assignee and move task back to `todo`.
 
-Agent dispatch prompts now include recent task comments, so user instructions can reach the agent on the next run.
+Implemented message board behavior:
+
+- Each Kanban task has its own message board.
+- Users can post normal comments or intervention instructions.
+- Users can post an agent-authored note by selecting an agent as the author.
+- Agent dispatch output is automatically added as an `agent_update` board message.
+- Reviewer output is automatically added as `review_note` or `review_rejected`.
+- Dispatch/review failures are automatically added as agent error messages.
+- Webhook completions are also added as agent/system board messages.
+
+Agent dispatch prompts now include latest task message board entries, so user and agent discussion can reach the agent on the next run.
+
+### Bounded Kanban Context Injection
+
+Implemented:
+
+- Every task dispatch invocation includes a bounded Kanban context snapshot.
+- Every review invocation includes the same bounded context plus execution output.
+- Every direct chat invocation includes same-company Kanban context and focus-agent work context.
+- The snapshot contains:
+  - company mission/settings
+  - compact same-company Kanban board state
+  - stage counts
+  - focus task full detail
+  - parent/child/dependency links
+  - focus agent assigned work and review queue
+  - latest task message board entries
+  - latest task lifecycle logs
+  - recent company activity
+  - recent heartbeat runs
+- Context length is controlled with:
+  - `DISPATCH_CONTEXT_CHAR_BUDGET`
+  - `DISPATCH_CONTEXT_CARD_LIMIT`
+  - `DISPATCH_CONTEXT_RECORD_LIMIT`
+  - `DISPATCH_TASK_BODY_CHAR_LIMIT`
+  - `DISPATCH_KNOWLEDGE_DOC_CHAR_LIMIT`
+  - `MESSAGE_BOARD_COMMENT_LIMIT`
+- Truncated sections are explicitly marked in the prompt.
 
 ### Agents, Company, Department, and O-chart
 
@@ -374,6 +412,8 @@ Verified on 2026-06-05:
 - `git diff --check`
 - This pass did not start Docker; deployment remains user-managed.
 - API compile coverage includes:
+  - task message board comments with user/agent authors
+  - bounded Kanban context builder
   - chat session/message routes
   - cron status/run routes
   - dispatch cron service

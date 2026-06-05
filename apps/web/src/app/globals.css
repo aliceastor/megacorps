@@ -582,6 +582,60 @@ button.card {
 .log-meta { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
 .log-meta span { border: 1px solid var(--border); border-radius: 99px; padding: 2px 7px; font-size: 11px; color: var(--muted); }
 
+.task-message-board {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.task-message {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 11px;
+  background: color-mix(in srgb, var(--card-strong) 46%, transparent);
+  color: var(--foreground);
+}
+
+.task-message.agent {
+  border-color: color-mix(in srgb, var(--primary) 34%, var(--border));
+  background: color-mix(in srgb, var(--primary) 8%, var(--card));
+}
+
+.task-message.system {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--accent) 8%, var(--card));
+}
+
+.task-message-author {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  margin-bottom: 8px;
+  min-width: 0;
+}
+
+.task-message-author div {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.task-message-author b,
+.task-message-author span {
+  overflow-wrap: anywhere;
+}
+
+.task-message-author span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-message p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .drag-handle {
   width: 30px;
   height: 30px;

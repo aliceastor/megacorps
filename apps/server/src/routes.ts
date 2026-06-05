@@ -347,9 +347,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = createCardCommentSchema.parse(request.body);
     const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
-    const [comment] = await db.insert(cardComments).values({ cardId: id, authorType: 'user', authorId: user.id, body: input.body, action: input.action }).returning();
-    await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'comment', status: 'success', message: `${actorLabel(user)} added a ${input.action} comment.`, output: input.body });
-    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: card.assigneeId, action: `comment.${input.action}`, entityType: 'card', entityId: card.id, details: { commentId: comment?.id } });
+    if (input.agentId && !['comment', 'agent_note'].includes(input.action)) return reply.code(400).send({ error: 'agent_comments_cannot_control_task' });
+    const [authorAgent] = input.agentId ? await db.select().from(agents).where(eq(agents.id, input.agentId)).limit(1) : [];
+    if (input.agentId && !authorAgent) return reply.code(404).send({ error: 'agent_not_found' });
+    if (authorAgent && authorAgent.companyId !== card.companyId) return reply.code(400).send({ error: 'agent_company_mismatch' });
+    const authorType = authorAgent ? 'agent' : 'user';
+    const effectiveAction = authorAgent ? 'agent_note' : input.action;
+    const effectiveAgentId = authorAgent?.id ?? card.assigneeId;
+    const authorName = authorAgent ? authorAgent.name : actorLabel(user);
+    const [comment] = await db.insert(cardComments).values({ cardId: id, authorType, authorId: authorAgent ? null : user.id, agentId: authorAgent?.id ?? null, body: input.body, action: effectiveAction }).returning();
+    await db.insert(taskLogs).values({ cardId: id, agentId: effectiveAgentId, type: 'comment', status: 'success', message: `${authorName} added a ${effectiveAction} message.`, output: input.body });
+    await db.insert(activityLog).values({ companyId: card.companyId, actorType: authorType, actorId: authorAgent?.id ?? user.id, userId: user.id, agentId: effectiveAgentId, action: `comment.${effectiveAction}`, entityType: 'card', entityId: card.id, details: { commentId: comment?.id, authorAgentId: authorAgent?.id } });
     if (input.action === 'pause_agent') {
       if (card.assigneeId) await db.update(agents).set({ isBusy: false, isActive: false }).where(eq(agents.id, card.assigneeId));
       await db.update(kanbanCards).set({
@@ -562,6 +570,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }).where(eq(kanbanCards.id, body.cardId));
     if (body.status !== card.columnStatus) await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'backlog'} to ${body.status} by webhook` });
     await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'webhook', status: body.status === 'blocked' ? 'failed' : 'success', message: body.summary ?? `Webhook marked card ${body.status}`, output: body.output, costUsd: body.costUsd?.toString() });
+    await db.insert(cardComments).values({ cardId: body.cardId, agentId: card.assigneeId, authorType: card.assigneeId ? 'agent' : 'system', action: body.status === 'blocked' ? 'agent_blocked' : 'agent_update', body: [body.summary, body.output].filter(Boolean).join('\n\n') || `Webhook marked card ${body.status}` });
     if (card.assigneeId && body.costUsd) {
       await db.update(agents).set({ spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${body.costUsd}` }).where(eq(agents.id, card.assigneeId));
       await db.insert(costEvents).values({ companyId: card.companyId, agentId: card.assigneeId, cardId: card.id, projectId: card.projectId, goalId: card.goalId, provider: 'webhook', model: 'external', costUsd: body.costUsd.toString() });

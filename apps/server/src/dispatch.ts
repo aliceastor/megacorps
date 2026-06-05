@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardComments, companies, costEvents, cronRuns, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardComments, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
@@ -10,6 +10,12 @@ type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
 type LogStatus = 'queued' | 'running' | 'success' | 'failed';
 
 const LOOP_INTERVAL_MS = Number(process.env.DISPATCH_LOOP_INTERVAL_MS ?? 10_000);
+const CONTEXT_CHAR_BUDGET = Number(process.env.DISPATCH_CONTEXT_CHAR_BUDGET ?? 32_000);
+const KANBAN_CONTEXT_CARD_LIMIT = Number(process.env.DISPATCH_CONTEXT_CARD_LIMIT ?? 160);
+const KANBAN_CONTEXT_RECORD_LIMIT = Number(process.env.DISPATCH_CONTEXT_RECORD_LIMIT ?? 30);
+const MESSAGE_BOARD_COMMENT_LIMIT = Number(process.env.MESSAGE_BOARD_COMMENT_LIMIT ?? 20_000);
+const TASK_BODY_CHAR_LIMIT = Number(process.env.DISPATCH_TASK_BODY_CHAR_LIMIT ?? 12_000);
+const KNOWLEDGE_DOC_CHAR_LIMIT = Number(process.env.DISPATCH_KNOWLEDGE_DOC_CHAR_LIMIT ?? 4_000);
 let loopRunning = false;
 const companyLastTick = new Map<string, number>();
 const cronState = {
@@ -46,6 +52,17 @@ async function addTaskLog(input: {
     output: input.output,
     costUsd: input.costUsd?.toString(),
     durationSeconds: input.durationSeconds,
+  });
+}
+
+async function addCardMessage(input: { cardId: string; agentId?: string | null; authorType?: 'agent' | 'system'; action: string; body: string }) {
+  await db.insert(cardComments).values({
+    cardId: input.cardId,
+    agentId: input.agentId ?? null,
+    authorType: input.authorType ?? 'agent',
+    authorId: null,
+    action: input.action,
+    body: clipText(input.body, MESSAGE_BOARD_COMMENT_LIMIT),
   });
 }
 
@@ -336,6 +353,7 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
     message: blocked ? `Dispatch failed after ${retryCount} attempt(s); card blocked.` : `Dispatch failed; retry ${retryCount}/${maxRetries} scheduled.`,
     output: message,
   });
+  await addCardMessage({ cardId: card.id, agentId: agent.id, action: blocked ? 'agent_blocked' : 'agent_error', body: message });
   await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: blocked ? 'dispatch.blocked' : 'dispatch.retry_scheduled', entityType: 'card', entityId: card.id, details: { retryCount, maxRetries, error: message } });
   if (!updated) throw new Error('card_update_failed');
   return updated;
@@ -417,6 +435,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
     });
+    await addCardMessage({ cardId: card.id, agentId: agent.id, action: 'agent_update', body: result.output });
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, nextStatus, costUsd: result.costUsd, budgetPaused } });
     if (!updated) throw new Error('card_update_failed');
     if (nextStatus === 'in_review') await createPendingApproval(updated, agent.id, effectiveReviewerId ? 'Reports-to review required' : 'Task requires approval');
@@ -452,7 +471,7 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
     const adapter = getAdapter(reviewer.adapterType ?? 'hermes');
     const result = await adapter.dispatch(
       await buildExecutionAgent(reviewer),
-      { id: card.id, title: `Review: ${card.title}`, body: buildReviewPrompt(card), timeoutSeconds: 180 },
+      { id: card.id, title: `Review: ${card.title}`, body: await buildReviewPrompt(card), timeoutSeconds: 180 },
     );
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     if (!result.success) throw new Error(result.output || 'review_adapter_reported_failure');
@@ -475,6 +494,7 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
     });
+    await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: rejected ? 'review_rejected' : 'review_note', body: result.output });
     await db.update(heartbeatRuns).set({ status: result.success ? 'success' : 'failed', completedAt: new Date(), durationSeconds: result.durationSeconds, error: result.success ? null : result.output }).where(eq(heartbeatRuns.id, run.id));
     await resolvePendingApproval(card, rejected ? 'rejected' : 'approved', rejected ? result.output : 'Reviewer approved task.', reviewer.id);
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: rejected ? 'review.rejected' : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd } });
@@ -485,6 +505,7 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
     await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: error instanceof Error ? error.message : 'review_failed' }).where(eq(heartbeatRuns.id, run.id));
     await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'failed', message: error instanceof Error ? error.message : 'review_failed' });
+    await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: 'review_error', body: error instanceof Error ? error.message : 'review_failed' });
     throw error;
   }
 }
@@ -714,8 +735,157 @@ export function startDispatchLoop(app: FastifyInstance): void {
   void runDispatchCronTick(app, 'startup');
 }
 
+function clipText(value: string | null | undefined, maxChars: number): string {
+  const text = value?.trim() ?? '';
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, Math.max(0, maxChars - 48)).trimEnd()}\n[truncated ${text.length - maxChars} chars]`;
+}
+
+function formatDate(value: Date | string | null | undefined): string {
+  if (!value) return 'n/a';
+  return new Date(value).toISOString();
+}
+
+function compactCardLine(card: CardRow, agentById: Map<string, AgentRow>): string {
+  return [
+    `- [${card.columnStatus ?? 'backlog'}] ${clipText(card.title, 96)}`,
+    `id=${card.id}`,
+    `priority=${card.priority ?? 0}`,
+    `assignee=${card.assigneeId ? agentById.get(card.assigneeId)?.name ?? card.assigneeId : 'unassigned'}`,
+    `reviewer=${card.reviewerId ? agentById.get(card.reviewerId)?.name ?? card.reviewerId : 'none'}`,
+    `parent=${card.parentCardId ?? 'none'}`,
+    `deps=${(card.dependencyCardIds ?? []).join(',') || 'none'}`,
+    `tags=${(card.tags ?? []).join(',') || 'none'}`,
+    `updated=${formatDate(card.updatedAt)}`,
+  ].join(' | ');
+}
+
+function addContextSection(state: { remaining: number; sections: string[]; truncated: boolean }, title: string, body: string, maxSectionChars = 8000): void {
+  const trimmed = body.trim();
+  if (!trimmed || state.remaining <= 0) return;
+  const allowance = Math.min(maxSectionChars, state.remaining - title.length - 8);
+  if (allowance <= 0) { state.truncated = true; return; }
+  const clipped = clipText(trimmed, allowance);
+  state.sections.push(`## ${title}\n${clipped}`);
+  state.remaining -= title.length + clipped.length + 8;
+  if (trimmed.length > clipped.length) state.truncated = true;
+}
+
+export async function buildCompanyKanbanContext(companyId: string, options: { focusCardId?: string; focusAgentId?: string | null; budgetChars?: number } = {}): Promise<string> {
+  const budget = Math.max(8000, options.budgetChars ?? CONTEXT_CHAR_BUDGET);
+  const state = { remaining: budget, sections: [] as string[], truncated: false };
+  const [company] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
+  const [companyAgents, companyDepartments, companyProjects, companyGoals, companyCards, recentActivity, recentRuns] = await Promise.all([
+    db.select().from(agents).where(eq(agents.companyId, companyId)),
+    db.select().from(departments).where(eq(departments.companyId, companyId)),
+    db.select().from(projects).where(eq(projects.companyId, companyId)),
+    db.select().from(goals).where(eq(goals.companyId, companyId)),
+    db.select().from(kanbanCards).where(eq(kanbanCards.companyId, companyId)).orderBy(desc(kanbanCards.updatedAt)),
+    db.select().from(activityLog).where(eq(activityLog.companyId, companyId)).orderBy(desc(activityLog.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
+    db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)).orderBy(desc(heartbeatRuns.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
+  ]);
+  const agentById = new Map(companyAgents.map((agent) => [agent.id, agent]));
+  const departmentById = new Map(companyDepartments.map((department) => [department.id, department]));
+  const projectById = new Map(companyProjects.map((project) => [project.id, project]));
+  const goalById = new Map(companyGoals.map((goal) => [goal.id, goal]));
+  const focusCard = options.focusCardId ? companyCards.find((card) => card.id === options.focusCardId) : undefined;
+  const focusAgent = options.focusAgentId ? agentById.get(options.focusAgentId) : undefined;
+
+  addContextSection(state, 'Company', [
+    `Name: ${company?.name ?? 'unknown'}`,
+    `Mission: ${company?.mission ?? 'No mission configured.'}`,
+    `Auto dispatch: ${company?.autoDispatchEnabled === false ? 'off' : 'on'}`,
+    `Dispatch interval seconds: ${company?.dispatchIntervalSeconds ?? 10}`,
+    `Departments: ${companyDepartments.map((department) => `${department.name} (${department.slug})`).join(', ') || 'none'}`,
+    `Projects: ${companyProjects.map((project) => project.name).join(', ') || 'none'}`,
+    `Goals: ${companyGoals.map((goal) => goal.title).join(', ') || 'none'}`,
+  ].join('\n'), 2600);
+
+  const statusCounts = companyCards.reduce<Record<string, number>>((acc, card) => {
+    const key = card.columnStatus ?? 'backlog';
+    acc[key] = (acc[key] ?? 0) + 1;
+    return acc;
+  }, {});
+  const boardLines = companyCards.slice(0, KANBAN_CONTEXT_CARD_LIMIT).map((card) => compactCardLine(card, agentById));
+  addContextSection(state, 'Kanban Board Snapshot', [
+    `Total cards: ${companyCards.length}`,
+    `Stage counts: ${Object.entries(statusCounts).map(([status, count]) => `${status}=${count}`).join(', ') || 'none'}`,
+    ...boardLines,
+    companyCards.length > boardLines.length ? `[omitted ${companyCards.length - boardLines.length} older cards due context limit]` : '',
+  ].filter(Boolean).join('\n'), 14000);
+
+  if (focusAgent) {
+    const manager = focusAgent.bossId ? agentById.get(focusAgent.bossId) : undefined;
+    const reports = companyAgents.filter((agent) => agent.bossId === focusAgent.id);
+    const assigned = companyCards.filter((card) => card.assigneeId === focusAgent.id && !['done', 'blocked'].includes(card.columnStatus ?? 'backlog')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
+    const reviews = companyCards.filter((card) => card.reviewerId === focusAgent.id || reports.some((report) => report.id === card.assigneeId && card.columnStatus === 'in_review')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
+    addContextSection(state, 'Invocation Agent Work Context', [
+      `Agent: ${focusAgent.name}`,
+      `Identity label: ${focusAgent.role}`,
+      `Reports to: ${manager?.name ?? 'top-level'}`,
+      `Direct reports: ${reports.map((report) => `${report.name} (${report.role})`).join(', ') || 'none'}`,
+      `Assigned open work:\n${assigned.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
+      `Review queue:\n${reviews.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
+    ].join('\n'), 6000);
+  }
+
+  if (focusCard) {
+    const parent = focusCard.parentCardId ? companyCards.find((card) => card.id === focusCard.parentCardId) : undefined;
+    const children = companyCards.filter((card) => card.parentCardId === focusCard.id);
+    const deps = (focusCard.dependencyCardIds ?? []).map((id) => companyCards.find((card) => card.id === id)).filter((card): card is CardRow => Boolean(card));
+    const focusAssignee = focusCard.assigneeId ? agentById.get(focusCard.assigneeId) : undefined;
+    const focusReviewer = focusCard.reviewerId ? agentById.get(focusCard.reviewerId) : undefined;
+    addContextSection(state, 'Focus Task Full Context', [
+      `ID: ${focusCard.id}`,
+      `Title: ${focusCard.title}`,
+      `Stage: ${focusCard.columnStatus ?? 'backlog'}`,
+      `Priority: ${focusCard.priority ?? 0}`,
+      `Department: ${focusCard.departmentId ? departmentById.get(focusCard.departmentId)?.name ?? focusCard.departmentId : 'none'}`,
+      `Project: ${focusCard.projectId ? projectById.get(focusCard.projectId)?.name ?? focusCard.projectId : 'none'}`,
+      `Goal: ${focusCard.goalId ? goalById.get(focusCard.goalId)?.title ?? focusCard.goalId : 'none'}`,
+      `Assignee: ${focusAssignee?.name ?? focusCard.assigneeId ?? 'unassigned'}`,
+      `Reviewer: ${focusReviewer?.name ?? focusCard.reviewerId ?? 'none'}`,
+      `Parent: ${parent ? compactCardLine(parent, agentById) : 'none'}`,
+      `Children:\n${children.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
+      `Dependencies:\n${deps.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
+      `Requires approval: ${focusCard.requiresApproval ? 'yes' : 'no'}`,
+      `Retry: ${focusCard.retryCount ?? 0}/${focusCard.maxRetries ?? 3}`,
+      `Session: ${focusCard.sessionId ?? 'none'}`,
+      `Cost USD: ${focusCard.costUsd ?? '0'}`,
+      'Body:',
+      clipText(focusCard.body, 8000),
+      focusCard.reviewFeedback ? `Review feedback:\n${clipText(focusCard.reviewFeedback, 4000)}` : '',
+      focusCard.executionLog ? `Latest execution output:\n${clipText(focusCard.executionLog, 6000)}` : '',
+    ].filter(Boolean).join('\n'), 14000);
+
+    const [messages, logs] = await Promise.all([
+      db.select().from(cardComments).where(eq(cardComments.cardId, focusCard.id)).orderBy(desc(cardComments.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
+      db.select().from(taskLogs).where(eq(taskLogs.cardId, focusCard.id)).orderBy(desc(taskLogs.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
+    ]);
+    addContextSection(state, 'Focus Task Message Board Latest', messages.reverse().map((message) => {
+      const author = message.agentId ? agentById.get(message.agentId)?.name ?? message.agentId : message.authorType;
+      return `- ${formatDate(message.createdAt)} | ${author} | ${message.action}: ${clipText(message.body, 900)}`;
+    }).join('\n') || 'none', 7000);
+    addContextSection(state, 'Focus Task Lifecycle Latest', logs.reverse().map((log) => [
+      `- ${formatDate(log.createdAt)} | ${log.type}/${log.status}: ${clipText(log.message, 700)}`,
+      log.output ? `  output: ${clipText(log.output, 900)}` : '',
+    ].filter(Boolean).join('\n')).join('\n') || 'none', 7000);
+  }
+
+  addContextSection(state, 'Recent Company Activity', recentActivity.map((event) => [
+    `- ${formatDate(event.createdAt)} | ${event.actorType}:${event.actorId} | ${event.action} | ${event.entityType}:${event.entityId}`,
+    `  details=${clipText(JSON.stringify(event.details ?? {}), 800)}`,
+  ].join('\n')).join('\n') || 'none', 5000);
+  addContextSection(state, 'Recent Heartbeat Runs', recentRuns.map((run) => [
+    `- ${formatDate(run.createdAt)} | ${run.source}/${run.status} | card=${run.cardId ?? 'none'} | agent=${run.agentId ? agentById.get(run.agentId)?.name ?? run.agentId : 'none'} | duration=${run.durationSeconds ?? 0}s | cost=${run.costUsd ?? '0'}`,
+    run.error ? `  error=${clipText(run.error, 500)}` : '',
+  ].filter(Boolean).join('\n')).join('\n') || 'none', 5000);
+
+  if (state.truncated || state.remaining <= 0) state.sections.push('[Kanban context was truncated to fit the configured context budget.]');
+  return state.sections.join('\n\n');
+}
+
 async function buildTaskPrompt(card: CardRow): Promise<string> {
-  const comments = await db.select().from(cardComments).where(eq(cardComments.cardId, card.id)).orderBy(desc(cardComments.createdAt)).limit(20);
   const [company] = await db.select().from(companies).where(eq(companies.id, card.companyId)).limit(1);
   const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
   const [goal] = card.goalId ? await db.select().from(goals).where(eq(goals.id, card.goalId)).limit(1) : [];
@@ -723,6 +893,7 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
   const [manager] = assignee?.bossId ? await db.select().from(agents).where(eq(agents.id, assignee.bossId)).limit(1) : [];
   const reports = assignee ? await db.select().from(agents).where(eq(agents.bossId, assignee.id)) : [];
   const docs = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.companyId, card.companyId)).orderBy(desc(knowledgeDocs.updatedAt)).limit(10);
+  const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.assigneeId });
   const matchingDocs = docs.filter((doc) => {
     const tags = doc.tags ?? [];
     return tags.length === 0 || tags.some((tag) => (card.tags ?? []).includes(tag));
@@ -741,20 +912,24 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
     `Status: ${card.columnStatus}`,
     `Priority: ${card.priority ?? 0}`,
     card.reviewFeedback ? `Previous review feedback:\n${card.reviewFeedback}` : '',
-    comments.length ? `User comments and instructions:\n${comments.reverse().map((comment) => `- [${comment.action}] ${comment.body}`).join('\n')}` : '',
-    matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${doc.body}`).join('\n\n---\n\n')}` : '',
+    kanbanContext ? `Kanban context snapshot:\n${kanbanContext}` : '',
+    matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
     'Task body:',
-    card.body,
+    clipText(card.body, TASK_BODY_CHAR_LIMIT),
   ].filter(Boolean).join('\n\n');
 }
 
-function buildReviewPrompt(card: CardRow): string {
+async function buildReviewPrompt(card: CardRow): Promise<string> {
+  const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.reviewerId });
   return [
     `Review the completed work for card ${card.id}: ${card.title}.`,
     'Return PASS if it is acceptable, or REJECT with feedback if it needs more work.',
+    'Use the Kanban context, message board, lifecycle logs, dependencies, and company state when deciding.',
+    'Kanban context snapshot:',
+    kanbanContext,
     'Original task:',
-    card.body,
+    clipText(card.body, TASK_BODY_CHAR_LIMIT),
     'Execution output:',
-    card.executionLog ?? 'No execution log was captured.',
+    clipText(card.executionLog ?? 'No execution log was captured.', 12_000),
   ].join('\n\n');
 }

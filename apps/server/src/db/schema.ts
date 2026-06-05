@@ -133,6 +133,7 @@ export const cardComments = pgTable('card_comments', {
   cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
   authorType: text('author_type').notNull().default('user'),
   authorId: uuid('author_id').references(() => users.id),
+  agentId: uuid('agent_id').references(() => agents.id),
   body: text('body').notNull(),
   action: text('action').notNull().default('comment'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),

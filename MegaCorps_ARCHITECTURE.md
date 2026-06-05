@@ -2,6 +2,66 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v0.7 - Task Message Boards and Bounded Kanban Context
+
+Date: 2026-06-05
+
+### Task Message Boards
+
+Every Kanban task now has a dedicated message board backed by `card_comments`.
+
+Schema update:
+
+- `card_comments.agent_id` links an agent-authored message to the agent that wrote it.
+- `author_type` can now represent user, agent, or system style messages.
+- `action` distinguishes normal comments, `agent_note`, `agent_update`, review notes, and intervention actions.
+
+Behavior:
+
+- Users can post normal task messages.
+- Users can post a message as a selected agent for coordination/debugging.
+- Agent dispatch completion writes an `agent_update` message.
+- Reviewer completion writes `review_note` or `review_rejected`.
+- Dispatch/review failures write agent error messages.
+- Webhook completions write agent/system board messages.
+
+The Kanban task detail panel now shows a `Task Message Board` with author, action, timestamp, and message body.
+
+### Bounded Kanban Context Injection
+
+Agent invocations now receive a richer platform-side context snapshot while respecting context length limits.
+
+Applies to:
+
+- task dispatch,
+- task review,
+- direct agent chat.
+
+Injected context:
+
+- company mission/settings,
+- compact same-company Kanban board snapshot,
+- stage counts,
+- focus task details,
+- parent/child/dependency relationships,
+- focus agent assigned work and review queue,
+- latest task message board entries,
+- latest task lifecycle logs,
+- recent company activity,
+- recent heartbeat runs,
+- matching knowledge docs.
+
+Context controls:
+
+- `DISPATCH_CONTEXT_CHAR_BUDGET`
+- `DISPATCH_CONTEXT_CARD_LIMIT`
+- `DISPATCH_CONTEXT_RECORD_LIMIT`
+- `DISPATCH_TASK_BODY_CHAR_LIMIT`
+- `DISPATCH_KNOWLEDGE_DOC_CHAR_LIMIT`
+- `MESSAGE_BOARD_COMMENT_LIMIT`
+
+When the generated context exceeds the configured budget, MegaCorps clips sections and marks the prompt as truncated instead of silently overfilling the model context.
+
 ## Architecture Update v0.6 - Direct Chat and Cron Observability
 
 Date: 2026-06-05
