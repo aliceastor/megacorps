@@ -1,4 +1,19 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
+const BAKED_API_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
+
+function isLocalApiUrl(url: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?/i.test(url);
+}
+
+function getApiUrl(): string {
+  const fallback = BAKED_API_URL || 'http://localhost:4000';
+  if (typeof window === 'undefined') return fallback;
+
+  const { protocol, hostname } = window.location;
+  const isLocalBrowser = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  if (isLocalBrowser) return fallback;
+  if (BAKED_API_URL && !isLocalApiUrl(BAKED_API_URL)) return BAKED_API_URL;
+  return `${protocol}//${hostname}:4000`;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -41,9 +56,10 @@ function formatIssue(issue: unknown): string {
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = init.method?.toUpperCase();
   const shouldSendEmptyJson = method && !['GET', 'HEAD'].includes(method) && init.body === undefined;
+  const apiUrl = getApiUrl();
   let response: Response;
   try {
-    response = await fetch(`${API_URL}${path}`, {
+    response = await fetch(`${apiUrl}${path}`, {
       ...init,
       body: shouldSendEmptyJson ? '{}' : init.body,
       credentials: 'include',
@@ -51,7 +67,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
       cache: 'no-store',
     });
   } catch (error) {
-    throw new ApiError(`API unreachable at ${API_URL}. Check that the server container is running.`, 0, error);
+    throw new ApiError(`API unreachable at ${apiUrl}. Check that the server container is running.`, 0, error);
   }
   const text = await response.text();
   const data = parseResponse(text);
@@ -67,4 +83,5 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   return data as T;
 }
-export { API_URL };
+const API_URL = getApiUrl();
+export { API_URL, getApiUrl };

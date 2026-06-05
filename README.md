@@ -19,6 +19,11 @@ Default local URLs:
 - Web UI: `http://localhost:3000`
 - API: `http://localhost:4000`
 
+NAS / remote Docker note:
+
+- The web client auto-detects non-localhost browser hosts. If the UI is opened at `http://192.168.1.180:3000`, API calls fall back to `http://192.168.1.180:4000` instead of `http://localhost:4000`.
+- Set `NEXT_PUBLIC_API_URL` only when the API is on a different host/domain. A baked `localhost` default will not override the browser-host fallback on NAS.
+
 ## Scripts
 
 - `npm run test`
