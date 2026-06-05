@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs';
 import { and, desc, eq, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { approvalDecisionSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, signupSchema, updateCardSchema } from '@megacorps/shared';
+import { approvalDecisionSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema } from '@megacorps/shared';
 import { signSession, requireAuth } from './auth.ts';
 import { db } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, apiEvents, approvals, budgetPolicies, cardComments, companies, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, users } from './db/schema.ts';
@@ -9,6 +9,7 @@ import { getAdapter } from './adapters/registry.ts';
 import { cascadeParentStatus, decomposeCard, dispatchCard, getTaskLogs, reviewCard } from './dispatch.ts';
 import { registerChatRoutes } from './chat.ts';
 import { registerCronRoutes } from './cron-routes.ts';
+import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
@@ -23,6 +24,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/health', async () => ({ ok: true }));
   await registerChatRoutes(app);
   await registerCronRoutes(app);
+  app.get('/api/help', async (request, reply) => {
+    const query = request.query as { format?: string };
+    if (query.format === 'markdown' || query.format === 'md') {
+      return reply.type('text/markdown; charset=utf-8').send(apiHelpMarkdown());
+    }
+    return apiHelpCatalog();
+  });
 
   app.post('/api/auth/signup', async (request, reply) => {
     const input = signupSchema.parse(request.body);
@@ -110,7 +118,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         const nextStatus = input.status === 'approved' ? 'done' : 'todo';
         await db.update(kanbanCards).set({ columnStatus: nextStatus, completedAt: nextStatus === 'done' ? new Date() : null, reviewFeedback: input.decisionNote ?? card.reviewFeedback, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
         await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'approval', status: input.status === 'approved' ? 'success' : 'failed', message: `Approval ${input.status} by ${actorLabel(user)}.`, output: input.decisionNote });
-        await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'backlog'} to ${nextStatus} by approval.` });
+        await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by approval.` });
       }
     }
     await db.insert(activityLog).values({ companyId: approval.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: `approval.${input.status}`, entityType: 'approval', entityId: approval.id, details: { cardId: approval.cardId, note: input.decisionNote } });
@@ -180,7 +188,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       db.select().from(approvals).where(eq(approvals.status, 'pending')).orderBy(desc(approvals.createdAt)).limit(50),
       db.select().from(budgetPolicies).where(eq(budgetPolicies.isActive, true)),
     ]);
-    const openCards = cards.filter((card) => !['done', 'blocked'].includes(card.columnStatus ?? 'backlog'));
+    const openCards = cards.filter((card) => !['done', 'blocked'].includes(card.columnStatus ?? 'todo'));
     const completedCards = cards.filter((card) => card.columnStatus === 'done');
     const blockedCards = cards.filter((card) => card.columnStatus === 'blocked');
     const activeAgents = agentRows.filter((agent) => agent.isActive !== false);
@@ -202,7 +210,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         monthlyCost: Number(monthlyCost.toFixed(4)),
       },
       stages: cards.reduce<Record<string, number>>((acc, card) => {
-        const key = card.columnStatus ?? 'backlog';
+        const key = card.columnStatus ?? 'todo';
         acc[key] = (acc[key] ?? 0) + 1;
         return acc;
       }, {}),
@@ -255,8 +263,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/cards', async (request) => {
     const query = request.query as { status?: string; assigneeId?: string; tag?: string; priority?: string; limit?: string; offset?: string };
+    const status = normalizeCardStatus(query.status);
     const filters = [
-      query.status ? eq(kanbanCards.columnStatus, query.status) : undefined,
+      status ? eq(kanbanCards.columnStatus, status) : undefined,
       query.assigneeId ? eq(kanbanCards.assigneeId, query.assigneeId) : undefined,
       query.priority ? eq(kanbanCards.priority, priorityToNumber(query.priority)) : undefined,
       query.tag ? drizzleSql`${query.tag} = ANY(${kanbanCards.tags})` : undefined,
@@ -285,7 +294,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       maxRetries: input.maxRetries,
       createdBy: user.id,
     }).returning();
-    if (card) await db.insert(taskLogs).values({ cardId: card.id, type: 'stage', status: 'success', message: `Stage set to ${card.columnStatus ?? 'backlog'} by ${actorLabel(user)}` });
+    if (card) await db.insert(taskLogs).values({ cardId: card.id, type: 'stage', status: 'success', message: `Stage set to ${card.columnStatus ?? 'todo'} by ${actorLabel(user)}` });
     if (card) await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'card.created', entityType: 'card', entityId: card.id, details: { title: card.title, stage: card.columnStatus } });
     return reply.code(201).send(card);
   });
@@ -321,7 +330,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         agentId: card.assigneeId,
         type: 'stage',
         status: 'success',
-        message: `Stage changed from ${existing.columnStatus ?? 'backlog'} to ${input.columnStatus} by ${actorLabel(user)}`,
+        message: `Stage changed from ${existing.columnStatus ?? 'todo'} to ${input.columnStatus} by ${actorLabel(user)}`,
       });
     }
     if (card) await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: card.assigneeId, action: input.columnStatus && input.columnStatus !== existing.columnStatus ? 'card.stage_changed' : 'card.updated', entityType: 'card', entityId: card.id, details: { from: existing.columnStatus, to: input.columnStatus, title: card.title } });
@@ -371,11 +380,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         updatedAt: new Date(),
       }).where(eq(kanbanCards.id, id));
       if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', error: `Paused by ${actorLabel(user)}`, completedAt: new Date() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
-      await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'backlog'} to blocked by ${actorLabel(user)}.` });
+      await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to blocked by ${actorLabel(user)}.` });
     } else if (input.action === 'continue_run') {
       if (card.assigneeId) await db.update(agents).set({ isActive: true, isBusy: false }).where(eq(agents.id, card.assigneeId));
       await db.update(kanbanCards).set({ columnStatus: 'todo', lastError: null, nextRunAt: null, updatedAt: new Date() }).where(eq(kanbanCards.id, id));
-      await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'backlog'} to todo by ${actorLabel(user)}.` });
+      await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to todo by ${actorLabel(user)}.` });
     } else if (input.action === 'send_to_agent') {
       await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'comment', status: 'queued', message: 'Comment queued for agent context on the next run.', output: input.body });
     }
@@ -553,14 +562,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/webhook/task-complete', async (request, reply) => {
     const body = request.body as { cardId?: string; status?: string; summary?: string; output?: string; costUsd?: number };
     if (!body.cardId || !body.status) return reply.code(400).send({ error: 'missing_fields' });
+    const nextStatus = normalizeCardStatus(body.status);
+    if (!nextStatus) return reply.code(400).send({ error: 'invalid_status', allowed: ['todo', 'in_progress', 'in_review', 'done', 'blocked'], legacyAliases: { backlog: 'todo' } });
     const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, body.cardId)).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
     const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
     await db.update(kanbanCards).set({
-      columnStatus: body.status,
+      columnStatus: nextStatus,
       executionLog,
       costUsd: body.costUsd?.toString(),
-      completedAt: body.status === 'done' ? new Date() : undefined,
+      completedAt: nextStatus === 'done' ? new Date() : undefined,
       executionLockId: null,
       executionLockedByAgentId: null,
       executionLockedAt: null,
@@ -568,42 +579,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       activeHeartbeatRunId: null,
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, body.cardId));
-    if (body.status !== card.columnStatus) await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'backlog'} to ${body.status} by webhook` });
-    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'webhook', status: body.status === 'blocked' ? 'failed' : 'success', message: body.summary ?? `Webhook marked card ${body.status}`, output: body.output, costUsd: body.costUsd?.toString() });
-    await db.insert(cardComments).values({ cardId: body.cardId, agentId: card.assigneeId, authorType: card.assigneeId ? 'agent' : 'system', action: body.status === 'blocked' ? 'agent_blocked' : 'agent_update', body: [body.summary, body.output].filter(Boolean).join('\n\n') || `Webhook marked card ${body.status}` });
+    if (nextStatus !== card.columnStatus) await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by webhook` });
+    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'webhook', status: nextStatus === 'blocked' ? 'failed' : 'success', message: body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: body.costUsd?.toString() });
+    await db.insert(cardComments).values({ cardId: body.cardId, agentId: card.assigneeId, authorType: card.assigneeId ? 'agent' : 'system', action: nextStatus === 'blocked' ? 'agent_blocked' : 'agent_update', body: [body.summary, body.output].filter(Boolean).join('\n\n') || `Webhook marked card ${nextStatus}` });
     if (card.assigneeId && body.costUsd) {
       await db.update(agents).set({ spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${body.costUsd}` }).where(eq(agents.id, card.assigneeId));
       await db.insert(costEvents).values({ companyId: card.companyId, agentId: card.assigneeId, cardId: card.id, projectId: card.projectId, goalId: card.goalId, provider: 'webhook', model: 'external', costUsd: body.costUsd.toString() });
     }
-    if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: body.status === 'blocked' ? 'failed' : 'success', completedAt: new Date(), error: body.status === 'blocked' ? body.summary ?? 'blocked_by_webhook' : null, costUsd: body.costUsd?.toString() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
-    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: `webhook.task_${body.status}`, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd } });
-    if (body.status === 'done') await cascadeParentStatus(card.parentCardId);
-    return { ok: true, cardId: body.cardId, newStatus: body.status };
-  });
-
-  app.get('/api/help', async () => {
-    return `MegaCorps API Documentation
-===========================
-
-Endpoints:
-- GET /api/cards
-- POST /api/cards
-- PUT /api/cards/:id
-- DELETE /api/cards/:id
-- POST /api/cards/:id/run
-- GET /api/agents
-- POST /api/agents
-- DELETE /api/agents/:id
-- POST /api/webhook/task-complete
-
-Webhook Payload:
-{
-  "cardId": "uuid",
-  "status": "done" | "blocked" | "in_review",
-  "summary": "...",
-  "output": "...",
-  "costUsd": 0.05
-}
-`;
+    if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: nextStatus === 'blocked' ? 'failed' : 'success', completedAt: new Date(), error: nextStatus === 'blocked' ? body.summary ?? 'blocked_by_webhook' : null, costUsd: body.costUsd?.toString() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
+    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: `webhook.task_${nextStatus}`, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd } });
+    if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
+    return { ok: true, cardId: body.cardId, newStatus: nextStatus };
   });
 }

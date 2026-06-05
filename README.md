@@ -83,7 +83,7 @@ MegaCorps follows the same control-plane idea as Paperclip: manage goals and an 
 
 The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds with `DISPATCH_LOOP_INTERVAL_MS=10000`; each company also has `dispatchIntervalSeconds` and `autoDispatchEnabled`. On each company heartbeat:
 
-- scan `backlog` and `todo` Kanban tasks,
+- scan `todo` Kanban tasks,
 - auto-assign unassigned tasks to an active idle agent, preferring department and tag/capability matches,
 - move assigned work into `in_progress`,
 - run the configured adapter,
@@ -93,6 +93,8 @@ The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds 
 
 Cron/debug endpoints:
 
+- `GET /api/help`: machine-readable API catalog for agents and integrations.
+- `GET /api/help?format=markdown`: Markdown API catalog.
 - `GET /api/cron/status`: in-memory scheduler state plus recent durable cron runs.
 - `GET /api/cron/runs`: cron run history.
 - `POST /api/cron/run`: manually run one dispatch heartbeat.

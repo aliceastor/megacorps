@@ -1,6 +1,8 @@
 'use client';
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { api } from '@/lib/api';
+import { CircleHelp, ExternalLink } from 'lucide-react';
+import { api, API_URL } from '@/lib/api';
 
 type DashboardData = {
   stats: Record<string, number>;
@@ -40,6 +42,16 @@ export function Dashboard() {
     <div className="stat-grid">
       {stats.map(([label, value]) => <section className="card stat-card" key={label}><span>{label}</span><b>{value}</b></section>)}
     </div>
+    <section className="card section-card">
+      <div className="panel-title">
+        <div><h2>API Help</h2><p style={{ margin: 0, color: 'var(--muted)' }}>Agents can discover all MegaCorps routes from the Help page or `GET /api/help`.</p></div>
+        <CircleHelp size={18} />
+      </div>
+      <div className="action-row">
+        <Link className="btn btn-primary" href="/help"><CircleHelp size={15} /> Open Help</Link>
+        <a className="btn" href={`${API_URL}/api/help?format=markdown`} target="_blank" rel="noreferrer"><ExternalLink size={15} /> Markdown API</a>
+      </div>
+    </section>
     <div className="data-grid">
       <section className="card section-card">
         <div className="panel-title"><h2>Kanban stages</h2></div>

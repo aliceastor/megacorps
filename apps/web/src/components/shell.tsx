@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, BriefcaseBusiness, Building2, ChartNoAxesColumnIncreasing, FileClock, Kanban, LayoutDashboard, Languages, LogOut, Menu, MessageSquare, Moon, Network, Settings, Sun, User, Check } from 'lucide-react';
+import { BookOpen, BriefcaseBusiness, Building2, ChartNoAxesColumnIncreasing, CircleHelp, FileClock, Kanban, LayoutDashboard, Languages, LogOut, Menu, MessageSquare, Moon, Network, Settings, Sun, User, Check } from 'lucide-react';
 import { useLocale, localeList, localeNames } from '@/lib/locale-context';
 import { api } from '@/lib/api';
 
@@ -17,6 +17,10 @@ const nav = [
   { href: '/logs', label: 'Logs', icon: FileClock },
   { href: '/knowledge', label: 'Knowledge', icon: BookOpen },
   { href: '/workspaces', label: 'Workspaces', icon: BriefcaseBusiness },
+];
+
+const utilityNav = [
+  { href: '/help', label: 'Help', icon: CircleHelp },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -41,6 +45,14 @@ function DropdownItem({ onClick, children, active }: { onClick: () => void; chil
     {children}
     {active && <Check size={14} style={{ marginLeft: 'auto' }} />}
   </button>;
+}
+
+function SidebarLink({ item, open, pathname }: { item: { href: string; label: string; icon: React.ElementType }; open: boolean; pathname: string }) {
+  const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+  return <Link className={`nav-link ${active ? 'active' : ''}`} href={item.href} title={item.label} aria-label={item.label}>
+    <item.icon size={18} />
+    {open && <span>{item.label}</span>}
+  </Link>;
 }
 
 export function AppShell({ title, children }: { title: string; children: React.ReactNode }) {
@@ -73,27 +85,30 @@ export function AppShell({ title, children }: { title: string; children: React.R
 
   return <div className={`app-frame ${open ? 'sidebar-open' : 'sidebar-compact'}`}>
     <aside className="sidebar">
-      <div className="brand-lockup">
-        <span className="brand-mark">MC</span>
-        {open && <div><b>MegaCorps</b><span>Agent Company OS</span></div>}
+      <div className="sidebar-head">
+        <button className="btn icon-btn sidebar-toggle" aria-label="Toggle sidebar" onClick={() => setOpen(!open)}><Menu size={18} /></button>
+        <Link href="/dashboard" className="brand-lockup" title="MegaCorps Dashboard">
+          <span className="brand-mark">MC</span>
+          {open && <div><b>MegaCorps</b><span>Agent Company OS</span></div>}
+        </Link>
       </div>
-      <nav className="nav-list" aria-label="Primary">
-        {nav.map((item) => {
-          const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-          return <Link className={`nav-link ${active ? 'active' : ''}`} href={item.href} key={item.href} title={item.label}>
-            <item.icon size={18} />
-            {open && <span>{item.label}</span>}
-          </Link>;
-        })}
-      </nav>
-      {open && <div className="sidebar-status">
-        <span>Heartbeat</span>
-        <b>10s / company override</b>
-      </div>}
+      <div className="sidebar-body">
+        <nav className="nav-list" aria-label="Primary">
+          {nav.map((item) => <SidebarLink item={item} open={open} pathname={pathname} key={item.href} />)}
+        </nav>
+      </div>
+      <div className="sidebar-footer">
+        <nav className="nav-list nav-list-utility" aria-label="Utility">
+          {utilityNav.map((item) => <SidebarLink item={item} open={open} pathname={pathname} key={item.href} />)}
+        </nav>
+        {open && <div className="sidebar-status">
+          <span>Heartbeat</span>
+          <b>10s / company override</b>
+        </div>}
+      </div>
     </aside>
     <main>
       <header className="topbar">
-        <button className="btn icon-btn" aria-label="Toggle sidebar" onClick={() => setOpen(!open)}><Menu size={16} /></button>
         <div>
           <p className="eyebrow">Workspace</p>
           <strong>{title}</strong>

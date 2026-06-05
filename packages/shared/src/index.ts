@@ -1,12 +1,13 @@
 import { z } from 'zod';
 
-export const cardStatuses = ['backlog', 'todo', 'in_progress', 'in_review', 'done', 'blocked'] as const;
+export const cardStatuses = ['todo', 'in_progress', 'in_review', 'done', 'blocked'] as const;
 export type CardStatus = (typeof cardStatuses)[number];
+export const legacyCardStatusAliases = { backlog: 'todo' } as const;
+const cardStatusInputs = ['backlog', ...cardStatuses] as const;
 export const agentAdapterTypes = ['hermes', 'hermes-gateway', 'openclaw', 'webhook', 'mock'] as const;
 export type AgentAdapterType = (typeof agentAdapterTypes)[number];
 
 const allowedTransitions: Record<CardStatus, CardStatus[]> = {
-  backlog: ['todo', 'blocked'],
   todo: ['in_progress', 'blocked'],
   in_progress: ['in_review', 'blocked'],
   in_review: ['done', 'in_progress', 'blocked'],
@@ -19,8 +20,14 @@ export function canTransitionCard(from: CardStatus, to: CardStatus): boolean {
   return allowedTransitions[from].includes(to);
 }
 
+export function normalizeCardStatus(value: string | null | undefined): CardStatus | undefined {
+  if (!value) return undefined;
+  if (value === 'backlog') return 'todo';
+  return (cardStatuses as readonly string[]).includes(value) ? value as CardStatus : undefined;
+}
+
 export const prioritySchema = z.enum(['urgent', 'high', 'normal', 'low']);
-export const cardStatusSchema = z.enum(cardStatuses);
+export const cardStatusSchema = z.enum(cardStatusInputs).transform((status) => normalizeCardStatus(status) ?? 'todo');
 
 export const createCardSchema = z.object({
   title: z.string().trim().min(1).max(160),

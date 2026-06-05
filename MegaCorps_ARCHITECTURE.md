@@ -173,7 +173,7 @@ Implemented:
 - Agent CRUD, department membership, O-chart reporting line, pause/resume/fire/reset session.
 - Runtime registry for mock, Hermes Portainer, Hermes HTTP API, Webhook, and OpenClaw.
 - Dispatch heartbeat with global interval and company-specific interval/enable switch.
-- Automatic assignment for `backlog` and `todo` tasks, with department/tag/capability scoring.
+- Automatic assignment for `todo` tasks, with department/tag/capability scoring. Legacy `backlog` inputs are normalized to `todo`.
 - Prompt context injection for company mission, project, goal, comments, and matching knowledge docs.
 - Task lifecycle logs and API lifecycle logs with sensitive-key redaction.
 - Company settings, department setup, budget view, logs view, knowledge view, workspace/project/goal view, dashboard.
@@ -461,7 +461,7 @@ interface KanbanCard {
   id: string;
   title: string;
   body: string;                     // Markdown 任務描述
-  column: 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'done' | 'blocked';
+  column: 'todo' | 'in_progress' | 'in_review' | 'done' | 'blocked';
   priority: 0 | 1 | 2 | 3;         // 0=normal, 3=urgent
   tags: string[];
   
@@ -498,7 +498,7 @@ interface KanbanCard {
 ### 4.3 Card 狀態流轉
 
 ```
-backlog → todo → in_progress → in_review → done
+todo → in_progress → in_review → done
                      ↑              │
                      └── reject ────┘
                      
@@ -575,7 +575,7 @@ adapters.set('webhook', new WebhookAdapter());
 Request 進入
   │
   ▼
-1. 創建 Card (backlog)
+1. 創建 Card (todo)
   │
   ▼
 2. CEO Decomposition（if 大任務）
@@ -1102,7 +1102,7 @@ const locales = {
   "nav.kanban": "任務看板",
   "nav.orgChart": "組織架構",
   "nav.budget": "預算管理",
-  "card.status.backlog": "待辦",
+  "card.status.todo": "待辦",
   "card.status.todo": "排隊中",
   "card.status.in_progress": "進行中",
   "card.status.in_review": "審查中",
@@ -1289,7 +1289,7 @@ CREATE TABLE kanban_cards (
     parent_card_id UUID REFERENCES kanban_cards(id),
     title TEXT NOT NULL,
     body TEXT NOT NULL,
-    column_status TEXT DEFAULT 'backlog',
+    column_status TEXT DEFAULT 'todo',
     priority INTEGER DEFAULT 0,
     tags TEXT[] DEFAULT '{}',
     assignee_id UUID REFERENCES agents(id),
@@ -1485,7 +1485,7 @@ Phase 6 ──▶ Phase 7 ──▶ Phase 8 ──▶ Phase 9
 **Backend:**
 - [ ] DB migration：`kanban_cards` / `projects` / `goals` 表
 - [ ] Card CRUD API：POST / GET / PUT / DELETE `/api/cards`
-- [ ] Card 狀態流轉邏輯：backlog → todo → in_progress → in_review → done / blocked
+- [ ] Card 狀態流轉邏輯：todo → in_progress → in_review → done / blocked
 - [ ] Card filtering / sorting / pagination API
 - [ ] Project CRUD API
 
@@ -2151,7 +2151,7 @@ MegaCorps now follows the same product direction as `paperclipai/paperclip`: a c
 - Company: mission, dispatch heartbeat, auto-dispatch switch.
 - Department: grouping unit for agents and tasks.
 - O-chart: agents report to other agents via `bossId`; agents can also belong to departments.
-- Kanban: every task has one UUID and one stage: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`.
+- Kanban: every task has one UUID and one stage: `todo`, `in_progress`, `in_review`, `done`, `blocked`. Legacy `backlog` input maps to `todo`.
 - Logs: task lifecycle logs plus API lifecycle logs.
 - Intervention: users can comment, stop an agent, send instructions to agent context, and continue a run.
 
@@ -2170,7 +2170,7 @@ Each company has its own settings:
 
 On each eligible company heartbeat, MegaCorps:
 
-1. Scans `backlog` and `todo` cards.
+1. Scans `todo` cards.
 2. Auto-assigns unassigned cards to an idle active agent.
 3. Prefers same department, then tag/capability/role match.
 4. Moves assigned work to `todo`, then `in_progress`.

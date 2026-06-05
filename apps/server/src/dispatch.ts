@@ -72,7 +72,7 @@ async function addStageLog(cardId: string, agentId: string | null, from: string 
     agentId,
     type: 'stage',
     status: 'success',
-    message: `Stage changed from ${from ?? 'backlog'} to ${to} by ${actor}.`,
+    message: `Stage changed from ${from ?? 'todo'} to ${to} by ${actor}.`,
   });
 }
 
@@ -748,7 +748,7 @@ function formatDate(value: Date | string | null | undefined): string {
 
 function compactCardLine(card: CardRow, agentById: Map<string, AgentRow>): string {
   return [
-    `- [${card.columnStatus ?? 'backlog'}] ${clipText(card.title, 96)}`,
+    `- [${card.columnStatus ?? 'todo'}] ${clipText(card.title, 96)}`,
     `id=${card.id}`,
     `priority=${card.priority ?? 0}`,
     `assignee=${card.assigneeId ? agentById.get(card.assigneeId)?.name ?? card.assigneeId : 'unassigned'}`,
@@ -802,7 +802,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
   ].join('\n'), 2600);
 
   const statusCounts = companyCards.reduce<Record<string, number>>((acc, card) => {
-    const key = card.columnStatus ?? 'backlog';
+    const key = card.columnStatus ?? 'todo';
     acc[key] = (acc[key] ?? 0) + 1;
     return acc;
   }, {});
@@ -817,7 +817,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
   if (focusAgent) {
     const manager = focusAgent.bossId ? agentById.get(focusAgent.bossId) : undefined;
     const reports = companyAgents.filter((agent) => agent.bossId === focusAgent.id);
-    const assigned = companyCards.filter((card) => card.assigneeId === focusAgent.id && !['done', 'blocked'].includes(card.columnStatus ?? 'backlog')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
+    const assigned = companyCards.filter((card) => card.assigneeId === focusAgent.id && !['done', 'blocked'].includes(card.columnStatus ?? 'todo')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
     const reviews = companyCards.filter((card) => card.reviewerId === focusAgent.id || reports.some((report) => report.id === card.assigneeId && card.columnStatus === 'in_review')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
     addContextSection(state, 'Invocation Agent Work Context', [
       `Agent: ${focusAgent.name}`,
@@ -838,7 +838,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
     addContextSection(state, 'Focus Task Full Context', [
       `ID: ${focusCard.id}`,
       `Title: ${focusCard.title}`,
-      `Stage: ${focusCard.columnStatus ?? 'backlog'}`,
+      `Stage: ${focusCard.columnStatus ?? 'todo'}`,
       `Priority: ${focusCard.priority ?? 0}`,
       `Department: ${focusCard.departmentId ? departmentById.get(focusCard.departmentId)?.name ?? focusCard.departmentId : 'none'}`,
       `Project: ${focusCard.projectId ? projectById.get(focusCard.projectId)?.name ?? focusCard.projectId : 'none'}`,

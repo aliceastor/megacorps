@@ -260,7 +260,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const middleAgents = visibleAgents.filter((agent) => visibleAgents.some((item) => item.bossId === agent.id) && Boolean(agent.bossId));
   const leafAgents = visibleAgents.filter((agent) => !visibleAgents.some((item) => item.bossId === agent.id));
   const reviewCards = companyCards.filter((card) => card.columnStatus === 'in_review');
-  const openCards = companyCards.filter((card) => !['done', 'blocked'].includes(card.columnStatus ?? 'backlog'));
+  const openCards = companyCards.filter((card) => !['done', 'blocked'].includes(card.columnStatus ?? 'todo'));
   const selectedManager = selected?.bossId ? visibleAgents.find((agent) => agent.id === selected.bossId) : null;
   const selectedReports = selected ? visibleAgents.filter((agent) => agent.bossId === selected.id) : [];
   const selectedAssignedCards = selected ? companyCards.filter((card) => card.assigneeId === selected.id) : [];
@@ -299,7 +299,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
         </label>
         {isCompanySurface && <label className="field-label">Company name<input className="input" value={companyName} onChange={(event) => setCompanyName(event.target.value)} /></label>}
         {isCompanySurface && <label className="field-label">Dispatch interval seconds<input className="input" type="number" min={5} max={3600} value={companyInterval} onChange={(event) => setCompanyInterval(Number(event.target.value))} /></label>}
-        {isCompanySurface && <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={companyAutoDispatch} onChange={(event) => setCompanyAutoDispatch(event.target.checked)} /> Auto-dispatch backlog/todo</label>}
+        {isCompanySurface && <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={companyAutoDispatch} onChange={(event) => setCompanyAutoDispatch(event.target.checked)} /> Auto-dispatch todo tasks</label>}
       </div>
       {isCompanySurface && <label className="field-label">Mission<textarea className="input" rows={3} value={companyMission} onChange={(event) => setCompanyMission(event.target.value)} /></label>}
       {isCompanySurface && <div className="panel-title"><h2>Department Settings</h2><span className="status-pill">{companyDepartments.length} departments</span></div>}

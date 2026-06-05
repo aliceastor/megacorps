@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canTransitionCard, createAgentSchema, createCardSchema, signupSchema } from './index.ts';
+import { canTransitionCard, cardStatusSchema, cardStatuses, createAgentSchema, createCardSchema, signupSchema } from './index.ts';
 
-test('allows the MVP card status path and blocks invalid skips', () => {
-  assert.equal(canTransitionCard('backlog', 'todo'), true);
+test('allows the canonical card status path and blocks invalid skips', () => {
+  assert.deepEqual([...cardStatuses], ['todo', 'in_progress', 'in_review', 'done', 'blocked']);
   assert.equal(canTransitionCard('todo', 'in_progress'), true);
   assert.equal(canTransitionCard('in_progress', 'done'), false);
+});
+
+test('maps legacy backlog input to todo', () => {
+  assert.equal(cardStatusSchema.parse('backlog'), 'todo');
 });
 
 test('rejects empty card bodies at schema level', () => {

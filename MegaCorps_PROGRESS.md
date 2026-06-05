@@ -18,6 +18,9 @@ Latest verified baseline:
 - Company registry page, department setup, O-chart, runtime presets, adapter endpoint configuration, direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, heartbeat runs, cron run history, budget policies, approvals, and automatic dispatch heartbeat are implemented.
 - Deployment is user-managed. Local-only Docker was used for QA in this pass; NAS/server deployment remains user-managed.
 - Browser plugin QA verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text.
+- Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
+- API discovery is available at `GET /api/help`, `GET /api/help?format=markdown`, and the Web UI Help page.
+- Sidebar navigation now keeps Help and Settings in the bottom utility area, with the collapse toggle inside the sidebar.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 
 ## Paperclip Research Summary
@@ -68,12 +71,12 @@ Implemented:
 
 - Every task/card has a UUID.
 - A card has exactly one stage:
-  - `backlog`
   - `todo`
   - `in_progress`
   - `in_review`
   - `done`
   - `blocked`
+- Legacy `backlog` API input is accepted as an alias and normalized to `todo`.
 - Kanban columns match the stage list.
 - Card detail panel includes:
   - UUID
@@ -243,7 +246,7 @@ DISPATCH_LOOP_INTERVAL_MS=10000
 
 On each eligible company heartbeat:
 
-1. Scan that company's `backlog` and `todo` tasks.
+1. Scan that company's `todo` tasks.
 2. Check dependencies.
 3. If no assignee exists, auto-select an active idle agent.
 4. Prefer agents from the same department.

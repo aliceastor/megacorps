@@ -70,7 +70,7 @@ export const kanbanCards = pgTable('kanban_cards', {
   parentCardId: uuid('parent_card_id'),
   title: text('title').notNull(),
   body: text('body').notNull(),
-  columnStatus: text('column_status').default('backlog'),
+  columnStatus: text('column_status').default('todo'),
   priority: integer('priority').default(0),
   tags: text('tags').array().default([]),
   assigneeId: uuid('assignee_id').references(() => agents.id),

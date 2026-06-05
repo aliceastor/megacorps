@@ -7,9 +7,8 @@ import { Bot, GitBranch, GripVertical, ListChecks, MessageSquare, Play, Plus, Re
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
-const statuses = ['backlog', 'todo', 'in_progress', 'in_review', 'done', 'blocked'] as const;
+const statuses = ['todo', 'in_progress', 'in_review', 'done', 'blocked'] as const;
 const statusLabels: Record<string, Record<string, string>> = {
-  backlog: { 'zh-TW': '待整理', en: 'Backlog', ja: '整理待ち' },
   todo: { 'zh-TW': '待辦', en: 'Todo', ja: '未着手' },
   in_progress: { 'zh-TW': '執行中', en: 'In Progress', ja: '進行中' },
   in_review: { 'zh-TW': '審核中', en: 'In Review', ja: 'レビュー中' },
