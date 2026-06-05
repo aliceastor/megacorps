@@ -14,6 +14,8 @@ type Agent = {
   title?: string;
   hermesProfile?: string;
   adapterType?: string;
+  adapterConfig?: Record<string, unknown>;
+  runtimeId?: string | null;
   bossId?: string | null;
   isBusy?: boolean;
   isActive?: boolean;
@@ -23,6 +25,15 @@ type Agent = {
 };
 type Company = { id: string; name: string; slug: string; mission?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean };
 type Department = { id: string; companyId: string; name: string; slug: string };
+type Runtime = { id: string; name: string; adapterType: string; config?: Record<string, unknown>; isActive?: boolean };
+
+function adapterFields(adapterType?: string): Array<[string, string]> {
+  if (adapterType === 'hermes') return [['portainerUrl', 'Portainer URL'], ['portainerUser', 'Portainer user'], ['portainerPass', 'Portainer password'], ['portainerEndpointId', 'Endpoint ID'], ['hermesContainer', 'Hermes container'], ['publicApiUrl', 'MegaCorps public API URL']];
+  if (adapterType === 'hermes-gateway') return [['hermesGatewayUrl', 'Hermes HTTP API URL'], ['hermesDashboardToken', 'Hermes token'], ['publicApiUrl', 'MegaCorps public API URL']];
+  if (adapterType === 'webhook') return [['webhookUrl', 'Webhook URL']];
+  if (adapterType === 'openclaw') return [['openclawUrl', 'OpenClaw URL']];
+  return [];
+}
 
 function Toast({ message, type, onClose }: { message: string; type: 'success' | 'error'; onClose: () => void }) {
   useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, [onClose]);
@@ -36,6 +47,7 @@ export function OrgChart() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
+  const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [companyId, setCompanyId] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [companyMission, setCompanyMission] = useState('');
@@ -51,6 +63,7 @@ export function OrgChart() {
   const [role, setRole] = useState('worker');
   const [bossId, setBossId] = useState('');
   const [departmentId, setDepartmentId] = useState('');
+  const [runtimeId, setRuntimeId] = useState('');
   const [adapterType, setAdapterType] = useState('mock');
   const [creating, setCreating] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
@@ -60,10 +73,11 @@ export function OrgChart() {
   async function refresh() {
     setLoading(true);
     try {
-      const [rows, companyRows, departmentRows] = await Promise.all([api<Agent[]>('/api/agents'), api<Company[]>('/api/companies'), api<Department[]>('/api/departments')]);
+      const [rows, companyRows, departmentRows, runtimeRows] = await Promise.all([api<Agent[]>('/api/agents'), api<Company[]>('/api/companies'), api<Department[]>('/api/departments'), api<Runtime[]>('/api/agent-runtimes')]);
       setAgents(rows);
       setCompanies(companyRows);
       setDepartments(departmentRows);
+      setRuntimes(runtimeRows);
       const activeCompany = companyRows.find((company) => company.id === companyId) ?? companyRows[0];
       if (activeCompany) {
         setCompanyId(activeCompany.id);
@@ -90,6 +104,8 @@ export function OrgChart() {
       title: selected.title ?? '',
       hermesProfile: selected.hermesProfile ?? '',
       adapterType: selected.adapterType ?? 'mock',
+      adapterConfig: selected.adapterConfig ?? {},
+      runtimeId: selected.runtimeId ?? '',
       bossId: selected.bossId ?? '',
       departmentId: selected.departmentId ?? '',
       budgetMonthly: selected.budgetMonthly ?? '',
@@ -108,13 +124,14 @@ export function OrgChart() {
     try {
       const agent = await api<Agent>('/api/agents', {
         method: 'POST',
-        body: JSON.stringify({ companyId: companyId || undefined, departmentId: departmentId || null, name: name.trim(), slug: slug.trim(), role, title: role === 'ceo' ? 'CEO Agent' : 'Hermes Agent', adapterType, hermesProfile: profile, bossId: bossId || null }),
+        body: JSON.stringify({ companyId: companyId || undefined, departmentId: departmentId || null, runtimeId: runtimeId || null, name: name.trim(), slug: slug.trim(), role, title: role === 'ceo' ? 'CEO Agent' : 'Hermes Agent', adapterType, hermesProfile: profile, bossId: bossId || null }),
       });
       setAgents([...agents, agent]);
       setName('');
       setSlug('');
       setBossId('');
       setDepartmentId('');
+      setRuntimeId('');
       setToast({ message: `Agent "${agent.name}" created`, type: 'success' });
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : 'Failed to create agent', type: 'error' });
@@ -191,6 +208,8 @@ export function OrgChart() {
         role: String(agentDraft.role ?? selected.role),
         title: String(agentDraft.title ?? ''),
         adapterType: String(agentDraft.adapterType ?? selected.adapterType ?? 'mock'),
+        adapterConfig: agentDraft.adapterConfig ?? {},
+        runtimeId: agentDraft.runtimeId || null,
         hermesProfile: agentDraft.hermesProfile ? String(agentDraft.hermesProfile) : undefined,
         bossId: agentDraft.bossId || null,
         departmentId: agentDraft.departmentId || null,
@@ -243,7 +262,7 @@ export function OrgChart() {
       <button className="btn" onClick={createDepartment}><Plus size={14} /> Add Department</button>
     </section>
 
-    <div className="card" style={{ padding: 16, display: 'grid', gridTemplateColumns: 'repeat(7, minmax(110px, 1fr)) auto', gap: 8, marginBottom: 16, alignItems: 'center', overflowX: 'auto' }}>
+    <div className="card" style={{ padding: 16, display: 'grid', gridTemplateColumns: 'repeat(8, minmax(110px, 1fr)) auto', gap: 8, marginBottom: 16, alignItems: 'center', overflowX: 'auto' }}>
       <input className="input" placeholder="Agent Name" value={name} onChange={(e) => setName(e.target.value)} />
       <input className="input" placeholder="Slug" value={slug} onChange={(e) => setSlug(e.target.value)} />
       <input className="input" placeholder="Profile" value={profile} onChange={(e) => setProfile(e.target.value)} />
@@ -255,7 +274,9 @@ export function OrgChart() {
         <option value="hermes">Hermes Portainer</option>
         <option value="hermes-gateway">Hermes HTTP API</option>
         <option value="webhook">Webhook</option>
+        <option value="openclaw">OpenClaw</option>
       </select>
+      <select className="input" value={runtimeId} onChange={(e) => setRuntimeId(e.target.value)}><option value="">Runtime</option>{runtimes.filter((runtime) => runtime.adapterType === adapterType).map((runtime) => <option value={runtime.id} key={runtime.id}>{runtime.name}</option>)}</select>
       <button className="btn btn-primary" onClick={create} disabled={creating}>{creating ? <Loader2 size={14} className="spin" /> : <Plus size={14} />} New</button>
     </div>
 
@@ -302,9 +323,11 @@ export function OrgChart() {
                 <option value="webhook">Webhook</option>
                 <option value="openclaw">OpenClaw</option>
               </select></label>
+              <label className="field-label">Runtime preset<select className="input" value={String(agentDraft?.runtimeId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), runtimeId: e.target.value || null })}><option value="">Use env / agent override</option>{runtimes.filter((runtime) => runtime.adapterType === String(agentDraft?.adapterType ?? selected.adapterType ?? 'mock')).map((runtime) => <option value={runtime.id} key={runtime.id}>{runtime.name}</option>)}</select></label>
               <label className="field-label">Department<select className="input" value={String(agentDraft?.departmentId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), departmentId: e.target.value || null })}><option value="">No department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
               <label className="field-label">Boss<select className="input" value={String(agentDraft?.bossId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), bossId: e.target.value || null })}><option value="">No boss</option>{visibleAgents.filter((agent) => agent.id !== selected.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
               <label className="field-label">Monthly budget<input className="input" type="number" min={0} step="0.01" value={String(agentDraft?.budgetMonthly ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), budgetMonthly: e.target.value })} /></label>
+              {adapterFields(String(agentDraft?.adapterType ?? selected.adapterType ?? 'mock')).map(([key, label]) => <label className="field-label" key={key}>Override {label}<input className="input" type={key.toLowerCase().includes('pass') || key.toLowerCase().includes('token') ? 'password' : 'text'} value={String((agentDraft?.adapterConfig as Record<string, unknown> | undefined)?.[key] ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), adapterConfig: { ...((agentDraft?.adapterConfig as Record<string, unknown> | undefined) ?? {}), [key]: e.target.value } })} /></label>)}
             </div>
             <div className="action-row">
               <button className="btn btn-primary" disabled={testing === selected.id} onClick={saveAgent}><Save size={14} /> Save</button>

@@ -1,2 +1,6 @@
 import { AppShell } from '@/components/shell';
-export default function DashboardPage() { return <AppShell title="Dashboard"><h1>Dashboard</h1><div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 16 }}>{['Open Tasks','Active Agents','Monthly Cost'].map((x) => <section className="card" style={{ padding: 20 }} key={x}><p>{x}</p><div style={{ height: 32, background: 'var(--border)', borderRadius: 8 }} /></section>)}</div></AppShell>; }
+import { Dashboard } from '@/components/dashboard';
+
+export default function DashboardPage() {
+  return <AppShell title="Dashboard"><Dashboard /></AppShell>;
+}

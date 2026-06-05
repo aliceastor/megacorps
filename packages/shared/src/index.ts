@@ -65,6 +65,8 @@ export const createAgentSchema = z.object({
   companyId: z.string().uuid().optional(),
   title: z.string().trim().max(120).optional(),
   adapterType: z.enum(agentAdapterTypes).default('hermes'),
+  adapterConfig: z.record(z.string(), z.unknown()).optional(),
+  runtimeId: z.string().uuid().nullable().optional(),
   hermesProfile: z.string().trim().min(1).max(80).optional(),
   bossId: z.string().uuid().nullable().optional(),
   departmentId: z.string().uuid().nullable().optional(),
@@ -72,9 +74,35 @@ export const createAgentSchema = z.object({
   budgetMonthly: z.number().nonnegative().optional(),
 });
 
+export const createAgentRuntimeSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  adapterType: z.enum(agentAdapterTypes),
+  config: z.record(z.string(), z.unknown()).default({}),
+  isActive: z.boolean().default(true),
+});
+
 export const createCardCommentSchema = z.object({
   body: z.string().trim().min(1).max(5000),
   action: z.enum(['comment', 'pause_agent', 'send_to_agent', 'continue_run']).default('comment'),
+});
+
+export const createKnowledgeDocSchema = z.object({
+  companyId: z.string().uuid(),
+  title: z.string().trim().min(1).max(160),
+  tags: z.array(z.string().trim().min(1).max(40)).default([]),
+  body: z.string().trim().min(1).max(20000),
+});
+
+export const createProjectSchema = z.object({
+  companyId: z.string().uuid().optional(),
+  name: z.string().trim().min(1).max(160),
+  description: z.string().trim().max(4000).optional(),
+});
+
+export const createGoalSchema = z.object({
+  companyId: z.string().uuid().optional(),
+  title: z.string().trim().min(1).max(160),
+  body: z.string().trim().max(4000).optional(),
 });
 
 export const taskLogTypes = ['dispatch', 'retry', 'review', 'decomposition', 'cascade', 'webhook', 'manual', 'stage', 'comment'] as const;
@@ -105,7 +133,11 @@ export const loginSchema = z.object({
 export type CreateCardInput = z.infer<typeof createCardSchema>;
 export type UpdateCardInput = z.infer<typeof updateCardSchema>;
 export type CreateAgentInput = z.infer<typeof createAgentSchema>;
+export type CreateAgentRuntimeInput = z.infer<typeof createAgentRuntimeSchema>;
 export type CreateCompanyInput = z.infer<typeof createCompanySchema>;
 export type CreateDepartmentInput = z.infer<typeof createDepartmentSchema>;
 export type CreateCardCommentInput = z.infer<typeof createCardCommentSchema>;
+export type CreateKnowledgeDocInput = z.infer<typeof createKnowledgeDocSchema>;
+export type CreateProjectInput = z.infer<typeof createProjectSchema>;
+export type CreateGoalInput = z.infer<typeof createGoalSchema>;
 export type TaskLogInput = z.infer<typeof taskLogSchema>;

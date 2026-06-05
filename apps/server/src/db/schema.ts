@@ -38,6 +38,7 @@ export const agents = pgTable('agents', {
   title: text('title'),
   adapterType: text('adapter_type').notNull().default('hermes'),
   adapterConfig: jsonb('adapter_config').default({}),
+  runtimeId: uuid('runtime_id'),
   hermesProfile: text('hermes_profile'),
   bossId: uuid('boss_id'),
   budgetPerTask: numeric('budget_per_task', { precision: 10, scale: 4 }),
@@ -50,7 +51,15 @@ export const agents = pgTable('agents', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 }, (table) => ({ companySlugUnique: unique().on(table.companyId, table.slug) }));
 
-export const agentRuntimes = pgTable('agent_runtimes', { id: uuid('id').primaryKey().defaultRandom(), name: text('name').notNull(), adapterType: text('adapter_type').notNull(), config: jsonb('config').default({}), isActive: boolean('is_active').default(true), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
+export const agentRuntimes = pgTable('agent_runtimes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  adapterType: text('adapter_type').notNull(),
+  config: jsonb('config').default({}),
+  isActive: boolean('is_active').default(true),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
 
 export const kanbanCards = pgTable('kanban_cards', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -117,4 +126,15 @@ export const apiEvents = pgTable('api_events', {
   error: text('error'),
   durationMs: integer('duration_ms'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+export const knowledgeDocs = pgTable('knowledge_docs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  title: text('title').notNull(),
+  tags: text('tags').array().default([]),
+  body: text('body').notNull(),
+  createdBy: uuid('created_by').references(() => users.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });

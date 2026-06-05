@@ -1,4 +1,4 @@
-# MegaCorps Phase 1-6 Control Plane MVP
+# MegaCorps Phase 1-7 Control Plane MVP
 
 Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm workspaces.
 
@@ -25,6 +25,37 @@ Default local URLs:
 - `npm run typecheck`
 - `npm run build`
 
+## How to use agent adapters
+
+MegaCorps now has two configuration layers:
+
+1. Open `Settings -> Agent runtimes` and create a reusable runtime preset.
+2. Open `Agents`, select an agent, then choose a runtime preset or fill the adapter override fields on that agent.
+
+Agent overrides win over runtime presets. Runtime presets win over `.env` defaults.
+
+Supported runtime fields:
+
+- `mock`: no endpoint needed.
+- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
+- `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `publicApiUrl`.
+- `webhook`: `webhookUrl`.
+- `openclaw`: `openclawUrl`.
+
+For Hermes Portainer, the agent still needs a `hermesProfile`; the runtime tells MegaCorps where to execute it.
+For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or the agent override panel.
+
+## Web UI pages
+
+- `Dashboard`: operating overview, stage counts, recent task logs, recent API lifecycle events.
+- `Kanban`: task UUIDs, stage, details, comments, sub-tasks, logs, run/review/decompose/delete.
+- `Agents`: O-chart, departments, agent CRUD, pause/resume/fire/reset, runtime and adapter configuration.
+- `Budget`: spend and budget visibility for agents and tasks.
+- `Logs`: full API lifecycle log with request, response, status, duration, and errors.
+- `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
+- `Workspaces`: project and goal setup for task context.
+- `Settings`: company heartbeat settings, departments, runtime presets, adapter endpoints.
+
 ## Current scope
 
 - Phase 1: auth endpoints, login/signup screens, shell, dashboard, theme toggle, locale string foundation.
@@ -33,6 +64,7 @@ Default local URLs:
 - Phase 4: dispatch loop, review loop, retries, stage history, sub-task decomposition, execution logs.
 - Phase 5: governance basics, agent pause/resume/fire, monthly budgets, API lifecycle logs.
 - Phase 6: card comments, send-comment-to-agent context, stop-agent/comment/continue-run flow, company and department setup.
+- Phase 7: runtime registry, adapter endpoint configuration, project/goal context, knowledge docs, workspace page, settings page, dashboard/log/budget views.
 
 ## Paperclip-inspired loop
 
@@ -67,3 +99,12 @@ MegaCorps stores two complementary log streams:
 - `api_events`: full API lifecycle with method, path, status, request, response, error, duration, and user id. Sensitive fields such as password/token/secret/jwt are redacted.
 
 No pnpm. No Redis.
+
+## Latest local verification
+
+- `npm run typecheck`
+- `npm test`
+- `npm run build`
+- `docker compose up -d --build`
+- Authenticated API smoke: runtime, department, agent, project, goal, knowledge doc, task, comment, manual run, dashboard, logs.
+- Web route smoke: `/dashboard`, `/kanban`, `/agents`, `/budget`, `/logs`, `/knowledge`, `/workspaces`, `/settings`.

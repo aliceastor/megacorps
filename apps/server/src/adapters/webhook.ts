@@ -2,7 +2,7 @@ import type { AgentLike, TaskContext, TaskResult } from './hermes.ts';
 import { estimateCost, estimateTokens } from './hermes.ts';
 
 function getWebhookUrl(agent: AgentLike, adapterType: 'webhook' | 'openclaw'): string {
-  const configured = agent.adapterConfig?.webhookUrl;
+  const configured = adapterType === 'openclaw' ? (agent.adapterConfig?.openclawUrl ?? agent.adapterConfig?.webhookUrl) : agent.adapterConfig?.webhookUrl;
   if (typeof configured === 'string' && configured.length > 0) return configured;
   const envName = adapterType === 'openclaw' ? 'OPENCLAW_WEBHOOK_URL' : 'WEBHOOK_ADAPTER_URL';
   const value = process.env[envName];

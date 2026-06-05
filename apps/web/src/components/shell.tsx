@@ -1,15 +1,21 @@
 'use client';
 import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { LayoutDashboard, Kanban, Network, Menu, Moon, Sun, Languages, User, LogOut, Check } from 'lucide-react';
+import { BookOpen, BriefcaseBusiness, ChartNoAxesColumnIncreasing, FileClock, Kanban, LayoutDashboard, Languages, LogOut, Menu, Moon, Network, Settings, Sun, User, Check } from 'lucide-react';
 import { useLocale, localeList, localeNames } from '@/lib/locale-context';
 import { api } from '@/lib/api';
 
 const nav = [
-  { href: '/dashboard', label: 'dashboard', icon: LayoutDashboard },
-  { href: '/kanban', label: 'kanban', icon: Kanban },
-  { href: '/agents', label: 'agents', icon: Network },
+  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/kanban', label: 'Kanban', icon: Kanban },
+  { href: '/agents', label: 'Agents', icon: Network },
+  { href: '/budget', label: 'Budget', icon: ChartNoAxesColumnIncreasing },
+  { href: '/logs', label: 'Logs', icon: FileClock },
+  { href: '/knowledge', label: 'Knowledge', icon: BookOpen },
+  { href: '/workspaces', label: 'Workspaces', icon: BriefcaseBusiness },
+  { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
 function Dropdown({ open, onClose, children, style }: { open: boolean; onClose: () => void; children: React.ReactNode; style?: React.CSSProperties }) {
@@ -41,6 +47,7 @@ export function AppShell({ title, children }: { title: string; children: React.R
   const [langOpen, setLangOpen] = useState(false);
   const [isDark, setIsDark] = useState(true);
   const [userEmail, setUserEmail] = useState('');
+  const pathname = usePathname();
   const { locale, setLocale, t } = useLocale();
 
   useEffect(() => { setIsDark(document.documentElement.dataset.theme === 'dark'); }, []);
@@ -66,11 +73,21 @@ export function AppShell({ title, children }: { title: string; children: React.R
     <aside className="sidebar">
       <div className="brand-lockup">
         <span className="brand-mark">MC</span>
-        {open && <b>MegaCorps</b>}
+        {open && <div><b>MegaCorps</b><span>Agent Company OS</span></div>}
       </div>
       <nav className="nav-list" aria-label="Primary">
-        {nav.map((item) => <Link className="btn nav-link" href={item.href} key={item.href} title={t(item.label)}><item.icon size={16} /> {open && t(item.label)}</Link>)}
+        {nav.map((item) => {
+          const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+          return <Link className={`nav-link ${active ? 'active' : ''}`} href={item.href} key={item.href} title={item.label}>
+            <item.icon size={18} />
+            {open && <span>{item.label}</span>}
+          </Link>;
+        })}
       </nav>
+      {open && <div className="sidebar-status">
+        <span>Heartbeat</span>
+        <b>10s / company override</b>
+      </div>}
     </aside>
     <main>
       <header className="topbar">

@@ -2,6 +2,73 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v0.4 - Phase 1-7 Operational MVP
+
+Date: 2026-06-05
+
+### Adapter Configuration
+
+MegaCorps now separates adapter configuration into runtime presets and per-agent overrides.
+
+Configuration order:
+
+1. Environment fallback from `.env` / Docker environment.
+2. Shared runtime preset stored in `agent_runtimes.config`.
+3. Agent override stored in `agents.adapter_config`.
+
+The effective runtime config is merged in dispatch before the adapter is called. Agent overrides win over runtime presets, and runtime presets win over environment defaults.
+
+UI entry points:
+
+- `Settings -> Agent runtimes`: create/edit/delete runtime presets.
+- `Agents -> select agent`: attach a runtime preset and fill adapter override fields.
+- `Agents -> Test`: validate the merged runtime/agent config against the selected adapter.
+
+Supported adapter fields:
+
+- `mock`: no endpoint required.
+- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
+- `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `publicApiUrl`.
+- `webhook`: `webhookUrl`.
+- `openclaw`: `openclawUrl`.
+
+### Phase 1-7 Functional Baseline
+
+Implemented:
+
+- Authentication, signup/login/logout, cookie session, validation error formatting.
+- Kanban task CRUD with UUID, one stage per task, detail drawer, logs, comments, sub-tasks, delete, run, review.
+- Agent CRUD, department membership, O-chart reporting line, pause/resume/fire/reset session.
+- Runtime registry for mock, Hermes Portainer, Hermes HTTP API, Webhook, and OpenClaw.
+- Dispatch heartbeat with global interval and company-specific interval/enable switch.
+- Automatic assignment for `backlog` and `todo` tasks, with department/tag/capability scoring.
+- Prompt context injection for company mission, project, goal, comments, and matching knowledge docs.
+- Task lifecycle logs and API lifecycle logs with sensitive-key redaction.
+- Company settings, department setup, budget view, logs view, knowledge view, workspace/project/goal view, dashboard.
+
+Production hardening still needed:
+
+- Atomic execution locks and stale-lock recovery.
+- Dedicated async worker/queue for long-running Hermes jobs.
+- Runtime health checks, versions, capabilities, and offline routing.
+- Immutable event bus separate from task/API logs.
+- Strong endpoint-level multi-company isolation.
+- Secret encryption or external secret references for adapter credentials.
+- Git worktree/branch/commit/merge workflow.
+- Work products and attachments.
+- Approval queue UI and richer budget policy enforcement.
+
+### Latest Verification
+
+Local verification completed on 2026-06-05:
+
+- `npm run typecheck`
+- `npm test`
+- `npm run build`
+- `docker compose up -d --build`
+- Authenticated API smoke for runtime, department, agent, project, goal, knowledge doc, task, comment, manual run, dashboard, and logs.
+- Web route smoke for `/dashboard`, `/kanban`, `/agents`, `/budget`, `/logs`, `/knowledge`, `/workspaces`, and `/settings`.
+
 > AI Agent 團隊編排與管理平台
 > 調度層 + 任務板 = MegaCorps Core
 > Agent 執行層 = 多種 Agent 後端（Hermes / OpenClaw / ...）

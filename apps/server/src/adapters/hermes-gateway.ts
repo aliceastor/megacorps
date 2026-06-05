@@ -1,15 +1,17 @@
 import type { AgentLike, TaskContext, TaskResult } from './hermes.ts';
 import { buildAgentPrompt, estimateTokens, estimateCost } from './hermes.ts';
 
-function getEnv(name: string, fallback?: string): string {
-  const value = process.env[name] ?? fallback;
-  if (!value) throw new Error(`${name} is required`);
+function getConfig(agent: AgentLike, key: string, envName: string, fallback?: string): string {
+  const configured = agent.adapterConfig?.[key];
+  const value = (typeof configured === 'string' && configured.length > 0 ? configured : undefined) ?? process.env[envName] ?? fallback;
+  if (!value) throw new Error(`${key} (${envName}) is required`);
   return value;
 }
 
-async function hermesFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const base = getEnv('HERMES_GATEWAY_URL', 'http://192.168.1.172:9119');
-  const token = process.env.HERMES_DASHBOARD_TOKEN;
+async function hermesFetch(agent: AgentLike, path: string, init: RequestInit = {}): Promise<Response> {
+  const base = getConfig(agent, 'hermesGatewayUrl', 'HERMES_GATEWAY_URL', 'http://192.168.1.172:9119');
+  const configuredToken = agent.adapterConfig?.hermesDashboardToken;
+  const token = (typeof configuredToken === 'string' && configuredToken.length > 0 ? configuredToken : undefined) ?? process.env.HERMES_DASHBOARD_TOKEN;
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'application/json');
   if (token) headers.set('Authorization', `Bearer ${token}`);
@@ -23,7 +25,7 @@ export async function dispatchToHermesGateway(agent: AgentLike, task: TaskContex
   const prompt = buildAgentPrompt(agent, task);
 
   // Step 1: Create Kanban task via HTTP API
-  const createResp = await hermesFetch('/api/plugins/kanban/tasks', {
+  const createResp = await hermesFetch(agent, '/api/plugins/kanban/tasks', {
     method: 'POST',
     body: JSON.stringify({
       title: `[MegaCorps] ${task.title}`,
@@ -38,7 +40,7 @@ export async function dispatchToHermesGateway(agent: AgentLike, task: TaskContex
   if (!taskId) throw new Error('Hermes task create returned no id');
 
   // Step 2: Trigger dispatch
-  await hermesFetch('/api/plugins/kanban/dispatch', { method: 'POST' });
+  await hermesFetch(agent, '/api/plugins/kanban/dispatch', { method: 'POST' });
 
   // Step 3: Poll until done/blocked (max timeout)
   const timeoutMs = (task.timeoutSeconds ?? 300) * 1000;
@@ -48,14 +50,14 @@ export async function dispatchToHermesGateway(agent: AgentLike, task: TaskContex
 
   while (Date.now() - started < timeoutMs) {
     await new Promise((r) => setTimeout(r, pollInterval));
-    const statusResp = await hermesFetch(`/api/plugins/kanban/tasks/${taskId}`);
+    const statusResp = await hermesFetch(agent, `/api/plugins/kanban/tasks/${taskId}`);
     if (!statusResp.ok) continue;
     const detail = await statusResp.json() as { status?: string; summary?: string; result?: string };
     status = detail.status ?? 'running';
     if (status === 'done' || status === 'blocked') {
       output = detail.summary ?? detail.result ?? '';
       // Try to get worker log for full output
-      const logResp = await hermesFetch(`/api/plugins/kanban/tasks/${taskId}/log?tail=50000`);
+      const logResp = await hermesFetch(agent, `/api/plugins/kanban/tasks/${taskId}/log?tail=50000`);
       if (logResp.ok) {
         const logData = await logResp.json() as { log?: string; content?: string };
         output = logData.log ?? logData.content ?? output;

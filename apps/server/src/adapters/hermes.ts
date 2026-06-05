@@ -3,24 +3,37 @@ export type TaskContext = { id: string; title: string; body: string; timeoutSeco
 export type TaskResult = { success: boolean; output: string; sessionId: string; tokensUsed: number; costUsd: number; durationSeconds: number };
 export type AgentLike = { hermesProfile: string | null; currentSessionId: string | null; adapterConfig?: Record<string, unknown> | null };
 
+function getConfig(agent: AgentLike | null, key: string, envName: string, fallback?: string): string {
+  const configured = agent?.adapterConfig?.[key];
+  const value = (typeof configured === 'string' && configured.length > 0 ? configured : undefined) ?? process.env[envName] ?? fallback;
+  if (!value) throw new Error(`${key} (${envName}) is required`);
+  return value;
+}
+
 function getEnv(name: string, fallback?: string): string {
   const value = process.env[name] ?? fallback;
   if (!value) throw new Error(`${name} is required`);
   return value;
 }
 
-async function portainerFetch(path: string, init: RequestInit = {}, token?: string): Promise<Response> {
-  const base = getEnv('PORTAINER_URL', 'https://192.168.1.180:31015');
+async function portainerFetch(agent: AgentLike | null, path: string, init: RequestInit = {}, token?: string): Promise<Response> {
+  const base = getConfig(agent, 'portainerUrl', 'PORTAINER_URL', 'https://192.168.1.180:31015');
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'application/json');
   if (token) headers.set('Authorization', `Bearer ${token}`);
   return fetch(`${base}${path}`, { ...init, headers });
 }
 
-export async function portainerLogin(retries = 3): Promise<string> {
+export async function portainerLogin(agent: AgentLike | null, retries = 3): Promise<string> {
   let lastError = 'unknown';
   for (let i = 0; i < retries; i += 1) {
-    const response = await portainerFetch('/api/auth', { method: 'POST', body: JSON.stringify({ username: getEnv('PORTAINER_USER'), password: getEnv('PORTAINER_PASS') }) });
+    const response = await portainerFetch(agent, '/api/auth', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: getConfig(agent, 'portainerUser', 'PORTAINER_USER'),
+        password: getConfig(agent, 'portainerPass', 'PORTAINER_PASS'),
+      }),
+    });
     if (response.ok) {
       const data = await response.json() as { jwt?: string };
       if (data.jwt) return data.jwt;
@@ -48,23 +61,23 @@ function decodeDockerMultiplexed(buffer: ArrayBuffer): { stdout: string; stderr:
   return { stdout, stderr };
 }
 
-export async function portainerExec(cmd: string[], timeoutSec = 300): Promise<ExecResult> {
+export async function portainerExec(agent: AgentLike, cmd: string[], timeoutSec = 300): Promise<ExecResult> {
   const started = Date.now();
-  const token = await portainerLogin();
-  const endpoint = getEnv('PORTAINER_ENDPOINT_ID', '4');
-  const containerName = getEnv('HERMES_CONTAINER', 'hermes-suite');
-  const containersResponse = await portainerFetch(`/api/endpoints/${endpoint}/docker/containers/json`, { method: 'GET' }, token);
+  const token = await portainerLogin(agent);
+  const endpoint = getConfig(agent, 'portainerEndpointId', 'PORTAINER_ENDPOINT_ID', '4');
+  const containerName = getConfig(agent, 'hermesContainer', 'HERMES_CONTAINER', 'hermes-suite');
+  const containersResponse = await portainerFetch(agent, `/api/endpoints/${endpoint}/docker/containers/json`, { method: 'GET' }, token);
   if (!containersResponse.ok) throw new Error(`Portainer container query failed: ${containersResponse.status}`);
   const containers = await containersResponse.json() as Array<{ Id: string; Names: string[]; State: string }>;
   const container = containers.find((item) => item.Names.some((name) => name.replace(/^\//, '') === containerName) && item.State === 'running');
   if (!container) throw new Error('Hermes container not found or not running');
-  const create = await portainerFetch(`/api/endpoints/${endpoint}/docker/containers/${container.Id}/exec`, { method: 'POST', body: JSON.stringify({ AttachStdout: true, AttachStderr: true, Tty: false, Cmd: cmd }) }, token);
+  const create = await portainerFetch(agent, `/api/endpoints/${endpoint}/docker/containers/${container.Id}/exec`, { method: 'POST', body: JSON.stringify({ AttachStdout: true, AttachStderr: true, Tty: false, Cmd: cmd }) }, token);
   if (!create.ok) throw new Error(`Portainer exec create failed: ${create.status}`);
   const { Id } = await create.json() as { Id: string };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
   try {
-    const start = await portainerFetch(`/api/endpoints/${endpoint}/docker/exec/${Id}/start`, { method: 'POST', body: JSON.stringify({ Detach: false, Tty: false }), signal: controller.signal }, token);
+    const start = await portainerFetch(agent, `/api/endpoints/${endpoint}/docker/exec/${Id}/start`, { method: 'POST', body: JSON.stringify({ Detach: false, Tty: false }), signal: controller.signal }, token);
     const raw = await start.arrayBuffer();
     const parsed = decodeDockerMultiplexed(raw);
     return { ...parsed, exitCode: start.ok ? 0 : start.status, duration: Math.round((Date.now() - started) / 1000) };
@@ -85,7 +98,7 @@ export function estimateTokens(text: string): number { return Math.ceil(text.len
 export function estimateCost(tokens: number): number { return Number(((tokens / 1_000_000) * 3).toFixed(6)); }
 
 export function buildAgentPrompt(agent: AgentLike, task: TaskContext): string {
-  const apiUrl = process.env.MEGACORPS_PUBLIC_URL ?? 'http://192.168.1.180:4000';
+  const apiUrl = (typeof agent.adapterConfig?.publicApiUrl === 'string' && agent.adapterConfig.publicApiUrl) || process.env.MEGACORPS_PUBLIC_URL || 'http://192.168.1.180:4000';
   return `You are now working under PLATFORM MegaCorps at ${apiUrl}.
 
 === Common API Endpoints ===
@@ -118,8 +131,10 @@ For full API documentation, fetch: GET ${apiUrl}/api/help
 export async function dispatchToHermes(agent: AgentLike, task: TaskContext): Promise<TaskResult> {
   if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
   const prompt = buildAgentPrompt(agent, task);
-  const cmd = ['hermes', 'chat', '-q', `--profile=${agent.hermesProfile}`, ...(agent.currentSessionId ? ['--resume', agent.currentSessionId] : []), '--max-turns=60', '--reasoning-effort=medium', prompt];
-  const result = await portainerExec(cmd, task.timeoutSeconds ?? 300);
+  const maxTurns = typeof agent.adapterConfig?.maxTurns === 'number' ? agent.adapterConfig.maxTurns : 60;
+  const reasoningEffort = typeof agent.adapterConfig?.reasoningEffort === 'string' ? agent.adapterConfig.reasoningEffort : 'medium';
+  const cmd = ['hermes', 'chat', '-q', `--profile=${agent.hermesProfile}`, ...(agent.currentSessionId ? ['--resume', agent.currentSessionId] : []), `--max-turns=${maxTurns}`, `--reasoning-effort=${reasoningEffort}`, prompt];
+  const result = await portainerExec(agent, cmd, task.timeoutSeconds ?? 300);
   const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
   const tokensUsed = estimateTokens(output);
   return { success: result.exitCode === 0, output, sessionId: extractSessionId(output), tokensUsed, costUsd: estimateCost(tokensUsed), durationSeconds: result.duration };

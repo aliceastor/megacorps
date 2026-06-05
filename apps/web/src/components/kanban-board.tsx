@@ -24,8 +24,12 @@ type Card = {
   columnStatus: string;
   tags: string[];
   priority: number;
+  companyId?: string;
+  departmentId?: string | null;
   assigneeId?: string | null;
   reviewerId?: string | null;
+  projectId?: string | null;
+  goalId?: string | null;
   parentCardId?: string | null;
   dependencyCardIds?: string[];
   requiresApproval?: boolean;
@@ -40,6 +44,10 @@ type Card = {
   updatedAt?: string;
 };
 type Agent = { id: string; name: string; adapterType?: string; isBusy?: boolean };
+type Company = { id: string; name: string };
+type Department = { id: string; companyId: string; name: string };
+type Project = { id: string; companyId: string; name: string };
+type Goal = { id: string; companyId: string; title: string };
 type TaskLog = { id: string; type: string; status: string; message: string; output?: string; costUsd?: string; durationSeconds?: number; createdAt?: string };
 type ApiEvent = { id: string; method: string; path: string; statusCode?: number; requestBody?: unknown; responseBody?: unknown; error?: string | null; durationMs?: number; createdAt?: string };
 type CardComment = { id: string; body: string; action: string; authorType: string; createdAt?: string };
@@ -132,6 +140,10 @@ export function KanbanBoard() {
   const { t } = useLocale();
   const [cards, setCards] = useState<Card[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [goals, setGoals] = useState<Goal[]>([]);
   const [selected, setSelected] = useState<Card | null>(null);
   const [draft, setDraft] = useState<Partial<Card> | null>(null);
   const [logs, setLogs] = useState<TaskLog[]>([]);
@@ -145,6 +157,10 @@ export function KanbanBoard() {
   const [newBody, setNewBody] = useState('');
   const [newAssignee, setNewAssignee] = useState('');
   const [newReviewer, setNewReviewer] = useState('');
+  const [newCompany, setNewCompany] = useState('');
+  const [newDepartment, setNewDepartment] = useState('');
+  const [newProject, setNewProject] = useState('');
+  const [newGoal, setNewGoal] = useState('');
   const [requiresApproval, setRequiresApproval] = useState(false);
   const [filterStatus, setFilterStatus] = useState('');
   const [filterAssignee, setFilterAssignee] = useState('');
@@ -156,9 +172,14 @@ export function KanbanBoard() {
   async function refresh() {
     setLoading(true);
     try {
-      const [nextCards, nextAgents] = await Promise.all([api<Card[]>('/api/cards'), api<Agent[]>('/api/agents')]);
+      const [nextCards, nextAgents, nextCompanies, nextDepartments, nextProjects, nextGoals] = await Promise.all([api<Card[]>('/api/cards'), api<Agent[]>('/api/agents'), api<Company[]>('/api/companies'), api<Department[]>('/api/departments'), api<Project[]>('/api/projects'), api<Goal[]>('/api/goals')]);
       setCards(nextCards);
       setAgents(nextAgents);
+      setCompanies(nextCompanies);
+      setDepartments(nextDepartments);
+      setProjects(nextProjects);
+      setGoals(nextGoals);
+      if (!newCompany && nextCompanies[0]) setNewCompany(nextCompanies[0].id);
       if (selected) setSelected(nextCards.find((card) => card.id === selected.id) ?? null);
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : 'Failed to load board', type: 'error' });
@@ -176,6 +197,9 @@ export function KanbanBoard() {
       columnStatus: selected.columnStatus,
       assigneeId: selected.assigneeId ?? null,
       reviewerId: selected.reviewerId ?? null,
+      departmentId: selected.departmentId ?? null,
+      projectId: selected.projectId ?? null,
+      goalId: selected.goalId ?? null,
       requiresApproval: selected.requiresApproval ?? false,
       maxRetries: selected.maxRetries ?? 3,
     });
@@ -205,6 +229,10 @@ export function KanbanBoard() {
           body: newBody.trim() || newTitle.trim(),
           tags: [],
           priority: 'normal',
+          companyId: newCompany || undefined,
+          departmentId: newDepartment || null,
+          projectId: newProject || null,
+          goalId: newGoal || null,
           assigneeId: newAssignee || null,
           reviewerId: newReviewer || null,
           requiresApproval,
@@ -215,6 +243,9 @@ export function KanbanBoard() {
       setNewBody('');
       setNewAssignee('');
       setNewReviewer('');
+      setNewDepartment('');
+      setNewProject('');
+      setNewGoal('');
       setRequiresApproval(false);
       setModalOpen(false);
       setToast({ message: `Card "${card.title}" created`, type: 'success' });
@@ -251,6 +282,9 @@ export function KanbanBoard() {
         columnStatus: String(draft.columnStatus ?? selected.columnStatus),
         assigneeId: draft.assigneeId ?? null,
         reviewerId: draft.reviewerId ?? null,
+        departmentId: draft.departmentId ?? null,
+        projectId: draft.projectId ?? null,
+        goalId: draft.goalId ?? null,
         requiresApproval: Boolean(draft.requiresApproval),
         maxRetries: Number(draft.maxRetries ?? selected.maxRetries ?? 3),
       });
@@ -270,6 +304,9 @@ export function KanbanBoard() {
       columnStatus: selected.columnStatus,
       assigneeId: selected.assigneeId ?? null,
       reviewerId: selected.reviewerId ?? null,
+      departmentId: selected.departmentId ?? null,
+      projectId: selected.projectId ?? null,
+      goalId: selected.goalId ?? null,
       requiresApproval: selected.requiresApproval ?? false,
       maxRetries: selected.maxRetries ?? 3,
     });
@@ -370,6 +407,10 @@ export function KanbanBoard() {
             <input className="input" placeholder="Title" value={newTitle} onChange={(e) => setNewTitle(e.target.value)} />
             <textarea className="input" placeholder="Description" value={newBody} onChange={(e) => setNewBody(e.target.value)} rows={5} />
             <div className="form-grid">
+              <select className="input" value={newCompany} onChange={(e) => { setNewCompany(e.target.value); setNewDepartment(''); setNewProject(''); setNewGoal(''); }}><option value="">Company</option>{companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}</select>
+              <select className="input" value={newDepartment} onChange={(e) => setNewDepartment(e.target.value)}><option value="">Department</option>{departments.filter((department) => !newCompany || department.companyId === newCompany).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select>
+              <select className="input" value={newProject} onChange={(e) => setNewProject(e.target.value)}><option value="">Project</option>{projects.filter((project) => !newCompany || project.companyId === newCompany).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>
+              <select className="input" value={newGoal} onChange={(e) => setNewGoal(e.target.value)}><option value="">Goal</option>{goals.filter((goal) => !newCompany || goal.companyId === newCompany).map((goal) => <option value={goal.id} key={goal.id}>{goal.title}</option>)}</select>
               <select className="input" value={newAssignee} onChange={(e) => setNewAssignee(e.target.value)}><option value="">Assignee</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
               <select className="input" value={newReviewer} onChange={(e) => setNewReviewer(e.target.value)}><option value="">Reviewer</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
             </div>
@@ -402,6 +443,9 @@ export function KanbanBoard() {
             <div className="form-grid">
               <label className="field-label">Assignee<select className="input" value={draft?.assigneeId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), assigneeId: e.target.value || null })}><option value="">Assignee</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
               <label className="field-label">Reviewer<select className="input" value={draft?.reviewerId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), reviewerId: e.target.value || null, requiresApproval: Boolean(e.target.value) })}><option value="">Reviewer</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
+              <label className="field-label">Department<select className="input" value={draft?.departmentId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), departmentId: e.target.value || null })}><option value="">Department</option>{departments.filter((department) => !selected.companyId || department.companyId === selected.companyId).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
+              <label className="field-label">Project<select className="input" value={draft?.projectId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), projectId: e.target.value || null })}><option value="">Project</option>{projects.filter((project) => !selected.companyId || project.companyId === selected.companyId).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label>
+              <label className="field-label">Goal<select className="input" value={draft?.goalId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), goalId: e.target.value || null })}><option value="">Goal</option>{goals.filter((goal) => !selected.companyId || goal.companyId === selected.companyId).map((goal) => <option value={goal.id} key={goal.id}>{goal.title}</option>)}</select></label>
             </div>
             <div className="form-grid">
               <label className="field-label">Max retries<input className="input" type="number" min={1} max={10} value={Number(draft?.maxRetries ?? 3)} onChange={(e) => setDraft({ ...(draft ?? {}), maxRetries: Number(e.target.value) })} /></label>

@@ -1,10 +1,10 @@
 import bcrypt from 'bcryptjs';
 import { and, desc, eq, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { createAgentSchema, createCardCommentSchema, createCardSchema, createCompanySchema, createDepartmentSchema, loginSchema, signupSchema, updateCardSchema } from '@megacorps/shared';
+import { createAgentRuntimeSchema, createAgentSchema, createCardCommentSchema, createCardSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, signupSchema, updateCardSchema } from '@megacorps/shared';
 import { signSession, requireAuth } from './auth.ts';
 import { db } from './db/client.ts';
-import { agentRuntimes, agents, apiEvents, cardComments, companies, departments, goals, kanbanCards, projects, taskLogs, users } from './db/schema.ts';
+import { agentRuntimes, agents, apiEvents, cardComments, companies, departments, goals, kanbanCards, knowledgeDocs, projects, taskLogs, users } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { cascadeParentStatus, decomposeCard, dispatchCard, getTaskLogs, reviewCard } from './dispatch.ts';
 
@@ -46,6 +46,42 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const query = request.query as { limit?: string };
     const limit = Math.min(Math.max(Number(query.limit ?? 100), 1), 500);
     return db.select().from(apiEvents).orderBy(desc(apiEvents.createdAt)).limit(limit);
+  });
+  app.get('/api/dashboard', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const [cards, agentRows, companyRows, recentTaskLogs, recentApiEvents] = await Promise.all([
+      db.select().from(kanbanCards),
+      db.select().from(agents),
+      db.select().from(companies),
+      db.select().from(taskLogs).orderBy(desc(taskLogs.createdAt)).limit(20),
+      db.select().from(apiEvents).orderBy(desc(apiEvents.createdAt)).limit(20),
+    ]);
+    const openCards = cards.filter((card) => !['done', 'blocked'].includes(card.columnStatus ?? 'backlog'));
+    const completedCards = cards.filter((card) => card.columnStatus === 'done');
+    const blockedCards = cards.filter((card) => card.columnStatus === 'blocked');
+    const activeAgents = agentRows.filter((agent) => agent.isActive !== false);
+    const busyAgents = agentRows.filter((agent) => agent.isBusy);
+    const monthlyCost = cards.reduce((sum, card) => sum + Number(card.costUsd ?? 0), 0);
+    return {
+      stats: {
+        companies: companyRows.length,
+        tasks: cards.length,
+        openTasks: openCards.length,
+        completedTasks: completedCards.length,
+        blockedTasks: blockedCards.length,
+        agents: agentRows.length,
+        activeAgents: activeAgents.length,
+        busyAgents: busyAgents.length,
+        monthlyCost: Number(monthlyCost.toFixed(4)),
+      },
+      stages: cards.reduce<Record<string, number>>((acc, card) => {
+        const key = card.columnStatus ?? 'backlog';
+        acc[key] = (acc[key] ?? 0) + 1;
+        return acc;
+      }, {}),
+      recentTaskLogs,
+      recentApiEvents,
+    };
   });
 
   app.get('/api/companies', async () => db.select().from(companies).orderBy(desc(companies.createdAt)));
@@ -208,7 +244,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/agents', async () => db.select().from(agents));
   app.post('/api/agents', async (request, reply) => {
     const input = createAgentSchema.parse(request.body);
-    const [agent] = await db.insert(agents).values({ companyId: input.companyId ?? await defaultCompanyId(), departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, adapterType: input.adapterType, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
+    const [agent] = await db.insert(agents).values({ companyId: input.companyId ?? await defaultCompanyId(), departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
     return reply.code(201).send(agent);
   });
   app.delete('/api/agents/:id', async (request) => {
@@ -245,6 +281,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       title: input.title,
       departmentId: input.departmentId,
       adapterType: input.adapterType,
+      adapterConfig: input.adapterConfig,
+      runtimeId: input.runtimeId,
       hermesProfile: input.hermesProfile,
       bossId: input.bossId,
       budgetPerTask: input.budgetPerTask?.toString(),
@@ -254,26 +292,103 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return agent;
   });
 
-  app.get('/api/agent-runtimes', async () => db.select().from(agentRuntimes));
+  app.get('/api/agent-runtimes', async () => db.select().from(agentRuntimes).orderBy(desc(agentRuntimes.createdAt)));
   app.post('/api/agent-runtimes', async (request, reply) => {
-    const body = request.body as { name?: string; adapterType?: string; config?: Record<string, unknown> };
-    if (!body.name || !body.adapterType) return reply.code(400).send({ error: 'name_and_adapter_required' });
-    const [row] = await db.insert(agentRuntimes).values({ name: body.name, adapterType: body.adapterType, config: body.config ?? {} }).returning();
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const input = createAgentRuntimeSchema.parse(request.body);
+    const [row] = await db.insert(agentRuntimes).values(input).returning();
     return reply.code(201).send(row);
+  });
+  app.put('/api/agent-runtimes/:id', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const id = (request.params as { id: string }).id;
+    const input = createAgentRuntimeSchema.partial().parse(request.body);
+    const [row] = await db.update(agentRuntimes).set({
+      name: input.name,
+      adapterType: input.adapterType,
+      config: input.config,
+      isActive: input.isActive,
+      updatedAt: new Date(),
+    }).where(eq(agentRuntimes.id, id)).returning();
+    if (!row) return reply.code(404).send({ error: 'runtime_not_found' });
+    return row;
+  });
+  app.delete('/api/agent-runtimes/:id', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const id = (request.params as { id: string }).id;
+    await db.update(agents).set({ runtimeId: null }).where(eq(agents.runtimeId, id));
+    await db.delete(agentRuntimes).where(eq(agentRuntimes.id, id));
+    return { ok: true };
   });
 
   app.post('/api/agents/:id/test-connection', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const [agent] = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
-    try { const adapter = getAdapter(agent.adapterType ?? 'hermes'); return await adapter.dispatch({ hermesProfile: agent.hermesProfile, currentSessionId: agent.currentSessionId, adapterConfig: {} }, { id: 'test', title: 'Connection test', body: 'Return OK.', timeoutSeconds: 30 }); }
+    try {
+      const adapter = getAdapter(agent.adapterType ?? 'hermes');
+      let runtimeConfig: Record<string, unknown> = {};
+      if (agent.runtimeId) {
+        const [runtime] = await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, agent.runtimeId)).limit(1);
+        if (runtime && runtime.isActive === false) return reply.code(400).send({ error: 'runtime_inactive' });
+        runtimeConfig = (runtime?.config as Record<string, unknown> | null) ?? {};
+      }
+      return await adapter.dispatch({
+        hermesProfile: agent.hermesProfile,
+        currentSessionId: agent.currentSessionId,
+        adapterConfig: { ...runtimeConfig, ...((agent.adapterConfig as Record<string, unknown> | null) ?? {}) },
+      }, { id: 'test', title: 'Connection test', body: 'Return OK.', timeoutSeconds: 30 });
+    }
     catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : 'connection_failed' }); }
   });
 
-  app.get('/api/projects', async () => db.select().from(projects));
-  app.post('/api/projects', async (request, reply) => { const body = request.body as { name?: string; description?: string }; if (!body.name) return reply.code(400).send({ error: 'name_required' }); const [row] = await db.insert(projects).values({ companyId: await defaultCompanyId(), name: body.name, description: body.description }).returning(); return reply.code(201).send(row); });
-  app.get('/api/goals', async () => db.select().from(goals));
-  app.post('/api/goals', async (request, reply) => { const body = request.body as { title?: string; body?: string }; if (!body.title) return reply.code(400).send({ error: 'title_required' }); const [row] = await db.insert(goals).values({ companyId: await defaultCompanyId(), title: body.title, body: body.body }).returning(); return reply.code(201).send(row); });
+  app.get('/api/projects', async (request) => {
+    const query = request.query as { companyId?: string };
+    return db.select().from(projects).where(query.companyId ? eq(projects.companyId, query.companyId) : undefined).orderBy(desc(projects.createdAt));
+  });
+  app.post('/api/projects', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const input = createProjectSchema.parse(request.body);
+    const [row] = await db.insert(projects).values({ companyId: input.companyId ?? await defaultCompanyId(), name: input.name, description: input.description }).returning();
+    return reply.code(201).send(row);
+  });
+  app.get('/api/goals', async (request) => {
+    const query = request.query as { companyId?: string };
+    return db.select().from(goals).where(query.companyId ? eq(goals.companyId, query.companyId) : undefined).orderBy(desc(goals.createdAt));
+  });
+  app.post('/api/goals', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const input = createGoalSchema.parse(request.body);
+    const [row] = await db.insert(goals).values({ companyId: input.companyId ?? await defaultCompanyId(), title: input.title, body: input.body }).returning();
+    return reply.code(201).send(row);
+  });
+  app.get('/api/knowledge-docs', async (request) => {
+    const query = request.query as { companyId?: string; tag?: string };
+    const filters = [
+      query.companyId ? eq(knowledgeDocs.companyId, query.companyId) : undefined,
+      query.tag ? drizzleSql`${query.tag} = ANY(${knowledgeDocs.tags})` : undefined,
+    ].filter(Boolean);
+    return db.select().from(knowledgeDocs).where(filters.length ? and(...filters) : undefined).orderBy(desc(knowledgeDocs.updatedAt));
+  });
+  app.post('/api/knowledge-docs', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const input = createKnowledgeDocSchema.parse(request.body);
+    const [row] = await db.insert(knowledgeDocs).values({ ...input, createdBy: user.id }).returning();
+    return reply.code(201).send(row);
+  });
+  app.put('/api/knowledge-docs/:id', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const id = (request.params as { id: string }).id;
+    const input = createKnowledgeDocSchema.partial().parse(request.body);
+    const [row] = await db.update(knowledgeDocs).set({ ...input, updatedAt: new Date() }).where(eq(knowledgeDocs.id, id)).returning();
+    if (!row) return reply.code(404).send({ error: 'knowledge_doc_not_found' });
+    return row;
+  });
+  app.delete('/api/knowledge-docs/:id', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    await db.delete(knowledgeDocs).where(eq(knowledgeDocs.id, (request.params as { id: string }).id));
+    return { ok: true };
+  });
 
   app.post('/api/webhook/task-complete', async (request, reply) => {
     const body = request.body as { cardId?: string; status?: string; summary?: string; output?: string; costUsd?: number };

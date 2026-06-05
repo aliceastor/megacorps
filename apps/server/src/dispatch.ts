@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { db } from './db/client.ts';
-import { agents, cardComments, companies, kanbanCards, taskLogs } from './db/schema.ts';
+import { agentRuntimes, agents, cardComments, companies, goals, kanbanCards, knowledgeDocs, projects, taskLogs } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
@@ -59,6 +59,23 @@ async function dependenciesMet(card: CardRow): Promise<boolean> {
 async function budgetOk(agent: AgentRow): Promise<boolean> {
   if (!agent.budgetMonthly) return true;
   return Number(agent.spentThisMonth ?? 0) < Number(agent.budgetMonthly);
+}
+
+async function buildExecutionAgent(agent: AgentRow) {
+  let runtimeConfig: Record<string, unknown> = {};
+  if (agent.runtimeId) {
+    const [runtime] = await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, agent.runtimeId)).limit(1);
+    if (runtime && runtime.isActive === false) throw new Error('agent_runtime_inactive');
+    runtimeConfig = (runtime?.config as Record<string, unknown> | null) ?? {};
+  }
+  return {
+    hermesProfile: agent.hermesProfile,
+    currentSessionId: agent.currentSessionId,
+    adapterConfig: {
+      ...runtimeConfig,
+      ...((agent.adapterConfig as Record<string, unknown> | null) ?? {}),
+    },
+  };
 }
 
 function matchScore(card: CardRow, agent: AgentRow): number {
@@ -162,7 +179,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
   try {
     const adapter = getAdapter(agent.adapterType ?? 'hermes');
     const result = await adapter.dispatch(
-      { hermesProfile: agent.hermesProfile, currentSessionId: agent.currentSessionId, adapterConfig: agent.adapterConfig as Record<string, unknown> | null },
+      await buildExecutionAgent(agent),
       { id: card.id, title: card.title, body: await buildTaskPrompt(card), timeoutSeconds: 300 },
     );
     const nextStatus = card.requiresApproval || card.reviewerId ? 'in_review' : 'done';
@@ -221,7 +238,7 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
   try {
     const adapter = getAdapter(reviewer.adapterType ?? 'hermes');
     const result = await adapter.dispatch(
-      { hermesProfile: reviewer.hermesProfile, currentSessionId: reviewer.currentSessionId, adapterConfig: reviewer.adapterConfig as Record<string, unknown> | null },
+      await buildExecutionAgent(reviewer),
       { id: card.id, title: `Review: ${card.title}`, body: buildReviewPrompt(card), timeoutSeconds: 180 },
     );
     const rejected = /\b(reject|rejected|fail|failed|blocked)\b/i.test(result.output);
@@ -328,12 +345,24 @@ export function startDispatchLoop(app: FastifyInstance): void {
 
 async function buildTaskPrompt(card: CardRow): Promise<string> {
   const comments = await db.select().from(cardComments).where(eq(cardComments.cardId, card.id)).orderBy(desc(cardComments.createdAt)).limit(20);
+  const [company] = await db.select().from(companies).where(eq(companies.id, card.companyId)).limit(1);
+  const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
+  const [goal] = card.goalId ? await db.select().from(goals).where(eq(goals.id, card.goalId)).limit(1) : [];
+  const docs = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.companyId, card.companyId)).orderBy(desc(knowledgeDocs.updatedAt)).limit(10);
+  const matchingDocs = docs.filter((doc) => {
+    const tags = doc.tags ?? [];
+    return tags.length === 0 || tags.some((tag) => (card.tags ?? []).includes(tag));
+  }).slice(0, 5);
   return [
+    company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
+    project ? `Project: ${project.name}\n${project.description ?? ''}` : '',
+    goal ? `Goal: ${goal.title}\n${goal.body ?? ''}` : '',
     `Card: ${card.title}`,
     `Status: ${card.columnStatus}`,
     `Priority: ${card.priority ?? 0}`,
     card.reviewFeedback ? `Previous review feedback:\n${card.reviewFeedback}` : '',
     comments.length ? `User comments and instructions:\n${comments.reverse().map((comment) => `- [${comment.action}] ${comment.body}`).join('\n')}` : '',
+    matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${doc.body}`).join('\n\n---\n\n')}` : '',
     'Task body:',
     card.body,
   ].filter(Boolean).join('\n\n');

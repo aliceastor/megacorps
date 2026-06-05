@@ -14,10 +14,10 @@ The current local stack runs with Docker:
 
 Latest verified baseline:
 
-- Phase 1-4 core flows are implemented.
-- Phase 5-6 foundation is partially implemented.
-- Company setup, department setup, O-chart, comments, task intervention, lifecycle logs, and automatic dispatch heartbeat are implemented.
-- Docker CI builds have passed for server and web.
+- Phase 1-7 operational MVP flows are implemented.
+- Company setup, department setup, O-chart, runtime presets, adapter endpoint configuration, comments, task intervention, lifecycle logs, knowledge docs, project/goal context, and automatic dispatch heartbeat are implemented.
+- Local Docker deploy is running on `http://localhost:3000` and `http://localhost:4000`.
+- Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 
 ## Paperclip Research Summary
 
@@ -128,6 +128,9 @@ Implemented:
 - Agent can belong to a department.
 - Agent can report to another agent through `bossId`.
 - Agents page groups the O-chart by department and reporting line.
+- Agent runtime presets are managed in `Settings -> Agent runtimes`.
+- Each agent can select a runtime preset in `Agents`.
+- Each agent can override adapter-specific fields without changing the shared runtime preset.
 
 Current O-chart meaning:
 
@@ -172,10 +175,35 @@ Implemented adapters:
 - `hermes`
 - `hermes-gateway`
 - `webhook`
+- `openclaw`
+
+Configuration model:
+
+- Global defaults can still come from `.env`.
+- Runtime presets live in `agent_runtimes`.
+- Agent-specific overrides live in `agents.adapter_config`.
+- Effective adapter config is `env fallback -> runtime preset -> agent override`.
+
+Where to configure:
+
+- `Settings -> Agent runtimes`: create/edit/delete reusable runtime presets.
+- `Agents -> select agent`: choose the runtime preset and set per-agent override fields.
+- `Agents -> Test`: test the selected adapter using the merged runtime and agent configuration.
+
+Runtime fields:
+
+- `mock`: no endpoint required.
+- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
+- `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `publicApiUrl`.
+- `webhook`: `webhookUrl`.
+- `openclaw`: `openclawUrl`.
 
 Current behavior:
 
 - `mock` completes local smoke tasks.
+- Hermes Portainer executes `hermes chat -q` through Portainer exec using runtime/agent configuration.
+- Hermes HTTP API calls the configured gateway URL.
+- Webhook and OpenClaw adapters post to their configured URLs.
 - Hermes adapter stores session id, cost, duration, and output.
 - Review loop can reject or approve based on reviewer output.
 
@@ -184,6 +212,7 @@ Gaps:
 - Long-running async worker sidecar is still future work.
 - Queue-based concurrency is not yet implemented.
 - Atomic DB execution locks are not yet implemented.
+- Secrets are stored as JSON config in the local MVP database; production should encrypt or externalize them.
 
 ### Logs and Audit Trail
 
@@ -224,24 +253,47 @@ Log health notes:
 
 ## Current Local Verification
 
-Recently verified:
+Verified on 2026-06-05:
 
 - `npm run typecheck`
 - `npm test`
 - `npm run build`
 - `docker compose up -d --build`
 - API health: `GET /health`
-- Web login page: `GET http://localhost:3000/login`
-- Signup validation error shape.
-- Company + department + agent creation.
-- Backlog task auto-assignment.
-- Mock agent auto-dispatch to done.
-- Comment-to-agent context log.
+- Authenticated API smoke:
+  - signup/session cookie
+  - runtime creation
+  - department creation
+  - agent creation with runtime
+  - project creation
+  - goal creation
+  - knowledge doc creation
+  - task creation with UUID/company/department/project/goal
+  - comment queued for agent
+  - manual mock dispatch
+  - task logs
+  - dashboard
+  - API lifecycle logs
+- Web route smoke:
+  - `/dashboard`
+  - `/kanban`
+  - `/agents`
+  - `/budget`
+  - `/logs`
+  - `/knowledge`
+  - `/workspaces`
+  - `/settings`
 - Docker compose server/web/postgres health.
 
 Known local warning:
 
 - On Windows, Next sometimes warns that the native SWC binary is not a valid Win32 application. The build falls back and exits successfully.
+
+Recent log review:
+
+- Last smoke run produced no 5xx server errors.
+- Recent 400 entries were validation/JSON errors from deliberately incorrect smoke payloads while verifying error logging.
+- Migration startup emits PostgreSQL `already exists, skipping` NOTICE messages because migrations are idempotent.
 
 ## Gap Analysis Against Paperclip
 
@@ -252,33 +304,37 @@ Implemented or partially implemented:
 - Kanban/ticket board.
 - Heartbeat dispatch.
 - Bring-your-own-agent adapter shape.
+- Runtime registry and adapter endpoint configuration.
 - Basic budgets on agents.
 - Pause/resume/fire governance.
 - Task comments and intervention.
 - Task and API logs.
 - Sub-task creation and parent cascade.
+- Company/project/goal ancestry in prompts.
+- Knowledge base CRUD and tag-based prompt injection.
+- Project/workspace/goal setup UI.
+- Dashboard, logs, budget, settings, knowledge, and workspace pages.
 
 Still missing:
 
 - Strong multi-company data isolation enforcement in every endpoint.
-- Company/project/goal ancestry in every prompt.
 - Atomic execution locks / no double-work guarantee.
 - Async worker sidecar for long-running Hermes jobs.
 - Queue and retries with BullMQ/Redis or equivalent.
-- Runtime health checks and agent runtime registry details.
+- Runtime health checks, last heartbeat, versions, and capabilities.
 - Immutable event bus separate from task/API logs.
 - Cost events and budget policy enforcement.
 - Approval queue UI.
-- Knowledge base CRUD and tag-based injection.
-- Project workspaces, git worktrees, branches, commits, and merge/review flow.
+- Project git worktrees, branches, commits, and merge/review flow.
 - Work products and attachments.
 - Company template import/export with secret scrubbing.
 - Plugin architecture.
-- Mobile-first/polished operations UI.
+- Secret encryption/external secret store for adapter credentials.
+- End-to-end browser test suite.
 
-## Recommended Next Phase
+## Recommended Production Hardening Phase
 
-Phase 7 should focus on the missing control-plane backbone rather than cosmetic UI:
+The Phase 1-7 operational MVP is usable locally. The next work should harden it for real unattended operation:
 
 1. Immutable event bus:
    - `events` table
@@ -293,8 +349,11 @@ Phase 7 should focus on the missing control-plane backbone rather than cosmetic 
    - prevent double dispatch
    - recover stale locks
 
-3. Goal/project context:
-   - inject company mission, project, goal, dependency summaries, comments, and previous work into prompts
+3. Runtime health:
+   - runtime status
+   - last heartbeat
+   - version/capabilities
+   - disable routing to offline runtimes
 
 4. Budget policies:
    - `cost_events`
@@ -302,11 +361,10 @@ Phase 7 should focus on the missing control-plane backbone rather than cosmetic 
    - 80% warning
    - 100% hard stop
 
-5. Agent runtime health:
-   - runtime status
-   - last heartbeat
-   - version/capabilities
-   - disable routing to offline runtimes
+5. Secret handling:
+   - encrypt runtime config secrets
+   - redact secret-like values in all API responses
+   - support external secret references
 
 6. Workspaces:
    - project workspace path
@@ -318,10 +376,11 @@ Phase 7 should focus on the missing control-plane backbone rather than cosmetic 
    - reviewer output
    - approve/reject with feedback
 
-8. Knowledge base:
-   - markdown docs
-   - tags
-   - auto-injection into prompts
+8. Browser QA:
+   - logged-in Playwright flows
+   - task drawer interaction tests
+   - settings/agent runtime form tests
+   - dark-mode contrast snapshots
 
 ## Operational Notes
 
@@ -352,6 +411,7 @@ Important tables:
 - `task_logs`
 - `api_events`
 - `agent_runtimes`
+- `knowledge_docs`
 
 ## Source Links
 
