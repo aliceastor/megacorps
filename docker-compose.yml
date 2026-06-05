@@ -18,7 +18,9 @@ services:
       - megacorps
 
   server:
-    image: ghcr.io/meaadore1221-afk/megacorps-server:latest
+    # Pushed by GitHub Actions in aliceastor/megacorps. If you re-target
+    # the meaadore1221-afk registry, update this image ref.
+    image: ghcr.io/aliceastor/megacorps-server:latest
     build:
       context: .
       dockerfile: Dockerfile.server
@@ -44,7 +46,7 @@ services:
       - megacorps
 
   web:
-    image: ghcr.io/meaadore1221-afk/megacorps-web:latest
+    image: ghcr.io/aliceastor/megacorps-web:latest
     build:
       context: .
       dockerfile: Dockerfile.web

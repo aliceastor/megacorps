@@ -1,6 +1,9 @@
 services:
   server:
-    image: ghcr.io/meaadore1221-afk/megacorps-server:latest
+    # Pushed by GitHub Actions in aliceastor/megacorps. To retarget to
+    # ghcr.io/meaadore1221-afk/*, see .github/workflows/docker.yml
+    # (env.GHCR_OWNER + GHCR_PUSH_TOKEN secret).
+    image: ghcr.io/aliceastor/megacorps-server:latest
     container_name: megacorps-server
     restart: unless-stopped
     environment:
@@ -22,7 +25,7 @@ services:
       - megacorps
 
   web:
-    image: ghcr.io/meaadore1221-afk/megacorps-web:latest
+    image: ghcr.io/aliceastor/megacorps-web:latest
     container_name: megacorps-web
     restart: unless-stopped
     depends_on:
