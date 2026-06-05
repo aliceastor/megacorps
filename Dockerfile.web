@@ -13,6 +13,7 @@ COPY packages/shared/package.json ./packages/shared/package.json
 RUN npm ci
 
 FROM deps AS builder
+ENV NODE_ENV=production
 ARG NEXT_PUBLIC_API_URL=http://localhost:3100
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 COPY apps/web ./apps/web
