@@ -125,12 +125,23 @@ Approval behavior:
 
 ### UI Update
 
+- Added a dedicated `Companies` sidebar page for company registry, company settings, department settings, reporting structure, and lifecycle closure.
 - Kanban columns are desktop grid / mobile single-column.
 - Task detail panel becomes a full-width mobile sheet.
 - Agent creation form uses responsive auto-fit tracks instead of a fixed 8-column grid.
 - Org chart nodes collapse to one column on narrow viewports.
 - Budget page now includes policy creation, pending approvals, and cost events.
 - Logs page now includes activity and heartbeat run streams.
+
+### Hierarchy Closure Update
+
+The O-chart hierarchy is controlled by `agents.boss_id`, not by fixed role names.
+
+- Member identity labels are free text.
+- Clicking a member opens its reports-to relation and direct reports.
+- Decomposition delegates sub-tasks to direct reports when available.
+- Completed subordinate work goes to the reporting manager for review by default.
+- This creates the desired loop: top-level member delegates downward, leaf members execute, middle members review/modify, and closure propagates upward through parent cards and approvals.
 
 > AI Agent 團隊編排與管理平台
 > 調度層 + 任務板 = MegaCorps Core

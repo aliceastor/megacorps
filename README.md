@@ -53,8 +53,9 @@ For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or
 ## Web UI pages
 
 - `Dashboard`: operating overview, stage counts, recent task logs, recent API lifecycle events.
+- `Companies`: company registry, company settings, department settings, reporting structure, and delegation closure.
 - `Kanban`: task UUIDs, stage, details, comments, sub-tasks, logs, run/review/decompose/delete.
-- `Agents`: O-chart, departments, agent CRUD, pause/resume/fire/reset, runtime and adapter configuration.
+- `Agents`: member hierarchy, agent CRUD, pause/resume/fire/reset, runtime and adapter configuration.
 - `Budget`: spend and budget visibility for agents and tasks.
 - `Logs`: full API lifecycle log with request, response, status, duration, and errors.
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
@@ -115,6 +116,9 @@ Phase 8/9 safety behavior:
 - Adapter `success:false` now goes through retry/block handling instead of silently marking work done.
 - Budget policies can hard-stop an agent when monthly or per-task limits are reached.
 - Tasks requiring approval create pending approval records and can be approved/rejected from the Budget page.
+- Member hierarchy is based on `bossId`: the identity label is free text, while the important control-plane relation is who a member reports to and who reports to them.
+- Decomposed sub-tasks are delegated to direct reports when the parent task is assigned to a member with subordinates.
+- Work completed by a subordinate moves to `in_review` for the reporting manager by default, creating a bottom-up review path back toward the top-level member.
 
 No pnpm. No Redis.
 

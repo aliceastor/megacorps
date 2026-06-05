@@ -26,6 +26,8 @@ type Agent = {
 type Company = { id: string; name: string; slug: string; mission?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean };
 type Department = { id: string; companyId: string; name: string; slug: string };
 type Runtime = { id: string; name: string; adapterType: string; config?: Record<string, unknown>; isActive?: boolean };
+type Card = { id: string; companyId?: string; title: string; columnStatus?: string; assigneeId?: string | null; reviewerId?: string | null; parentCardId?: string | null };
+type Approval = { id: string; companyId: string; cardId?: string | null; status: string; type: string };
 
 function adapterFields(adapterType?: string): Array<[string, string]> {
   if (adapterType === 'hermes') return [['portainerUrl', 'Portainer URL'], ['portainerUser', 'Portainer user'], ['portainerPass', 'Portainer password'], ['portainerEndpointId', 'Endpoint ID'], ['hermesContainer', 'Hermes container'], ['publicApiUrl', 'MegaCorps public API URL']];
@@ -43,11 +45,14 @@ function Toast({ message, type, onClose }: { message: string; type: 'success' | 
   </motion.div>;
 }
 
-export function OrgChart() {
+export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'agents' }) {
+  const isCompanySurface = surface === 'companies';
   const [agents, setAgents] = useState<Agent[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
+  const [cards, setCards] = useState<Card[]>([]);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
   const [companyId, setCompanyId] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [companyMission, setCompanyMission] = useState('');
@@ -60,7 +65,7 @@ export function OrgChart() {
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');
   const [profile, setProfile] = useState('local-debug');
-  const [role, setRole] = useState('worker');
+  const [role, setRole] = useState('member');
   const [bossId, setBossId] = useState('');
   const [departmentId, setDepartmentId] = useState('');
   const [runtimeId, setRuntimeId] = useState('');
@@ -73,11 +78,13 @@ export function OrgChart() {
   async function refresh() {
     setLoading(true);
     try {
-      const [rows, companyRows, departmentRows, runtimeRows] = await Promise.all([api<Agent[]>('/api/agents'), api<Company[]>('/api/companies'), api<Department[]>('/api/departments'), api<Runtime[]>('/api/agent-runtimes')]);
+      const [rows, companyRows, departmentRows, runtimeRows, cardRows, approvalRows] = await Promise.all([api<Agent[]>('/api/agents'), api<Company[]>('/api/companies'), api<Department[]>('/api/departments'), api<Runtime[]>('/api/agent-runtimes'), api<Card[]>('/api/cards'), api<Approval[]>('/api/approvals?status=pending&limit=200')]);
       setAgents(rows);
       setCompanies(companyRows);
       setDepartments(departmentRows);
       setRuntimes(runtimeRows);
+      setCards(cardRows);
+      setApprovals(approvalRows);
       const activeCompany = companyRows.find((company) => company.id === companyId) ?? companyRows[0];
       if (activeCompany) {
         setCompanyId(activeCompany.id);
@@ -124,7 +131,7 @@ export function OrgChart() {
     try {
       const agent = await api<Agent>('/api/agents', {
         method: 'POST',
-        body: JSON.stringify({ companyId: companyId || undefined, departmentId: departmentId || null, runtimeId: runtimeId || null, name: name.trim(), slug: slug.trim(), role, title: role === 'ceo' ? 'CEO Agent' : 'Hermes Agent', adapterType, hermesProfile: profile, bossId: bossId || null }),
+        body: JSON.stringify({ companyId: companyId || undefined, departmentId: departmentId || null, runtimeId: runtimeId || null, name: name.trim(), slug: slug.trim(), role: role.trim() || 'member', title: '', adapterType, hermesProfile: profile, bossId: bossId || null }),
       });
       setAgents([...agents, agent]);
       setName('');
@@ -132,6 +139,7 @@ export function OrgChart() {
       setBossId('');
       setDepartmentId('');
       setRuntimeId('');
+      setRole('member');
       setToast({ message: `Agent "${agent.name}" created`, type: 'success' });
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : 'Failed to create agent', type: 'error' });
@@ -158,6 +166,24 @@ export function OrgChart() {
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : 'Failed to save company', type: 'error' });
     }
+  }
+
+  function startNewCompany() {
+    setCompanyId('');
+    setCompanyName('');
+    setCompanyMission('');
+    setCompanyInterval(10);
+    setCompanyAutoDispatch(true);
+    setSelected(null);
+  }
+
+  function selectCompany(company: Company) {
+    setCompanyId(company.id);
+    setCompanyName(company.name);
+    setCompanyMission(company.mission ?? '');
+    setCompanyInterval(company.dispatchIntervalSeconds ?? 10);
+    setCompanyAutoDispatch(company.autoDispatchEnabled !== false);
+    setSelected(null);
   }
 
   async function createDepartment() {
@@ -205,7 +231,7 @@ export function OrgChart() {
       const payload = {
         name: String(agentDraft.name ?? selected.name),
         slug: String(agentDraft.slug ?? selected.slug),
-        role: String(agentDraft.role ?? selected.role),
+        role: String(agentDraft.role ?? selected.role).trim() || 'member',
         title: String(agentDraft.title ?? ''),
         adapterType: String(agentDraft.adapterType ?? selected.adapterType ?? 'mock'),
         adapterConfig: agentDraft.adapterConfig ?? {},
@@ -227,48 +253,91 @@ export function OrgChart() {
     }
   }
 
-  const companyDepartments = departments.filter((department) => !companyId || department.companyId === companyId);
-  const visibleAgents = agents.filter((agent) => !companyId || agent.companyId === companyId);
+  const companyDepartments = companyId ? departments.filter((department) => department.companyId === companyId) : [];
+  const visibleAgents = companyId ? agents.filter((agent) => agent.companyId === companyId) : [];
   const roots = visibleAgents.filter((agent) => !agent.bossId);
+  const companyCards = companyId ? cards.filter((card) => card.companyId === companyId) : [];
+  const middleAgents = visibleAgents.filter((agent) => visibleAgents.some((item) => item.bossId === agent.id) && Boolean(agent.bossId));
+  const leafAgents = visibleAgents.filter((agent) => !visibleAgents.some((item) => item.bossId === agent.id));
+  const reviewCards = companyCards.filter((card) => card.columnStatus === 'in_review');
+  const openCards = companyCards.filter((card) => !['done', 'blocked'].includes(card.columnStatus ?? 'backlog'));
+  const selectedManager = selected?.bossId ? visibleAgents.find((agent) => agent.id === selected.bossId) : null;
+  const selectedReports = selected ? visibleAgents.filter((agent) => agent.bossId === selected.id) : [];
+  const selectedAssignedCards = selected ? companyCards.filter((card) => card.assigneeId === selected.id) : [];
+  const selectedReviewCards = selected ? companyCards.filter((card) => card.reviewerId === selected.id || selectedReports.some((report) => report.id === card.assigneeId && card.columnStatus === 'in_review')) : [];
 
   return <>
+    <div className="page-head">
+      <div><h1>{isCompanySurface ? 'Companies' : 'Agents'}</h1><p>{isCompanySurface ? 'Company registry, departments, reporting structure, and delegation closure.' : 'Agent members, reporting lines, runtime configuration, and direct reports.'}</p></div>
+      {isCompanySurface && <button className="btn" onClick={startNewCompany}><Plus size={14} /> New Company</button>}
+    </div>
+
+    {isCompanySurface && <section className="card section-card" style={{ marginBottom: 16 }}>
+      <div className="panel-title"><h2>Company Registry</h2><span className="status-pill">{companies.length} companies</span></div>
+      <div className="table-list">
+        {companies.map((company) => <button className="list-row" key={company.id} style={{ textAlign: 'left', cursor: 'pointer', borderColor: company.id === companyId ? 'var(--primary)' : 'var(--border)' }} onClick={() => selectCompany(company)}>
+          <b>{company.name}</b><p>{company.slug} / {company.autoDispatchEnabled === false ? 'dispatch off' : `dispatch ${company.dispatchIntervalSeconds ?? 10}s`}</p>
+        </button>)}
+      </div>
+    </section>}
+
     <section className="card" style={{ padding: 16, display: 'grid', gap: 12, marginBottom: 16 }}>
       <div className="panel-title">
-        <div><h2>Company Setup</h2><span className="status-pill">auto-dispatch every {companyInterval}s</span></div>
-        <button className="btn btn-primary" onClick={saveCompany}>Save Company</button>
+        <div><h2>{isCompanySurface ? 'Company Settings' : 'Company Context'}</h2><span className="status-pill">{companyId ? `auto-dispatch every ${companyInterval}s` : 'new company'}</span></div>
+        {isCompanySurface && <button className="btn btn-primary" onClick={saveCompany}>Save Company</button>}
       </div>
       <div className="form-grid">
         <label className="field-label">Company
           <select className="input" value={companyId} onChange={(event) => {
             const next = companies.find((company) => company.id === event.target.value);
-            setCompanyId(event.target.value);
-            setCompanyName(next?.name ?? '');
-            setCompanyMission(next?.mission ?? '');
-            setCompanyInterval(next?.dispatchIntervalSeconds ?? 10);
-            setCompanyAutoDispatch(next?.autoDispatchEnabled !== false);
+            if (next) selectCompany(next);
+            else startNewCompany();
           }}>
+            <option value="">New company</option>
             {companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}
           </select>
         </label>
-        <label className="field-label">Company name<input className="input" value={companyName} onChange={(event) => setCompanyName(event.target.value)} /></label>
-        <label className="field-label">Dispatch interval seconds<input className="input" type="number" min={5} max={3600} value={companyInterval} onChange={(event) => setCompanyInterval(Number(event.target.value))} /></label>
-        <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={companyAutoDispatch} onChange={(event) => setCompanyAutoDispatch(event.target.checked)} /> Auto-dispatch backlog/todo</label>
+        {isCompanySurface && <label className="field-label">Company name<input className="input" value={companyName} onChange={(event) => setCompanyName(event.target.value)} /></label>}
+        {isCompanySurface && <label className="field-label">Dispatch interval seconds<input className="input" type="number" min={5} max={3600} value={companyInterval} onChange={(event) => setCompanyInterval(Number(event.target.value))} /></label>}
+        {isCompanySurface && <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={companyAutoDispatch} onChange={(event) => setCompanyAutoDispatch(event.target.checked)} /> Auto-dispatch backlog/todo</label>}
       </div>
-      <label className="field-label">Mission<textarea className="input" rows={3} value={companyMission} onChange={(event) => setCompanyMission(event.target.value)} /></label>
-      <div className="form-grid">
+      {isCompanySurface && <label className="field-label">Mission<textarea className="input" rows={3} value={companyMission} onChange={(event) => setCompanyMission(event.target.value)} /></label>}
+      {isCompanySurface && <div className="panel-title"><h2>Department Settings</h2><span className="status-pill">{companyDepartments.length} departments</span></div>}
+      {isCompanySurface && <div className="form-grid">
         <label className="field-label">New department<input className="input" value={deptName} onChange={(event) => setDeptName(event.target.value)} /></label>
         <label className="field-label">Department slug<input className="input" value={deptSlug} onChange={(event) => setDeptSlug(event.target.value)} /></label>
-      </div>
-      <button className="btn" onClick={createDepartment}><Plus size={14} /> Add Department</button>
+      </div>}
+      {isCompanySurface && <button className="btn" onClick={createDepartment}><Plus size={14} /> Add Department</button>}
+      {isCompanySurface && <div className="table-list">{companyDepartments.map((department) => <div className="list-row" key={department.id}><b>{department.name}</b><p>{department.slug}</p></div>)}</div>}
     </section>
+
+    {isCompanySurface && <section className="card section-card" style={{ marginBottom: 16 }}>
+      <div className="panel-title"><h2>Lifecycle Closure</h2><span className="status-pill">{openCards.length} open / {reviewCards.length} review</span></div>
+      <div className="stat-grid">
+        <section className="card stat-card"><span>Top members</span><b>{roots.length}</b></section>
+        <section className="card stat-card"><span>Middle layer</span><b>{middleAgents.length}</b></section>
+        <section className="card stat-card"><span>Leaf executors</span><b>{leafAgents.length}</b></section>
+        <section className="card stat-card"><span>Pending approvals</span><b>{approvals.filter((approval) => !companyId || approval.companyId === companyId).length}</b></section>
+      </div>
+      <div className="data-grid">
+        <section className="section-card" style={{ padding: 0 }}>
+          <h2>Top-down queue</h2>
+          <div className="table-list">{openCards.slice(0, 8).map((card) => <div className="list-row" key={card.id}><b>{card.title}</b><p>{card.columnStatus} / assigned {visibleAgents.find((agent) => agent.id === card.assigneeId)?.name ?? 'unassigned'}</p></div>)}</div>
+        </section>
+        <section className="section-card" style={{ padding: 0 }}>
+          <h2>Bottom-up review</h2>
+          <div className="table-list">{reviewCards.slice(0, 8).map((card) => <div className="list-row" key={card.id}><b>{card.title}</b><p>reviewer {visibleAgents.find((agent) => agent.id === card.reviewerId)?.name ?? 'manager / board'}</p></div>)}</div>
+        </section>
+      </div>
+    </section>}
 
     <div className="card agent-create-grid">
       <input className="input" placeholder="Agent Name" value={name} onChange={(e) => setName(e.target.value)} />
       <input className="input" placeholder="Slug" value={slug} onChange={(e) => setSlug(e.target.value)} />
       <input className="input" placeholder="Profile" value={profile} onChange={(e) => setProfile(e.target.value)} />
-      <select className="input" value={role} onChange={(e) => setRole(e.target.value)}><option value="worker">Worker</option><option value="reviewer">Reviewer</option><option value="ceo">CEO</option></select>
+      <input className="input" placeholder="Identity label" value={role} onChange={(e) => setRole(e.target.value)} />
       <select className="input" value={departmentId} onChange={(e) => setDepartmentId(e.target.value)}><option value="">Department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select>
-      <select className="input" value={bossId} onChange={(e) => setBossId(e.target.value)}><option value="">Boss</option>{visibleAgents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
+      <select className="input" value={bossId} onChange={(e) => setBossId(e.target.value)}><option value="">Reports to</option>{visibleAgents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
       <select className="input" value={adapterType} onChange={(e) => setAdapterType(e.target.value)}>
         <option value="mock">Mock</option>
         <option value="hermes">Hermes Portainer</option>
@@ -304,7 +373,9 @@ export function OrgChart() {
               <button className="btn" onClick={() => setSelected(null)}>Close</button>
             </div>
             <div className="meta-grid">
-              <span>Role <b>{selected.role}</b></span>
+              <span>Identity <b>{selected.role}</b></span>
+              <span>Reports to <b>{selectedManager?.name ?? 'top-level'}</b></span>
+              <span>Direct reports <b>{selectedReports.length}</b></span>
               <span>Adapter <b>{selected.adapterType ?? 'hermes'}</b></span>
               <span>Profile <b>{selected.hermesProfile ?? 'none'}</b></span>
               <span>Session <b>{selected.currentSessionId ?? 'none'}</b></span>
@@ -313,7 +384,7 @@ export function OrgChart() {
             <div className="form-grid">
               <label className="field-label">Name<input className="input" value={String(agentDraft?.name ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), name: e.target.value })} /></label>
               <label className="field-label">Slug<input className="input" value={String(agentDraft?.slug ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), slug: e.target.value })} /></label>
-              <label className="field-label">Role<select className="input" value={String(agentDraft?.role ?? 'worker')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), role: e.target.value })}><option value="worker">Worker</option><option value="reviewer">Reviewer</option><option value="ceo">CEO</option></select></label>
+              <label className="field-label">Identity label<input className="input" value={String(agentDraft?.role ?? 'member')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), role: e.target.value })} /></label>
               <label className="field-label">Title<input className="input" value={String(agentDraft?.title ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), title: e.target.value })} /></label>
               <label className="field-label">Profile<input className="input" value={String(agentDraft?.hermesProfile ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), hermesProfile: e.target.value })} /></label>
               <label className="field-label">Adapter<select className="input" value={String(agentDraft?.adapterType ?? 'mock')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), adapterType: e.target.value })}>
@@ -325,9 +396,23 @@ export function OrgChart() {
               </select></label>
               <label className="field-label">Runtime preset<select className="input" value={String(agentDraft?.runtimeId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), runtimeId: e.target.value || null })}><option value="">Use env / agent override</option>{runtimes.filter((runtime) => runtime.adapterType === String(agentDraft?.adapterType ?? selected.adapterType ?? 'mock')).map((runtime) => <option value={runtime.id} key={runtime.id}>{runtime.name}</option>)}</select></label>
               <label className="field-label">Department<select className="input" value={String(agentDraft?.departmentId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), departmentId: e.target.value || null })}><option value="">No department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
-              <label className="field-label">Boss<select className="input" value={String(agentDraft?.bossId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), bossId: e.target.value || null })}><option value="">No boss</option>{visibleAgents.filter((agent) => agent.id !== selected.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
+              <label className="field-label">Reports to<select className="input" value={String(agentDraft?.bossId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), bossId: e.target.value || null })}><option value="">Top-level member</option>{visibleAgents.filter((agent) => agent.id !== selected.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
               <label className="field-label">Monthly budget<input className="input" type="number" min={0} step="0.01" value={String(agentDraft?.budgetMonthly ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), budgetMonthly: e.target.value })} /></label>
               {adapterFields(String(agentDraft?.adapterType ?? selected.adapterType ?? 'mock')).map(([key, label]) => <label className="field-label" key={key}>Override {label}<input className="input" type={key.toLowerCase().includes('pass') || key.toLowerCase().includes('token') ? 'password' : 'text'} value={String((agentDraft?.adapterConfig as Record<string, unknown> | undefined)?.[key] ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), adapterConfig: { ...((agentDraft?.adapterConfig as Record<string, unknown> | undefined) ?? {}), [key]: e.target.value } })} /></label>)}
+            </div>
+            <div className="data-grid">
+              <section className="section-card" style={{ padding: 0 }}>
+                <h2>Direct reports</h2>
+                <div className="table-list">{selectedReports.length ? selectedReports.map((agent) => <button className="list-row" key={agent.id} style={{ textAlign: 'left' }} onClick={() => setSelected(agent)}><b>{agent.name}</b><p>{agent.role} / {agent.isActive === false ? 'offline' : agent.isBusy ? 'busy' : 'idle'}</p></button>) : <p style={{ color: 'var(--muted)' }}>No direct reports.</p>}</div>
+              </section>
+              <section className="section-card" style={{ padding: 0 }}>
+                <h2>Assigned work</h2>
+                <div className="table-list">{selectedAssignedCards.slice(0, 6).map((card) => <div className="list-row" key={card.id}><b>{card.title}</b><p>{card.columnStatus}</p></div>)}</div>
+              </section>
+              <section className="section-card" style={{ padding: 0 }}>
+                <h2>Review queue</h2>
+                <div className="table-list">{selectedReviewCards.slice(0, 6).map((card) => <div className="list-row" key={card.id}><b>{card.title}</b><p>{card.columnStatus}</p></div>)}</div>
+              </section>
             </div>
             <div className="action-row">
               <button className="btn btn-primary" disabled={testing === selected.id} onClick={saveAgent}><Save size={14} /> Save</button>

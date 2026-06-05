@@ -376,7 +376,8 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       throw new Error(result.output || 'adapter_reported_failure');
     }
-    const nextStatus = card.requiresApproval || card.reviewerId ? 'in_review' : 'done';
+    const effectiveReviewerId = card.reviewerId ?? agent.bossId ?? null;
+    const nextStatus = card.requiresApproval || effectiveReviewerId ? 'in_review' : 'done';
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
     const [updated] = await db.update(kanbanCards).set({
@@ -384,6 +385,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       executionLog: result.output,
       sessionId: result.sessionId,
       costUsd: result.costUsd.toString(),
+      reviewerId: effectiveReviewerId ?? card.reviewerId,
       retryCount: 0,
       nextRunAt: null,
       completedAt: nextStatus === 'done' ? new Date() : null,
@@ -408,7 +410,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     });
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, nextStatus, costUsd: result.costUsd, budgetPaused } });
     if (!updated) throw new Error('card_update_failed');
-    if (nextStatus === 'in_review') await createPendingApproval(updated, agent.id, card.reviewerId ? 'Reviewer agent configured' : 'Task requires approval');
+    if (nextStatus === 'in_review') await createPendingApproval(updated, agent.id, effectiveReviewerId ? 'Reports-to review required' : 'Task requires approval');
     if (nextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
     return updated;
   } catch (error) {
@@ -481,29 +483,36 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
 export async function decomposeCard(cardId: string): Promise<CardRow[]> {
   const [parent] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
   if (!parent) throw new Error('card_not_found');
+  const directReports = parent.assigneeId
+    ? await db.select().from(agents).where(and(eq(agents.bossId, parent.assigneeId), eq(agents.isActive, true)))
+    : [];
   const items = parent.body
     .split(/\r?\n/)
     .map((line) => line.replace(/^[-*#\d.\s]+/, '').trim())
     .filter((line) => line.length > 0)
     .slice(0, 8);
   const titles = items.length > 1 ? items : [`Plan ${parent.title}`, `Execute ${parent.title}`, `Review ${parent.title}`];
-  const rows = await db.insert(kanbanCards).values(titles.map((title) => ({
-    companyId: parent.companyId,
-    departmentId: parent.departmentId,
-    projectId: parent.projectId,
-    goalId: parent.goalId,
-    parentCardId: parent.id,
-    title,
-    body: `Sub-task for ${parent.title}\n\n${title}`,
-    columnStatus: 'todo',
-    priority: parent.priority,
-    tags: [...(parent.tags ?? []), 'subtask'],
-    assigneeId: parent.assigneeId,
-    reviewerId: parent.reviewerId,
-    requiresApproval: parent.requiresApproval,
-    createdBy: parent.createdBy,
-  }))).returning();
-  await addTaskLog({ cardId: parent.id, type: 'decomposition', status: 'success', message: `Created ${rows.length} sub-task(s).` });
+  const rows = await db.insert(kanbanCards).values(titles.map((title, index) => {
+    const delegate = directReports.length ? directReports[index % directReports.length] : null;
+    return {
+      companyId: parent.companyId,
+      departmentId: delegate?.departmentId ?? parent.departmentId,
+      projectId: parent.projectId,
+      goalId: parent.goalId,
+      parentCardId: parent.id,
+      title,
+      body: `Sub-task for ${parent.title}\n\n${title}`,
+      columnStatus: 'todo',
+      priority: parent.priority,
+      tags: [...(parent.tags ?? []), 'subtask'],
+      assigneeId: delegate?.id ?? parent.assigneeId,
+      reviewerId: delegate ? parent.assigneeId : parent.reviewerId,
+      requiresApproval: parent.requiresApproval || Boolean(delegate),
+      createdBy: parent.createdBy,
+    };
+  })).returning();
+  await addTaskLog({ cardId: parent.id, type: 'decomposition', status: 'success', message: directReports.length ? `Created ${rows.length} sub-task(s) and delegated them to direct reports.` : `Created ${rows.length} sub-task(s).` });
+  await addActivity({ companyId: parent.companyId, actorType: 'system', actorId: 'decomposition', agentId: parent.assigneeId, action: 'card.decomposed', entityType: 'card', entityId: parent.id, details: { childCount: rows.length, delegatedToReports: directReports.length > 0 } });
   return rows;
 }
 
@@ -580,6 +589,9 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
   const [company] = await db.select().from(companies).where(eq(companies.id, card.companyId)).limit(1);
   const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
   const [goal] = card.goalId ? await db.select().from(goals).where(eq(goals.id, card.goalId)).limit(1) : [];
+  const [assignee] = card.assigneeId ? await db.select().from(agents).where(eq(agents.id, card.assigneeId)).limit(1) : [];
+  const [manager] = assignee?.bossId ? await db.select().from(agents).where(eq(agents.id, assignee.bossId)).limit(1) : [];
+  const reports = assignee ? await db.select().from(agents).where(eq(agents.bossId, assignee.id)) : [];
   const docs = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.companyId, card.companyId)).orderBy(desc(knowledgeDocs.updatedAt)).limit(10);
   const matchingDocs = docs.filter((doc) => {
     const tags = doc.tags ?? [];
@@ -589,6 +601,12 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
     company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
     project ? `Project: ${project.name}\n${project.description ?? ''}` : '',
     goal ? `Goal: ${goal.title}\n${goal.body ?? ''}` : '',
+    assignee ? [
+      `Assigned member: ${assignee.name}`,
+      `Identity label: ${assignee.role}`,
+      `Reports to: ${manager?.name ?? 'top-level'}`,
+      `Direct reports: ${reports.length ? reports.map((report) => `${report.name} (${report.role})`).join(', ') : 'none'}`,
+    ].join('\n') : '',
     `Card: ${card.title}`,
     `Status: ${card.columnStatus}`,
     `Priority: ${card.priority ?? 0}`,

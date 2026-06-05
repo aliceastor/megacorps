@@ -15,7 +15,7 @@ The current local stack runs with Docker:
 Latest verified baseline:
 
 - Phase 1-9 operational MVP flows are implemented.
-- Company setup, department setup, O-chart, runtime presets, adapter endpoint configuration, comments, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, heartbeat runs, budget policies, approvals, and automatic dispatch heartbeat are implemented.
+- Company registry page, department setup, O-chart, runtime presets, adapter endpoint configuration, comments, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, heartbeat runs, budget policies, approvals, and automatic dispatch heartbeat are implemented.
 - Local Docker deploy is running on `http://localhost:3000` and `http://localhost:4000`.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 
@@ -117,7 +117,8 @@ Implemented:
 
 - Agent CRUD.
 - Agent pause/resume/fire/reset-session.
-- Company setup UI.
+- Dedicated `Companies` sidebar page.
+- Company registry and company setup UI.
 - Company fields:
   - name
   - slug
@@ -127,7 +128,9 @@ Implemented:
 - Department creation.
 - Agent can belong to a department.
 - Agent can report to another agent through `bossId`.
-- Agents page groups the O-chart by department and reporting line.
+- Companies/Agents pages group the O-chart by department and reporting line.
+- Member identity labels are free text; hierarchy is controlled by `bossId` and direct reports.
+- Clicking a member opens editing for identity label, department, reports-to relation, runtime, adapter, and budget.
 - Agent runtime presets are managed in `Settings -> Agent runtimes`.
 - Each agent can select a runtime preset in `Agents`.
 - Each agent can override adapter-specific fields without changing the shared runtime preset.
@@ -136,8 +139,16 @@ Current O-chart meaning:
 
 - `companyId`: company ownership boundary.
 - `departmentId`: functional grouping.
-- `bossId`: manager/reporting relationship.
-- `role/title`: agent job description.
+- `bossId`: manager/reporting relationship and review path.
+- `role/title`: free-text identity/function label only; it does not define the hierarchy.
+
+Hierarchy lifecycle:
+
+- Top-level members can hold broad tasks.
+- `Split into Sub-tasks` delegates child tasks to direct reports when they exist.
+- Child tasks review back to the parent member by default.
+- Subordinate work moves upward through `in_review`, approval records, and parent-card cascade.
+- Parent tasks close when all child tasks are completed, preserving a top-down delegation and bottom-up reporting loop.
 
 ### Automatic Dispatch Heartbeat
 
