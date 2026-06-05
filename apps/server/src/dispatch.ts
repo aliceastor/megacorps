@@ -1,11 +1,12 @@
 import { and, desc, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { db } from './db/client.ts';
-import { agentRuntimes, agents, cardComments, companies, goals, kanbanCards, knowledgeDocs, projects, taskLogs } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardComments, companies, costEvents, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
+type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
 type LogStatus = 'queued' | 'running' | 'success' | 'failed';
 
 const LOOP_INTERVAL_MS = Number(process.env.DISPATCH_LOOP_INTERVAL_MS ?? 10_000);
@@ -49,6 +50,28 @@ async function addStageLog(cardId: string, agentId: string | null, from: string 
   });
 }
 
+async function addActivity(input: {
+  companyId: string;
+  actorType?: 'agent' | 'user' | 'system';
+  actorId?: string;
+  agentId?: string | null;
+  action: string;
+  entityType: string;
+  entityId: string;
+  details?: Record<string, unknown>;
+}) {
+  await db.insert(activityLog).values({
+    companyId: input.companyId,
+    actorType: input.actorType ?? 'system',
+    actorId: input.actorId ?? input.agentId ?? 'system',
+    agentId: input.agentId ?? null,
+    action: input.action,
+    entityType: input.entityType,
+    entityId: input.entityId,
+    details: input.details ?? {},
+  });
+}
+
 async function dependenciesMet(card: CardRow): Promise<boolean> {
   const ids = card.dependencyCardIds ?? [];
   if (ids.length === 0) return true;
@@ -56,9 +79,29 @@ async function dependenciesMet(card: CardRow): Promise<boolean> {
   return rows.length === ids.length && rows.every((row) => row.columnStatus === 'done');
 }
 
+async function getBudgetGuard(agent: AgentRow): Promise<{ monthlyLimit: number | null; perTaskLimit: number | null; warnAtPercent: number; hardStop: boolean }> {
+  const rows = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, agent.companyId), eq(budgetPolicies.isActive, true)));
+  const applicable = rows.filter((policy) => !policy.agentId || policy.agentId === agent.id);
+  const monthlyLimits = [
+    agent.budgetMonthly ? Number(agent.budgetMonthly) : null,
+    ...applicable.map((policy) => policy.monthlyLimitUsd ? Number(policy.monthlyLimitUsd) : null),
+  ].filter((value): value is number => typeof value === 'number' && value > 0);
+  const perTaskLimits = [
+    agent.budgetPerTask ? Number(agent.budgetPerTask) : null,
+    ...applicable.map((policy) => policy.perTaskLimitUsd ? Number(policy.perTaskLimitUsd) : null),
+  ].filter((value): value is number => typeof value === 'number' && value > 0);
+  return {
+    monthlyLimit: monthlyLimits.length ? Math.min(...monthlyLimits) : null,
+    perTaskLimit: perTaskLimits.length ? Math.min(...perTaskLimits) : null,
+    warnAtPercent: Math.min(...applicable.map((policy) => policy.warnAtPercent ?? 80), 80),
+    hardStop: applicable.some((policy) => policy.hardStop !== false) || Boolean(agent.budgetMonthly || agent.budgetPerTask),
+  };
+}
+
 async function budgetOk(agent: AgentRow): Promise<boolean> {
-  if (!agent.budgetMonthly) return true;
-  return Number(agent.spentThisMonth ?? 0) < Number(agent.budgetMonthly);
+  const guard = await getBudgetGuard(agent);
+  if (!guard.monthlyLimit) return true;
+  return Number(agent.spentThisMonth ?? 0) < guard.monthlyLimit;
 }
 
 async function buildExecutionAgent(agent: AgentRow) {
@@ -119,6 +162,133 @@ async function ensureAssigned(card: CardRow, source: string): Promise<CardRow | 
   return updated ?? null;
 }
 
+async function openHeartbeatRun(card: CardRow, agent: AgentRow, source: string): Promise<HeartbeatRunRow> {
+  const [run] = await db.insert(heartbeatRuns).values({
+    companyId: card.companyId,
+    cardId: card.id,
+    agentId: agent.id,
+    source,
+    status: 'running',
+    startedAt: new Date(),
+  }).returning();
+  if (!run) throw new Error('heartbeat_run_create_failed');
+  return run;
+}
+
+async function acquireExecutionLock(card: CardRow, agent: AgentRow, run: HeartbeatRunRow, source: string): Promise<CardRow> {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
+  const [locked] = await db.update(kanbanCards).set({
+    executionLockId: run.id,
+    executionLockedByAgentId: agent.id,
+    executionLockedAt: now,
+    executionLockExpiresAt: expiresAt,
+    activeHeartbeatRunId: run.id,
+    columnStatus: 'in_progress',
+    startedAt: now,
+    lastError: null,
+    updatedAt: now,
+  }).where(and(
+    eq(kanbanCards.id, card.id),
+    drizzleSql`(${kanbanCards.executionLockId} IS NULL OR ${kanbanCards.executionLockExpiresAt} < now())`,
+  )).returning();
+  if (!locked) {
+    await db.update(heartbeatRuns).set({ status: 'cancelled', error: 'card_execution_locked', completedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+    throw new Error('card_execution_locked');
+  }
+  await db.update(heartbeatRuns).set({ lockAcquiredAt: now }).where(eq(heartbeatRuns.id, run.id));
+  await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'lock', status: 'running', message: `Execution lock acquired by ${agent.name} via ${source}.` });
+  await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: 'execution.lock_acquired', entityType: 'card', entityId: card.id, details: { runId: run.id, source, expiresAt } });
+  return locked;
+}
+
+async function releaseExecutionLock(cardId: string, runId: string | null, status: string, error?: string | null, costUsd?: number, durationSeconds?: number) {
+  await db.update(kanbanCards).set({
+    executionLockId: null,
+    executionLockedByAgentId: null,
+    executionLockedAt: null,
+    executionLockExpiresAt: null,
+    activeHeartbeatRunId: null,
+    updatedAt: new Date(),
+  }).where(eq(kanbanCards.id, cardId));
+  if (runId) {
+    await db.update(heartbeatRuns).set({
+      status,
+      completedAt: new Date(),
+      durationSeconds,
+      error: error ?? null,
+      costUsd: costUsd === undefined ? undefined : costUsd.toString(),
+    }).where(eq(heartbeatRuns.id, runId));
+  }
+}
+
+async function createPendingApproval(card: CardRow, agentId: string | null, reason: string) {
+  const existing = await db.select().from(approvals).where(and(eq(approvals.cardId, card.id), eq(approvals.status, 'pending'))).limit(1);
+  if (existing[0]) return existing[0];
+  const [approval] = await db.insert(approvals).values({
+    companyId: card.companyId,
+    cardId: card.id,
+    requestedByAgentId: agentId,
+    type: 'task_review',
+    status: 'pending',
+    payload: { reason, title: card.title, stage: card.columnStatus },
+  }).returning();
+  await addTaskLog({ cardId: card.id, agentId, type: 'approval', status: 'queued', message: `Approval requested: ${reason}.` });
+  await addActivity({ companyId: card.companyId, actorType: agentId ? 'agent' : 'system', actorId: agentId ?? 'system', agentId, action: 'approval.requested', entityType: 'card', entityId: card.id, details: { approvalId: approval?.id, reason } });
+  return approval;
+}
+
+async function resolvePendingApproval(card: CardRow, status: 'approved' | 'rejected' | 'revision_requested' | 'cancelled', note: string, agentId?: string | null) {
+  const [approval] = await db.select().from(approvals).where(and(eq(approvals.cardId, card.id), eq(approvals.status, 'pending'))).orderBy(desc(approvals.createdAt)).limit(1);
+  if (!approval) return;
+  await db.update(approvals).set({ status, decisionNote: note, decidedAt: new Date(), updatedAt: new Date() }).where(eq(approvals.id, approval.id));
+  await addActivity({ companyId: card.companyId, actorType: agentId ? 'agent' : 'system', actorId: agentId ?? 'system', agentId, action: `approval.${status}`, entityType: 'approval', entityId: approval.id, details: { cardId: card.id, note } });
+}
+
+async function recordCostAndEnforceBudget(card: CardRow, agent: AgentRow, runId: string | null, costUsd: number, tokensUsed: number, durationSeconds?: number): Promise<boolean> {
+  await db.insert(costEvents).values({
+    companyId: card.companyId,
+    agentId: agent.id,
+    cardId: card.id,
+    projectId: card.projectId,
+    goalId: card.goalId,
+    provider: agent.adapterType ?? 'unknown',
+    model: agent.hermesProfile ?? 'unknown',
+    outputTokens: tokensUsed,
+    costUsd: costUsd.toString(),
+  });
+  const guard = await getBudgetGuard(agent);
+  const newSpend = Number(agent.spentThisMonth ?? 0) + costUsd;
+  const monthlyExceeded = guard.monthlyLimit !== null && newSpend >= guard.monthlyLimit;
+  const taskExceeded = guard.perTaskLimit !== null && costUsd > guard.perTaskLimit;
+  const warning = guard.monthlyLimit !== null && newSpend >= guard.monthlyLimit * (guard.warnAtPercent / 100);
+  const shouldPause = guard.hardStop && (monthlyExceeded || taskExceeded);
+  await db.update(agents).set({
+    spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${costUsd}`,
+    isBusy: false,
+    isActive: shouldPause ? false : undefined,
+  }).where(eq(agents.id, agent.id));
+  if (runId) await db.update(heartbeatRuns).set({ costUsd: costUsd.toString(), outputTokens: tokensUsed, durationSeconds }).where(eq(heartbeatRuns.id, runId));
+  if (warning || shouldPause) {
+    const message = shouldPause
+      ? `Budget hard stop reached; ${agent.name} paused.`
+      : `Budget warning: ${agent.name} reached ${guard.warnAtPercent}% of monthly budget.`;
+    await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'budget', status: shouldPause ? 'failed' : 'queued', message, costUsd });
+    await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'budget', agentId: agent.id, action: shouldPause ? 'budget.hard_stop' : 'budget.warning', entityType: 'agent', entityId: agent.id, details: { cardId: card.id, costUsd, newSpend, monthlyLimit: guard.monthlyLimit, perTaskLimit: guard.perTaskLimit, monthlyExceeded, taskExceeded } });
+    if (shouldPause) {
+      await db.insert(approvals).values({
+        companyId: card.companyId,
+        cardId: card.id,
+        requestedByAgentId: agent.id,
+        type: 'budget_override_required',
+        status: 'pending',
+        payload: { costUsd, newSpend, monthlyLimit: guard.monthlyLimit, perTaskLimit: guard.perTaskLimit, monthlyExceeded, taskExceeded },
+      });
+    }
+  }
+  return shouldPause;
+}
+
 export async function cascadeParentStatus(parentCardId: string | null): Promise<void> {
   if (!parentCardId) return;
   const children = await db.select().from(kanbanCards).where(eq(kanbanCards.parentCardId, parentCardId));
@@ -129,7 +299,7 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
   await addTaskLog({ cardId: parentCardId, type: 'cascade', status: 'success', message: 'All sub-tasks completed; parent card marked done.' });
 }
 
-async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unknown): Promise<CardRow> {
+async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unknown, runId?: string | null): Promise<CardRow> {
   const retryCount = (card.retryCount ?? 0) + 1;
   const maxRetries = card.maxRetries ?? 3;
   const message = error instanceof Error ? error.message : 'dispatch_failed';
@@ -139,9 +309,15 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
     retryCount,
     nextRunAt: blocked ? null : nextBackoff(retryCount),
     lastError: message,
+    executionLockId: null,
+    executionLockedByAgentId: null,
+    executionLockedAt: null,
+    executionLockExpiresAt: null,
+    activeHeartbeatRunId: null,
     updatedAt: new Date(),
   }).where(eq(kanbanCards.id, card.id)).returning();
   await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
+  await releaseExecutionLock(card.id, runId ?? card.activeHeartbeatRunId ?? null, 'failed', message);
   await addStageLog(card.id, agent.id, card.columnStatus, blocked ? 'blocked' : 'todo', 'retry');
   await addTaskLog({
     cardId: card.id,
@@ -151,6 +327,7 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
     message: blocked ? `Dispatch failed after ${retryCount} attempt(s); card blocked.` : `Dispatch failed; retry ${retryCount}/${maxRetries} scheduled.`,
     output: message,
   });
+  await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: blocked ? 'dispatch.blocked' : 'dispatch.retry_scheduled', entityType: 'card', entityId: card.id, details: { retryCount, maxRetries, error: message } });
   if (!updated) throw new Error('card_update_failed');
   return updated;
 }
@@ -168,13 +345,26 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
   if (!agent) throw new Error('agent_not_found');
   if (!agent.isActive) throw new Error('agent_paused');
   if (agent.isBusy) throw new Error('agent_busy');
-  if (!(await budgetOk(agent))) throw new Error('agent_budget_exceeded');
+  if (!(await budgetOk(agent))) {
+    await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, agent.id));
+    await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'budget', status: 'failed', message: `Agent ${agent.name} is over budget and was paused before dispatch.` });
+    await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'budget', agentId: agent.id, action: 'budget.preflight_hard_stop', entityType: 'agent', entityId: agent.id, details: { cardId: card.id } });
+    throw new Error('agent_budget_exceeded');
+  }
   if (!(await dependenciesMet(card))) throw new Error('card_dependencies_not_met');
 
-  await db.update(agents).set({ isBusy: true }).where(eq(agents.id, agent.id));
-  await db.update(kanbanCards).set({ columnStatus: 'in_progress', startedAt: new Date(), lastError: null, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
-  if (card.columnStatus !== 'in_progress') await addStageLog(card.id, agent.id, card.columnStatus, 'in_progress', source);
-  await addTaskLog({ cardId: card.id, agentId: agent.id, type: source, status: 'running', message: `Dispatch started via ${source}.` });
+  const [busyAgent] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, agent.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
+  if (!busyAgent) throw new Error('agent_busy');
+  const run = await openHeartbeatRun(card, agent, source);
+  let lockedCard = card;
+  try {
+    lockedCard = await acquireExecutionLock(card, agent, run, source);
+    if (card.columnStatus !== 'in_progress') await addStageLog(card.id, agent.id, card.columnStatus, 'in_progress', source);
+    await addTaskLog({ cardId: card.id, agentId: agent.id, type: source, status: 'running', message: `Dispatch started via ${source}.` });
+  } catch (error) {
+    await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
+    throw error;
+  }
 
   try {
     const adapter = getAdapter(agent.adapterType ?? 'hermes');
@@ -182,12 +372,13 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await buildExecutionAgent(agent),
       { id: card.id, title: card.title, body: await buildTaskPrompt(card), timeoutSeconds: 300 },
     );
+    if (!result.success) {
+      await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+      throw new Error(result.output || 'adapter_reported_failure');
+    }
     const nextStatus = card.requiresApproval || card.reviewerId ? 'in_review' : 'done';
-    await db.update(agents).set({
-      currentSessionId: result.sessionId,
-      spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${result.costUsd}`,
-      isBusy: false,
-    }).where(eq(agents.id, agent.id));
+    const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+    await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
     const [updated] = await db.update(kanbanCards).set({
       columnStatus: nextStatus,
       executionLog: result.output,
@@ -196,8 +387,14 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       retryCount: 0,
       nextRunAt: null,
       completedAt: nextStatus === 'done' ? new Date() : null,
+      executionLockId: null,
+      executionLockedByAgentId: null,
+      executionLockedAt: null,
+      executionLockExpiresAt: null,
+      activeHeartbeatRunId: null,
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, card.id)).returning();
+    await releaseExecutionLock(card.id, run.id, result.success ? 'success' : 'failed', result.success ? null : result.output, result.costUsd, result.durationSeconds);
     await addStageLog(card.id, agent.id, 'in_progress', nextStatus, 'dispatch');
     await addTaskLog({
       cardId: card.id,
@@ -209,11 +406,13 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
     });
+    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, nextStatus, costUsd: result.costUsd, budgetPaused } });
     if (!updated) throw new Error('card_update_failed');
+    if (nextStatus === 'in_review') await createPendingApproval(updated, agent.id, card.reviewerId ? 'Reviewer agent configured' : 'Task requires approval');
     if (nextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
     return updated;
   } catch (error) {
-    return handleDispatchFailure(card, agent, error);
+    return handleDispatchFailure(lockedCard, agent, error, run.id);
   }
 }
 
@@ -224,6 +423,7 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
     const [updated] = await db.update(kanbanCards).set({ columnStatus: 'done', completedAt: new Date(), updatedAt: new Date() }).where(eq(kanbanCards.id, card.id)).returning();
     if (card.columnStatus !== 'done') await addStageLog(card.id, null, card.columnStatus, 'done', 'review');
     await addTaskLog({ cardId: card.id, type: 'review', status: 'success', message: 'No reviewer configured; card approved automatically.' });
+    await resolvePendingApproval(card, 'approved', 'No reviewer configured; approved automatically.');
     if (!updated) throw new Error('card_update_failed');
     await cascadeParentStatus(updated.parentCardId);
     return updated;
@@ -233,7 +433,9 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
   if (!reviewer) throw new Error('reviewer_not_found');
   if (reviewer.isBusy) throw new Error('reviewer_busy');
 
-  await db.update(agents).set({ isBusy: true }).where(eq(agents.id, reviewer.id));
+  const [busyReviewer] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, reviewer.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
+  if (!busyReviewer) throw new Error('reviewer_busy');
+  const run = await openHeartbeatRun(card, reviewer, 'review');
   await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'running', message: 'Review started.' });
   try {
     const adapter = getAdapter(reviewer.adapterType ?? 'hermes');
@@ -241,6 +443,8 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
       await buildExecutionAgent(reviewer),
       { id: card.id, title: `Review: ${card.title}`, body: buildReviewPrompt(card), timeoutSeconds: 180 },
     );
+    await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+    if (!result.success) throw new Error(result.output || 'review_adapter_reported_failure');
     const rejected = /\b(reject|rejected|fail|failed|blocked)\b/i.test(result.output);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
     const [updated] = await db.update(kanbanCards).set({
@@ -260,11 +464,15 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
     });
+    await db.update(heartbeatRuns).set({ status: result.success ? 'success' : 'failed', completedAt: new Date(), durationSeconds: result.durationSeconds, error: result.success ? null : result.output }).where(eq(heartbeatRuns.id, run.id));
+    await resolvePendingApproval(card, rejected ? 'rejected' : 'approved', rejected ? result.output : 'Reviewer approved task.', reviewer.id);
+    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: rejected ? 'review.rejected' : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd } });
     if (!updated) throw new Error('card_update_failed');
     if (!rejected) await cascadeParentStatus(updated.parentCardId);
     return updated;
   } catch (error) {
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
+    await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: error instanceof Error ? error.message : 'review_failed' }).where(eq(heartbeatRuns.id, run.id));
     await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'failed', message: error instanceof Error ? error.message : 'review_failed' });
     throw error;
   }
@@ -303,6 +511,29 @@ export async function getTaskLogs(cardId: string) {
   return db.select().from(taskLogs).where(eq(taskLogs.cardId, cardId)).orderBy(desc(taskLogs.createdAt));
 }
 
+async function recoverStaleExecutionLocks(app: FastifyInstance) {
+  const stale = await db.select().from(kanbanCards).where(drizzleSql`${kanbanCards.executionLockExpiresAt} IS NOT NULL AND ${kanbanCards.executionLockExpiresAt} < now()`);
+  for (const card of stale) {
+    const agentId = card.executionLockedByAgentId;
+    await db.update(kanbanCards).set({
+      columnStatus: card.columnStatus === 'in_progress' ? 'todo' : card.columnStatus,
+      executionLockId: null,
+      executionLockedByAgentId: null,
+      executionLockedAt: null,
+      executionLockExpiresAt: null,
+      activeHeartbeatRunId: null,
+      lastError: 'Recovered stale execution lock.',
+      updatedAt: new Date(),
+    }).where(eq(kanbanCards.id, card.id));
+    if (agentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agentId));
+    if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'failed', error: 'stale_execution_lock_recovered', completedAt: new Date() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
+    await addTaskLog({ cardId: card.id, agentId, type: 'recovery', status: 'failed', message: 'Stale execution lock recovered; task returned to todo.' });
+    await addStageLog(card.id, agentId ?? null, card.columnStatus, card.columnStatus === 'in_progress' ? 'todo' : card.columnStatus ?? 'todo', 'stale-lock-recovery');
+    await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'recovery', agentId, action: 'execution.stale_lock_recovered', entityType: 'card', entityId: card.id, details: { runId: card.activeHeartbeatRunId } });
+    app.log.warn({ cardId: card.id, agentId }, 'stale execution lock recovered');
+  }
+}
+
 export function startDispatchLoop(app: FastifyInstance): void {
   if (process.env.DISPATCH_LOOP_ENABLED === 'false') return;
   const tick = async () => {
@@ -310,6 +541,7 @@ export function startDispatchLoop(app: FastifyInstance): void {
     loopRunning = true;
     try {
       const now = new Date();
+      await recoverStaleExecutionLocks(app);
       const companyRows = await db.select().from(companies);
       const nowMs = Date.now();
       const activeCompanyIds = companyRows.filter((company) => {

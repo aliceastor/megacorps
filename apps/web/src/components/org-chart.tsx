@@ -262,7 +262,7 @@ export function OrgChart() {
       <button className="btn" onClick={createDepartment}><Plus size={14} /> Add Department</button>
     </section>
 
-    <div className="card" style={{ padding: 16, display: 'grid', gridTemplateColumns: 'repeat(8, minmax(110px, 1fr)) auto', gap: 8, marginBottom: 16, alignItems: 'center', overflowX: 'auto' }}>
+    <div className="card agent-create-grid">
       <input className="input" placeholder="Agent Name" value={name} onChange={(e) => setName(e.target.value)} />
       <input className="input" placeholder="Slug" value={slug} onChange={(e) => setSlug(e.target.value)} />
       <input className="input" placeholder="Profile" value={profile} onChange={(e) => setProfile(e.target.value)} />
@@ -285,14 +285,14 @@ export function OrgChart() {
         <div style={{ display: 'grid', gap: 14 }}>
           {companyDepartments.map((department) => <section key={department.id} className="card" style={{ padding: 14 }}>
             <h3 style={{ margin: '0 0 12px' }}>{department.name}</h3>
-            <div style={{ display: 'flex', gap: 18, alignItems: 'start', flexWrap: 'wrap' }}>
+            <div className="org-node-list">
               <AnimatePresence>
                 {(roots.filter((agent) => agent.departmentId === department.id).length ? roots.filter((agent) => agent.departmentId === department.id) : visibleAgents.filter((agent) => agent.departmentId === department.id)).map((agent) => <AgentNode key={agent.id} agent={agent} agents={visibleAgents} selectedId={selected?.id} onSelect={setSelected} />)}
               </AnimatePresence>
             </div>
           </section>)}
         </div>
-        <div style={{ display: 'flex', gap: 18, alignItems: 'start', flexWrap: 'wrap' }}>
+        <div className="org-node-list">
           <AnimatePresence>
             {(roots.filter((agent) => !agent.departmentId).length ? roots.filter((agent) => !agent.departmentId) : visibleAgents.filter((agent) => !agent.departmentId)).map((agent) => <AgentNode key={agent.id} agent={agent} agents={visibleAgents} selectedId={selected?.id} onSelect={setSelected} />)}
           </AnimatePresence>
@@ -348,7 +348,7 @@ export function OrgChart() {
 function AgentNode({ agent, agents, selectedId, onSelect }: { agent: Agent; agents: Agent[]; selectedId?: string; onSelect: (agent: Agent) => void }) {
   const children = agents.filter((item) => item.bossId === agent.id);
   return <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95 }} style={{ display: 'grid', gap: 10 }}>
-    <button className="card" onClick={() => onSelect(agent)} style={{ padding: 14, minWidth: 250, textAlign: 'left', borderColor: selectedId === agent.id ? 'var(--primary)' : 'var(--border)', cursor: 'pointer' }}>
+    <button className="card agent-node-card" onClick={() => onSelect(agent)} style={{ borderColor: selectedId === agent.id ? 'var(--primary)' : 'var(--border)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
         <span style={{ width: 10, height: 10, borderRadius: 99, background: agent.isBusy ? '#16a34a' : agent.isActive ? '#3b82f6' : '#94a3b8' }} />
         <b>{agent.name}</b>
@@ -359,7 +359,7 @@ function AgentNode({ agent, agents, selectedId, onSelect }: { agent: Agent; agen
         <span>{agent.hermesProfile ?? 'no-profile'}</span>
       </div>
     </button>
-    {children.length > 0 && <div style={{ marginLeft: 28, paddingLeft: 16, borderLeft: '1px solid var(--border)', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+    {children.length > 0 && <div className="agent-children" style={{ marginLeft: 28, paddingLeft: 16, borderLeft: '1px solid var(--border)', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
       {children.map((child) => <AgentNode key={child.id} agent={child} agents={agents} selectedId={selectedId} onSelect={onSelect} />)}
     </div>}
   </motion.div>;

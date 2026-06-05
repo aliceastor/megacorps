@@ -1,4 +1,4 @@
-# MegaCorps Phase 1-7 Control Plane MVP
+# MegaCorps Phase 1-9 Control Plane MVP
 
 Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm workspaces.
 
@@ -65,6 +65,8 @@ For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or
 - Phase 5: governance basics, agent pause/resume/fire, monthly budgets, API lifecycle logs.
 - Phase 6: card comments, send-comment-to-agent context, stop-agent/comment/continue-run flow, company and department setup.
 - Phase 7: runtime registry, adapter endpoint configuration, project/goal context, knowledge docs, workspace page, settings page, dashboard/log/budget views.
+- Phase 8: execution locks, heartbeat run records, stale-lock recovery, safer adapter failure handling.
+- Phase 9: activity log, cost events, budget policies, budget hard stops, pending approvals and approval decisions.
 
 ## Paperclip-inspired loop
 
@@ -97,6 +99,17 @@ MegaCorps stores two complementary log streams:
 
 - `task_logs`: stage changes, dispatch/review/decomposition/comment events, agent output.
 - `api_events`: full API lifecycle with method, path, status, request, response, error, duration, and user id. Sensitive fields such as password/token/secret/jwt are redacted.
+- `activity_log`: product-level audit events for cards, agents, approvals, budget policies, locks, recovery, and webhook completions.
+- `heartbeat_runs`: every dispatch/review run with source, status, lock, cost, duration, and error.
+- `cost_events`: immutable cost records by company, agent, task, project, goal, provider, and model.
+
+Phase 8/9 safety behavior:
+
+- A task must acquire an execution lock before an adapter run starts.
+- Expired locks are recovered by the dispatch loop and returned to `todo`.
+- Adapter `success:false` now goes through retry/block handling instead of silently marking work done.
+- Budget policies can hard-stop an agent when monthly or per-task limits are reached.
+- Tasks requiring approval create pending approval records and can be approved/rejected from the Budget page.
 
 No pnpm. No Redis.
 

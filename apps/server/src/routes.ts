@@ -1,10 +1,10 @@
 import bcrypt from 'bcryptjs';
 import { and, desc, eq, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { createAgentRuntimeSchema, createAgentSchema, createCardCommentSchema, createCardSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, signupSchema, updateCardSchema } from '@megacorps/shared';
+import { approvalDecisionSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, signupSchema, updateCardSchema } from '@megacorps/shared';
 import { signSession, requireAuth } from './auth.ts';
 import { db } from './db/client.ts';
-import { agentRuntimes, agents, apiEvents, cardComments, companies, departments, goals, kanbanCards, knowledgeDocs, projects, taskLogs, users } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, apiEvents, approvals, budgetPolicies, cardComments, companies, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, users } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { cascadeParentStatus, decomposeCard, dispatchCard, getTaskLogs, reviewCard } from './dispatch.ts';
 
@@ -47,14 +47,134 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const limit = Math.min(Math.max(Number(query.limit ?? 100), 1), 500);
     return db.select().from(apiEvents).orderBy(desc(apiEvents.createdAt)).limit(limit);
   });
+  app.get('/api/activity', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const query = request.query as { companyId?: string; entityType?: string; limit?: string };
+    const filters = [
+      query.companyId ? eq(activityLog.companyId, query.companyId) : undefined,
+      query.entityType ? eq(activityLog.entityType, query.entityType) : undefined,
+    ].filter(Boolean);
+    return db.select().from(activityLog).where(filters.length ? and(...filters) : undefined).orderBy(desc(activityLog.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+  });
+  app.get('/api/heartbeat-runs', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const query = request.query as { companyId?: string; cardId?: string; agentId?: string; status?: string; limit?: string };
+    const filters = [
+      query.companyId ? eq(heartbeatRuns.companyId, query.companyId) : undefined,
+      query.cardId ? eq(heartbeatRuns.cardId, query.cardId) : undefined,
+      query.agentId ? eq(heartbeatRuns.agentId, query.agentId) : undefined,
+      query.status ? eq(heartbeatRuns.status, query.status) : undefined,
+    ].filter(Boolean);
+    return db.select().from(heartbeatRuns).where(filters.length ? and(...filters) : undefined).orderBy(desc(heartbeatRuns.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+  });
+  app.get('/api/cost-events', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const query = request.query as { companyId?: string; agentId?: string; cardId?: string; limit?: string };
+    const filters = [
+      query.companyId ? eq(costEvents.companyId, query.companyId) : undefined,
+      query.agentId ? eq(costEvents.agentId, query.agentId) : undefined,
+      query.cardId ? eq(costEvents.cardId, query.cardId) : undefined,
+    ].filter(Boolean);
+    return db.select().from(costEvents).where(filters.length ? and(...filters) : undefined).orderBy(desc(costEvents.occurredAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+  });
+  app.get('/api/approvals', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const query = request.query as { companyId?: string; status?: string; cardId?: string; limit?: string };
+    const filters = [
+      query.companyId ? eq(approvals.companyId, query.companyId) : undefined,
+      query.status ? eq(approvals.status, query.status) : undefined,
+      query.cardId ? eq(approvals.cardId, query.cardId) : undefined,
+    ].filter(Boolean);
+    return db.select().from(approvals).where(filters.length ? and(...filters) : undefined).orderBy(desc(approvals.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+  });
+  app.put('/api/approvals/:id', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const id = (request.params as { id: string }).id;
+    const input = approvalDecisionSchema.parse(request.body);
+    const [approval] = await db.select().from(approvals).where(eq(approvals.id, id)).limit(1);
+    if (!approval) return reply.code(404).send({ error: 'approval_not_found' });
+    const [updatedApproval] = await db.update(approvals).set({
+      status: input.status,
+      decisionNote: input.decisionNote ?? null,
+      decidedByUserId: user.id,
+      decidedAt: new Date(),
+      updatedAt: new Date(),
+    }).where(eq(approvals.id, id)).returning();
+    if (approval.cardId) {
+      const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, approval.cardId)).limit(1);
+      if (card && input.status !== 'cancelled') {
+        const nextStatus = input.status === 'approved' ? 'done' : 'todo';
+        await db.update(kanbanCards).set({ columnStatus: nextStatus, completedAt: nextStatus === 'done' ? new Date() : null, reviewFeedback: input.decisionNote ?? card.reviewFeedback, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
+        await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'approval', status: input.status === 'approved' ? 'success' : 'failed', message: `Approval ${input.status} by ${actorLabel(user)}.`, output: input.decisionNote });
+        await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'backlog'} to ${nextStatus} by approval.` });
+      }
+    }
+    await db.insert(activityLog).values({ companyId: approval.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: `approval.${input.status}`, entityType: 'approval', entityId: approval.id, details: { cardId: approval.cardId, note: input.decisionNote } });
+    return updatedApproval;
+  });
+  app.get('/api/budget-policies', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const query = request.query as { companyId?: string; agentId?: string };
+    const filters = [
+      query.companyId ? eq(budgetPolicies.companyId, query.companyId) : undefined,
+      query.agentId ? eq(budgetPolicies.agentId, query.agentId) : undefined,
+    ].filter(Boolean);
+    return db.select().from(budgetPolicies).where(filters.length ? and(...filters) : undefined).orderBy(desc(budgetPolicies.createdAt));
+  });
+  app.post('/api/budget-policies', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const input = createBudgetPolicySchema.parse(request.body);
+    const [policy] = await db.insert(budgetPolicies).values({
+      companyId: input.companyId,
+      agentId: input.agentId ?? null,
+      name: input.name,
+      monthlyLimitUsd: input.monthlyLimitUsd?.toString() ?? null,
+      perTaskLimitUsd: input.perTaskLimitUsd?.toString() ?? null,
+      warnAtPercent: input.warnAtPercent,
+      hardStop: input.hardStop,
+      isActive: input.isActive,
+    }).returning();
+    if (policy) await db.insert(activityLog).values({ companyId: policy.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'budget_policy.created', entityType: 'budget_policy', entityId: policy.id, details: { name: policy.name } });
+    return reply.code(201).send(policy);
+  });
+  app.put('/api/budget-policies/:id', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const id = (request.params as { id: string }).id;
+    const input = createBudgetPolicySchema.partial().parse(request.body);
+    const [policy] = await db.update(budgetPolicies).set({
+      companyId: input.companyId,
+      agentId: input.agentId,
+      name: input.name,
+      monthlyLimitUsd: input.monthlyLimitUsd === undefined ? undefined : input.monthlyLimitUsd?.toString() ?? null,
+      perTaskLimitUsd: input.perTaskLimitUsd === undefined ? undefined : input.perTaskLimitUsd?.toString() ?? null,
+      warnAtPercent: input.warnAtPercent,
+      hardStop: input.hardStop,
+      isActive: input.isActive,
+      updatedAt: new Date(),
+    }).where(eq(budgetPolicies.id, id)).returning();
+    if (!policy) return reply.code(404).send({ error: 'budget_policy_not_found' });
+    await db.insert(activityLog).values({ companyId: policy.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'budget_policy.updated', entityType: 'budget_policy', entityId: policy.id, details: { name: policy.name } });
+    return policy;
+  });
+  app.delete('/api/budget-policies/:id', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const id = (request.params as { id: string }).id;
+    const [policy] = await db.delete(budgetPolicies).where(eq(budgetPolicies.id, id)).returning();
+    if (policy) await db.insert(activityLog).values({ companyId: policy.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'budget_policy.deleted', entityType: 'budget_policy', entityId: policy.id, details: { name: policy.name } });
+    return { ok: true };
+  });
   app.get('/api/dashboard', async (request, reply) => {
     const user = await requireAuth(request, reply); if (!user) return reply;
-    const [cards, agentRows, companyRows, recentTaskLogs, recentApiEvents] = await Promise.all([
+    const [cards, agentRows, companyRows, recentTaskLogs, recentApiEvents, recentActivity, recentRuns, pendingApprovals, policyRows] = await Promise.all([
       db.select().from(kanbanCards),
       db.select().from(agents),
       db.select().from(companies),
       db.select().from(taskLogs).orderBy(desc(taskLogs.createdAt)).limit(20),
       db.select().from(apiEvents).orderBy(desc(apiEvents.createdAt)).limit(20),
+      db.select().from(activityLog).orderBy(desc(activityLog.createdAt)).limit(20),
+      db.select().from(heartbeatRuns).orderBy(desc(heartbeatRuns.createdAt)).limit(20),
+      db.select().from(approvals).where(eq(approvals.status, 'pending')).orderBy(desc(approvals.createdAt)).limit(50),
+      db.select().from(budgetPolicies).where(eq(budgetPolicies.isActive, true)),
     ]);
     const openCards = cards.filter((card) => !['done', 'blocked'].includes(card.columnStatus ?? 'backlog'));
     const completedCards = cards.filter((card) => card.columnStatus === 'done');
@@ -72,6 +192,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         agents: agentRows.length,
         activeAgents: activeAgents.length,
         busyAgents: busyAgents.length,
+        activeRuns: recentRuns.filter((run) => run.status === 'running').length,
+        pendingApprovals: pendingApprovals.length,
+        budgetPolicies: policyRows.length,
         monthlyCost: Number(monthlyCost.toFixed(4)),
       },
       stages: cards.reduce<Record<string, number>>((acc, card) => {
@@ -81,6 +204,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }, {}),
       recentTaskLogs,
       recentApiEvents,
+      recentActivity,
+      recentRuns,
+      pendingApprovals,
     };
   });
 
@@ -156,6 +282,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       createdBy: user.id,
     }).returning();
     if (card) await db.insert(taskLogs).values({ cardId: card.id, type: 'stage', status: 'success', message: `Stage set to ${card.columnStatus ?? 'backlog'} by ${actorLabel(user)}` });
+    if (card) await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'card.created', entityType: 'card', entityId: card.id, details: { title: card.title, stage: card.columnStatus } });
     return reply.code(201).send(card);
   });
 
@@ -193,16 +320,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         message: `Stage changed from ${existing.columnStatus ?? 'backlog'} to ${input.columnStatus} by ${actorLabel(user)}`,
       });
     }
+    if (card) await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: card.assigneeId, action: input.columnStatus && input.columnStatus !== existing.columnStatus ? 'card.stage_changed' : 'card.updated', entityType: 'card', entityId: card.id, details: { from: existing.columnStatus, to: input.columnStatus, title: card.title } });
     return card;
   });
 
   app.delete('/api/cards/:id', async (request, reply) => {
     const user = await requireAuth(request, reply); if (!user) return reply;
     const id = (request.params as { id: string }).id;
+    const [existing] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
     await db.update(kanbanCards).set({ parentCardId: null }).where(eq(kanbanCards.parentCardId, id));
     await db.delete(cardComments).where(eq(cardComments.cardId, id));
     await db.delete(taskLogs).where(eq(taskLogs.cardId, id));
     await db.delete(kanbanCards).where(eq(kanbanCards.id, id));
+    if (existing) await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'card.deleted', entityType: 'card', entityId: id, details: { title: existing.title } });
     return { ok: true };
   });
   app.get('/api/cards/:id/logs', async (request) => getTaskLogs((request.params as { id: string }).id));
@@ -215,9 +345,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
     const [comment] = await db.insert(cardComments).values({ cardId: id, authorType: 'user', authorId: user.id, body: input.body, action: input.action }).returning();
     await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'comment', status: 'success', message: `${actorLabel(user)} added a ${input.action} comment.`, output: input.body });
+    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: card.assigneeId, action: `comment.${input.action}`, entityType: 'card', entityId: card.id, details: { commentId: comment?.id } });
     if (input.action === 'pause_agent') {
       if (card.assigneeId) await db.update(agents).set({ isBusy: false, isActive: false }).where(eq(agents.id, card.assigneeId));
-      await db.update(kanbanCards).set({ columnStatus: 'blocked', lastError: `Paused by ${actorLabel(user)}: ${input.body}`, updatedAt: new Date() }).where(eq(kanbanCards.id, id));
+      await db.update(kanbanCards).set({
+        columnStatus: 'blocked',
+        lastError: `Paused by ${actorLabel(user)}: ${input.body}`,
+        executionLockId: null,
+        executionLockedByAgentId: null,
+        executionLockedAt: null,
+        executionLockExpiresAt: null,
+        activeHeartbeatRunId: null,
+        updatedAt: new Date(),
+      }).where(eq(kanbanCards.id, id));
+      if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', error: `Paused by ${actorLabel(user)}`, completedAt: new Date() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
       await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'backlog'} to blocked by ${actorLabel(user)}.` });
     } else if (input.action === 'continue_run') {
       if (card.assigneeId) await db.update(agents).set({ isActive: true, isBusy: false }).where(eq(agents.id, card.assigneeId));
@@ -245,30 +386,36 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/agents', async (request, reply) => {
     const input = createAgentSchema.parse(request.body);
     const [agent] = await db.insert(agents).values({ companyId: input.companyId ?? await defaultCompanyId(), departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
+    if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
     return reply.code(201).send(agent);
   });
   app.delete('/api/agents/:id', async (request) => {
     const id = (request.params as { id: string }).id;
+    const [agent] = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
     await db.update(kanbanCards).set({ assigneeId: null }).where(eq(kanbanCards.assigneeId, id));
     await db.delete(agents).where(eq(agents.id, id));
+    if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', action: 'agent.deleted', entityType: 'agent', entityId: id, details: { name: agent.name } });
     return { ok: true };
   });
   app.post('/api/agents/:id/pause', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const [agent] = await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', agentId: agent.id, action: 'agent.paused', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
     return agent;
   });
   app.post('/api/agents/:id/resume', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const [agent] = await db.update(agents).set({ isActive: true }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', agentId: agent.id, action: 'agent.resumed', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
     return agent;
   });
   app.post('/api/agents/:id/reset-session', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const [agent] = await db.update(agents).set({ currentSessionId: null, isBusy: false }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', agentId: agent.id, action: 'agent.session_reset', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
     return agent;
   });
   app.put('/api/agents/:id', async (request, reply) => {
@@ -289,6 +436,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       budgetMonthly: input.budgetMonthly?.toString(),
     }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', agentId: agent.id, action: 'agent.updated', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
     return agent;
   });
 
@@ -396,12 +544,26 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, body.cardId)).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
     const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
-    await db.update(kanbanCards).set({ columnStatus: body.status, executionLog, costUsd: body.costUsd?.toString(), completedAt: body.status === 'done' ? new Date() : undefined, updatedAt: new Date() }).where(eq(kanbanCards.id, body.cardId));
+    await db.update(kanbanCards).set({
+      columnStatus: body.status,
+      executionLog,
+      costUsd: body.costUsd?.toString(),
+      completedAt: body.status === 'done' ? new Date() : undefined,
+      executionLockId: null,
+      executionLockedByAgentId: null,
+      executionLockedAt: null,
+      executionLockExpiresAt: null,
+      activeHeartbeatRunId: null,
+      updatedAt: new Date(),
+    }).where(eq(kanbanCards.id, body.cardId));
     if (body.status !== card.columnStatus) await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'backlog'} to ${body.status} by webhook` });
     await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'webhook', status: body.status === 'blocked' ? 'failed' : 'success', message: body.summary ?? `Webhook marked card ${body.status}`, output: body.output, costUsd: body.costUsd?.toString() });
     if (card.assigneeId && body.costUsd) {
       await db.update(agents).set({ spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${body.costUsd}` }).where(eq(agents.id, card.assigneeId));
+      await db.insert(costEvents).values({ companyId: card.companyId, agentId: card.assigneeId, cardId: card.id, projectId: card.projectId, goalId: card.goalId, provider: 'webhook', model: 'external', costUsd: body.costUsd.toString() });
     }
+    if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: body.status === 'blocked' ? 'failed' : 'success', completedAt: new Date(), error: body.status === 'blocked' ? body.summary ?? 'blocked_by_webhook' : null, costUsd: body.costUsd?.toString() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
+    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: `webhook.task_${body.status}`, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd } });
     if (body.status === 'done') await cascadeParentStatus(card.parentCardId);
     return { ok: true, cardId: body.cardId, newStatus: body.status };
   });

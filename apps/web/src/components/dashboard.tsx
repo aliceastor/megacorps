@@ -21,12 +21,15 @@ export function Dashboard() {
   if (!data) return <p style={{ color: 'var(--muted)' }}>Loading dashboard...</p>;
 
   const stats = [
-    ['Companies', data.stats.companies],
-    ['Open tasks', data.stats.openTasks],
-    ['Completed', data.stats.completedTasks],
-    ['Blocked', data.stats.blockedTasks],
-    ['Active agents', data.stats.activeAgents],
-    ['Busy agents', data.stats.busyAgents],
+    ['Companies', data.stats.companies ?? 0],
+    ['Open tasks', data.stats.openTasks ?? 0],
+    ['Completed', data.stats.completedTasks ?? 0],
+    ['Blocked', data.stats.blockedTasks ?? 0],
+    ['Active agents', data.stats.activeAgents ?? 0],
+    ['Busy agents', data.stats.busyAgents ?? 0],
+    ['Active runs', data.stats.activeRuns ?? 0],
+    ['Pending approvals', data.stats.pendingApprovals ?? 0],
+    ['Budget policies', data.stats.budgetPolicies ?? 0],
     ['Monthly cost', `$${data.stats.monthlyCost ?? 0}`],
   ];
 

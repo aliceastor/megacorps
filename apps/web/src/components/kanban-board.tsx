@@ -39,6 +39,8 @@ type Card = {
   reviewFeedback?: string | null;
   sessionId?: string | null;
   costUsd?: string | null;
+  executionLockId?: string | null;
+  activeHeartbeatRunId?: string | null;
   startedAt?: string | null;
   completedAt?: string | null;
   updatedAt?: string;
@@ -70,13 +72,13 @@ function priorityLabel(priority: number) {
 function Column({ status, cards, onSelect }: { status: string; cards: Card[]; onSelect: (card: Card) => void }) {
   const { locale } = useLocale();
   const { setNodeRef, isOver } = useDroppable({ id: status });
-  return <section style={{ minHeight: 520 }}>
+  return <section className="kanban-column">
     <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, margin: '0 0 8px' }}>
       <span style={{ width: 8, height: 8, borderRadius: 99, background: statusColor(status) }} />
       {statusLabels[status]?.[locale] ?? status}
       <span style={{ background: 'var(--border)', borderRadius: 99, padding: '2px 8px', fontSize: 12 }}>{cards.length}</span>
     </h3>
-    <div ref={setNodeRef} className="card" style={{ padding: 10, minHeight: 470, outline: isOver ? '2px solid var(--primary)' : 'none', transition: 'outline 150ms', borderRadius: 8 }}>
+    <div ref={setNodeRef} className="card kanban-column-dropzone" style={{ outline: isOver ? '2px solid var(--primary)' : 'none', transition: 'outline 150ms' }}>
       <AnimatePresence>
         {cards.map((card) => <DraggableCard key={card.id} card={card} onSelect={onSelect} />)}
       </AnimatePresence>
@@ -266,6 +268,9 @@ export function KanbanBoard() {
       columnStatus: updated.columnStatus,
       assigneeId: updated.assigneeId ?? null,
       reviewerId: updated.reviewerId ?? null,
+      departmentId: updated.departmentId ?? null,
+      projectId: updated.projectId ?? null,
+      goalId: updated.goalId ?? null,
       requiresApproval: updated.requiresApproval ?? false,
       maxRetries: updated.maxRetries ?? 3,
     });
@@ -377,7 +382,7 @@ export function KanbanBoard() {
   }
 
   return <>
-    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14, flexWrap: 'wrap' }}>
+    <div className="kanban-toolbar">
       <div className="input-wrap" style={{ flex: '1 1 260px' }}><Search size={15} /><input placeholder="Search" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
       <select className="input compact" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
         <option value="">All status</option>
@@ -393,7 +398,7 @@ export function KanbanBoard() {
 
     {loading ? <p style={{ textAlign: 'center', opacity: 0.55 }}>Loading...</p> : (
       <DndContext onDragEnd={onDragEnd}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, minmax(230px, 1fr))', gap: 12, overflowX: 'auto', paddingBottom: 8 }}>
+        <div className="kanban-columns">
           {statuses.map((status) => <Column key={status} status={status} cards={visibleCards.filter((card) => card.columnStatus === status)} onSelect={(card) => { setSelected(card); setTab('details'); }} />)}
         </div>
       </DndContext>
@@ -458,6 +463,8 @@ export function KanbanBoard() {
               <span>Cost <b>{selected.costUsd ?? '0.0000'}</b></span>
               <span>Session <b>{selected.sessionId ?? 'none'}</b></span>
               <span>Retries <b>{selected.retryCount ?? 0}/{selected.maxRetries ?? 3}</b></span>
+              <span>Active run <b>{selected.activeHeartbeatRunId ?? 'none'}</b></span>
+              <span>Lock <b>{selected.executionLockId ?? 'none'}</b></span>
             </div>
             {selected.reviewFeedback && <pre className="log-block">{selected.reviewFeedback}</pre>}
             <div className="action-row">

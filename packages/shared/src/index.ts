@@ -105,7 +105,23 @@ export const createGoalSchema = z.object({
   body: z.string().trim().max(4000).optional(),
 });
 
-export const taskLogTypes = ['dispatch', 'retry', 'review', 'decomposition', 'cascade', 'webhook', 'manual', 'stage', 'comment'] as const;
+export const createBudgetPolicySchema = z.object({
+  companyId: z.string().uuid(),
+  agentId: z.string().uuid().nullable().optional(),
+  name: z.string().trim().min(1).max(160),
+  monthlyLimitUsd: z.number().nonnegative().nullable().optional(),
+  perTaskLimitUsd: z.number().nonnegative().nullable().optional(),
+  warnAtPercent: z.number().int().min(1).max(100).default(80),
+  hardStop: z.boolean().default(true),
+  isActive: z.boolean().default(true),
+});
+
+export const approvalDecisionSchema = z.object({
+  status: z.enum(['approved', 'rejected', 'revision_requested', 'cancelled']),
+  decisionNote: z.string().trim().max(4000).optional(),
+});
+
+export const taskLogTypes = ['dispatch', 'retry', 'review', 'decomposition', 'cascade', 'webhook', 'manual', 'stage', 'comment', 'lock', 'recovery', 'budget', 'approval'] as const;
 export type TaskLogType = (typeof taskLogTypes)[number];
 
 export const taskLogSchema = z.object({
@@ -140,4 +156,6 @@ export type CreateCardCommentInput = z.infer<typeof createCardCommentSchema>;
 export type CreateKnowledgeDocInput = z.infer<typeof createKnowledgeDocSchema>;
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
 export type CreateGoalInput = z.infer<typeof createGoalSchema>;
+export type CreateBudgetPolicyInput = z.infer<typeof createBudgetPolicySchema>;
+export type ApprovalDecisionInput = z.infer<typeof approvalDecisionSchema>;
 export type TaskLogInput = z.infer<typeof taskLogSchema>;

@@ -14,8 +14,8 @@ The current local stack runs with Docker:
 
 Latest verified baseline:
 
-- Phase 1-7 operational MVP flows are implemented.
-- Company setup, department setup, O-chart, runtime presets, adapter endpoint configuration, comments, task intervention, lifecycle logs, knowledge docs, project/goal context, and automatic dispatch heartbeat are implemented.
+- Phase 1-9 operational MVP flows are implemented.
+- Company setup, department setup, O-chart, runtime presets, adapter endpoint configuration, comments, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, heartbeat runs, budget policies, approvals, and automatic dispatch heartbeat are implemented.
 - Local Docker deploy is running on `http://localhost:3000` and `http://localhost:4000`.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 
@@ -167,6 +167,42 @@ On each eligible company heartbeat:
 10. Auto-review `in_review` cards when a reviewer is configured.
 11. Cascade parent cards to `done` when all sub-tasks are done.
 
+### Phase 8: Execution Safety
+
+Implemented:
+
+- `heartbeat_runs` records every dispatch/review run with source, status, cost, duration, error, card id, and agent id.
+- `kanban_cards` has execution lock fields:
+  - `executionLockId`
+  - `executionLockedByAgentId`
+  - `executionLockedAt`
+  - `executionLockExpiresAt`
+  - `activeHeartbeatRunId`
+- `dispatchCard` now creates a heartbeat run and atomically acquires a lock before calling an adapter.
+- If another process already owns the lock, the run is cancelled and the task is not double-executed.
+- Expired locks are recovered by the dispatch loop, the agent is marked not busy, the task returns to `todo`, and recovery is logged.
+- Adapter results with `success: false` now go through retry/block handling instead of being treated as completed work.
+- `pause_agent` comments clear active locks and cancel the active heartbeat run.
+
+### Phase 9: Governance and Budget
+
+Implemented:
+
+- `activity_log` records product-level audit events for cards, agents, comments, approvals, budget policies, execution locks, stale recovery, and webhook completions.
+- `cost_events` records immutable cost entries by company, agent, task, project, goal, provider, and model.
+- `budget_policies` supports company-wide or agent-scoped limits:
+  - monthly limit
+  - per-task limit
+  - warning threshold
+  - hard-stop flag
+- Dispatch preflight blocks and pauses agents that are already over monthly budget.
+- Dispatch/review completion records cost events and can pause agents if hard-stop limits are exceeded.
+- Budget hard stops create pending `budget_override_required` approvals.
+- Tasks that require approval create pending approval records.
+- Reviewer or board approval updates approval state and task stage.
+- Budget page now includes policy creation, pending approvals, cost events, and spend rollups.
+- Logs page now includes activity log and heartbeat run streams.
+
 ### Adapters and Execution
 
 Implemented adapters:
@@ -237,6 +273,9 @@ Implemented:
   - error
   - duration
   - timestamp
+- `activity_log` for immutable product-level actions.
+- `heartbeat_runs` for execution history and lock status.
+- `cost_events` for budget and cost rollups.
 
 Sensitive keys are redacted when they match:
 
@@ -318,13 +357,11 @@ Implemented or partially implemented:
 Still missing:
 
 - Strong multi-company data isolation enforcement in every endpoint.
-- Atomic execution locks / no double-work guarantee.
 - Async worker sidecar for long-running Hermes jobs.
 - Queue and retries with BullMQ/Redis or equivalent.
 - Runtime health checks, last heartbeat, versions, and capabilities.
-- Immutable event bus separate from task/API logs.
-- Cost events and budget policy enforcement.
-- Approval queue UI.
+- A richer event bus/streaming layer beyond the current `activity_log`.
+- Multi-stage approval policy UI.
 - Project git worktrees, branches, commits, and merge/review flow.
 - Work products and attachments.
 - Company template import/export with secret scrubbing.
@@ -334,49 +371,30 @@ Still missing:
 
 ## Recommended Production Hardening Phase
 
-The Phase 1-7 operational MVP is usable locally. The next work should harden it for real unattended operation:
+The Phase 1-9 operational MVP is usable locally. The next work should harden it for real unattended operation:
 
-1. Immutable event bus:
-   - `events` table
-   - event type
-   - actor
-   - company/project/card/agent ids
-   - payload
-   - created at
-
-2. Execution locking:
-   - card execution lock fields
-   - prevent double dispatch
-   - recover stale locks
-
-3. Runtime health:
+1. Runtime health:
    - runtime status
    - last heartbeat
    - version/capabilities
    - disable routing to offline runtimes
 
-4. Budget policies:
-   - `cost_events`
-   - `budget_policies`
-   - 80% warning
-   - 100% hard stop
-
-5. Secret handling:
+2. Secret handling:
    - encrypt runtime config secrets
    - redact secret-like values in all API responses
    - support external secret references
 
-6. Workspaces:
+3. Workspaces:
    - project workspace path
    - agent branch/worktree
    - output/work-product tracking
 
-7. Approval queue:
-   - all tasks requiring human approval
-   - reviewer output
-   - approve/reject with feedback
+4. Multi-stage approvals:
+   - configurable execution policies
+   - staged signoff
+   - approval queue filters
 
-8. Browser QA:
+5. Browser QA:
    - logged-in Playwright flows
    - task drawer interaction tests
    - settings/agent runtime form tests
@@ -412,6 +430,11 @@ Important tables:
 - `api_events`
 - `agent_runtimes`
 - `knowledge_docs`
+- `heartbeat_runs`
+- `activity_log`
+- `cost_events`
+- `budget_policies`
+- `approvals`
 
 ## Source Links
 

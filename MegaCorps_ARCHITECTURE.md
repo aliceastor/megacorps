@@ -69,6 +69,69 @@ Local verification completed on 2026-06-05:
 - Authenticated API smoke for runtime, department, agent, project, goal, knowledge doc, task, comment, manual run, dashboard, and logs.
 - Web route smoke for `/dashboard`, `/kanban`, `/agents`, `/budget`, `/logs`, `/knowledge`, `/workspaces`, and `/settings`.
 
+## Architecture Update v0.5 - Phase 8-9 Execution Safety and Governance
+
+Date: 2026-06-05
+
+### Phase 8: Execution Safety
+
+MegaCorps now records every adapter run in `heartbeat_runs` and requires a task-level execution lock before an adapter can run.
+
+Card lock fields:
+
+- `execution_lock_id`
+- `execution_locked_by_agent_id`
+- `execution_locked_at`
+- `execution_lock_expires_at`
+- `active_heartbeat_run_id`
+
+Dispatch flow:
+
+1. Load task and assignee.
+2. Run dependency and budget preflight checks.
+3. Atomically mark the agent busy.
+4. Insert a `heartbeat_runs` row.
+5. Atomically acquire the task lock.
+6. Move the task to `in_progress`.
+7. Execute the adapter.
+8. Record cost, output, stage, activity, and approval state.
+9. Release the lock and close the heartbeat run.
+
+If the adapter returns `success: false`, the task now enters retry/block handling instead of being marked done.
+The dispatch loop also recovers expired locks and returns stale `in_progress` work to `todo`.
+
+### Phase 9: Governance and Budget
+
+Governance tables:
+
+- `activity_log`: immutable product-level audit trail.
+- `cost_events`: immutable cost records.
+- `budget_policies`: company or agent scoped budget rules.
+- `approvals`: pending/approved/rejected/cancelled approval records.
+
+Budget behavior:
+
+- Agent monthly budget and budget policies are both enforced.
+- Per-task limits are checked after a run records cost.
+- Monthly hard stops pause agents and create `budget_override_required` approvals.
+- Budget warnings and hard stops are visible in task logs and activity logs.
+
+Approval behavior:
+
+- Tasks with `requiresApproval` or a reviewer move to `in_review`.
+- A pending approval record is created.
+- Reviewer approval/rejection resolves the approval.
+- Board users can approve/reject from the Budget page.
+
+### UI Update
+
+- Kanban columns are desktop grid / mobile single-column.
+- Task detail panel becomes a full-width mobile sheet.
+- Agent creation form uses responsive auto-fit tracks instead of a fixed 8-column grid.
+- Org chart nodes collapse to one column on narrow viewports.
+- Budget page now includes policy creation, pending approvals, and cost events.
+- Logs page now includes activity and heartbeat run streams.
+
 > AI Agent 團隊編排與管理平台
 > 調度層 + 任務板 = MegaCorps Core
 > Agent 執行層 = 多種 Agent 後端（Hermes / OpenClaw / ...）

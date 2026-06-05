@@ -24,7 +24,7 @@ services:
       DISPATCH_LOOP_ENABLED: ${DISPATCH_LOOP_ENABLED:-true}
       DISPATCH_LOOP_INTERVAL_MS: ${DISPATCH_LOOP_INTERVAL_MS:-30000}
     ports:
-      - "3100:4000"
+      - "4000:4000"
     volumes:
       - /mnt/Rklink_pool/VM/_Self_Docker/megacorps/server:/app/data
     networks:
@@ -38,7 +38,7 @@ services:
       - server
     environment:
       NODE_ENV: production
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://192.168.1.180:3100}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://192.168.1.180:4000}
     ports:
       - "3000:3000"
     volumes:
