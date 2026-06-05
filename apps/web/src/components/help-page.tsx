@@ -13,6 +13,9 @@ type ApiEndpoint = {
   params?: Record<string, string>;
   body?: unknown;
   response?: string;
+  responseSchema?: unknown;
+  responseExample?: unknown;
+  rateLimit?: string;
   notes?: string[];
 };
 
@@ -20,6 +23,7 @@ type ApiHelp = {
   service: string;
   help: { json: string; markdown: string; ui: string };
   auth: { mode: string; login: string; signup: string };
+  rateLimits?: { enforced: boolean; summary: string; productionRecommendation: string };
   kanban: { stages: string[]; legacyAliases: Record<string, string>; note: string };
   adapters: string[];
   endpoints: ApiEndpoint[];
@@ -41,6 +45,9 @@ function EndpointCard({ endpoint }: { endpoint: ApiEndpoint }) {
     {endpoint.query && <><b>Query</b><CodeBlock value={endpoint.query} /></>}
     {endpoint.body !== undefined && <><b>Body</b><CodeBlock value={endpoint.body} /></>}
     {endpoint.response && <><b>Response</b><p>{endpoint.response}</p></>}
+    {endpoint.responseSchema !== undefined && <><b>Response schema</b><CodeBlock value={endpoint.responseSchema} /></>}
+    {endpoint.responseExample !== undefined && <><b>Response example</b><CodeBlock value={endpoint.responseExample} /></>}
+    {endpoint.rateLimit && <><b>Rate limit</b><p>{endpoint.rateLimit}</p></>}
     {endpoint.notes?.map((note) => <p key={note}>{note}</p>)}
   </article>;
 }
@@ -117,7 +124,9 @@ export function HelpPage() {
         <span>Stages <b>{help.kanban.stages.join(', ')}</b></span>
         <span>Legacy alias <b>{Object.entries(help.kanban.legacyAliases).map(([from, to]) => `${from} -> ${to}`).join(', ')}</b></span>
         <span>Adapters <b>{help.adapters.join(', ')}</b></span>
+        <span>Rate limits <b>{help.rateLimits?.enforced ? 'enabled' : 'not enforced in app'}</b></span>
       </div>
+      {help.rateLimits && <p style={{ color: 'var(--muted)', margin: 0 }}>{help.rateLimits.summary}</p>}
     </section>
 
     <div className="kanban-toolbar">

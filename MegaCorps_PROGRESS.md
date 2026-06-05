@@ -1,6 +1,6 @@
 # MegaCorps Progress and Research Notes
 
-Last updated: 2026-06-05
+Last updated: 2026-06-06
 
 ## Executive Summary
 
@@ -19,8 +19,10 @@ Latest verified baseline:
 - Deployment is user-managed. Local-only Docker was used for QA in this pass; NAS/server deployment remains user-managed.
 - Browser plugin QA verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text.
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
-- API discovery is available at `GET /api/help`, `GET /api/help?format=markdown`, and the Web UI Help page.
+- API discovery is available at `GET /api/help`, `GET /api/help?format=markdown`, and the Web UI Help page, with response schema examples and rate-limit notes for every endpoint.
 - Sidebar navigation now keeps Help and Settings in the bottom utility area, with the collapse toggle inside the sidebar.
+- Hermes SSH adapter is implemented for direct `ssh -> hermes chat --profile {profile}` dispatch against the Hermes host, defaulting to `root@192.168.1.172`.
+- Browser API fallback now tries the current browser hostname on port `4000` before falling back to baked `NEXT_PUBLIC_API_URL`, which avoids NAS deployments accidentally calling unreachable `localhost` or stale IPs.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 
 ## Paperclip Research Summary
@@ -326,6 +328,7 @@ Implemented adapters:
 
 - `mock`
 - `hermes`
+- `hermes-ssh`
 - `hermes-gateway`
 - `webhook`
 - `openclaw`
@@ -347,6 +350,7 @@ Runtime fields:
 
 - `mock`: no endpoint required.
 - `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
+- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
 - `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `publicApiUrl`.
 - `webhook`: `webhookUrl`.
 - `openclaw`: `openclawUrl`.
@@ -355,6 +359,7 @@ Current behavior:
 
 - `mock` completes local smoke tasks.
 - Hermes Portainer executes `hermes chat -q` through Portainer exec using runtime/agent configuration.
+- Hermes SSH executes `hermes chat --profile {profile} "{prompt}"` through OpenSSH and captures stdout/stderr as the adapter result.
 - Hermes HTTP API calls the configured gateway URL.
 - Webhook and OpenClaw adapters post to their configured URLs.
 - Hermes adapter stores session id, cost, duration, and output.
@@ -365,6 +370,7 @@ Gaps:
 - Long-running async worker sidecar is still future work.
 - Queue-based concurrency is not yet implemented.
 - Secrets are stored as JSON config in the local MVP database; production should encrypt or externalize them.
+- The server image includes `openssh-client`, but production deployments must mount/provide an SSH key readable by the `megacorps` container user when `hermes-ssh` uses key auth.
 
 ### Logs and Audit Trail
 
@@ -410,12 +416,13 @@ Log health notes:
 
 ## Current Local Verification
 
-Verified on 2026-06-05:
+Verified on 2026-06-06:
 
-- `npm run typecheck`
-- `npm test`
-- `npm run build`
-- `git diff --check`
+- `npm run typecheck --workspace=@megacorps/server`
+- `npm run typecheck --workspace=@megacorps/web`
+- `npm run test --workspace=@megacorps/server`
+- `npm run test --workspace=@megacorps/web`
+- `npm run test --workspace=@megacorps/shared`
 - This pass did not start Docker; deployment remains user-managed.
 - API compile coverage includes:
   - task message board comments with user/agent authors
@@ -424,7 +431,8 @@ Verified on 2026-06-05:
   - cron status/run routes
   - dispatch cron service
   - task dispatch/review/decomposition
-  - adapter registry
+  - adapter registry including `hermes-ssh`
+  - API Help response schema/example and rate-limit coverage
 - Web route smoke:
   - `/dashboard`
   - `/companies`
@@ -482,14 +490,14 @@ Still missing:
 - Secret encryption/external secret store for adapter credentials.
 - End-to-end browser test suite.
 - WebSocket/SSE realtime updates for chat, task progress, logs, and dashboard counters.
-- Rate limits and abuse controls on auth, chat, webhook, and manual cron endpoints.
+- In-app rate limits and abuse controls on auth, chat, webhook, adapter test, delete, and manual cron endpoints. `/api/help` now discloses that rate limits are not enforced yet.
 - Role-based authorization beyond basic authenticated access.
 - Versioned migrations with rollback strategy; current migration is idempotent bootstrap SQL.
 - Backup/restore, disaster recovery, and retention policies.
 
 ## Production Readiness Review
 
-The Phase 1-10 operational MVP is usable for controlled local/NAS debugging, but it is not production-complete yet. The next work should harden it for real unattended operation:
+The Phase 1-12 operational MVP is usable for controlled local/NAS debugging, but it is not production-complete yet. The next work should harden it for real unattended operation:
 
 1. Runtime health:
    - runtime status
@@ -536,7 +544,7 @@ The Phase 1-10 operational MVP is usable for controlled local/NAS debugging, but
 9. Operations:
    - backup/restore runbook
    - metrics and alerting
-   - rate limits
+   - reverse-proxy rate limits now, then built-in API throttling
    - production CORS/cookie security
    - audit retention and export
 

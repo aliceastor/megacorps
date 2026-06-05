@@ -4,7 +4,7 @@ export const cardStatuses = ['todo', 'in_progress', 'in_review', 'done', 'blocke
 export type CardStatus = (typeof cardStatuses)[number];
 export const legacyCardStatusAliases = { backlog: 'todo' } as const;
 const cardStatusInputs = ['backlog', ...cardStatuses] as const;
-export const agentAdapterTypes = ['hermes', 'hermes-gateway', 'openclaw', 'webhook', 'mock'] as const;
+export const agentAdapterTypes = ['hermes', 'hermes-ssh', 'hermes-gateway', 'openclaw', 'webhook', 'mock'] as const;
 export type AgentAdapterType = (typeof agentAdapterTypes)[number];
 
 const allowedTransitions: Record<CardStatus, CardStatus[]> = {

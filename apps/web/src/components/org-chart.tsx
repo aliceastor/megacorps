@@ -31,6 +31,7 @@ type Approval = { id: string; companyId: string; cardId?: string | null; status:
 
 function adapterFields(adapterType?: string): Array<[string, string]> {
   if (adapterType === 'hermes') return [['portainerUrl', 'Portainer URL'], ['portainerUser', 'Portainer user'], ['portainerPass', 'Portainer password'], ['portainerEndpointId', 'Endpoint ID'], ['hermesContainer', 'Hermes container'], ['publicApiUrl', 'MegaCorps public API URL']];
+  if (adapterType === 'hermes-ssh') return [['sshHost', 'SSH host'], ['sshUser', 'SSH user'], ['sshPort', 'SSH port'], ['sshKeyPath', 'SSH key path'], ['sshOptions', 'SSH extra options'], ['hermesCommand', 'Hermes command'], ['publicApiUrl', 'MegaCorps public API URL'], ['reasoningEffort', 'Reasoning effort'], ['maxTurns', 'Max turns']];
   if (adapterType === 'hermes-gateway') return [['hermesGatewayUrl', 'Hermes HTTP API URL'], ['hermesDashboardToken', 'Hermes token'], ['publicApiUrl', 'MegaCorps public API URL']];
   if (adapterType === 'webhook') return [['webhookUrl', 'Webhook URL']];
   if (adapterType === 'openclaw') return [['openclawUrl', 'OpenClaw URL']];
@@ -341,6 +342,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       <select className="input" value={adapterType} onChange={(e) => setAdapterType(e.target.value)}>
         <option value="mock">Mock</option>
         <option value="hermes">Hermes Portainer</option>
+        <option value="hermes-ssh">Hermes SSH</option>
         <option value="hermes-gateway">Hermes HTTP API</option>
         <option value="webhook">Webhook</option>
         <option value="openclaw">OpenClaw</option>
@@ -390,6 +392,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
               <label className="field-label">Adapter<select className="input" value={String(agentDraft?.adapterType ?? 'mock')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), adapterType: e.target.value })}>
                 <option value="mock">Mock</option>
                 <option value="hermes">Hermes Portainer</option>
+                <option value="hermes-ssh">Hermes SSH</option>
                 <option value="hermes-gateway">Hermes HTTP API</option>
                 <option value="webhook">Webhook</option>
                 <option value="openclaw">OpenClaw</option>

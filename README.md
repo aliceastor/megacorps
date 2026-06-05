@@ -1,4 +1,4 @@
-# MegaCorps Phase 1-9 Control Plane MVP
+# MegaCorps Phase 1-12 Control Plane MVP
 
 Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm workspaces.
 
@@ -21,7 +21,7 @@ Default local URLs:
 
 NAS / remote Docker note:
 
-- The web client auto-detects non-localhost browser hosts. If the UI is opened at `http://192.168.1.180:3000`, API calls fall back to `http://192.168.1.180:4000` instead of `http://localhost:4000`.
+- The web client auto-detects the browser host first. If the UI is opened at `http://192.168.1.180:3000`, API calls use `http://192.168.1.180:4000` before trying the baked `NEXT_PUBLIC_API_URL`.
 - Set `NEXT_PUBLIC_API_URL` only when the API is on a different host/domain. A baked `localhost` default will not override the browser-host fallback on NAS.
 
 ## Scripts
@@ -43,11 +43,13 @@ Supported runtime fields:
 
 - `mock`: no endpoint needed.
 - `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
+- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
 - `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `publicApiUrl`.
 - `webhook`: `webhookUrl`.
 - `openclaw`: `openclawUrl`.
 
 For Hermes Portainer, the agent still needs a `hermesProfile`; the runtime tells MegaCorps where to execute it.
+For Hermes SSH, create a runtime preset with `adapterType=hermes-ssh`, set `sshHost=192.168.1.172`, set the SSH user/key path reachable inside the server container, and set each agent's `hermesProfile` to the Hermes profile name such as `alice`. The SSH user defaults to `root` and can be overridden.
 For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or the agent override panel.
 
 ## Web UI pages
@@ -76,6 +78,7 @@ For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or
 - Phase 9: activity log, cost events, budget policies, budget hard stops, pending approvals and approval decisions.
 - Phase 10: direct agent chat sessions, per-session adapter resume ids, cron status/history/manual tick APIs, and chat UI.
 - Phase 11: per-task agent/user message boards and bounded Kanban context injection for every agent invocation.
+- Phase 12: Hermes SSH adapter, API Help response schema/examples, rate-limit disclosure, and browser-host API fallback.
 
 ## Paperclip-inspired loop
 
@@ -93,8 +96,8 @@ The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds 
 
 Cron/debug endpoints:
 
-- `GET /api/help`: machine-readable API catalog for agents and integrations.
-- `GET /api/help?format=markdown`: Markdown API catalog.
+- `GET /api/help`: machine-readable API catalog for agents and integrations, including response schema examples and rate-limit notes.
+- `GET /api/help?format=markdown`: Markdown API catalog with body examples, response examples, and rate-limit notes.
 - `GET /api/cron/status`: in-memory scheduler state plus recent durable cron runs.
 - `GET /api/cron/runs`: cron run history.
 - `POST /api/cron/run`: manually run one dispatch heartbeat.

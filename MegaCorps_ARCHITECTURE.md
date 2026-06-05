@@ -2,6 +2,23 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v0.9 - Hermes SSH and Agent-Facing API Schemas
+
+Date: 2026-06-06
+
+Completed in this pass:
+
+- Added the `hermes-ssh` adapter.
+- The server container now includes `openssh-client`.
+- Hermes SSH dispatch connects to the configured SSH host, defaults to `root@192.168.1.172`, and runs `hermes chat --profile {profile} "{prompt}"`.
+- SSH stdout/stderr, exit code, duration, estimated tokens, cost, and session id are recorded through the normal adapter result path.
+- `Settings -> Agent runtimes` and `Agents -> select agent` now expose Hermes SSH fields: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `publicApiUrl`, `reasoningEffort`, and `maxTurns`.
+- Docker compose and `.env.example` include Hermes SSH environment fallbacks.
+- The web API client now tries the current browser host on port `4000` before falling back to the baked `NEXT_PUBLIC_API_URL`, which fixes NAS/browser deployments where a baked IP or `localhost` is unreachable from the current browser.
+- `GET /api/help` and `GET /api/help?format=markdown` now include response schemas, response examples, and explicit rate-limit notes for every endpoint.
+- Help UI displays response schema/example and rate-limit status.
+- Current rate-limit status is explicit: no in-app rate limiter is enforced yet; production should use reverse-proxy limits until the built-in limiter is added.
+
 ## Architecture Update v0.8 - API Help, Stage Merge, and Checklist Reconciliation
 
 Date: 2026-06-06
@@ -68,8 +85,9 @@ The older phase checklist later in this document is kept as historical design no
 - [x] `agents` and `agent_runtimes` tables.
 - [x] Agent CRUD API.
 - [x] Runtime preset CRUD API.
-- [x] Adapter registry for `mock`, Hermes Portainer, Hermes HTTP API, Webhook, and OpenClaw.
+- [x] Adapter registry for `mock`, Hermes Portainer, Hermes SSH, Hermes HTTP API, Webhook, and OpenClaw.
 - [x] Hermes Portainer adapter.
+- [x] Hermes SSH adapter.
 - [x] Hermes HTTP API adapter.
 - [x] Webhook/OpenClaw adapter.
 - [x] Agent connection test API.
@@ -177,6 +195,8 @@ The older phase checklist later in this document is kept as historical design no
 - [x] `GET /api/help` JSON API catalog.
 - [x] `GET /api/help?format=markdown` agent-readable catalog.
 - [x] Web Help page and dashboard API Help entrypoint.
+- [x] Response schema/example for every Help API endpoint.
+- [x] Explicit rate-limit disclosure in Help API and Help UI.
 - [x] Canonical Kanban intake stage merge: `backlog` -> `todo`.
 
 ## Architecture Update v0.7 - Task Message Boards and Bounded Kanban Context
@@ -337,6 +357,7 @@ Supported adapter fields:
 
 - `mock`: no endpoint required.
 - `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
+- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
 - `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `publicApiUrl`.
 - `webhook`: `webhookUrl`.
 - `openclaw`: `openclawUrl`.
@@ -348,7 +369,7 @@ Implemented:
 - Authentication, signup/login/logout, cookie session, validation error formatting.
 - Kanban task CRUD with UUID, one stage per task, detail drawer, logs, comments, sub-tasks, delete, run, review.
 - Agent CRUD, department membership, O-chart reporting line, pause/resume/fire/reset session.
-- Runtime registry for mock, Hermes Portainer, Hermes HTTP API, Webhook, and OpenClaw.
+- Runtime registry for mock, Hermes Portainer, Hermes SSH, Hermes HTTP API, Webhook, and OpenClaw.
 - Dispatch heartbeat with global interval and company-specific interval/enable switch.
 - Automatic assignment for `todo` tasks, with department/tag/capability scoring. Legacy `backlog` inputs are normalized to `todo`.
 - Prompt context injection for company mission, project, goal, comments, and matching knowledge docs.
@@ -518,6 +539,14 @@ MegaCorps ──[Portainer API]──> hermes-suite container
 ```
 
 ### 2.2 核心 Command
+
+Current implementation note, 2026-06-06:
+
+- `hermes` remains the Portainer-backed adapter.
+- `hermes-ssh` is now the direct SSH-backed Hermes CLI adapter.
+- `hermes-ssh` defaults to SSH host `192.168.1.172` and SSH user `root`.
+- The remote command shape is `hermes chat --profile {profile} "{prompt}"`, with optional `--resume`, `--max-turns`, and `--reasoning-effort`.
+- Use `Settings -> Agent runtimes` to configure SSH host/user/port/key path, then attach that runtime to agents in `Agents`.
 
 ```bash
 hermes chat -q \

@@ -19,6 +19,7 @@ test('rejects empty card bodies at schema level', () => {
 
 test('accepts MVP agent adapter options', () => {
   assert.equal(createAgentSchema.safeParse({ name: 'Alice', slug: 'alice', role: 'worker', adapterType: 'hermes-gateway', hermesProfile: 'alice' }).success, true);
+  assert.equal(createAgentSchema.safeParse({ name: 'SSH Alice', slug: 'ssh-alice', role: 'worker', adapterType: 'hermes-ssh', hermesProfile: 'alice' }).success, true);
   assert.equal(createAgentSchema.safeParse({ name: 'Local', slug: 'local', role: 'worker', adapterType: 'mock', hermesProfile: 'local-debug' }).success, true);
 });
 

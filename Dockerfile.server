@@ -21,7 +21,10 @@ RUN npm run build --workspace=@megacorps/server \
   && node -e "const fs=require('fs'); const p='packages/shared/package.json'; const pkg=require('./'+p); pkg.main='dist/index.js'; pkg.types='dist/index.d.ts'; fs.writeFileSync(p, JSON.stringify(pkg, null, 2));"
 
 FROM base AS runner
-RUN groupadd --system --gid 1001 nodejs \
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssh-client ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && groupadd --system --gid 1001 nodejs \
   && useradd --system --uid 1001 --gid nodejs megacorps
 COPY package.json package-lock.json ./
 COPY apps/server/package.json ./apps/server/package.json

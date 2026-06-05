@@ -7,7 +7,7 @@ type Runtime = { id: string; name: string; adapterType: string; config: Record<s
 type Company = { id: string; name: string; slug: string; mission?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean };
 type Department = { id: string; companyId: string; name: string; slug: string };
 
-const adapterTypes = ['mock', 'hermes', 'hermes-gateway', 'webhook', 'openclaw'];
+const adapterTypes = ['mock', 'hermes', 'hermes-ssh', 'hermes-gateway', 'webhook', 'openclaw'];
 
 function configFields(adapterType: string): Array<[string, string]> {
   if (adapterType === 'hermes') return [
@@ -24,6 +24,17 @@ function configFields(adapterType: string): Array<[string, string]> {
     ['hermesGatewayUrl', 'Hermes HTTP API URL'],
     ['hermesDashboardToken', 'Hermes dashboard token'],
     ['publicApiUrl', 'MegaCorps public API URL'],
+  ];
+  if (adapterType === 'hermes-ssh') return [
+    ['sshHost', 'SSH host'],
+    ['sshUser', 'SSH user'],
+    ['sshPort', 'SSH port'],
+    ['sshKeyPath', 'SSH key path'],
+    ['sshOptions', 'SSH extra options'],
+    ['hermesCommand', 'Hermes command'],
+    ['publicApiUrl', 'MegaCorps public API URL'],
+    ['reasoningEffort', 'Reasoning effort'],
+    ['maxTurns', 'Max turns'],
   ];
   if (adapterType === 'webhook') return [['webhookUrl', 'Webhook URL']];
   if (adapterType === 'openclaw') return [['openclawUrl', 'OpenClaw URL']];
@@ -131,7 +142,7 @@ export function SettingsPage() {
         <label className="check-row"><input type="checkbox" checked={runtimeActive} onChange={(event) => setRuntimeActive(event.target.checked)} /> Runtime active</label>
         <div className="form-grid">
           {configFields(runtimeAdapter).map(([key, label]) => <label className="field-label" key={key}>{label}
-            <input className="input" type={key.toLowerCase().includes('pass') || key.toLowerCase().includes('token') ? 'password' : key === 'maxTurns' ? 'number' : 'text'} value={String(runtimeConfig[key] ?? '')} onChange={(event) => setRuntimeConfig({ ...runtimeConfig, [key]: key === 'maxTurns' ? Number(event.target.value) : event.target.value })} />
+            <input className="input" type={key.toLowerCase().includes('pass') || key.toLowerCase().includes('token') ? 'password' : key === 'maxTurns' || key === 'sshPort' ? 'number' : 'text'} value={String(runtimeConfig[key] ?? '')} onChange={(event) => setRuntimeConfig({ ...runtimeConfig, [key]: key === 'maxTurns' || key === 'sshPort' ? Number(event.target.value) : event.target.value })} />
           </label>)}
         </div>
         <button className="btn btn-primary" onClick={saveRuntime}><Save size={15} /> Save runtime</button>

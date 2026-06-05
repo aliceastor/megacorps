@@ -9,3 +9,8 @@ test('mock adapter dispatches a local debug result', async () => {
   assert.match(result.output, /Mock agent local-debug completed card card-1/);
   assert.match(result.sessionId, /^mock-/);
 });
+
+test('registry includes hermes ssh adapter', () => {
+  const adapter = getAdapter('hermes-ssh');
+  assert.equal(typeof adapter.dispatch, 'function');
+});
