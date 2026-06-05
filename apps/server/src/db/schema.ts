@@ -138,6 +138,32 @@ export const cardComments = pgTable('card_comments', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 
+export const chatSessions = pgTable('chat_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  agentId: uuid('agent_id').notNull().references(() => agents.id),
+  userId: uuid('user_id').references(() => users.id),
+  title: text('title').notNull(),
+  status: text('status').notNull().default('active'),
+  agentSessionId: text('agent_session_id'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
+
+export const chatMessages = pgTable('chat_messages', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  sessionId: uuid('session_id').notNull().references(() => chatSessions.id),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  agentId: uuid('agent_id').notNull().references(() => agents.id),
+  userId: uuid('user_id').references(() => users.id),
+  authorType: text('author_type').notNull(),
+  body: text('body').notNull(),
+  metadata: jsonb('metadata').default({}),
+  costUsd: numeric('cost_usd', { precision: 10, scale: 4 }),
+  durationSeconds: integer('duration_seconds'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
 export const apiEvents = pgTable('api_events', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id),
@@ -148,6 +174,19 @@ export const apiEvents = pgTable('api_events', {
   responseBody: jsonb('response_body'),
   error: text('error'),
   durationMs: integer('duration_ms'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+export const cronRuns = pgTable('cron_runs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  source: text('source').notNull().default('loop'),
+  status: text('status').notNull().default('running'),
+  startedAt: timestamp('started_at', { withTimezone: true }).defaultNow(),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  durationSeconds: integer('duration_seconds'),
+  error: text('error'),
+  details: jsonb('details').default({}),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 

@@ -14,9 +14,9 @@ The current local stack runs with Docker:
 
 Latest verified baseline:
 
-- Phase 1-9 operational MVP flows are implemented.
-- Company registry page, department setup, O-chart, runtime presets, adapter endpoint configuration, comments, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, heartbeat runs, budget policies, approvals, and automatic dispatch heartbeat are implemented.
-- Local Docker deploy is running on `http://localhost:3000` and `http://localhost:4000`.
+- Phase 1-10 operational MVP flows are implemented.
+- Company registry page, department setup, O-chart, runtime presets, adapter endpoint configuration, direct agent chat, comments, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, heartbeat runs, cron run history, budget policies, approvals, and automatic dispatch heartbeat are implemented.
+- Deployment is user-managed; this pass verified code, tests, and production build without starting Docker.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 
 ## Paperclip Research Summary
@@ -150,6 +150,42 @@ Hierarchy lifecycle:
 - Subordinate work moves upward through `in_review`, approval records, and parent-card cascade.
 - Parent tasks close when all child tasks are completed, preserving a top-down delegation and bottom-up reporting loop.
 
+### Direct Agent Chat
+
+Implemented:
+
+- Sidebar `Direct Chat` page.
+- Company selector showing all agents in the selected company.
+- Agent selector with status, identity label, and adapter type.
+- Per-agent session list.
+- New session creation.
+- Session-scoped direct messaging.
+- WhatsApp/Teams-style web layout:
+  - company/agent rail
+  - session rail
+  - conversation thread
+  - bottom composer
+- Responsive narrow viewport layout that stacks rails and conversation vertically.
+- Backend tables:
+  - `chat_sessions`
+  - `chat_messages`
+- Chat lifecycle logging:
+  - user message
+  - agent reply
+  - system failure message
+  - `heartbeat_runs` source `chat`
+  - `activity_log` actions
+  - `cost_events`
+- Each chat session stores its own `agentSessionId`, so the same agent can have multiple independent conversations.
+- Direct chat uses the same runtime preset + agent override merge logic as task dispatch.
+
+Current behavior:
+
+- If the agent is paused, the message is stored and a system message explains the pause.
+- If the agent is busy, the message is stored and a system message explains the conflict.
+- If adapter execution fails, the error is stored as a system message and the API lifecycle log captures the failed response.
+- Hermes/Hermes Gateway direct chat uses a chat-specific prompt, not the Kanban task webhook prompt.
+
 ### Automatic Dispatch Heartbeat
 
 Implemented:
@@ -177,6 +213,32 @@ On each eligible company heartbeat:
 9. Move completed cards to `in_review` if approval/reviewer exists, otherwise `done`.
 10. Auto-review `in_review` cards when a reviewer is configured.
 11. Cascade parent cards to `done` when all sub-tasks are done.
+
+### Cron System
+
+Implemented:
+
+- The dispatch loop is now a named cron service: `dispatch-heartbeat`.
+- The server still starts it automatically unless `DISPATCH_LOOP_ENABLED=false`.
+- Global interval still uses `DISPATCH_LOOP_INTERVAL_MS`.
+- Company-level interval and auto-dispatch switch still control which companies are eligible on a loop tick.
+- Manual cron runs bypass company interval throttling so an operator can force a debug tick.
+- Durable `cron_runs` table records:
+  - source: `startup`, `loop`, or `manual`
+  - status
+  - start/completion time
+  - duration
+  - active company count
+  - scanned cards
+  - dispatched cards
+  - reviewed cards
+  - skipped cards
+  - errors
+- API endpoints:
+  - `GET /api/cron/status`
+  - `GET /api/cron/runs`
+  - `POST /api/cron/run`
+- Logs page includes cron heartbeat status, recent run history, and a manual `Run now` button.
 
 ### Phase 8: Execution Safety
 
@@ -258,7 +320,6 @@ Gaps:
 
 - Long-running async worker sidecar is still future work.
 - Queue-based concurrency is not yet implemented.
-- Atomic DB execution locks are not yet implemented.
 - Secrets are stored as JSON config in the local MVP database; production should encrypt or externalize them.
 
 ### Logs and Audit Trail
@@ -287,6 +348,8 @@ Implemented:
 - `activity_log` for immutable product-level actions.
 - `heartbeat_runs` for execution history and lock status.
 - `cost_events` for budget and cost rollups.
+- `cron_runs` for dispatch scheduler status and tick summaries.
+- `chat_sessions` / `chat_messages` for direct agent conversations and adapter-session continuity.
 
 Sensitive keys are redacted when they match:
 
@@ -308,24 +371,18 @@ Verified on 2026-06-05:
 - `npm run typecheck`
 - `npm test`
 - `npm run build`
-- `docker compose up -d --build`
-- API health: `GET /health`
-- Authenticated API smoke:
-  - signup/session cookie
-  - runtime creation
-  - department creation
-  - agent creation with runtime
-  - project creation
-  - goal creation
-  - knowledge doc creation
-  - task creation with UUID/company/department/project/goal
-  - comment queued for agent
-  - manual mock dispatch
-  - task logs
-  - dashboard
-  - API lifecycle logs
+- `git diff --check`
+- This pass did not start Docker; deployment remains user-managed.
+- API compile coverage includes:
+  - chat session/message routes
+  - cron status/run routes
+  - dispatch cron service
+  - task dispatch/review/decomposition
+  - adapter registry
 - Web route smoke:
   - `/dashboard`
+  - `/companies`
+  - `/chat`
   - `/kanban`
   - `/agents`
   - `/budget`
@@ -333,7 +390,6 @@ Verified on 2026-06-05:
   - `/knowledge`
   - `/workspaces`
   - `/settings`
-- Docker compose server/web/postgres health.
 
 Known local warning:
 
@@ -363,7 +419,7 @@ Implemented or partially implemented:
 - Company/project/goal ancestry in prompts.
 - Knowledge base CRUD and tag-based prompt injection.
 - Project/workspace/goal setup UI.
-- Dashboard, logs, budget, settings, knowledge, and workspace pages.
+- Dashboard, direct chat, logs, budget, settings, knowledge, and workspace pages.
 
 Still missing:
 
@@ -379,10 +435,15 @@ Still missing:
 - Plugin architecture.
 - Secret encryption/external secret store for adapter credentials.
 - End-to-end browser test suite.
+- WebSocket/SSE realtime updates for chat, task progress, logs, and dashboard counters.
+- Rate limits and abuse controls on auth, chat, webhook, and manual cron endpoints.
+- Role-based authorization beyond basic authenticated access.
+- Versioned migrations with rollback strategy; current migration is idempotent bootstrap SQL.
+- Backup/restore, disaster recovery, and retention policies.
 
-## Recommended Production Hardening Phase
+## Production Readiness Review
 
-The Phase 1-9 operational MVP is usable locally. The next work should harden it for real unattended operation:
+The Phase 1-10 operational MVP is usable for controlled local/NAS debugging, but it is not production-complete yet. The next work should harden it for real unattended operation:
 
 1. Runtime health:
    - runtime status
@@ -395,21 +456,42 @@ The Phase 1-9 operational MVP is usable locally. The next work should harden it 
    - redact secret-like values in all API responses
    - support external secret references
 
-3. Workspaces:
+3. Authorization and tenancy:
+   - enforce company scoping in every endpoint
+   - introduce RBAC for admin/operator/viewer actions
+   - restrict manual cron, adapter tests, budget override, and delete operations
+
+4. Workspaces:
    - project workspace path
    - agent branch/worktree
    - output/work-product tracking
 
-4. Multi-stage approvals:
+5. Async execution:
+   - queue/worker sidecar for long-running Hermes jobs
+   - per-agent concurrency limits outside the web server process
+   - persistent job retry/timeout controls
+
+6. Multi-stage approvals:
    - configurable execution policies
    - staged signoff
    - approval queue filters
 
-5. Browser QA:
+7. Realtime collaboration:
+   - WebSocket or SSE for chat, run progress, logs, and dashboard updates
+   - reconnect and backfill behavior
+
+8. Browser QA:
    - logged-in Playwright flows
    - task drawer interaction tests
    - settings/agent runtime form tests
    - dark-mode contrast snapshots
+
+9. Operations:
+   - backup/restore runbook
+   - metrics and alerting
+   - rate limits
+   - production CORS/cookie security
+   - audit retention and export
 
 ## Operational Notes
 
@@ -437,11 +519,14 @@ Important tables:
 - `agents`
 - `kanban_cards`
 - `card_comments`
+- `chat_sessions`
+- `chat_messages`
 - `task_logs`
 - `api_events`
 - `agent_runtimes`
 - `knowledge_docs`
 - `heartbeat_runs`
+- `cron_runs`
 - `activity_log`
 - `cost_events`
 - `budget_policies`

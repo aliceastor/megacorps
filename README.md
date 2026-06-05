@@ -54,10 +54,11 @@ For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or
 
 - `Dashboard`: operating overview, stage counts, recent task logs, recent API lifecycle events.
 - `Companies`: company registry, company settings, department settings, reporting structure, and delegation closure.
+- `Direct Chat`: company -> agent -> session direct messaging with resumable adapter sessions.
 - `Kanban`: task UUIDs, stage, details, comments, sub-tasks, logs, run/review/decompose/delete.
 - `Agents`: member hierarchy, agent CRUD, pause/resume/fire/reset, runtime and adapter configuration.
 - `Budget`: spend and budget visibility for agents and tasks.
-- `Logs`: full API lifecycle log with request, response, status, duration, and errors.
+- `Logs`: cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
 - `Workspaces`: project and goal setup for task context.
 - `Settings`: company heartbeat settings, departments, runtime presets, adapter endpoints.
@@ -73,6 +74,7 @@ For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or
 - Phase 7: runtime registry, adapter endpoint configuration, project/goal context, knowledge docs, workspace page, settings page, dashboard/log/budget views.
 - Phase 8: execution locks, heartbeat run records, stale-lock recovery, safer adapter failure handling.
 - Phase 9: activity log, cost events, budget policies, budget hard stops, pending approvals and approval decisions.
+- Phase 10: direct agent chat sessions, per-session adapter resume ids, cron status/history/manual tick APIs, and chat UI.
 
 ## Paperclip-inspired loop
 
@@ -87,6 +89,23 @@ The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds 
 - move completed work to `in_review` or `done`,
 - review tasks when a reviewer is configured,
 - cascade parent tasks when all sub-tasks are complete.
+
+Cron/debug endpoints:
+
+- `GET /api/cron/status`: in-memory scheduler state plus recent durable cron runs.
+- `GET /api/cron/runs`: cron run history.
+- `POST /api/cron/run`: manually run one dispatch heartbeat.
+
+## Direct agent chat
+
+Open `Direct Chat` in the sidebar:
+
+1. Pick a company.
+2. Pick an agent in that company.
+3. Select an existing session or create a new session.
+4. Send a message.
+
+Every chat session stores its own `agentSessionId`, so a user can keep several separate conversations with the same agent. Chat messages are stored in `chat_messages`, sessions in `chat_sessions`, and every agent reply is also recorded through `heartbeat_runs`, `activity_log`, and `cost_events`.
 
 ## Task comments and intervention
 
@@ -108,6 +127,8 @@ MegaCorps stores two complementary log streams:
 - `activity_log`: product-level audit events for cards, agents, approvals, budget policies, locks, recovery, and webhook completions.
 - `heartbeat_runs`: every dispatch/review run with source, status, lock, cost, duration, and error.
 - `cost_events`: immutable cost records by company, agent, task, project, goal, provider, and model.
+- `cron_runs`: every dispatch heartbeat tick with source, status, counts, duration, and errors.
+- `chat_sessions` / `chat_messages`: direct agent conversation lifecycle and agent reply metadata.
 
 Phase 8/9 safety behavior:
 
@@ -127,6 +148,5 @@ No pnpm. No Redis.
 - `npm run typecheck`
 - `npm test`
 - `npm run build`
-- `docker compose up -d --build`
 - Authenticated API smoke: runtime, department, agent, project, goal, knowledge doc, task, comment, manual run, dashboard, logs.
-- Web route smoke: `/dashboard`, `/kanban`, `/agents`, `/budget`, `/logs`, `/knowledge`, `/workspaces`, `/settings`.
+- Web route smoke: `/dashboard`, `/companies`, `/chat`, `/kanban`, `/agents`, `/budget`, `/logs`, `/knowledge`, `/workspaces`, `/settings`.

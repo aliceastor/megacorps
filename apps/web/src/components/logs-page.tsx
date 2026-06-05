@@ -1,36 +1,77 @@
 'use client';
 import { useEffect, useState } from 'react';
+import { Clock, Loader2, Play } from 'lucide-react';
 import { api } from '@/lib/api';
 
 type ApiEvent = { id: string; method: string; path: string; statusCode?: number; error?: string | null; durationMs?: number; requestBody?: unknown; responseBody?: unknown; createdAt?: string };
 type ActivityEvent = { id: string; action: string; entityType: string; entityId: string; actorType: string; actorId: string; details?: unknown; createdAt?: string };
 type HeartbeatRun = { id: string; cardId?: string | null; agentId?: string | null; source: string; status: string; error?: string | null; costUsd?: string | null; durationSeconds?: number | null; createdAt?: string };
+type CronRun = { id: string; name: string; source: string; status: string; error?: string | null; durationSeconds?: number | null; details?: unknown; createdAt?: string };
+type CronStatus = { enabled: boolean; intervalMs: number; running: boolean; lastStatus: string; lastStartedAt?: string | null; lastCompletedAt?: string | null; lastError?: string | null; recentRuns: CronRun[] };
 
 export function LogsPage() {
   const [logs, setLogs] = useState<ApiEvent[]>([]);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [runs, setRuns] = useState<HeartbeatRun[]>([]);
+  const [cron, setCron] = useState<CronStatus | null>(null);
   const [filter, setFilter] = useState('');
+  const [cronRunning, setCronRunning] = useState(false);
 
-  useEffect(() => {
-    void Promise.all([
+  async function refresh() {
+    await Promise.all([
       api<ApiEvent[]>('/api/system-logs?limit=300'),
       api<ActivityEvent[]>('/api/activity?limit=300'),
       api<HeartbeatRun[]>('/api/heartbeat-runs?limit=300'),
-    ]).then(([apiLogs, activityLogs, heartbeatRows]) => {
+      api<CronStatus>('/api/cron/status'),
+    ]).then(([apiLogs, activityLogs, heartbeatRows, cronStatus]) => {
       setLogs(apiLogs);
       setActivity(activityLogs);
       setRuns(heartbeatRows);
-    }).catch(() => { setLogs([]); setActivity([]); setRuns([]); });
-  }, []);
+      setCron(cronStatus);
+    }).catch(() => { setLogs([]); setActivity([]); setRuns([]); setCron(null); });
+  }
+
+  useEffect(() => { void refresh(); }, []);
+
+  async function runCronNow() {
+    setCronRunning(true);
+    try {
+      await api('/api/cron/run', { method: 'POST' });
+      await refresh();
+    } finally {
+      setCronRunning(false);
+    }
+  }
+
   const visible = logs.filter((log) => !filter || `${log.method} ${log.path} ${log.error ?? ''}`.toLowerCase().includes(filter.toLowerCase()));
   const visibleActivity = activity.filter((event) => !filter || `${event.action} ${event.entityType} ${event.entityId}`.toLowerCase().includes(filter.toLowerCase()));
   const visibleRuns = runs.filter((run) => !filter || `${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(filter.toLowerCase()));
+  const visibleCronRuns = (cron?.recentRuns ?? []).filter((run) => !filter || `${run.name} ${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(filter.toLowerCase()));
 
   return <div style={{ display: 'grid', gap: 16 }}>
     <div className="page-head"><div><h1>Logs</h1><p>API lifecycle, product activity, heartbeat runs, locks, costs, and errors.</p></div></div>
     <div className="input-wrap"><input placeholder="Filter logs" value={filter} onChange={(event) => setFilter(event.target.value)} /></div>
     <div className="data-grid">
+      <section className="card section-card">
+        <div className="panel-title">
+          <div><h2>Cron heartbeat</h2><span className="status-pill">{cron?.enabled === false ? 'disabled' : cron?.running ? 'running' : cron?.lastStatus ?? 'unknown'}</span></div>
+          <button className="btn" onClick={() => void runCronNow()} disabled={cronRunning}>{cronRunning ? <Loader2 size={14} className="spin" /> : <Play size={14} />} Run now</button>
+        </div>
+        <div className="meta-grid">
+          <span>Interval <b>{cron ? `${Math.round(cron.intervalMs / 1000)}s` : '-'}</b></span>
+          <span>Last started <b>{cron?.lastStartedAt ? new Date(cron.lastStartedAt).toLocaleString() : '-'}</b></span>
+          <span>Last completed <b>{cron?.lastCompletedAt ? new Date(cron.lastCompletedAt).toLocaleString() : '-'}</b></span>
+          <span>Error <b>{cron?.lastError ?? 'none'}</b></span>
+        </div>
+        <div className="table-list">
+          {visibleCronRuns.map((run) => <article className="list-row" key={run.id}>
+            <b><Clock size={13} /> {run.name} / {run.status}</b>
+            <p>{run.source} / {run.durationSeconds ?? 0}s / {run.createdAt ? new Date(run.createdAt).toLocaleString() : ''}</p>
+            {run.error && <p className="form-error">{run.error}</p>}
+            <pre className="log-block">{JSON.stringify(run.details ?? {}, null, 2)}</pre>
+          </article>)}
+        </div>
+      </section>
       <section className="card section-card">
         <h2>Activity</h2>
         <div className="table-list">

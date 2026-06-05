@@ -86,6 +86,16 @@ export const createCardCommentSchema = z.object({
   action: z.enum(['comment', 'pause_agent', 'send_to_agent', 'continue_run']).default('comment'),
 });
 
+export const createChatSessionSchema = z.object({
+  companyId: z.string().uuid(),
+  agentId: z.string().uuid(),
+  title: z.string().trim().min(1).max(160).optional(),
+});
+
+export const createChatMessageSchema = z.object({
+  body: z.string().trim().min(1).max(10000),
+});
+
 export const createKnowledgeDocSchema = z.object({
   companyId: z.string().uuid(),
   title: z.string().trim().min(1).max(160),
@@ -153,6 +163,8 @@ export type CreateAgentRuntimeInput = z.infer<typeof createAgentRuntimeSchema>;
 export type CreateCompanyInput = z.infer<typeof createCompanySchema>;
 export type CreateDepartmentInput = z.infer<typeof createDepartmentSchema>;
 export type CreateCardCommentInput = z.infer<typeof createCardCommentSchema>;
+export type CreateChatSessionInput = z.infer<typeof createChatSessionSchema>;
+export type CreateChatMessageInput = z.infer<typeof createChatMessageSchema>;
 export type CreateKnowledgeDocInput = z.infer<typeof createKnowledgeDocSchema>;
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
 export type CreateGoalInput = z.infer<typeof createGoalSchema>;

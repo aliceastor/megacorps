@@ -2,6 +2,78 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v0.6 - Direct Chat and Cron Observability
+
+Date: 2026-06-05
+
+### Direct Agent Chat
+
+MegaCorps now has a dedicated `Direct Chat` sidebar page.
+
+User flow:
+
+1. Select a company.
+2. Select an agent in that company.
+3. Select an existing session or create a new session.
+4. Send a direct message to that agent.
+
+Data model:
+
+- `chat_sessions`: company, agent, user, title, status, and adapter `agent_session_id`.
+- `chat_messages`: user/agent/system messages, cost, duration, and metadata.
+
+Execution behavior:
+
+- Direct chat uses the same adapter registry as task dispatch.
+- Direct chat uses the same runtime preset plus agent override merge logic.
+- Each chat session stores its own adapter resume id, so one agent can have multiple independent conversations.
+- Chat runs are recorded in `heartbeat_runs` with source `chat`.
+- Replies and failures are recorded in `activity_log`.
+- Successful replies record cost in `cost_events`.
+- Paused/busy/failed agents create visible system messages in the conversation.
+- Hermes direct chat uses a chat-specific prompt, not the Kanban task webhook prompt.
+
+### Cron System
+
+The dispatch heartbeat is now exposed as a named cron service: `dispatch-heartbeat`.
+
+Runtime state:
+
+- `DISPATCH_LOOP_ENABLED=false` disables the automatic scheduler.
+- `DISPATCH_LOOP_INTERVAL_MS` controls the global scheduler interval.
+- Company `dispatchIntervalSeconds` and `autoDispatchEnabled` decide which companies are eligible on each loop tick.
+
+Durable history:
+
+- `cron_runs` records startup, loop, and manual ticks.
+- Each run stores status, duration, active company count, scanned cards, dispatched cards, reviewed cards, skipped cards, and errors.
+
+API:
+
+- `GET /api/cron/status`
+- `GET /api/cron/runs`
+- `POST /api/cron/run`
+
+UI:
+
+- `Logs` shows cron status and recent run history.
+- `Logs` includes a manual `Run now` action for operator debugging.
+
+### Production Gap Review
+
+The Phase 1-10 MVP is now usable for controlled local/NAS debugging, but production still needs:
+
+- strong company-scoped authorization on every endpoint,
+- RBAC for admin/operator/viewer actions,
+- encrypted or externalized adapter secrets,
+- async worker/queue for long-running Hermes jobs,
+- runtime health checks and offline routing,
+- realtime WebSocket/SSE updates for chat, runs, and logs,
+- versioned migrations and rollback strategy,
+- rate limiting for auth/chat/webhooks/manual cron,
+- backup/restore and retention policies,
+- browser E2E tests for core logged-in workflows.
+
 ## Architecture Update v0.4 - Phase 1-7 Operational MVP
 
 Date: 2026-06-05

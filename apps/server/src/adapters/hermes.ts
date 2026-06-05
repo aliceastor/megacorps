@@ -1,5 +1,5 @@
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
-export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number };
+export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' };
 export type TaskResult = { success: boolean; output: string; sessionId: string; tokensUsed: number; costUsd: number; durationSeconds: number };
 export type AgentLike = { hermesProfile: string | null; currentSessionId: string | null; adapterConfig?: Record<string, unknown> | null };
 
@@ -98,6 +98,19 @@ export function estimateTokens(text: string): number { return Math.ceil(text.len
 export function estimateCost(tokens: number): number { return Number(((tokens / 1_000_000) * 3).toFixed(6)); }
 
 export function buildAgentPrompt(agent: AgentLike, task: TaskContext): string {
+  if (task.kind === 'chat') {
+    return `You are in a direct MegaCorps chat session.
+
+=== Your Identity ===
+Agent: ${agent.hermesProfile ?? 'unknown'}
+Session: ${agent.currentSessionId ?? 'new'}
+
+=== Conversation ===
+${task.body}
+
+Respond to the user directly. Do not report task completion or call the Kanban webhook unless the user explicitly asks you to create or update MegaCorps work items.`;
+  }
+
   const apiUrl = (typeof agent.adapterConfig?.publicApiUrl === 'string' && agent.adapterConfig.publicApiUrl) || process.env.MEGACORPS_PUBLIC_URL || 'http://192.168.1.180:4000';
   return `You are now working under PLATFORM MegaCorps at ${apiUrl}.
 

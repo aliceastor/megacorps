@@ -7,6 +7,8 @@ import { db } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, apiEvents, approvals, budgetPolicies, cardComments, companies, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, users } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { cascadeParentStatus, decomposeCard, dispatchCard, getTaskLogs, reviewCard } from './dispatch.ts';
+import { registerChatRoutes } from './chat.ts';
+import { registerCronRoutes } from './cron-routes.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
@@ -19,6 +21,8 @@ function actorLabel(user: { email?: string; id?: string } | null): string { retu
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/health', async () => ({ ok: true }));
+  await registerChatRoutes(app);
+  await registerCronRoutes(app);
 
   app.post('/api/auth/signup', async (request, reply) => {
     const input = signupSchema.parse(request.body);

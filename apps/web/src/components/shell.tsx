@@ -3,13 +3,14 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, BriefcaseBusiness, Building2, ChartNoAxesColumnIncreasing, FileClock, Kanban, LayoutDashboard, Languages, LogOut, Menu, Moon, Network, Settings, Sun, User, Check } from 'lucide-react';
+import { BookOpen, BriefcaseBusiness, Building2, ChartNoAxesColumnIncreasing, FileClock, Kanban, LayoutDashboard, Languages, LogOut, Menu, MessageSquare, Moon, Network, Settings, Sun, User, Check } from 'lucide-react';
 import { useLocale, localeList, localeNames } from '@/lib/locale-context';
 import { api } from '@/lib/api';
 
 const nav = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/companies', label: 'Companies', icon: Building2 },
+  { href: '/chat', label: 'Direct Chat', icon: MessageSquare },
   { href: '/kanban', label: 'Kanban', icon: Kanban },
   { href: '/agents', label: 'Agents', icon: Network },
   { href: '/budget', label: 'Budget', icon: ChartNoAxesColumnIncreasing },

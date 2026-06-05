@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardComments, companies, costEvents, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardComments, companies, costEvents, cronRuns, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
@@ -12,6 +12,15 @@ type LogStatus = 'queued' | 'running' | 'success' | 'failed';
 const LOOP_INTERVAL_MS = Number(process.env.DISPATCH_LOOP_INTERVAL_MS ?? 10_000);
 let loopRunning = false;
 const companyLastTick = new Map<string, number>();
+const cronState = {
+  enabled: process.env.DISPATCH_LOOP_ENABLED !== 'false',
+  intervalMs: LOOP_INTERVAL_MS,
+  running: false,
+  lastStartedAt: null as string | null,
+  lastCompletedAt: null as string | null,
+  lastStatus: 'idle',
+  lastError: null as string | null,
+};
 
 function nextBackoff(retryCount: number): Date {
   const seconds = Math.min(300, 10 * 2 ** Math.max(0, retryCount));
@@ -104,7 +113,7 @@ async function budgetOk(agent: AgentRow): Promise<boolean> {
   return Number(agent.spentThisMonth ?? 0) < guard.monthlyLimit;
 }
 
-async function buildExecutionAgent(agent: AgentRow) {
+export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: string | null) {
   let runtimeConfig: Record<string, unknown> = {};
   if (agent.runtimeId) {
     const [runtime] = await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, agent.runtimeId)).limit(1);
@@ -113,7 +122,7 @@ async function buildExecutionAgent(agent: AgentRow) {
   }
   return {
     hermesProfile: agent.hermesProfile,
-    currentSessionId: agent.currentSessionId,
+    currentSessionId: currentSessionId === undefined ? agent.currentSessionId : currentSessionId,
     adapterConfig: {
       ...runtimeConfig,
       ...((agent.adapterConfig as Record<string, unknown> | null) ?? {}),
@@ -543,45 +552,166 @@ async function recoverStaleExecutionLocks(app: FastifyInstance) {
   }
 }
 
-export function startDispatchLoop(app: FastifyInstance): void {
-  if (process.env.DISPATCH_LOOP_ENABLED === 'false') return;
-  const tick = async () => {
-    if (loopRunning) return;
-    loopRunning = true;
-    try {
-      const now = new Date();
-      await recoverStaleExecutionLocks(app);
-      const companyRows = await db.select().from(companies);
-      const nowMs = Date.now();
-      const activeCompanyIds = companyRows.filter((company) => {
-        if (company.autoDispatchEnabled === false) return false;
-        const intervalMs = Math.max(5, company.dispatchIntervalSeconds ?? 10) * 1000;
-        const last = companyLastTick.get(company.id) ?? 0;
-        if (nowMs - last < intervalMs) return false;
-        companyLastTick.set(company.id, nowMs);
-        return true;
-      }).map((company) => company.id);
-      if (activeCompanyIds.length === 0) return;
+export type DispatchCronStatus = typeof cronState & { companyTicks: Array<{ companyId: string; lastTickMs: number }> };
+export type DispatchCronResult = {
+  name: string;
+  source: 'loop' | 'manual' | 'startup';
+  status: 'success' | 'failed' | 'skipped';
+  activeCompanies: number;
+  cardsScanned: number;
+  dispatched: number;
+  reviewed: number;
+  skipped: number;
+  errors: number;
+  durationSeconds: number;
+  error?: string | null;
+};
+
+export function getDispatchCronStatus(): DispatchCronStatus {
+  return {
+    ...cronState,
+    companyTicks: [...companyLastTick.entries()].map(([companyId, lastTickMs]) => ({ companyId, lastTickMs })),
+  };
+}
+
+export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' | 'manual' | 'startup' = 'manual'): Promise<DispatchCronResult> {
+  const started = Date.now();
+  const startedAt = new Date(started);
+  if (loopRunning) {
+    return {
+      name: 'dispatch-heartbeat',
+      source,
+      status: 'skipped',
+      activeCompanies: 0,
+      cardsScanned: 0,
+      dispatched: 0,
+      reviewed: 0,
+      skipped: 1,
+      errors: 0,
+      durationSeconds: 0,
+      error: 'dispatch_cron_already_running',
+    };
+  }
+
+  loopRunning = true;
+  cronState.running = true;
+  cronState.lastStartedAt = startedAt.toISOString();
+  cronState.lastStatus = 'running';
+  cronState.lastError = null;
+
+  const [run] = await db.insert(cronRuns).values({
+    name: 'dispatch-heartbeat',
+    source,
+    status: 'running',
+    startedAt,
+    details: {},
+  }).returning();
+  if (!run) {
+    loopRunning = false;
+    cronState.running = false;
+    cronState.lastStatus = 'failed';
+    cronState.lastError = 'cron_run_create_failed';
+    throw new Error('cron_run_create_failed');
+  }
+
+  const result: DispatchCronResult = {
+    name: 'dispatch-heartbeat',
+    source,
+    status: 'success',
+    activeCompanies: 0,
+    cardsScanned: 0,
+    dispatched: 0,
+    reviewed: 0,
+    skipped: 0,
+    errors: 0,
+    durationSeconds: 0,
+    error: null,
+  };
+
+  try {
+    const now = new Date();
+    await recoverStaleExecutionLocks(app);
+    const companyRows = await db.select().from(companies);
+    const nowMs = Date.now();
+    const activeCompanyIds = companyRows.filter((company) => {
+      if (company.autoDispatchEnabled === false) return false;
+      const intervalMs = Math.max(5, company.dispatchIntervalSeconds ?? 10) * 1000;
+      const last = companyLastTick.get(company.id) ?? 0;
+      if (source === 'loop' && nowMs - last < intervalMs) return false;
+      companyLastTick.set(company.id, nowMs);
+      return true;
+    }).map((company) => company.id);
+    result.activeCompanies = activeCompanyIds.length;
+
+    if (activeCompanyIds.length > 0) {
       const cards = await db.select().from(kanbanCards).where(inArray(kanbanCards.companyId, activeCompanyIds));
+      result.cardsScanned = cards.length;
       for (const card of cards) {
         if (card.columnStatus === 'backlog' || card.columnStatus === 'todo') {
-          if (card.nextRunAt && card.nextRunAt > now) continue;
-          if (!(await dependenciesMet(card))) continue;
+          if (card.nextRunAt && card.nextRunAt > now) { result.skipped += 1; continue; }
+          if (!(await dependenciesMet(card))) { result.skipped += 1; continue; }
           try {
-            const assigned = await ensureAssigned(card, 'loop');
-            if (assigned || card.assigneeId) await dispatchCard(card.id, 'loop');
-          } catch (error) { app.log.warn({ error, cardId: card.id }, 'dispatch loop skipped card'); }
+            const assigned = await ensureAssigned(card, source === 'manual' ? 'manual' : 'loop');
+            if (assigned || card.assigneeId) {
+              await dispatchCard(card.id, source === 'manual' ? 'manual' : 'loop');
+              result.dispatched += 1;
+            } else {
+              result.skipped += 1;
+            }
+          } catch (error) {
+            result.errors += 1;
+            app.log.warn({ error, cardId: card.id }, 'dispatch cron skipped card');
+          }
         } else if (card.columnStatus === 'in_review') {
-          try { await reviewCard(card.id); } catch (error) { app.log.warn({ error, cardId: card.id }, 'review loop skipped card'); }
+          try {
+            await reviewCard(card.id);
+            result.reviewed += 1;
+          } catch (error) {
+            result.errors += 1;
+            app.log.warn({ error, cardId: card.id }, 'review cron skipped card');
+          }
+        } else {
+          result.skipped += 1;
         }
       }
-    } finally {
-      loopRunning = false;
     }
-  };
-  const timer = setInterval(() => { void tick(); }, LOOP_INTERVAL_MS);
+  } catch (error) {
+    result.status = 'failed';
+    result.errors += 1;
+    result.error = error instanceof Error ? error.message : 'dispatch_cron_failed';
+    app.log.error({ error }, 'dispatch cron failed');
+  } finally {
+    result.durationSeconds = Math.round((Date.now() - started) / 1000);
+    const completedAt = new Date();
+    await db.update(cronRuns).set({
+      status: result.status,
+      completedAt,
+      durationSeconds: result.durationSeconds,
+      error: result.error ?? null,
+      details: {
+        activeCompanies: result.activeCompanies,
+        cardsScanned: result.cardsScanned,
+        dispatched: result.dispatched,
+        reviewed: result.reviewed,
+        skipped: result.skipped,
+        errors: result.errors,
+      },
+    }).where(eq(cronRuns.id, run.id));
+    loopRunning = false;
+    cronState.running = false;
+    cronState.lastCompletedAt = completedAt.toISOString();
+    cronState.lastStatus = result.status;
+    cronState.lastError = result.error ?? null;
+  }
+
+  return result;
+}
+
+export function startDispatchLoop(app: FastifyInstance): void {
+  if (!cronState.enabled) return;
+  const timer = setInterval(() => { void runDispatchCronTick(app, 'loop'); }, LOOP_INTERVAL_MS);
   app.addHook('onClose', async () => clearInterval(timer));
-  void tick();
+  void runDispatchCronTick(app, 'startup');
 }
 
 async function buildTaskPrompt(card: CardRow): Promise<string> {
