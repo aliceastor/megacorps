@@ -9,7 +9,7 @@ Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm work
 
 ## Run locally
 
-1. Copy `.env.example` to `.env`, set `JWT_SECRET` to a stable random value of at least 32 characters, and set any adapter credentials such as `PORTAINER_PASS`.
+1. Copy `.env.example` to `.env` and set any adapter credentials such as `PORTAINER_PASS`.
 2. Install dependencies with `npm install`.
 3. Start the full stack with `docker compose up -d --build`.
 4. Open `http://localhost:3000`.
@@ -47,21 +47,20 @@ MegaCorps now has two configuration layers:
 
 Agent overrides win over runtime presets. When `.env` adapter fallback is enabled, runtime presets win over `.env` defaults.
 In production, external adapters (`hermes`, `hermes-ssh`, `hermes-gateway`, `webhook`, `openclaw`) require a company-scoped runtime preset by default. `.env` adapter fallback is disabled unless `ADAPTER_ENV_FALLBACK_ENABLED=true`, which should be reserved for local development/debugging.
-Production signup is disabled by default (`SIGNUP_ENABLED=false`). Create users through a controlled bootstrap/invite flow, or explicitly enable signup only for a trusted deployment window.
+Signup is stored in DB setting `auth.signup_enabled` and defaults to enabled. Admins can turn it on/off in the Web UI `Admin` page.
 Adapter egress blocks localhost/link-local metadata targets by default. Set `ADAPTER_TARGET_ALLOWLIST` to comma-separated hostnames or wildcard domains such as `hermes.example.internal,*.agents.example.com` when production should restrict agent runtimes to known hosts.
 
 Production onboarding:
 
-1. Set `JWT_SECRET` to a real stable secret. Generate one with `openssl rand -base64 32`.
-2. Set `BOOTSTRAP_TOKEN` temporarily and open `/setup` in the Web UI, or call `POST /api/auth/bootstrap` with the first admin's email/name/password. The endpoint fails once any active company admin exists.
-3. Remove `BOOTSTRAP_TOKEN` after the first admin is created.
-4. Use `POST /api/auth/invites` as a company admin to create one-time invite tokens for later users.
-5. New users accept with `/signup?invite=...` or `POST /api/auth/accept-invite`. Existing users receive the new membership but must log in with their existing password.
+1. Open `/signup` on a fresh DB and create the first account. The first signup becomes global admin and default-company admin.
+2. Open `Admin` to manage all accounts, roles, account status, password resets, and the DB-backed signup switch.
+3. Later users can self-signup while signup is enabled, or accept `/signup?invite=...` invite links from an admin.
+4. Existing users receiving invites get the new membership but must log in with their existing password.
 
 Common login/onboarding errors:
 
-- `JWT_SECRET must be at least 32 characters and not use an insecure default`: set a real `JWT_SECRET` in the server environment or Portainer stack variables, then restart the server container. Do not use the `.env.example` placeholder.
-- `signup_disabled`: expected in production when `SIGNUP_ENABLED=false`. Use `/setup` for the first admin, then invite users from an admin account. Only set `SIGNUP_ENABLED=true` for a trusted temporary signup window.
+- `signup_disabled`: signup was turned off from the `Admin` page. Use an invite link or ask an admin to re-enable signup.
+- `user_disabled`: the account was disabled from the `Admin` page.
 
 Supported runtime fields:
 
@@ -87,6 +86,7 @@ For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or
 - `Logs`: cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
 - `Workspaces`: project and goal setup for task context.
+- `Admin`: global account management, signup switch, roles, account status, and password resets.
 - `Settings`: company heartbeat settings, departments, runtime presets, adapter endpoints.
   Runtime health summaries show adapter status, attached agents, last run status, and capabilities. Company members can be managed by email with viewer/operator/admin roles.
 
@@ -221,7 +221,7 @@ No pnpm. No Redis.
 ## Production launch checklist
 
 - Put the app behind TLS, a reverse proxy, and external rate limits in addition to the in-app limiter.
-- Set strong `JWT_SECRET`, `WEBHOOK_SHARED_SECRET`, SSH keys, and external database credentials. `JWT_SECRET` is required by Compose and must not use an example/default value.
+- Set strong `WEBHOOK_SHARED_SECRET`, SSH keys, and external database credentials. The session signing secret is generated automatically into DB `app_settings.auth.jwt_secret`.
 - Encrypt or externalize adapter/runtime secrets before multi-user production.
 - Move the current in-process DB task-run worker into a separate sidecar/replica-safe worker for heavy production usage.
 - Add WebSocket/SSE consumers for live task/chat/log updates.

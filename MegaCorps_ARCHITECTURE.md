@@ -2,17 +2,32 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.4 - DB-Backed Signup and Admin Accounts
+
+Date: 2026-06-06
+
+Completed in this pass:
+
+- Added `app_settings` for DB-backed application settings.
+- Moved session signing secret to DB setting `auth.jwt_secret`, generated automatically on migration/on-demand.
+- Moved signup control to DB setting `auth.signup_enabled`, defaulting to `true`.
+- Changed fresh onboarding so the first `/signup` account becomes global admin and default-company admin.
+- Later self-signup accounts become global viewer and default-company viewer.
+- Added global Admin APIs for signup settings and account management.
+- Added Admin Web UI for all accounts, roles, status, password resets, and signup control.
+- Removed the need for `JWT_SECRET`, `BOOTSTRAP_TOKEN`, and `SIGNUP_*` env vars from Docker/Compose onboarding.
+
 ## Architecture Update v1.3 - Auth Onboarding Hardening
 
 Date: 2026-06-06
 
 Completed in this pass:
 
-- Added `GET /api/auth/status` so the Web UI can detect public signup, first-admin bootstrap availability, and existing admin state.
-- Added a Web UI `/setup` page for one-shot first-admin bootstrap using `BOOTSTRAP_TOKEN`.
-- Updated the login/signup pages so production `SIGNUP_ENABLED=false` is handled as expected onboarding state, not a raw error.
+- Added `GET /api/auth/status` so the Web UI can detect public signup and fresh-DB first-admin state.
+- Previous one-shot setup flow has been superseded by v1.4 DB-backed first-signup admin onboarding.
+- Updated the login/signup pages so disabled signup is handled as expected admin-controlled onboarding state, not a raw error.
 - Updated invite signup handling so `/signup?invite=...` calls `POST /api/auth/accept-invite`.
-- Treated `.env.example` JWT placeholders as insecure defaults and clarified Docker/README guidance for real `JWT_SECRET` generation.
+- v1.4 superseded env-based session secret configuration with DB-backed `auth.jwt_secret`.
 
 ## Architecture Update v1.2 - Phase 14-15 RBAC and Task Runs
 
@@ -63,7 +78,7 @@ Completed in this pass:
 - Added role helper `requireRole` and enforced operator/admin access for mutation-heavy control actions: cards create/update/delete/run/review/decompose, comments/interventions, agents CRUD/actions/tests, runtime CRUD, budget policy CRUD, approval decisions, company/department changes, projects/goals/knowledge writes, and manual cron.
 - Added in-app IP-based rate limiting with configurable buckets for auth, chat, webhooks, operator actions, writes, and reads.
 - Added fail-closed webhook shared-secret validation; task completion webhooks require `WEBHOOK_SHARED_SECRET`.
-- Added one-shot first-admin bootstrap plus hashed one-time invite tokens for controlled production onboarding while signup remains disabled by default.
+- Added first-admin onboarding plus hashed one-time invite tokens for controlled production account creation.
 - Added `GET /api/agent-runtimes/health` runtime health summary with attached agent counts, last run status/error, and adapter capabilities.
 - Added Settings UI runtime health panel.
 - Added monthly budget reset cron behavior, marked durably in `cron_runs`, defaulting to UTC day 1.
@@ -276,7 +291,7 @@ The older phase checklist later in this document is kept as historical design no
 
 - [x] `company_memberships` table.
 - [x] Migration backfill for existing users and companies.
-- [x] Signup creates admin membership for the default company.
+- [x] First signup creates admin membership for the default company; later self-signups create viewer membership.
 - [x] Company-scoped read filters for company-owned resources.
 - [x] Company operator/admin checks for company-owned mutations.
 - [x] Company admin checks for membership management.

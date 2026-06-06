@@ -1,12 +1,12 @@
 import bcrypt from 'bcryptjs';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { and, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, ne, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { acceptInviteSchema, approvalDecisionSchema, bootstrapAdminSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema } from '@megacorps/shared';
+import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema } from '@megacorps/shared';
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, apiEvents, approvals, budgetPolicies, cardComments, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, userInvites, users } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, userInvites, users } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { buildExecutionAgent, cascadeParentStatus, decomposeCard, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
@@ -25,29 +25,10 @@ function actorLabel(user: { email?: string; id?: string } | null): string { retu
 
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|keyPath|privateKey)/i;
-const validGlobalRoles = new Set(['viewer', 'operator', 'admin']);
-const validCompanyRoles = new Set(['viewer', 'operator', 'admin']);
+const SIGNUP_ENABLED_SETTING = 'auth.signup_enabled';
 
 function truthy(value: string | undefined): boolean {
   return value === '1' || value === 'true' || value === 'yes' || value === 'on';
-}
-
-function envRole(value: string | undefined, fallback: 'viewer' | 'operator' | 'admin'): 'viewer' | 'operator' | 'admin' {
-  return validGlobalRoles.has(value ?? '') ? value as 'viewer' | 'operator' | 'admin' : fallback;
-}
-
-function envCompanyRole(value: string | undefined, fallback: 'viewer' | 'operator' | 'admin'): 'viewer' | 'operator' | 'admin' {
-  return validCompanyRoles.has(value ?? '') ? value as 'viewer' | 'operator' | 'admin' : fallback;
-}
-
-function signupEnabled(): boolean {
-  if (process.env.SIGNUP_ENABLED !== undefined) return truthy(process.env.SIGNUP_ENABLED);
-  return process.env.NODE_ENV !== 'production';
-}
-
-function attachDefaultCompanyOnSignup(): boolean {
-  if (process.env.SIGNUP_ATTACH_DEFAULT_COMPANY !== undefined) return truthy(process.env.SIGNUP_ATTACH_DEFAULT_COMPANY);
-  return process.env.NODE_ENV !== 'production';
 }
 
 function isLocalWebOrigin(): boolean {
@@ -85,12 +66,28 @@ function webUrl(path: string): string | null {
   return `${origin.replace(/\/$/, '')}${path}`;
 }
 
-function headerSecret(value: unknown): string | undefined {
-  return Array.isArray(value) ? value[0] : typeof value === 'string' ? value : undefined;
+async function settingValue(key: string, fallback: string): Promise<string> {
+  await db.insert(appSettings).values({ key, value: fallback }).onConflictDoNothing();
+  const [row] = await db.select({ value: appSettings.value }).from(appSettings).where(eq(appSettings.key, key)).limit(1);
+  return row?.value ?? fallback;
 }
 
-async function hasActiveCompanyAdmin(): Promise<boolean> {
-  const [row] = await db.select({ id: companyMemberships.id }).from(companyMemberships).where(and(eq(companyMemberships.role, 'admin'), eq(companyMemberships.status, 'active'))).limit(1);
+async function setSettingValue(key: string, value: string): Promise<void> {
+  await db.insert(appSettings).values({ key, value })
+    .onConflictDoUpdate({ target: appSettings.key, set: { value, updatedAt: new Date() } });
+}
+
+async function signupEnabled(): Promise<boolean> {
+  return truthy(await settingValue(SIGNUP_ENABLED_SETTING, 'true'));
+}
+
+async function userCount(): Promise<number> {
+  const [row] = await db.select({ count: drizzleSql<number>`count(*)::int` }).from(users);
+  return Number(row?.count ?? 0);
+}
+
+async function hasOtherActiveGlobalAdmin(userId: string): Promise<boolean> {
+  const [row] = await db.select({ id: users.id }).from(users).where(and(eq(users.role, 'admin'), eq(users.status, 'active'), ne(users.id, userId))).limit(1);
   return Boolean(row);
 }
 
@@ -202,72 +199,49 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/api/auth/status', async () => {
-    const bootstrapConfigured = Boolean(process.env.BOOTSTRAP_TOKEN && process.env.BOOTSTRAP_TOKEN.length >= 16);
-    const hasAdmin = await hasActiveCompanyAdmin();
+    const count = await userCount();
     return {
-      signupEnabled: signupEnabled(),
-      bootstrapConfigured,
-      canBootstrap: bootstrapConfigured && !hasAdmin,
-      hasActiveCompanyAdmin: hasAdmin,
+      signupEnabled: await signupEnabled(),
+      userCount: count,
+      firstAccountWillBeAdmin: count === 0,
     };
   });
 
-  app.post('/api/auth/bootstrap', async (request, reply) => {
-    assertSessionSecretReady();
-    const expectedToken = process.env.BOOTSTRAP_TOKEN;
-    if (!expectedToken || expectedToken.length < 16) return reply.code(503).send({ error: 'bootstrap_not_configured' });
-    const input = bootstrapAdminSchema.parse(request.body);
-    const providedToken = input.bootstrapToken ?? headerSecret(request.headers['x-megacorps-bootstrap-token']);
-    if (!safeSecretEqual(providedToken, expectedToken)) return reply.code(401).send({ error: 'bootstrap_token_required' });
-    if (await hasActiveCompanyAdmin()) return reply.code(409).send({ error: 'bootstrap_already_completed' });
-
-    const companyId = input.companyId ?? await defaultCompanyId();
-    const [company] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
-    if (!company) return reply.code(404).send({ error: 'company_not_found' });
-
-    const passwordHash = await bcrypt.hash(input.password, 12);
-    const [existingUser] = await db.select().from(users).where(eq(users.email, input.email)).limit(1);
-    const [user] = existingUser
-      ? await db.update(users).set({ name: input.name, passwordHash, role: 'admin', updatedAt: new Date() }).where(eq(users.id, existingUser.id)).returning()
-      : await db.insert(users).values({ email: input.email, name: input.name, passwordHash, role: 'admin' }).returning();
-    if (!user) return reply.code(500).send({ error: 'bootstrap_user_failed' });
-
-    const [membership] = await db.insert(companyMemberships).values({ companyId, userId: user.id, role: 'admin', status: 'active' }).onConflictDoUpdate({
-      target: [companyMemberships.companyId, companyMemberships.userId],
-      set: { role: 'admin', status: 'active', updatedAt: new Date() },
-    }).returning();
-    await db.insert(activityLog).values({ companyId, actorType: 'system', actorId: 'bootstrap', userId: user.id, action: 'auth.bootstrap_admin', entityType: 'user', entityId: user.id, details: { email: user.email } });
-    const token = await signSession({ id: user.id, email: user.email, role: user.role ?? 'admin' });
-    setSessionCookie(reply, token);
-    return reply.code(201).send({ ok: true, user: { id: user.id, email: user.email, name: user.name, role: user.role }, membership });
-  });
-
   app.post('/api/auth/signup', async (request, reply) => {
-    assertSessionSecretReady();
-    if (!signupEnabled()) return reply.code(403).send({ error: 'signup_disabled' });
+    await assertSessionSecretReady();
+    if (!await signupEnabled()) return reply.code(403).send({ error: 'signup_disabled' });
     const input = signupSchema.parse(request.body);
     const passwordHash = await bcrypt.hash(input.password, 12);
-    const defaultRole = envRole(process.env.SIGNUP_DEFAULT_ROLE, 'viewer');
-    const [user] = await db.insert(users).values({ email: input.email, name: input.name, passwordHash, role: defaultRole }).returning();
+    const result = await db.transaction(async (tx) => {
+      await tx.execute(drizzleSql`SELECT pg_advisory_xact_lock(7042024060601)`);
+      const [countRow] = await tx.select({ count: drizzleSql<number>`count(*)::int` }).from(users);
+      const firstAccount = Number(countRow?.count ?? 0) === 0;
+      const role = firstAccount ? 'admin' : 'viewer';
+      const companyRole = firstAccount ? 'admin' : 'viewer';
+      const [company] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
+      if (!company) throw new Error('Default company missing. Run migrations.');
+      const [created] = await tx.insert(users).values({ email: input.email, name: input.name, passwordHash, role, status: 'active' }).returning();
+      if (!created) throw new Error('signup_failed');
+      const [membership] = await tx.insert(companyMemberships).values({ companyId: company.id, userId: created.id, role: companyRole, status: 'active' }).onConflictDoNothing().returning();
+      await tx.insert(activityLog).values({ companyId: company.id, actorType: 'user', actorId: created.id, userId: created.id, action: firstAccount ? 'auth.first_admin_signup' : 'auth.signup', entityType: 'user', entityId: created.id, details: { email: created.email, role, companyRole } });
+      return { user: created, membership, firstAccount };
+    });
+    const user = result.user;
     if (!user) return reply.code(500).send({ error: 'signup_failed' });
-    if (attachDefaultCompanyOnSignup()) {
-      const companyId = await defaultCompanyId();
-      const defaultCompanyRole = envCompanyRole(process.env.SIGNUP_DEFAULT_COMPANY_ROLE, 'viewer');
-      await db.insert(companyMemberships).values({ companyId, userId: user.id, role: defaultCompanyRole, status: 'active' }).onConflictDoNothing();
-    }
-    const token = await signSession({ id: user.id, email: user.email, role: user.role ?? 'viewer' });
+    const token = await signSession({ id: user.id, email: user.email, role: user.role ?? (result.firstAccount ? 'admin' : 'viewer') });
     setSessionCookie(reply, token);
-    return { user: { id: user.id, email: user.email, name: user.name } };
+    return { user: { id: user.id, email: user.email, name: user.name, role: user.role }, firstAccount: result.firstAccount, membership: result.membership };
   });
 
   app.post('/api/auth/login', async (request, reply) => {
-    assertSessionSecretReady();
+    await assertSessionSecretReady();
     const input = loginSchema.parse(request.body);
     const [user] = await db.select().from(users).where(eq(users.email, input.email)).limit(1);
     if (!user?.passwordHash || !(await bcrypt.compare(input.password, user.passwordHash))) return reply.code(401).send({ error: 'invalid_credentials' });
+    if (user.status === 'disabled') return reply.code(403).send({ error: 'user_disabled' });
     const token = await signSession({ id: user.id, email: user.email, role: user.role ?? 'viewer' });
     setSessionCookie(reply, token);
-    return { user: { id: user.id, email: user.email, name: user.name } };
+    return { user: { id: user.id, email: user.email, name: user.name, role: user.role, status: user.status } };
   });
 
   app.post('/api/auth/logout', async (_request, reply) => { reply.clearCookie('session', { path: '/' }); return { ok: true }; });
@@ -299,7 +273,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/auth/accept-invite', async (request, reply) => {
-    assertSessionSecretReady();
+    await assertSessionSecretReady();
     const input = acceptInviteSchema.parse(request.body);
     const [invite] = await db.select().from(userInvites).where(eq(userInvites.tokenHash, sha256(input.token))).limit(1);
     if (!invite) return reply.code(404).send({ error: 'invite_not_found' });
@@ -343,6 +317,70 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const memberships = await db.select().from(companyMemberships).where(and(eq(companyMemberships.userId, user.id), eq(companyMemberships.status, 'active')));
     return { user, memberships };
   });
+
+  app.get('/api/admin/settings', async (request, reply) => {
+    const user = await requireRole(request, reply, 'admin'); if (!user) return reply;
+    return { signupEnabled: await signupEnabled() };
+  });
+
+  app.put('/api/admin/settings', async (request, reply) => {
+    const user = await requireRole(request, reply, 'admin'); if (!user) return reply;
+    const input = adminUpdateSettingsSchema.parse(request.body);
+    if (input.signupEnabled !== undefined) await setSettingValue(SIGNUP_ENABLED_SETTING, input.signupEnabled ? 'true' : 'false');
+    const companyId = await defaultCompanyId();
+    await db.insert(activityLog).values({ companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'admin.settings.updated', entityType: 'app_settings', entityId: SIGNUP_ENABLED_SETTING, details: { signupEnabled: input.signupEnabled } });
+    return { signupEnabled: await signupEnabled() };
+  });
+
+  app.get('/api/admin/users', async (request, reply) => {
+    const user = await requireRole(request, reply, 'admin'); if (!user) return reply;
+    const userRows = await db.select({
+      id: users.id,
+      email: users.email,
+      name: users.name,
+      role: users.role,
+      status: users.status,
+      locale: users.locale,
+      theme: users.theme,
+      createdAt: users.createdAt,
+      updatedAt: users.updatedAt,
+    }).from(users).orderBy(desc(users.createdAt));
+    const membershipRows = await db.select({
+      id: companyMemberships.id,
+      userId: companyMemberships.userId,
+      companyId: companyMemberships.companyId,
+      companyName: companies.name,
+      role: companyMemberships.role,
+      status: companyMemberships.status,
+    }).from(companyMemberships)
+      .innerJoin(companies, eq(companyMemberships.companyId, companies.id))
+      .orderBy(desc(companyMemberships.createdAt));
+    return userRows.map((row) => ({
+      ...row,
+      memberships: membershipRows.filter((membership) => membership.userId === row.id),
+    }));
+  });
+
+  app.put('/api/admin/users/:id', async (request, reply) => {
+    const actor = await requireRole(request, reply, 'admin'); if (!actor) return reply;
+    const { id } = request.params as { id: string };
+    const input = adminUpdateUserSchema.parse(request.body);
+    const [existing] = await db.select().from(users).where(eq(users.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'user_not_found' });
+    const wouldRemoveAdmin = existing.role === 'admin' && existing.status === 'active' && ((input.role !== undefined && input.role !== 'admin') || input.status === 'disabled');
+    if (wouldRemoveAdmin && !await hasOtherActiveGlobalAdmin(id)) return reply.code(409).send({ error: 'last_admin_required' });
+    const updates: { name?: string; role?: string; status?: string; passwordHash?: string; updatedAt: Date } = { updatedAt: new Date() };
+    if (input.name !== undefined) updates.name = input.name;
+    if (input.role !== undefined) updates.role = input.role;
+    if (input.status !== undefined) updates.status = input.status;
+    if (input.password !== undefined) updates.passwordHash = await bcrypt.hash(input.password, 12);
+    const [updated] = await db.update(users).set(updates).where(eq(users.id, id)).returning();
+    if (!updated) return reply.code(500).send({ error: 'user_update_failed' });
+    const companyId = await defaultCompanyId();
+    await db.insert(activityLog).values({ companyId, actorType: 'user', actorId: actor.id, userId: actor.id, action: 'admin.user.updated', entityType: 'user', entityId: id, details: { email: updated?.email, role: input.role, status: input.status, passwordReset: input.password !== undefined } });
+    return { user: { id: updated.id, email: updated.email, name: updated.name, role: updated.role, status: updated.status, createdAt: updated.createdAt, updatedAt: updated.updatedAt } };
+  });
+
   app.get('/api/system-logs', async (request, reply) => {
     const user = await requireAuth(request, reply); if (!user) return reply;
     const query = request.query as { limit?: string };

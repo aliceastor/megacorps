@@ -31,14 +31,17 @@ const defaultRateLimit = 'In-app IP-based rate limiting is enforced by route buc
 const endpoints: ApiEndpoint[] = [
   { method: 'GET', path: '/health', group: 'System', auth: 'none', summary: 'Read server health.', response: '{ ok: true }' },
   { method: 'GET', path: '/api/help', group: 'System', auth: 'none', summary: 'List MegaCorps API endpoints and usage.', query: { format: 'Optional. Use markdown or md for text/markdown output.' }, responseSchema: { service: 'string', help: 'object', auth: 'object', rateLimits: 'object', kanban: 'object', adapters: 'string[]', endpoints: 'ApiHelpEndpoint[]' }, responseExample: { service: 'MegaCorps API', endpoints: [{ method: 'GET', path: '/health', responseSchema: { ok: 'boolean' }, responseExample: { ok: true } }] } },
-  { method: 'GET', path: '/api/auth/status', group: 'Auth', auth: 'none', summary: 'Read public onboarding state: signup availability and whether first-admin bootstrap is available.' },
-  { method: 'POST', path: '/api/auth/bootstrap', group: 'Auth', auth: 'none', summary: 'One-shot bootstrap for the first company admin. Requires BOOTSTRAP_TOKEN and fails once an active company admin exists.', body: { bootstrapToken: 'optional if X-MegaCorps-Bootstrap-Token header is sent', email: 'admin@example.com', name: 'Operator', password: 'at least 12 chars', companyId: 'optional company UUID' } },
-  { method: 'POST', path: '/api/auth/signup', group: 'Auth', auth: 'none', summary: 'Create a user only when SIGNUP_ENABLED=true. Production default is disabled.', body: { email: 'user@example.com', name: 'Operator', password: 'at least 8 chars' } },
+  { method: 'GET', path: '/api/auth/status', group: 'Auth', auth: 'none', summary: 'Read public onboarding state. Signup is DB-configured and defaults to enabled; the first signup becomes admin.' },
+  { method: 'POST', path: '/api/auth/signup', group: 'Auth', auth: 'none', summary: 'Create a user when DB auth.signup_enabled=true. The first account in a fresh DB becomes global admin and default-company admin.', body: { email: 'user@example.com', name: 'Operator', password: 'at least 8 chars' } },
   { method: 'POST', path: '/api/auth/login', group: 'Auth', auth: 'none', summary: 'Log in and set the session cookie.', body: { email: 'user@example.com', password: 'password' } },
   { method: 'POST', path: '/api/auth/logout', group: 'Auth', auth: 'session', summary: 'Clear the session cookie.' },
   { method: 'POST', path: '/api/auth/invites', group: 'Auth', auth: 'session', requiredRole: 'admin', summary: 'Create a one-time company invite token. The raw token is returned once and only its SHA-256 hash is stored.', body: { companyId: 'uuid', email: 'operator@example.com', name: 'Optional name', role: 'viewer | operator | admin', expiresInDays: 7 } },
   { method: 'POST', path: '/api/auth/accept-invite', group: 'Auth', auth: 'none', summary: 'Accept a one-time invite token and create or activate the user membership.', body: { token: 'invite token', name: 'Optional display name', password: 'at least 12 chars' } },
   { method: 'GET', path: '/api/me', group: 'Auth', auth: 'session', summary: 'Read the current authenticated user.' },
+  { method: 'GET', path: '/api/admin/settings', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Read global admin settings such as DB-backed signup enablement.' },
+  { method: 'PUT', path: '/api/admin/settings', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Update global admin settings.', body: { signupEnabled: true } },
+  { method: 'GET', path: '/api/admin/users', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'List all user accounts and company memberships.' },
+  { method: 'PUT', path: '/api/admin/users/:id', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Update an account name, global role, active/disabled status, or reset password. The last active admin cannot be demoted or disabled.', params: { id: 'User UUID.' }, body: { name: 'Operator', role: 'viewer | operator | admin', status: 'active | disabled', password: 'optional reset password' } },
 
   { method: 'GET', path: '/api/dashboard', group: 'Overview', auth: 'session', summary: 'Read dashboard stats, stage counts, recent task logs, and recent API events.' },
   { method: 'GET', path: '/api/system-logs', group: 'Logs', auth: 'session', summary: 'Read persisted API lifecycle logs for the current user.', query: { limit: '1-500, default 100.' } },
@@ -168,6 +171,20 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
     return { responseSchema: { user: { id: 'uuid', email: 'string', role: 'string' }, memberships: 'CompanyMembership[]' }, responseExample: { user: { id: 'user-uuid', email: 'user@example.com', role: 'admin' }, memberships: [{ companyId: 'company-uuid', role: 'admin', status: 'active' }] }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
+  if (endpoint.path === '/api/auth/status') {
+    return { responseSchema: { signupEnabled: 'boolean', userCount: 'number', firstAccountWillBeAdmin: 'boolean' }, responseExample: { signupEnabled: true, userCount: 0, firstAccountWillBeAdmin: true }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path.includes('/api/admin/settings')) {
+    return { responseSchema: { signupEnabled: 'boolean' }, responseExample: { signupEnabled: true }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path.includes('/api/admin/users')) {
+    const user = { id: 'user-uuid', email: 'admin@example.com', name: 'Admin', role: 'admin', status: 'active', memberships: [{ companyId: 'company-uuid', companyName: 'Default Company', role: 'admin', status: 'active' }] };
+    if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: user }, responseExample: [user], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: { user }, responseExample: { user }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
   if (endpoint.path.includes('/auth/signup') || endpoint.path.includes('/auth/login')) {
     return { responseSchema: { user: { id: 'uuid', email: 'string', name: 'string', role: 'string' } }, responseExample: { user: { id: 'user-uuid', email: 'user@example.com', name: 'Operator', role: 'admin' } }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
@@ -241,9 +258,10 @@ export function apiHelpCatalog() {
       ui: '/help',
     },
     auth: {
-      mode: 'Cookie session with company membership role checks. Viewer can read data for visible companies; company operator/admin is required for company-scoped mutation, run/review/decompose, adapter tests, runtime edits, and budget decisions. Manual cron remains an operator system action.',
+      mode: 'Cookie session with company membership role checks. Signup is DB-configured and defaults to enabled; the first account in a fresh DB becomes global admin and default-company admin. Viewer can read data for visible companies; company operator/admin is required for company-scoped mutation, run/review/decompose, adapter tests, runtime edits, and budget decisions. Manual cron remains an operator system action.',
       login: 'POST /api/auth/login',
       signup: 'POST /api/auth/signup',
+      admin: 'GET/PUT /api/admin/settings and GET/PUT /api/admin/users require global admin role.',
     },
     rateLimits: {
       enforced: process.env.RATE_LIMIT_ENABLED !== 'false',

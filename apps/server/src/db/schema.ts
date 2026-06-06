@@ -7,9 +7,16 @@ export const users = pgTable('users', {
   passwordHash: text('password_hash'),
   avatarUrl: text('avatar_url'),
   role: text('role').default('viewer'),
+  status: text('status').notNull().default('active'),
   locale: text('locale').default('zh-TW'),
   theme: text('theme').default('system'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
+
+export const appSettings = pgTable('app_settings', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 

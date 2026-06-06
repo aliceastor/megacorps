@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 
 type AuthStatus = {
   signupEnabled: boolean;
-  canBootstrap: boolean;
+  firstAccountWillBeAdmin: boolean;
 };
 
 export default function LoginPage() {
@@ -57,10 +57,9 @@ export default function LoginPage() {
       <button className="btn btn-primary" disabled={busy}><LogIn size={16} /> {busy ? 'Logging in...' : 'Login'}</button>
       {status === undefined && <p className="auth-note">Checking onboarding status...</p>}
       {status === null && <p className="auth-note">Onboarding status is unavailable. Check that the API is reachable from this browser.</p>}
-      {status?.canBootstrap && <Link className="muted-link" href="/setup">First time here? Run admin setup</Link>}
       {status && (status.signupEnabled
-        ? <Link className="muted-link" href="/signup">Do not have an account? Sign up</Link>
-        : <p className="auth-note">Public signup is disabled. Use an invite link or ask an admin to invite you.</p>)}
+        ? <Link className="muted-link" href="/signup">{status.firstAccountWillBeAdmin ? 'Create the first admin account' : 'Do not have an account? Sign up'}</Link>
+        : <p className="auth-note">Signup is disabled by an admin. Use an invite link or ask an admin to re-enable signup.</p>)}
     </form>
   </main>;
 }

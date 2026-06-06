@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, BriefcaseBusiness, Building2, ChartNoAxesColumnIncreasing, CircleHelp, FileClock, Kanban, LayoutDashboard, Languages, LogOut, Menu, MessageSquare, Moon, Network, Settings, Sun, User, Check } from 'lucide-react';
+import { BookOpen, BriefcaseBusiness, Building2, ChartNoAxesColumnIncreasing, CircleHelp, FileClock, Kanban, LayoutDashboard, Languages, LogOut, Menu, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, User, Check } from 'lucide-react';
 import { useLocale, localeList, localeNames } from '@/lib/locale-context';
 import { api } from '@/lib/api';
 
@@ -23,6 +23,8 @@ const utilityNav = [
   { href: '/help', label: 'Help', icon: CircleHelp },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];
+
+const adminNav = { href: '/admin', label: 'Admin', icon: ShieldCheck };
 
 function Dropdown({ open, onClose, children, style }: { open: boolean; onClose: () => void; children: React.ReactNode; style?: React.CSSProperties }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -61,13 +63,14 @@ export function AppShell({ title, children }: { title: string; children: React.R
   const [langOpen, setLangOpen] = useState(false);
   const [isDark, setIsDark] = useState(true);
   const [userEmail, setUserEmail] = useState('');
+  const [userRole, setUserRole] = useState('');
   const pathname = usePathname();
   const { locale, setLocale, t } = useLocale();
 
   useEffect(() => { setIsDark(document.documentElement.dataset.theme === 'dark'); }, []);
   useEffect(() => {
-    api<{ user: { email: string } }>('/api/me')
-      .then((result) => setUserEmail(result.user.email))
+    api<{ user: { email: string; role?: string } }>('/api/me')
+      .then((result) => { setUserEmail(result.user.email); setUserRole(result.user.role ?? ''); })
       .catch(() => undefined);
   }, []);
 
@@ -99,6 +102,7 @@ export function AppShell({ title, children }: { title: string; children: React.R
       </div>
       <div className="sidebar-footer">
         <nav className="nav-list nav-list-utility" aria-label="Utility">
+          {userRole === 'admin' && <SidebarLink item={adminNav} open={open} pathname={pathname} />}
           {utilityNav.map((item) => <SidebarLink item={item} open={open} pathname={pathname} key={item.href} />)}
         </nav>
         {open && <div className="sidebar-status">

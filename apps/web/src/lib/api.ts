@@ -67,13 +67,11 @@ function errorMessage(data: unknown): string {
 }
 
 function friendlyError(message: string): string {
-  if (message === 'signup_disabled') return 'Public signup is disabled. Use an invite link or the first-admin setup page.';
-  if (message === 'bootstrap_not_configured') return 'First-admin setup is not configured. Set BOOTSTRAP_TOKEN in the server environment.';
-  if (message === 'bootstrap_token_required') return 'Bootstrap token is missing or incorrect.';
-  if (message === 'bootstrap_already_completed') return 'First-admin setup has already been completed. Log in or ask an admin to invite you.';
+  if (message === 'signup_disabled') return 'Signup is disabled by an admin. Use an invite link or ask an admin to re-enable signup.';
   if (message === 'invalid_credentials') return 'Invalid email or password.';
-  if (message === 'JWT_SECRET is required in production') return 'Server JWT_SECRET is missing. Set a stable random value of at least 32 characters and restart the server.';
-  if (message === 'JWT_SECRET must be at least 32 characters and not use an insecure default') return 'Server JWT_SECRET is invalid. Set a stable random value of at least 32 characters and restart the server.';
+  if (message === 'user_disabled') return 'This account is disabled. Contact an admin.';
+  if (message === 'last_admin_required') return 'At least one active admin account is required.';
+  if (message === 'DB auth.jwt_secret must be at least 32 characters') return 'The DB session secret is invalid. Check app_settings.auth.jwt_secret.';
   return message;
 }
 

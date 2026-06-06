@@ -555,6 +555,23 @@ button.card {
 .meta-grid b { color: var(--foreground); overflow-wrap: anywhere; }
 .action-row { display: flex; gap: 8px; flex-wrap: wrap; }
 
+.admin-account-row {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-account-main {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.account-memberships {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .kanban-toolbar {
   display: flex;
   gap: 8px;

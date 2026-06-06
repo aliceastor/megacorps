@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 
 type AuthStatus = {
   signupEnabled: boolean;
-  canBootstrap: boolean;
+  firstAccountWillBeAdmin: boolean;
 };
 
 type InviteAcceptResponse = {
@@ -59,6 +59,7 @@ export default function SignupPage() {
         <h1>{inviteToken ? 'Accept invite' : 'Sign up'}</h1>
       </div>
       {inviteToken && <p className="auth-note">Invite token detected. Set your name and password to join the company.</p>}
+      {!inviteToken && status?.firstAccountWillBeAdmin && <p className="auth-note">This is a fresh deployment. The first account will become global admin and default-company admin.</p>}
       <label className="field-label">Name
         <input className="input" value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required />
       </label>
@@ -68,10 +69,9 @@ export default function SignupPage() {
       <label className="field-label">Password
         <input className="input" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" minLength={inviteToken ? 12 : 8} required />
       </label>
-      {!inviteToken && status && !status.signupEnabled && <p className="auth-note">Public signup is disabled. Use an invite link or run first-admin setup if this is a new deployment.</p>}
+      {!inviteToken && status && !status.signupEnabled && <p className="auth-note">Signup is disabled by an admin. Use an invite link or ask an admin to re-enable signup.</p>}
       {error && <p className="form-error">{error}</p>}
       <button className="btn btn-primary" disabled={busy || (!inviteToken && status !== null && !status.signupEnabled)}><UserPlus size={16} /> {busy ? 'Creating...' : inviteToken ? 'Accept invite' : 'Create account'}</button>
-      {!inviteToken && status?.canBootstrap && <Link className="muted-link" href="/setup">Run first-admin setup</Link>}
       <Link className="muted-link" href="/login">Already have an account? Login</Link>
     </form>
   </main>;

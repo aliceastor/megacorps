@@ -181,12 +181,17 @@ export const loginSchema = z.object({
   password: z.string().min(1),
 });
 
-export const bootstrapAdminSchema = z.object({
-  bootstrapToken: z.string().min(16).max(500).optional(),
-  email: emailSchema,
-  name: z.string().trim().min(1).max(120),
-  password: z.string().min(12).max(200),
-  companyId: z.string().uuid().optional(),
+export const userStatusSchema = z.enum(['active', 'disabled']);
+
+export const adminUpdateUserSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  role: z.enum(['viewer', 'operator', 'admin']).optional(),
+  status: userStatusSchema.optional(),
+  password: z.string().min(8).max(200).optional(),
+});
+
+export const adminUpdateSettingsSchema = z.object({
+  signupEnabled: z.boolean().optional(),
 });
 
 export const createInviteSchema = z.object({
@@ -209,7 +214,8 @@ export type CreateAgentInput = z.infer<typeof createAgentSchema>;
 export type CreateAgentRuntimeInput = z.infer<typeof createAgentRuntimeSchema>;
 export type CreateCompanyMembershipInput = z.infer<typeof createCompanyMembershipSchema>;
 export type UpdateCompanyMembershipInput = z.infer<typeof updateCompanyMembershipSchema>;
-export type BootstrapAdminInput = z.infer<typeof bootstrapAdminSchema>;
+export type AdminUpdateUserInput = z.infer<typeof adminUpdateUserSchema>;
+export type AdminUpdateSettingsInput = z.infer<typeof adminUpdateSettingsSchema>;
 export type CreateInviteInput = z.infer<typeof createInviteSchema>;
 export type AcceptInviteInput = z.infer<typeof acceptInviteSchema>;
 export type CreateCompanyInput = z.infer<typeof createCompanySchema>;
