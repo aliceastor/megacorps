@@ -2,6 +2,44 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.2 - Phase 14-15 RBAC and Task Runs
+
+Date: 2026-06-06
+
+Completed in this pass:
+
+- Added `company_memberships` with company-scoped viewer/operator/admin roles.
+- Backfilled existing users into existing companies during migration to preserve visibility on upgrade.
+- Added company-scoped reads for companies, departments, cards, agents, runtime presets, projects, goals, knowledge docs, activity, approvals, cost events, heartbeat runs, task runs, and chat sessions.
+- Added company-scoped mutation checks for company-owned cards, comments, agents, runtime presets, departments, projects, goals, knowledge docs, budget policies, approvals, direct chat, and company settings.
+- Added Settings UI for company member management by email.
+- Added `agent_runtimes.company_id` so runtime presets and adapter credentials are company-scoped.
+- Added `task_runs` as the first-class queue/job attempt table.
+- Changed manual Run/Review and cron heartbeat dispatch to enqueue task runs instead of executing adapter work directly in the request/scan path.
+- Added an in-process task-run worker that claims queued rows, executes dispatch/review, links `heartbeat_runs`, and records status/error/output/cost/duration.
+- Added Logs UI visibility for task runs.
+- Updated API Help, Docker compose, `.env.example`, README, and progress notes for Phase 14-15.
+
+## Architecture Update v1.1 - External Kanban Reference and Next Phases
+
+Date: 2026-06-06
+
+This update adds a new reference-review chapter to [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md) comparing Hermes Agent Kanban and Paperclip.
+
+Design conclusion:
+
+- Hermes Kanban is best treated as a durable worker-board reference: task rows, handoff rows, worker identity, claim/heartbeat/reclaim, run attempts, dependency promotion, task-scoped skills, and reviewer/goal loops.
+- Paperclip is the closer product reference for MegaCorps: company-scoped control plane, O-chart-driven delegation, goal ancestry, budgets, governance, work products, templates, and auditability.
+- MegaCorps should stay the source of truth above Hermes. Hermes can execute work, but MegaCorps owns company structure, task lifecycle, context packing, dispatch policy, budget policy, audit logs, approvals, and production governance.
+
+Reference-informed next phases:
+
+- [x] Phase 14: Company-scoped RBAC and memberships.
+- [x] Phase 15: Async worker queue plus first-class task-run attempts.
+- [ ] Phase 16: Dependency/blocker graph with derived ready state, reclaim policy, and structured handoff records.
+- [ ] Phase 17: Chain-of-command context, manager review, escalation, and delegation loop.
+- [ ] Phase 18: Work products, attachments, preview links, and company template import/export.
+
 ## Architecture Update v1.0 - Production Hardening and Real O-chart
 
 Date: 2026-06-06
@@ -168,11 +206,13 @@ The older phase checklist later in this document is kept as historical design no
 #### Phase 8 - Execution Safety
 
 - [x] `heartbeat_runs` table.
+- [x] `task_runs` table for queued dispatch/review attempts.
 - [x] Task execution locks.
 - [x] Agent busy-state locking.
 - [x] Stale-lock recovery.
 - [x] Run duration/cost/error recording.
 - [x] Safer adapter failure handling.
+- [x] In-process DB-backed task-run worker.
 - [ ] Dedicated async worker sidecar.
 - [ ] BullMQ/Redis queue.
 - [ ] Long-running job progress streaming.
@@ -187,7 +227,8 @@ The older phase checklist later in this document is kept as historical design no
 - [x] Settings page for runtime presets, adapter endpoints, companies, and departments.
 - [x] Help page and machine-readable API catalog.
 - [~] Audit log via `activity_log` and `api_events`.
-- [~] Strong company-scoped authorization on every endpoint.
+- [x] Company membership table.
+- [x] Company-scoped authorization for company-owned data.
 - [~] RBAC for admin/operator/viewer/agent-service actions.
 - [ ] Encrypted or externalized adapter secrets.
 - [ ] Company template import/export with secret scrubbing.
@@ -217,6 +258,33 @@ The older phase checklist later in this document is kept as historical design no
 - [x] Response schema/example for every Help API endpoint.
 - [x] Explicit rate-limit disclosure in Help API and Help UI.
 - [x] Canonical Kanban intake stage merge: `backlog` -> `todo`.
+
+#### Phase 14 - Company Memberships and RBAC
+
+- [x] `company_memberships` table.
+- [x] Migration backfill for existing users and companies.
+- [x] Signup creates admin membership for the default company.
+- [x] Company-scoped read filters for company-owned resources.
+- [x] Company operator/admin checks for company-owned mutations.
+- [x] Company admin checks for membership management.
+- [x] Runtime presets scoped by company.
+- [x] Settings UI for member add/update/disable.
+- [~] System API lifecycle logs remain authenticated system data, not fully company-sliced.
+- [ ] Invite flow.
+- [ ] Service-agent API keys.
+
+#### Phase 15 - Task Runs and Async Queue
+
+- [x] `task_runs` table.
+- [x] Manual Run/Review enqueue task runs and return queued job rows.
+- [x] Cron heartbeat enqueues dispatch/review task runs.
+- [x] In-process task-run worker claims queued rows and executes dispatch/review.
+- [x] `task_runs.heartbeat_run_id` links queue attempts to adapter execution runs.
+- [x] Logs page shows task runs.
+- [x] Docker compose and `.env.example` include task-run worker settings.
+- [ ] Dedicated worker sidecar for production-heavy Hermes jobs.
+- [ ] Distributed queue locks/retries for multi-replica deployments.
+- [ ] Live run progress streaming.
 
 ## Architecture Update v0.7 - Task Message Boards and Bounded Kanban Context
 
@@ -337,12 +405,11 @@ UI:
 
 ### Production Gap Review
 
-The Phase 1-10 MVP is now usable for controlled local/NAS debugging, but production still needs:
+The Phase 1-10 MVP was usable for controlled local/NAS debugging. v1.2 has since addressed company-scoped RBAC and the first DB-backed task-run queue. Production still needs:
 
-- strong company-scoped authorization on every endpoint,
-- RBAC for admin/operator/viewer actions,
+- invite/service-agent key flows and deeper multi-tenant audit slicing,
 - encrypted or externalized adapter secrets,
-- async worker/queue for long-running Hermes jobs,
+- dedicated worker sidecar and distributed queue locks for long-running Hermes jobs,
 - runtime health checks and offline routing,
 - realtime WebSocket/SSE updates for chat, runs, and logs,
 - versioned migrations and rollback strategy,
@@ -397,10 +464,10 @@ Implemented:
 
 Production hardening still needed:
 
-- Dedicated async worker/queue for long-running Hermes jobs.
+- Dedicated sidecar worker and distributed queue locks for long-running Hermes jobs.
 - Runtime health checks, versions, capabilities, and offline routing.
 - Immutable event bus separate from task/API logs.
-- Strong endpoint-level multi-company isolation.
+- Invite/service-agent key flows and deeper endpoint-level multi-tenant audit slicing.
 - Secret encryption or external secret references for adapter credentials.
 - Git worktree/branch/commit/merge workflow.
 - Work products and attachments.

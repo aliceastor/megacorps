@@ -1,13 +1,16 @@
 import { and, desc, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardComments, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardComments, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
+type TaskRunRow = typeof taskRuns.$inferSelect;
 type LogStatus = 'queued' | 'running' | 'success' | 'failed';
+type TaskRunKind = 'dispatch' | 'review';
+type TaskRunSource = 'manual' | 'loop' | 'startup' | 'queue';
 
 const LOOP_INTERVAL_MS = Number(process.env.DISPATCH_LOOP_INTERVAL_MS ?? 10_000);
 const CONTEXT_CHAR_BUDGET = Number(process.env.DISPATCH_CONTEXT_CHAR_BUDGET ?? 32_000);
@@ -17,7 +20,11 @@ const MESSAGE_BOARD_COMMENT_LIMIT = Number(process.env.MESSAGE_BOARD_COMMENT_LIM
 const TASK_BODY_CHAR_LIMIT = Number(process.env.DISPATCH_TASK_BODY_CHAR_LIMIT ?? 12_000);
 const KNOWLEDGE_DOC_CHAR_LIMIT = Number(process.env.DISPATCH_KNOWLEDGE_DOC_CHAR_LIMIT ?? 4_000);
 const BUDGET_RESET_DAY = Number(process.env.BUDGET_RESET_DAY ?? 1);
+const TASK_RUN_WORKER_INTERVAL_MS = Number(process.env.TASK_RUN_WORKER_INTERVAL_MS ?? 2_000);
+const TASK_RUN_WORKER_BATCH_SIZE = Number(process.env.TASK_RUN_WORKER_BATCH_SIZE ?? 2);
+const TASK_RUN_WORKER_ID = process.env.TASK_RUN_WORKER_ID ?? `server-${Math.random().toString(36).slice(2, 10)}`;
 let loopRunning = false;
+let taskRunWorkerRunning = false;
 const companyLastTick = new Map<string, number>();
 const cronState = {
   enabled: process.env.DISPATCH_LOOP_ENABLED !== 'false',
@@ -97,6 +104,134 @@ async function addActivity(input: {
     entityId: input.entityId,
     details: input.details ?? {},
   });
+}
+
+async function addTaskRunLog(run: TaskRunRow, status: LogStatus, message: string, output?: string) {
+  await addTaskLog({
+    cardId: run.cardId,
+    agentId: run.agentId,
+    type: 'queue',
+    status,
+    message,
+    output,
+  });
+}
+
+async function completeTaskRun(runId: string | null | undefined, input: {
+  status: 'success' | 'failed' | 'cancelled';
+  error?: string | null;
+  output?: string | null;
+  costUsd?: number;
+  durationSeconds?: number;
+}) {
+  if (!runId) return;
+  await db.update(taskRuns).set({
+    status: input.status,
+    error: input.error ?? null,
+    output: input.output ?? null,
+    costUsd: input.costUsd === undefined ? undefined : input.costUsd.toString(),
+    durationSeconds: input.durationSeconds,
+    completedAt: new Date(),
+    updatedAt: new Date(),
+  }).where(eq(taskRuns.id, runId));
+}
+
+export async function enqueueTaskRun(cardId: string, kind: TaskRunKind = 'dispatch', source: TaskRunSource = 'manual', requestedByUserId?: string | null): Promise<TaskRunRow> {
+  const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  if (!card) throw new Error('card_not_found');
+  const [existing] = await db.select().from(taskRuns).where(and(
+    eq(taskRuns.cardId, cardId),
+    eq(taskRuns.kind, kind),
+    inArray(taskRuns.status, ['queued', 'running']),
+  )).orderBy(desc(taskRuns.createdAt)).limit(1);
+  if (existing) return existing;
+
+  const previous = await db.select({ id: taskRuns.id }).from(taskRuns).where(and(eq(taskRuns.cardId, cardId), eq(taskRuns.kind, kind)));
+  const [run] = await db.insert(taskRuns).values({
+    companyId: card.companyId,
+    cardId: card.id,
+    agentId: kind === 'review' ? card.reviewerId : card.assigneeId,
+    kind,
+    source,
+    status: 'queued',
+    priority: card.priority ?? 0,
+    attemptNumber: previous.length + 1,
+    maxAttempts: 1,
+    requestedByUserId: requestedByUserId ?? null,
+  }).returning();
+  if (!run) throw new Error('task_run_create_failed');
+  await addTaskRunLog(run, 'queued', `${kind} task run queued via ${source}.`);
+  await addActivity({
+    companyId: card.companyId,
+    actorType: requestedByUserId ? 'user' : 'system',
+    actorId: requestedByUserId ?? 'queue',
+    agentId: run.agentId,
+    action: 'task_run.queued',
+    entityType: 'task_run',
+    entityId: run.id,
+    details: { cardId: card.id, kind, source, attemptNumber: run.attemptNumber },
+  });
+  return run;
+}
+
+async function claimNextTaskRun(): Promise<TaskRunRow | null> {
+  const [queued] = await db.select().from(taskRuns).where(eq(taskRuns.status, 'queued')).orderBy(desc(taskRuns.priority), taskRuns.createdAt).limit(1);
+  if (!queued) return null;
+  const now = new Date();
+  const [claimed] = await db.update(taskRuns).set({
+    status: 'running',
+    lockedBy: TASK_RUN_WORKER_ID,
+    lockedAt: now,
+    startedAt: now,
+    updatedAt: now,
+  }).where(and(eq(taskRuns.id, queued.id), eq(taskRuns.status, 'queued'))).returning();
+  return claimed ?? null;
+}
+
+async function finishWorkerTaskRun(run: TaskRunRow, work: () => Promise<CardRow>) {
+  const started = Date.now();
+  await addTaskRunLog(run, 'running', `${run.kind} task run started by ${TASK_RUN_WORKER_ID}.`);
+  try {
+    const card = await work();
+    const [latest] = await db.select().from(taskRuns).where(eq(taskRuns.id, run.id)).limit(1);
+    if (latest && latest.status === 'running') {
+      await completeTaskRun(run.id, {
+        status: 'success',
+        output: `Card ${card.id} is now ${card.columnStatus ?? 'todo'}.`,
+        costUsd: card.costUsd ? Number(card.costUsd) : undefined,
+        durationSeconds: Math.round((Date.now() - started) / 1000),
+      });
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'task_run_failed';
+    await completeTaskRun(run.id, { status: 'failed', error: message, durationSeconds: Math.round((Date.now() - started) / 1000) });
+    await addTaskRunLog(run, 'failed', `${run.kind} task run failed.`, message);
+    await addActivity({ companyId: run.companyId, actorType: 'system', actorId: TASK_RUN_WORKER_ID, agentId: run.agentId, action: 'task_run.failed', entityType: 'task_run', entityId: run.id, details: { cardId: run.cardId, kind: run.kind, error: message } });
+  }
+}
+
+export async function processTaskRunQueue(app: FastifyInstance): Promise<{ claimed: number; completed: number; failed: number }> {
+  if (taskRunWorkerRunning) return { claimed: 0, completed: 0, failed: 0 };
+  taskRunWorkerRunning = true;
+  const result = { claimed: 0, completed: 0, failed: 0 };
+  try {
+    for (let index = 0; index < Math.max(1, TASK_RUN_WORKER_BATCH_SIZE); index += 1) {
+      const run = await claimNextTaskRun();
+      if (!run) break;
+      result.claimed += 1;
+      const before = await db.select({ status: taskRuns.status }).from(taskRuns).where(eq(taskRuns.id, run.id)).limit(1);
+      if (run.kind === 'review') await finishWorkerTaskRun(run, () => reviewCard(run.cardId, { taskRunId: run.id }));
+      else await finishWorkerTaskRun(run, () => dispatchCard(run.cardId, run.source === 'manual' ? 'manual' : 'loop', { taskRunId: run.id }));
+      const [after] = await db.select({ status: taskRuns.status }).from(taskRuns).where(eq(taskRuns.id, run.id)).limit(1);
+      if (after?.status === 'failed') result.failed += 1;
+      else if (before.length > 0) result.completed += 1;
+    }
+  } catch (error) {
+    app.log.error({ error }, 'task run queue processing failed');
+  } finally {
+    taskRunWorkerRunning = false;
+  }
+  return result;
 }
 
 async function dependenciesMet(card: CardRow): Promise<boolean> {
@@ -189,7 +324,7 @@ async function ensureAssigned(card: CardRow, source: string): Promise<CardRow | 
   return updated ?? null;
 }
 
-async function openHeartbeatRun(card: CardRow, agent: AgentRow, source: string): Promise<HeartbeatRunRow> {
+async function openHeartbeatRun(card: CardRow, agent: AgentRow, source: string, taskRunId?: string | null): Promise<HeartbeatRunRow> {
   const [run] = await db.insert(heartbeatRuns).values({
     companyId: card.companyId,
     cardId: card.id,
@@ -199,6 +334,7 @@ async function openHeartbeatRun(card: CardRow, agent: AgentRow, source: string):
     startedAt: new Date(),
   }).returning();
   if (!run) throw new Error('heartbeat_run_create_failed');
+  if (taskRunId) await db.update(taskRuns).set({ heartbeatRunId: run.id, agentId: agent.id, updatedAt: new Date() }).where(eq(taskRuns.id, taskRunId));
   return run;
 }
 
@@ -326,7 +462,7 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
   await addTaskLog({ cardId: parentCardId, type: 'cascade', status: 'success', message: 'All sub-tasks completed; parent card marked done.' });
 }
 
-async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unknown, runId?: string | null): Promise<CardRow> {
+async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unknown, runId?: string | null, taskRunId?: string | null): Promise<CardRow> {
   const retryCount = (card.retryCount ?? 0) + 1;
   const maxRetries = card.maxRetries ?? 3;
   const message = error instanceof Error ? error.message : 'dispatch_failed';
@@ -356,11 +492,12 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
   });
   await addCardMessage({ cardId: card.id, agentId: agent.id, action: blocked ? 'agent_blocked' : 'agent_error', body: message });
   await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: blocked ? 'dispatch.blocked' : 'dispatch.retry_scheduled', entityType: 'card', entityId: card.id, details: { retryCount, maxRetries, error: message } });
+  await completeTaskRun(taskRunId, { status: 'failed', error: message });
   if (!updated) throw new Error('card_update_failed');
   return updated;
 }
 
-export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = 'manual'): Promise<CardRow> {
+export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = 'manual', options: { taskRunId?: string | null } = {}): Promise<CardRow> {
   let [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
   if (!card) throw new Error('card_not_found');
   if (!card.assigneeId) {
@@ -383,7 +520,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
 
   const [busyAgent] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, agent.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
   if (!busyAgent) throw new Error('agent_busy');
-  const run = await openHeartbeatRun(card, agent, source);
+  const run = await openHeartbeatRun(card, agent, source, options.taskRunId);
   let lockedCard = card;
   try {
     lockedCard = await acquireExecutionLock(card, agent, run, source);
@@ -438,16 +575,17 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     });
     await addCardMessage({ cardId: card.id, agentId: agent.id, action: 'agent_update', body: result.output });
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, nextStatus, costUsd: result.costUsd, budgetPaused } });
+    await completeTaskRun(options.taskRunId, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
     if (nextStatus === 'in_review') await createPendingApproval(updated, agent.id, effectiveReviewerId ? 'Reports-to review required' : 'Task requires approval');
     if (nextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
     return updated;
   } catch (error) {
-    return handleDispatchFailure(lockedCard, agent, error, run.id);
+    return handleDispatchFailure(lockedCard, agent, error, run.id, options.taskRunId);
   }
 }
 
-export async function reviewCard(cardId: string): Promise<CardRow> {
+export async function reviewCard(cardId: string, options: { taskRunId?: string | null } = {}): Promise<CardRow> {
   const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
   if (!card) throw new Error('card_not_found');
   if (!card.reviewerId) {
@@ -455,6 +593,7 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
     if (card.columnStatus !== 'done') await addStageLog(card.id, null, card.columnStatus, 'done', 'review');
     await addTaskLog({ cardId: card.id, type: 'review', status: 'success', message: 'No reviewer configured; card approved automatically.' });
     await resolvePendingApproval(card, 'approved', 'No reviewer configured; approved automatically.');
+    await completeTaskRun(options.taskRunId, { status: 'success', output: 'No reviewer configured; approved automatically.' });
     if (!updated) throw new Error('card_update_failed');
     await cascadeParentStatus(updated.parentCardId);
     return updated;
@@ -466,7 +605,7 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
 
   const [busyReviewer] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, reviewer.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
   if (!busyReviewer) throw new Error('reviewer_busy');
-  const run = await openHeartbeatRun(card, reviewer, 'review');
+  const run = await openHeartbeatRun(card, reviewer, 'review', options.taskRunId);
   await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'running', message: 'Review started.' });
   try {
     const adapter = getAdapter(reviewer.adapterType ?? 'hermes');
@@ -499,6 +638,7 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
     await db.update(heartbeatRuns).set({ status: result.success ? 'success' : 'failed', completedAt: new Date(), durationSeconds: result.durationSeconds, error: result.success ? null : result.output }).where(eq(heartbeatRuns.id, run.id));
     await resolvePendingApproval(card, rejected ? 'rejected' : 'approved', rejected ? result.output : 'Reviewer approved task.', reviewer.id);
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: rejected ? 'review.rejected' : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd } });
+    await completeTaskRun(options.taskRunId, { status: rejected ? 'failed' : 'success', error: rejected ? result.output : null, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
     if (!rejected) await cascadeParentStatus(updated.parentCardId);
     return updated;
@@ -507,6 +647,7 @@ export async function reviewCard(cardId: string): Promise<CardRow> {
     await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: error instanceof Error ? error.message : 'review_failed' }).where(eq(heartbeatRuns.id, run.id));
     await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'failed', message: error instanceof Error ? error.message : 'review_failed' });
     await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: 'review_error', body: error instanceof Error ? error.message : 'review_failed' });
+    await completeTaskRun(options.taskRunId, { status: 'failed', error: error instanceof Error ? error.message : 'review_failed' });
     throw error;
   }
 }
@@ -567,6 +708,7 @@ async function recoverStaleExecutionLocks(app: FastifyInstance) {
     }).where(eq(kanbanCards.id, card.id));
     if (agentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agentId));
     if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'failed', error: 'stale_execution_lock_recovered', completedAt: new Date() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
+    if (card.activeHeartbeatRunId) await db.update(taskRuns).set({ status: 'failed', error: 'stale_execution_lock_recovered', completedAt: new Date(), updatedAt: new Date() }).where(eq(taskRuns.heartbeatRunId, card.activeHeartbeatRunId));
     await addTaskLog({ cardId: card.id, agentId, type: 'recovery', status: 'failed', message: 'Stale execution lock recovered; task returned to todo.' });
     await addStageLog(card.id, agentId ?? null, card.columnStatus, card.columnStatus === 'in_progress' ? 'todo' : card.columnStatus ?? 'todo', 'stale-lock-recovery');
     await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'recovery', agentId, action: 'execution.stale_lock_recovered', entityType: 'card', entityId: card.id, details: { runId: card.activeHeartbeatRunId } });
@@ -720,7 +862,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
           try {
             const assigned = await ensureAssigned(card, source === 'manual' ? 'manual' : 'loop');
             if (assigned || card.assigneeId) {
-              await dispatchCard(card.id, source === 'manual' ? 'manual' : 'loop');
+              await enqueueTaskRun(card.id, 'dispatch', source === 'manual' ? 'manual' : 'loop');
               result.dispatched += 1;
             } else {
               result.skipped += 1;
@@ -731,7 +873,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
           }
         } else if (card.columnStatus === 'in_review') {
           try {
-            await reviewCard(card.id);
+            await enqueueTaskRun(card.id, 'review', source === 'manual' ? 'manual' : 'loop');
             result.reviewed += 1;
           } catch (error) {
             result.errors += 1;
@@ -776,6 +918,11 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
 }
 
 export function startDispatchLoop(app: FastifyInstance): void {
+  if (process.env.TASK_RUN_WORKER_ENABLED !== 'false') {
+    const workerTimer = setInterval(() => { void processTaskRunQueue(app); }, TASK_RUN_WORKER_INTERVAL_MS);
+    app.addHook('onClose', async () => clearInterval(workerTimer));
+    void processTaskRunQueue(app);
+  }
   if (!cronState.enabled) return;
   const timer = setInterval(() => { void runDispatchCronTick(app, 'loop'); }, LOOP_INTERVAL_MS);
   app.addHook('onClose', async () => clearInterval(timer));

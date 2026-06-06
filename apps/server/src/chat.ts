@@ -1,7 +1,8 @@
 import { createChatMessageSchema, createChatSessionSchema } from '@megacorps/shared';
-import { and, desc, eq, sql as drizzleSql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { requireAuth } from './auth.ts';
+import { requireAnyVisibleCompany, requireCompanyRole } from './access.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { db } from './db/client.ts';
 import { activityLog, agents, chatMessages, chatSessions, companies, costEvents, heartbeatRuns } from './db/schema.ts';
@@ -54,10 +55,11 @@ async function addChatActivity(input: {
 
 export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/chat/sessions', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string; agentId?: string; limit?: string };
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
     const filters = [
-      query.companyId ? eq(chatSessions.companyId, query.companyId) : undefined,
+      query.companyId ? eq(chatSessions.companyId, query.companyId) : inArray(chatSessions.companyId, access.companyIds),
       query.agentId ? eq(chatSessions.agentId, query.agentId) : undefined,
     ].filter(Boolean);
     return db.select().from(chatSessions)
@@ -67,8 +69,8 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/chat/sessions', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
     const input = createChatSessionSchema.parse(request.body);
+    const user = await requireCompanyRole(request, reply, input.companyId, 'operator'); if (!user) return reply;
     const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId)).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     if (agent.companyId !== input.companyId) return reply.code(400).send({ error: 'agent_company_mismatch' });
@@ -84,11 +86,11 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/api/chat/sessions/:id/messages', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const query = request.query as { limit?: string };
     const [session] = await db.select().from(chatSessions).where(eq(chatSessions.id, id)).limit(1);
     if (!session) return reply.code(404).send({ error: 'chat_session_not_found' });
+    const user = await requireCompanyRole(request, reply, session.companyId, 'viewer'); if (!user) return reply;
     const rows = await db.select().from(chatMessages)
       .where(eq(chatMessages.sessionId, id))
       .orderBy(desc(chatMessages.createdAt))
@@ -97,11 +99,11 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/chat/sessions/:id/messages', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = createChatMessageSchema.parse(request.body);
     const [session] = await db.select().from(chatSessions).where(eq(chatSessions.id, id)).limit(1);
     if (!session) return reply.code(404).send({ error: 'chat_session_not_found' });
+    const user = await requireCompanyRole(request, reply, session.companyId, 'operator'); if (!user) return reply;
     const [agent] = await db.select().from(agents).where(eq(agents.id, session.agentId)).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     const [company] = await db.select().from(companies).where(eq(companies.id, session.companyId)).limit(1);

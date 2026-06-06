@@ -3,10 +3,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { Save, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
 
-type Runtime = { id: string; name: string; adapterType: string; config: Record<string, unknown>; isActive?: boolean };
+type Runtime = { id: string; companyId?: string | null; name: string; adapterType: string; config: Record<string, unknown>; isActive?: boolean };
 type RuntimeHealth = { runtimeId: string; name: string; adapterType: string; status: string; isActive: boolean; agents: number; activeAgents: number; busyAgents: number; lastRunAt?: string | null; lastRunStatus?: string | null; lastError?: string | null; capabilities?: string[] };
 type Company = { id: string; name: string; slug: string; mission?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean };
 type Department = { id: string; companyId: string; name: string; slug: string };
+type Membership = { id: string; companyId: string; userId: string; role: string; status: string; userEmail?: string; userName?: string };
 
 const adapterTypes = ['mock', 'hermes', 'hermes-ssh', 'hermes-gateway', 'webhook', 'openclaw'];
 
@@ -47,7 +48,9 @@ export function SettingsPage() {
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealth[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
+  const [memberships, setMemberships] = useState<Membership[]>([]);
   const [runtimeId, setRuntimeId] = useState('');
+  const [runtimeCompanyId, setRuntimeCompanyId] = useState('');
   const [runtimeName, setRuntimeName] = useState('Local Mock Runtime');
   const [runtimeAdapter, setRuntimeAdapter] = useState('mock');
   const [runtimeActive, setRuntimeActive] = useState(true);
@@ -59,30 +62,37 @@ export function SettingsPage() {
   const [autoDispatch, setAutoDispatch] = useState(true);
   const [deptName, setDeptName] = useState('');
   const [deptSlug, setDeptSlug] = useState('');
+  const [memberEmail, setMemberEmail] = useState('');
+  const [memberRole, setMemberRole] = useState('viewer');
   const [toast, setToast] = useState('');
 
   async function refresh() {
-    const [nextRuntimes, nextHealth, nextCompanies, nextDepartments] = await Promise.all([
+    const [nextRuntimes, nextHealth, nextCompanies, nextDepartments, nextMemberships] = await Promise.all([
       api<Runtime[]>('/api/agent-runtimes'),
       api<RuntimeHealth[]>('/api/agent-runtimes/health'),
       api<Company[]>('/api/companies'),
       api<Department[]>('/api/departments'),
+      api<Membership[]>('/api/company-memberships'),
     ]);
     setRuntimes(nextRuntimes);
     setRuntimeHealth(nextHealth);
     setCompanies(nextCompanies);
     setDepartments(nextDepartments);
+    setMemberships(nextMemberships);
     const company = nextCompanies.find((item) => item.id === companyId) ?? nextCompanies[0];
     if (company) selectCompany(company);
+    if (!runtimeCompanyId && nextCompanies[0]) setRuntimeCompanyId(nextCompanies[0].id);
   }
 
   useEffect(() => { void refresh(); }, []);
   useEffect(() => { setDeptSlug(deptName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')); }, [deptName]);
 
   const selectedCompanyDepartments = useMemo(() => departments.filter((department) => department.companyId === companyId), [companyId, departments]);
+  const selectedCompanyMembers = useMemo(() => memberships.filter((membership) => membership.companyId === companyId && membership.status !== 'disabled'), [companyId, memberships]);
 
   function selectRuntime(runtime: Runtime) {
     setRuntimeId(runtime.id);
+    setRuntimeCompanyId(runtime.companyId ?? companies[0]?.id ?? '');
     setRuntimeName(runtime.name);
     setRuntimeAdapter(runtime.adapterType);
     setRuntimeActive(runtime.isActive !== false);
@@ -98,7 +108,7 @@ export function SettingsPage() {
   }
 
   async function saveRuntime() {
-    const payload = { name: runtimeName, adapterType: runtimeAdapter, isActive: runtimeActive, config: runtimeConfig };
+    const payload = { companyId: runtimeCompanyId || companyId || companies[0]?.id, name: runtimeName, adapterType: runtimeAdapter, isActive: runtimeActive, config: runtimeConfig };
     const saved = runtimeId ? await api<Runtime>(`/api/agent-runtimes/${runtimeId}`, { method: 'PUT', body: JSON.stringify(payload) }) : await api<Runtime>('/api/agent-runtimes', { method: 'POST', body: JSON.stringify(payload) });
     setRuntimeId(saved.id);
     setToast('Runtime saved');
@@ -131,6 +141,27 @@ export function SettingsPage() {
     await refresh();
   }
 
+  async function addMember() {
+    if (!companyId || !memberEmail.trim()) return;
+    await api<Membership>('/api/company-memberships', { method: 'POST', body: JSON.stringify({ companyId, email: memberEmail.trim(), role: memberRole, status: 'active' }) });
+    setMemberEmail('');
+    setMemberRole('viewer');
+    setToast('Member saved');
+    await refresh();
+  }
+
+  async function updateMember(membership: Membership, role: string) {
+    await api<Membership>(`/api/company-memberships/${membership.id}`, { method: 'PUT', body: JSON.stringify({ role, status: membership.status }) });
+    setToast('Member role updated');
+    await refresh();
+  }
+
+  async function disableMember(membership: Membership) {
+    await api(`/api/company-memberships/${membership.id}`, { method: 'DELETE' });
+    setToast('Member disabled');
+    await refresh();
+  }
+
   return <div style={{ display: 'grid', gap: 16 }}>
     <div className="page-head">
       <div><h1>Settings</h1><p>Configure companies, departments, agent runtimes, and adapter endpoints.</p></div>
@@ -138,8 +169,9 @@ export function SettingsPage() {
     {toast && <p className="status-pill">{toast}</p>}
     <div className="data-grid">
       <section className="card section-card">
-        <div className="panel-title"><h2>Agent runtimes</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeName(''); setRuntimeAdapter('mock'); setRuntimeConfig({}); }}>New</button></div>
+        <div className="panel-title"><h2>Agent runtimes</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeCompanyId(companyId || companies[0]?.id || ''); setRuntimeName(''); setRuntimeAdapter('mock'); setRuntimeConfig({}); }}>New</button></div>
         <div className="form-grid">
+          <label className="field-label">Company<select className="input" value={runtimeCompanyId} onChange={(event) => setRuntimeCompanyId(event.target.value)}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
           <label className="field-label">Name<input className="input" value={runtimeName} onChange={(event) => setRuntimeName(event.target.value)} /></label>
           <label className="field-label">Adapter<select className="input" value={runtimeAdapter} onChange={(event) => setRuntimeAdapter(event.target.value)}>{adapterTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
         </div>
@@ -152,7 +184,7 @@ export function SettingsPage() {
         <button className="btn btn-primary" onClick={saveRuntime}><Save size={15} /> Save runtime</button>
         <div className="table-list">
           {runtimes.map((runtime) => <div className="list-row" key={runtime.id}>
-            <b>{runtime.name}</b><p>{runtime.adapterType} / {runtime.isActive === false ? 'inactive' : 'active'}</p>
+            <b>{runtime.name}</b><p>{companies.find((company) => company.id === runtime.companyId)?.name ?? 'company'} / {runtime.adapterType} / {runtime.isActive === false ? 'inactive' : 'active'}</p>
             <div className="action-row"><button className="btn" onClick={() => selectRuntime(runtime)}>Edit</button><button className="btn" style={{ color: 'var(--danger)' }} onClick={() => deleteRuntime(runtime)}><Trash2 size={14} /> Delete</button></div>
           </div>)}
         </div>
@@ -190,6 +222,30 @@ export function SettingsPage() {
         </div>
         <button className="btn" onClick={addDepartment}>Add department</button>
         <div className="table-list">{selectedCompanyDepartments.map((department) => <div className="list-row" key={department.id}><b>{department.name}</b><p>{department.slug}</p></div>)}</div>
+      </section>
+
+      <section className="card section-card">
+        <div className="panel-title"><h2>Company members</h2><span className="status-pill">{selectedCompanyMembers.length} active</span></div>
+        <div className="form-grid">
+          <label className="field-label">User email<input className="input" value={memberEmail} onChange={(event) => setMemberEmail(event.target.value)} /></label>
+          <label className="field-label">Role<select className="input" value={memberRole} onChange={(event) => setMemberRole(event.target.value)}><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select></label>
+        </div>
+        <button className="btn" onClick={addMember}>Add or update member</button>
+        <div className="table-list">
+          {selectedCompanyMembers.map((membership) => <div className="list-row" key={membership.id}>
+            <b>{membership.userName ?? membership.userEmail ?? membership.userId}</b>
+            <p>{membership.userEmail ?? membership.userId} / {membership.status}</p>
+            <div className="action-row">
+              <select className="input compact" value={membership.role} onChange={(event) => updateMember(membership, event.target.value)}>
+                <option value="viewer">viewer</option>
+                <option value="operator">operator</option>
+                <option value="admin">admin</option>
+              </select>
+              <button className="btn" style={{ color: 'var(--danger)' }} onClick={() => disableMember(membership)}>Disable</button>
+            </div>
+          </div>)}
+          {selectedCompanyMembers.length === 0 && <p style={{ color: 'var(--muted)' }}>No active members.</p>}
+        </div>
       </section>
     </div>
   </div>;

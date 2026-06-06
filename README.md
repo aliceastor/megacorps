@@ -1,10 +1,10 @@
-# MegaCorps Phase 1-13 Control Plane MVP
+# MegaCorps Phase 1-15 Control Plane MVP
 
 Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm workspaces.
 
 ## Documentation
 
-- [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md): current progress, Paperclip research, implemented features, gap analysis, and next phase plan.
+- [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md): current progress, Paperclip/Hermes Kanban reference review, implemented features, gap analysis, and next phase plan.
 - [MegaCorps_ARCHITECTURE.md](./MegaCorps_ARCHITECTURE.md): long-form architecture notes and implementation updates.
 
 ## Run locally
@@ -64,7 +64,7 @@ For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
 - `Workspaces`: project and goal setup for task context.
 - `Settings`: company heartbeat settings, departments, runtime presets, adapter endpoints.
-  Runtime health summaries show adapter status, attached agents, last run status, and capabilities.
+  Runtime health summaries show adapter status, attached agents, last run status, and capabilities. Company members can be managed by email with viewer/operator/admin roles.
 
 ## Current scope
 
@@ -81,6 +81,14 @@ For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or
 - Phase 11: per-task agent/user message boards and bounded Kanban context injection for every agent invocation.
 - Phase 12: Hermes SSH adapter, API Help response schema/examples, rate-limit disclosure, and browser-host API fallback.
 - Phase 13: real O-chart tree canvas, operator RBAC for mutations/manual execution, in-app rate limiting, runtime health summary, webhook shared-secret guard, monthly budget reset cron, and UI error boundary.
+- Phase 14: company memberships, company-scoped read filters, company operator/admin mutation checks, runtime company scoping, and Settings member management.
+- Phase 15: database-backed `task_runs` queue, background task-run worker, queued manual run/review, queued cron dispatch/review, and Logs task-run visibility.
+
+Reference-informed next phases:
+
+- Phase 16: dependency/blocker graph with derived ready state and reclaim policy.
+- Phase 17: chain-of-command context, manager review, escalation, and delegation loop.
+- Phase 18: work products, attachments, preview links, and company template import/export.
 
 ## Paperclip-inspired loop
 
@@ -90,10 +98,9 @@ The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds 
 
 - scan `todo` Kanban tasks,
 - auto-assign unassigned tasks to an active idle agent, preferring department and tag/capability matches,
-- move assigned work into `in_progress`,
-- run the configured adapter,
-- move completed work to `in_review` or `done`,
-- review tasks when a reviewer is configured,
+- enqueue dispatch task-run attempts,
+- enqueue review task-run attempts when a reviewer is configured,
+- let the task-run worker claim queued work, move assigned work into `in_progress`, run the configured adapter, and move completed work to `in_review` or `done`,
 - cascade parent tasks when all sub-tasks are complete.
 
 Cron/debug endpoints:
@@ -101,9 +108,10 @@ Cron/debug endpoints:
 - `GET /api/help`: machine-readable API catalog for agents and integrations, including response schema examples and rate-limit notes.
 - `GET /api/help?format=markdown`: Markdown API catalog with body examples, response examples, and rate-limit notes.
 - `GET /api/agent-runtimes/health`: runtime status, attached agent counts, last run state, and adapter capabilities.
+- `GET /api/task-runs`: queued/running/completed dispatch and review attempts.
 - `GET /api/cron/status`: in-memory scheduler state plus recent durable cron runs.
 - `GET /api/cron/runs`: cron run history.
-- `POST /api/cron/run`: manually run one dispatch heartbeat.
+- `POST /api/cron/run`: manually run one dispatch heartbeat and enqueue eligible task runs.
 
 ## Direct agent chat
 
@@ -160,6 +168,7 @@ MegaCorps stores two complementary log streams:
 - `task_logs`: stage changes, dispatch/review/decomposition/comment events, agent output.
 - `api_events`: full API lifecycle with method, path, status, request, response, error, duration, and user id. Sensitive fields such as password/token/secret/jwt are redacted.
 - `activity_log`: product-level audit events for cards, agents, approvals, budget policies, locks, recovery, and webhook completions.
+- `task_runs`: DB-backed queue jobs for dispatch/review attempts with queued/running/success/failed state.
 - `heartbeat_runs`: every dispatch/review run with source, status, lock, cost, duration, and error.
 - `cost_events`: immutable cost records by company, agent, task, project, goal, provider, and model.
 - `cron_runs`: every dispatch heartbeat tick with source, status, counts, duration, and errors.
@@ -180,6 +189,8 @@ Phase 8/9 safety behavior:
 - Mutation/manual execution routes require operator/admin roles. Viewer role can read authenticated UI data.
 - If `WEBHOOK_SHARED_SECRET` is set, task completion webhooks must send either `X-MegaCorps-Webhook-Secret` or `Authorization: Bearer`.
 - Monthly agent spend resets on `BUDGET_RESET_DAY` UTC, default day 1, and the reset is marked in `cron_runs`.
+- Company membership rows scope visible companies and company-owned entities. Company operators/admins can mutate company data; company admins can manage memberships.
+- Manual Run/Review and cron dispatch now enqueue `task_runs`; the in-process worker claims the queue and records linked `heartbeat_runs`.
 
 No pnpm. No Redis.
 
@@ -188,9 +199,9 @@ No pnpm. No Redis.
 - Put the app behind TLS, a reverse proxy, and external rate limits in addition to the in-app limiter.
 - Set strong `JWT_SECRET`, `WEBHOOK_SHARED_SECRET`, SSH keys, and external database credentials.
 - Encrypt or externalize adapter/runtime secrets before multi-user production.
-- Add durable async worker/queue for long-running Hermes jobs instead of doing every run inside the API process.
+- Move the current in-process DB task-run worker into a separate sidecar/replica-safe worker for heavy production usage.
 - Add WebSocket/SSE consumers for live task/chat/log updates.
-- Add company-scoped membership/RBAC tables if multiple human tenants share one deployment.
+- Extend company-scoped membership/RBAC with invite flow, service-agent keys, and emergency break-glass admin policy.
 - Add database backup/restore, retention, migration rollback, metrics, alerts, and incident runbooks.
 
 ## Latest local verification

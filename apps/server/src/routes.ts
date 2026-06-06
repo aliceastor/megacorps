@@ -1,12 +1,13 @@
 import bcrypt from 'bcryptjs';
-import { and, desc, eq, sql as drizzleSql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { approvalDecisionSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema } from '@megacorps/shared';
+import { approvalDecisionSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema } from '@megacorps/shared';
 import { signSession, requireAuth, requireRole } from './auth.ts';
+import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, apiEvents, approvals, budgetPolicies, cardComments, companies, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, users } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, apiEvents, approvals, budgetPolicies, cardComments, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, users } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
-import { cascadeParentStatus, decomposeCard, dispatchCard, getTaskLogs, reviewCard } from './dispatch.ts';
+import { cascadeParentStatus, decomposeCard, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
 import { registerChatRoutes } from './chat.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
@@ -19,6 +20,68 @@ async function defaultCompanyId(): Promise<string> {
 
 function priorityToNumber(priority: string | undefined): number { return priority === 'urgent' ? 3 : priority === 'high' ? 2 : priority === 'low' ? -1 : 0; }
 function actorLabel(user: { email?: string; id?: string } | null): string { return user?.email ?? user?.id ?? 'system'; }
+
+async function cardCompanyId(cardId: string): Promise<string | null> {
+  const [card] = await db.select({ companyId: kanbanCards.companyId }).from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  return card?.companyId ?? null;
+}
+
+async function agentCompanyId(agentId: string): Promise<string | null> {
+  const [agent] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, agentId)).limit(1);
+  return agent?.companyId ?? null;
+}
+
+async function ensureVisibleCard(request: Parameters<typeof requireVisibleCompany>[0], reply: Parameters<typeof requireVisibleCompany>[1], cardId: string) {
+  const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  if (!card) {
+    await reply.code(404).send({ error: 'card_not_found' });
+    return null;
+  }
+  const user = await requireVisibleCompany(request, reply, card.companyId);
+  return user ? card : null;
+}
+
+async function ensureCompanyReferences(companyId: string, input: {
+  departmentId?: string | null;
+  projectId?: string | null;
+  goalId?: string | null;
+  assigneeId?: string | null;
+  reviewerId?: string | null;
+  bossId?: string | null;
+  parentCardId?: string | null;
+  dependencyCardIds?: string[];
+  runtimeId?: string | null;
+}) {
+  if (input.departmentId) {
+    const [row] = await db.select({ id: departments.id }).from(departments).where(and(eq(departments.id, input.departmentId), eq(departments.companyId, companyId))).limit(1);
+    if (!row) throw new Error('department_company_mismatch');
+  }
+  if (input.projectId) {
+    const [row] = await db.select({ id: projects.id }).from(projects).where(and(eq(projects.id, input.projectId), eq(projects.companyId, companyId))).limit(1);
+    if (!row) throw new Error('project_company_mismatch');
+  }
+  if (input.goalId) {
+    const [row] = await db.select({ id: goals.id }).from(goals).where(and(eq(goals.id, input.goalId), eq(goals.companyId, companyId))).limit(1);
+    if (!row) throw new Error('goal_company_mismatch');
+  }
+  for (const [key, id] of [['assignee_company_mismatch', input.assigneeId], ['reviewer_company_mismatch', input.reviewerId], ['boss_company_mismatch', input.bossId]] as const) {
+    if (!id) continue;
+    const company = await agentCompanyId(id);
+    if (company !== companyId) throw new Error(key);
+  }
+  if (input.parentCardId) {
+    const company = await cardCompanyId(input.parentCardId);
+    if (company !== companyId) throw new Error('parent_card_company_mismatch');
+  }
+  if (input.dependencyCardIds?.length) {
+    const rows = await db.select({ id: kanbanCards.id }).from(kanbanCards).where(and(inArray(kanbanCards.id, input.dependencyCardIds), eq(kanbanCards.companyId, companyId)));
+    if (rows.length !== input.dependencyCardIds.length) throw new Error('dependency_card_company_mismatch');
+  }
+  if (input.runtimeId) {
+    const [runtime] = await db.select({ companyId: agentRuntimes.companyId }).from(agentRuntimes).where(eq(agentRuntimes.id, input.runtimeId)).limit(1);
+    if (!runtime || runtime.companyId !== companyId) throw new Error('runtime_company_mismatch');
+  }
+}
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/health', async () => ({ ok: true }));
@@ -37,6 +100,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const passwordHash = await bcrypt.hash(input.password, 12);
     const [user] = await db.insert(users).values({ email: input.email, name: input.name, passwordHash, role: 'admin' }).returning();
     if (!user) return reply.code(500).send({ error: 'signup_failed' });
+    const companyId = await defaultCompanyId();
+    await db.insert(companyMemberships).values({ companyId, userId: user.id, role: 'admin', status: 'active' }).onConflictDoNothing();
     const token = await signSession({ id: user.id, email: user.email, role: user.role ?? 'admin' });
     reply.setCookie('session', token, { httpOnly: true, sameSite: 'lax', path: '/', secure: false });
     return { user: { id: user.id, email: user.email, name: user.name } };
@@ -52,7 +117,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/auth/logout', async (_request, reply) => { reply.clearCookie('session', { path: '/' }); return { ok: true }; });
-  app.get('/api/me', async (request, reply) => { const user = await requireAuth(request, reply); return user ? { user } : reply; });
+  app.get('/api/me', async (request, reply) => {
+    const user = await requireAuth(request, reply);
+    if (!user) return reply;
+    const memberships = await db.select().from(companyMemberships).where(and(eq(companyMemberships.userId, user.id), eq(companyMemberships.status, 'active')));
+    return { user, memberships };
+  });
   app.get('/api/system-logs', async (request, reply) => {
     const user = await requireAuth(request, reply); if (!user) return reply;
     const query = request.query as { limit?: string };
@@ -60,51 +130,68 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return db.select().from(apiEvents).orderBy(desc(apiEvents.createdAt)).limit(limit);
   });
   app.get('/api/activity', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string; entityType?: string; limit?: string };
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
     const filters = [
-      query.companyId ? eq(activityLog.companyId, query.companyId) : undefined,
+      query.companyId ? eq(activityLog.companyId, query.companyId) : inArray(activityLog.companyId, access.companyIds),
       query.entityType ? eq(activityLog.entityType, query.entityType) : undefined,
     ].filter(Boolean);
     return db.select().from(activityLog).where(filters.length ? and(...filters) : undefined).orderBy(desc(activityLog.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
   });
   app.get('/api/heartbeat-runs', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string; cardId?: string; agentId?: string; status?: string; limit?: string };
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
     const filters = [
-      query.companyId ? eq(heartbeatRuns.companyId, query.companyId) : undefined,
+      query.companyId ? eq(heartbeatRuns.companyId, query.companyId) : inArray(heartbeatRuns.companyId, access.companyIds),
       query.cardId ? eq(heartbeatRuns.cardId, query.cardId) : undefined,
       query.agentId ? eq(heartbeatRuns.agentId, query.agentId) : undefined,
       query.status ? eq(heartbeatRuns.status, query.status) : undefined,
     ].filter(Boolean);
     return db.select().from(heartbeatRuns).where(filters.length ? and(...filters) : undefined).orderBy(desc(heartbeatRuns.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
   });
-  app.get('/api/cost-events', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
-    const query = request.query as { companyId?: string; agentId?: string; cardId?: string; limit?: string };
+  app.get('/api/task-runs', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    const query = request.query as { companyId?: string; cardId?: string; agentId?: string; kind?: string; status?: string; limit?: string };
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
     const filters = [
-      query.companyId ? eq(costEvents.companyId, query.companyId) : undefined,
+      query.companyId ? eq(taskRuns.companyId, query.companyId) : inArray(taskRuns.companyId, access.companyIds),
+      query.cardId ? eq(taskRuns.cardId, query.cardId) : undefined,
+      query.agentId ? eq(taskRuns.agentId, query.agentId) : undefined,
+      query.kind ? eq(taskRuns.kind, query.kind) : undefined,
+      query.status ? eq(taskRuns.status, query.status) : undefined,
+    ].filter(Boolean);
+    return db.select().from(taskRuns).where(filters.length ? and(...filters) : undefined).orderBy(desc(taskRuns.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+  });
+  app.get('/api/cost-events', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    const query = request.query as { companyId?: string; agentId?: string; cardId?: string; limit?: string };
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
+    const filters = [
+      query.companyId ? eq(costEvents.companyId, query.companyId) : inArray(costEvents.companyId, access.companyIds),
       query.agentId ? eq(costEvents.agentId, query.agentId) : undefined,
       query.cardId ? eq(costEvents.cardId, query.cardId) : undefined,
     ].filter(Boolean);
     return db.select().from(costEvents).where(filters.length ? and(...filters) : undefined).orderBy(desc(costEvents.occurredAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
   });
   app.get('/api/approvals', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string; status?: string; cardId?: string; limit?: string };
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
     const filters = [
-      query.companyId ? eq(approvals.companyId, query.companyId) : undefined,
+      query.companyId ? eq(approvals.companyId, query.companyId) : inArray(approvals.companyId, access.companyIds),
       query.status ? eq(approvals.status, query.status) : undefined,
       query.cardId ? eq(approvals.cardId, query.cardId) : undefined,
     ].filter(Boolean);
     return db.select().from(approvals).where(filters.length ? and(...filters) : undefined).orderBy(desc(approvals.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
   });
   app.put('/api/approvals/:id', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = approvalDecisionSchema.parse(request.body);
     const [approval] = await db.select().from(approvals).where(eq(approvals.id, id)).limit(1);
     if (!approval) return reply.code(404).send({ error: 'approval_not_found' });
+    const user = await requireCompanyRole(request, reply, approval.companyId, 'operator'); if (!user) return reply;
     const [updatedApproval] = await db.update(approvals).set({
       status: input.status,
       decisionNote: input.decisionNote ?? null,
@@ -125,17 +212,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return updatedApproval;
   });
   app.get('/api/budget-policies', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string; agentId?: string };
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
     const filters = [
-      query.companyId ? eq(budgetPolicies.companyId, query.companyId) : undefined,
+      query.companyId ? eq(budgetPolicies.companyId, query.companyId) : inArray(budgetPolicies.companyId, access.companyIds),
       query.agentId ? eq(budgetPolicies.agentId, query.agentId) : undefined,
     ].filter(Boolean);
     return db.select().from(budgetPolicies).where(filters.length ? and(...filters) : undefined).orderBy(desc(budgetPolicies.createdAt));
   });
   app.post('/api/budget-policies', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createBudgetPolicySchema.parse(request.body);
+    const user = await requireCompanyRole(request, reply, input.companyId, 'operator'); if (!user) return reply;
+    await ensureCompanyReferences(input.companyId, { assigneeId: input.agentId ?? null });
     const [policy] = await db.insert(budgetPolicies).values({
       companyId: input.companyId,
       agentId: input.agentId ?? null,
@@ -150,9 +239,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(policy);
   });
   app.put('/api/budget-policies/:id', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = createBudgetPolicySchema.partial().parse(request.body);
+    const [existing] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'budget_policy_not_found' });
+    const companyId = input.companyId ?? existing.companyId;
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
+    await ensureCompanyReferences(companyId, { assigneeId: input.agentId ?? existing.agentId });
     const [policy] = await db.update(budgetPolicies).set({
       companyId: input.companyId,
       agentId: input.agentId,
@@ -169,24 +262,29 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return policy;
   });
   app.delete('/api/budget-policies/:id', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
+    const [existing] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'budget_policy_not_found' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
     const [policy] = await db.delete(budgetPolicies).where(eq(budgetPolicies.id, id)).returning();
     if (policy) await db.insert(activityLog).values({ companyId: policy.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'budget_policy.deleted', entityType: 'budget_policy', entityId: policy.id, details: { name: policy.name } });
     return { ok: true };
   });
   app.get('/api/dashboard', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    if (access.companyIds.length === 0) {
+      return { stats: { companies: 0, tasks: 0, openTasks: 0, completedTasks: 0, blockedTasks: 0, agents: 0, activeAgents: 0, busyAgents: 0, activeRuns: 0, pendingApprovals: 0, budgetPolicies: 0, monthlyCost: 0 }, stages: {}, recentTaskLogs: [], recentApiEvents: [], recentActivity: [], recentRuns: [], pendingApprovals: [] };
+    }
     const [cards, agentRows, companyRows, recentTaskLogs, recentApiEvents, recentActivity, recentRuns, pendingApprovals, policyRows] = await Promise.all([
-      db.select().from(kanbanCards),
-      db.select().from(agents),
-      db.select().from(companies),
-      db.select().from(taskLogs).orderBy(desc(taskLogs.createdAt)).limit(20),
+      db.select().from(kanbanCards).where(inArray(kanbanCards.companyId, access.companyIds)),
+      db.select().from(agents).where(inArray(agents.companyId, access.companyIds)),
+      db.select().from(companies).where(inArray(companies.id, access.companyIds)),
+      db.select().from(taskLogs).innerJoin(kanbanCards, eq(taskLogs.cardId, kanbanCards.id)).where(inArray(kanbanCards.companyId, access.companyIds)).orderBy(desc(taskLogs.createdAt)).limit(20),
       db.select().from(apiEvents).orderBy(desc(apiEvents.createdAt)).limit(20),
-      db.select().from(activityLog).orderBy(desc(activityLog.createdAt)).limit(20),
-      db.select().from(heartbeatRuns).orderBy(desc(heartbeatRuns.createdAt)).limit(20),
-      db.select().from(approvals).where(eq(approvals.status, 'pending')).orderBy(desc(approvals.createdAt)).limit(50),
-      db.select().from(budgetPolicies).where(eq(budgetPolicies.isActive, true)),
+      db.select().from(activityLog).where(inArray(activityLog.companyId, access.companyIds)).orderBy(desc(activityLog.createdAt)).limit(20),
+      db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.companyId, access.companyIds)).orderBy(desc(heartbeatRuns.createdAt)).limit(20),
+      db.select().from(approvals).where(and(inArray(approvals.companyId, access.companyIds), eq(approvals.status, 'pending'))).orderBy(desc(approvals.createdAt)).limit(50),
+      db.select().from(budgetPolicies).where(and(inArray(budgetPolicies.companyId, access.companyIds), eq(budgetPolicies.isActive, true))),
     ]);
     const openCards = cards.filter((card) => !['done', 'blocked'].includes(card.columnStatus ?? 'todo'));
     const completedCards = cards.filter((card) => card.columnStatus === 'done');
@@ -214,7 +312,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         acc[key] = (acc[key] ?? 0) + 1;
         return acc;
       }, {}),
-      recentTaskLogs,
+      recentTaskLogs: recentTaskLogs.map((row) => row.task_logs),
       recentApiEvents,
       recentActivity,
       recentRuns,
@@ -222,7 +320,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.get('/api/companies', async () => db.select().from(companies).orderBy(desc(companies.createdAt)));
+  app.get('/api/companies', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    if (access.companyIds.length === 0) return [];
+    return db.select().from(companies).where(inArray(companies.id, access.companyIds)).orderBy(desc(companies.createdAt));
+  });
   app.post('/api/companies', async (request, reply) => {
     const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createCompanySchema.parse(request.body);
@@ -233,11 +335,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       dispatchIntervalSeconds: input.dispatchIntervalSeconds,
       autoDispatchEnabled: input.autoDispatchEnabled,
     }).returning();
+    if (company) await db.insert(companyMemberships).values({ companyId: company.id, userId: user.id, role: 'admin', status: 'active' }).onConflictDoNothing();
     return reply.code(201).send(company);
   });
   app.put('/api/companies/:id', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
+    const user = await requireCompanyRole(request, reply, id, 'operator'); if (!user) return reply;
     const input = createCompanySchema.partial().parse(request.body);
     const [company] = await db.update(companies).set({
       name: input.name,
@@ -250,21 +353,89 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return company;
   });
 
-  app.get('/api/departments', async (request) => {
+  app.get('/api/company-memberships', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string };
-    return db.select().from(departments).where(query.companyId ? eq(departments.companyId, query.companyId) : undefined).orderBy(desc(departments.createdAt));
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
+    const filters = [query.companyId ? eq(companyMemberships.companyId, query.companyId) : inArray(companyMemberships.companyId, access.companyIds)];
+    return db.select({
+      id: companyMemberships.id,
+      companyId: companyMemberships.companyId,
+      userId: companyMemberships.userId,
+      role: companyMemberships.role,
+      status: companyMemberships.status,
+      createdAt: companyMemberships.createdAt,
+      updatedAt: companyMemberships.updatedAt,
+      userEmail: users.email,
+      userName: users.name,
+    }).from(companyMemberships)
+      .innerJoin(users, eq(companyMemberships.userId, users.id))
+      .where(and(...filters))
+      .orderBy(desc(companyMemberships.createdAt));
+  });
+
+  app.post('/api/company-memberships', async (request, reply) => {
+    const input = createCompanyMembershipSchema.parse(request.body);
+    const actor = await requireCompanyRole(request, reply, input.companyId, 'admin'); if (!actor) return reply;
+    const [targetUser] = input.userId
+      ? await db.select().from(users).where(eq(users.id, input.userId)).limit(1)
+      : await db.select().from(users).where(eq(users.email, input.email ?? '')).limit(1);
+    if (!targetUser) return reply.code(404).send({ error: 'user_not_found' });
+    const [membership] = await db.insert(companyMemberships).values({
+      companyId: input.companyId,
+      userId: targetUser.id,
+      role: input.role,
+      status: input.status,
+    }).onConflictDoUpdate({
+      target: [companyMemberships.companyId, companyMemberships.userId],
+      set: { role: input.role, status: input.status, updatedAt: new Date() },
+    }).returning();
+    if (membership) await db.insert(activityLog).values({ companyId: membership.companyId, actorType: 'user', actorId: actor.id, userId: actor.id, action: 'membership.upserted', entityType: 'company_membership', entityId: membership.id, details: { userId: targetUser.id, email: targetUser.email, role: membership.role, status: membership.status } });
+    return reply.code(201).send(membership);
+  });
+
+  app.put('/api/company-memberships/:id', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const input = updateCompanyMembershipSchema.parse(request.body);
+    const [existing] = await db.select().from(companyMemberships).where(eq(companyMemberships.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'membership_not_found' });
+    const actor = await requireCompanyRole(request, reply, existing.companyId, 'admin'); if (!actor) return reply;
+    const [membership] = await db.update(companyMemberships).set({ role: input.role, status: input.status, updatedAt: new Date() }).where(eq(companyMemberships.id, id)).returning();
+    if (membership) await db.insert(activityLog).values({ companyId: membership.companyId, actorType: 'user', actorId: actor.id, userId: actor.id, action: 'membership.updated', entityType: 'company_membership', entityId: membership.id, details: { role: membership.role, status: membership.status } });
+    return membership;
+  });
+
+  app.delete('/api/company-memberships/:id', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const [existing] = await db.select().from(companyMemberships).where(eq(companyMemberships.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'membership_not_found' });
+    const actor = await requireCompanyRole(request, reply, existing.companyId, 'admin'); if (!actor) return reply;
+    await db.update(companyMemberships).set({ status: 'disabled', updatedAt: new Date() }).where(eq(companyMemberships.id, id));
+    await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: actor.id, userId: actor.id, action: 'membership.disabled', entityType: 'company_membership', entityId: existing.id, details: { userId: existing.userId } });
+    return { ok: true };
+  });
+
+  app.get('/api/departments', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    const query = request.query as { companyId?: string };
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
+    return db.select().from(departments).where(query.companyId ? eq(departments.companyId, query.companyId) : inArray(departments.companyId, access.companyIds)).orderBy(desc(departments.createdAt));
   });
   app.post('/api/departments', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createDepartmentSchema.parse(request.body);
+    const user = await requireCompanyRole(request, reply, input.companyId, 'operator'); if (!user) return reply;
     const [department] = await db.insert(departments).values(input).returning();
     return reply.code(201).send(department);
   });
 
-  app.get('/api/cards', async (request) => {
-    const query = request.query as { status?: string; assigneeId?: string; tag?: string; priority?: string; limit?: string; offset?: string };
+  app.get('/api/cards', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    if (access.companyIds.length === 0) return [];
+    const query = request.query as { companyId?: string; status?: string; assigneeId?: string; tag?: string; priority?: string; limit?: string; offset?: string };
+    if (query.companyId && !access.companyIds.includes(query.companyId)) return [];
     const status = normalizeCardStatus(query.status);
     const filters = [
+      query.companyId ? eq(kanbanCards.companyId, query.companyId) : inArray(kanbanCards.companyId, access.companyIds),
       status ? eq(kanbanCards.columnStatus, status) : undefined,
       query.assigneeId ? eq(kanbanCards.assigneeId, query.assigneeId) : undefined,
       query.priority ? eq(kanbanCards.priority, priorityToNumber(query.priority)) : undefined,
@@ -275,10 +446,24 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/cards', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createCardSchema.parse(request.body);
+    const companyId = input.companyId ?? await defaultCompanyId();
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
+    try {
+      await ensureCompanyReferences(companyId, {
+        departmentId: input.departmentId,
+        projectId: input.projectId,
+        goalId: input.goalId,
+        assigneeId: input.assigneeId,
+        reviewerId: input.reviewerId,
+        parentCardId: input.parentCardId,
+        dependencyCardIds: input.dependencyCardIds,
+      });
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' });
+    }
     const [card] = await db.insert(kanbanCards).values({
-      companyId: input.companyId ?? await defaultCompanyId(),
+      companyId,
       title: input.title,
       body: input.body,
       priority: priorityToNumber(input.priority),
@@ -300,11 +485,24 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.put('/api/cards/:id', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = updateCardSchema.parse(request.body);
     const [existing] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
     if (!existing) return reply.code(404).send({ error: 'card_not_found' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    try {
+      await ensureCompanyReferences(existing.companyId, {
+        departmentId: input.departmentId,
+        projectId: input.projectId,
+        goalId: input.goalId,
+        assigneeId: input.assigneeId,
+        reviewerId: input.reviewerId,
+        parentCardId: input.parentCardId,
+        dependencyCardIds: input.dependencyCardIds,
+      });
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' });
+    }
     if (input.updatedAt && existing.updatedAt && new Date(input.updatedAt).getTime() !== existing.updatedAt.getTime()) return reply.code(409).send({ error: 'card_modified' });
     const [card] = await db.update(kanbanCards).set({
       title: input.title,
@@ -338,24 +536,34 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.delete('/api/cards/:id', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const [existing] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'card_not_found' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
     await db.update(kanbanCards).set({ parentCardId: null }).where(eq(kanbanCards.parentCardId, id));
+    await db.delete(taskRuns).where(eq(taskRuns.cardId, id));
     await db.delete(cardComments).where(eq(cardComments.cardId, id));
     await db.delete(taskLogs).where(eq(taskLogs.cardId, id));
     await db.delete(kanbanCards).where(eq(kanbanCards.id, id));
-    if (existing) await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'card.deleted', entityType: 'card', entityId: id, details: { title: existing.title } });
+    await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'card.deleted', entityType: 'card', entityId: id, details: { title: existing.title } });
     return { ok: true };
   });
-  app.get('/api/cards/:id/logs', async (request) => getTaskLogs((request.params as { id: string }).id));
-  app.get('/api/cards/:id/comments', async (request) => db.select().from(cardComments).where(eq(cardComments.cardId, (request.params as { id: string }).id)).orderBy(desc(cardComments.createdAt)));
+  app.get('/api/cards/:id/logs', async (request, reply) => {
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    return getTaskLogs(card.id);
+  });
+  app.get('/api/cards/:id/comments', async (request, reply) => {
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    return db.select().from(cardComments).where(eq(cardComments.cardId, card.id)).orderBy(desc(cardComments.createdAt));
+  });
   app.post('/api/cards/:id/comments', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = createCardCommentSchema.parse(request.body);
     const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
+    const user = await requireCompanyRole(request, reply, card.companyId, 'operator'); if (!user) return reply;
     if (input.agentId && !['comment', 'agent_note'].includes(input.action)) return reply.code(400).send({ error: 'agent_comments_cannot_control_task' });
     const [authorAgent] = input.agentId ? await db.select().from(agents).where(eq(agents.id, input.agentId)).limit(1) : [];
     if (input.agentId && !authorAgent) return reply.code(404).send({ error: 'agent_not_found' });
@@ -391,66 +599,92 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(comment);
   });
   app.post('/api/cards/:id/run', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
-    try { return await dispatchCard((request.params as { id: string }).id, 'manual'); }
-    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'dispatch_failed' }); }
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    const user = await requireCompanyRole(request, reply, card.companyId, 'operator'); if (!user) return reply;
+    try { return reply.code(202).send(await enqueueTaskRun(card.id, 'dispatch', 'manual', user.id)); }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'dispatch_enqueue_failed' }); }
   });
   app.post('/api/cards/:id/review', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
-    try { return await reviewCard((request.params as { id: string }).id); }
-    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'review_failed' }); }
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    const user = await requireCompanyRole(request, reply, card.companyId, 'operator'); if (!user) return reply;
+    try { return reply.code(202).send(await enqueueTaskRun(card.id, 'review', 'manual', user.id)); }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'review_enqueue_failed' }); }
   });
   app.post('/api/cards/:id/decompose', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
-    try { return reply.code(201).send(await decomposeCard((request.params as { id: string }).id)); }
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    const user = await requireCompanyRole(request, reply, card.companyId, 'operator'); if (!user) return reply;
+    try { return reply.code(201).send(await decomposeCard(card.id)); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'decompose_failed' }); }
   });
 
-  app.get('/api/agents', async () => db.select().from(agents));
+  app.get('/api/agents', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    if (access.companyIds.length === 0) return [];
+    const query = request.query as { companyId?: string };
+    if (query.companyId && !access.companyIds.includes(query.companyId)) return [];
+    return db.select().from(agents).where(query.companyId ? eq(agents.companyId, query.companyId) : inArray(agents.companyId, access.companyIds));
+  });
   app.post('/api/agents', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createAgentSchema.parse(request.body);
-    const [agent] = await db.insert(agents).values({ companyId: input.companyId ?? await defaultCompanyId(), departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
-    if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
+    const companyId = input.companyId ?? await defaultCompanyId();
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
+    try { await ensureCompanyReferences(companyId, { departmentId: input.departmentId, bossId: input.bossId, runtimeId: input.runtimeId }); }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
+    const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
+    if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
     return reply.code(201).send(agent);
   });
   app.delete('/api/agents/:id', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const [agent] = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
+    if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    const user = await requireCompanyRole(request, reply, agent.companyId, 'operator'); if (!user) return reply;
     await db.update(kanbanCards).set({ assigneeId: null }).where(eq(kanbanCards.assigneeId, id));
     await db.delete(agents).where(eq(agents.id, id));
-    if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', action: 'agent.deleted', entityType: 'agent', entityId: id, details: { name: agent.name } });
+    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'agent.deleted', entityType: 'agent', entityId: id, details: { name: agent.name } });
     return { ok: true };
   });
   app.post('/api/agents/:id/pause', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
+    const companyId = await agentCompanyId(id);
+    if (!companyId) return reply.code(404).send({ error: 'agent_not_found' });
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     const [agent] = await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
-    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', agentId: agent.id, action: 'agent.paused', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
+    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.paused', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
     return agent;
   });
   app.post('/api/agents/:id/resume', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
+    const companyId = await agentCompanyId(id);
+    if (!companyId) return reply.code(404).send({ error: 'agent_not_found' });
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     const [agent] = await db.update(agents).set({ isActive: true }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
-    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', agentId: agent.id, action: 'agent.resumed', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
+    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.resumed', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
     return agent;
   });
   app.post('/api/agents/:id/reset-session', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
+    const companyId = await agentCompanyId(id);
+    if (!companyId) return reply.code(404).send({ error: 'agent_not_found' });
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     const [agent] = await db.update(agents).set({ currentSessionId: null, isBusy: false }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
-    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', agentId: agent.id, action: 'agent.session_reset', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
+    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.session_reset', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
     return agent;
   });
   app.put('/api/agents/:id', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = createAgentSchema.partial().parse(request.body);
+    const [existing] = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'agent_not_found' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    try { await ensureCompanyReferences(existing.companyId, { departmentId: input.departmentId, bossId: input.bossId, runtimeId: input.runtimeId }); }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
     const [agent] = await db.update(agents).set({
       name: input.name,
       slug: input.slug,
@@ -466,17 +700,24 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       budgetMonthly: input.budgetMonthly?.toString(),
     }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
-    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'system', agentId: agent.id, action: 'agent.updated', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
+    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.updated', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
     return agent;
   });
 
-  app.get('/api/agent-runtimes', async () => db.select().from(agentRuntimes).orderBy(desc(agentRuntimes.createdAt)));
+  app.get('/api/agent-runtimes', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    if (access.companyIds.length === 0) return [];
+    const query = request.query as { companyId?: string };
+    if (query.companyId && !access.companyIds.includes(query.companyId)) return [];
+    return db.select().from(agentRuntimes).where(query.companyId ? eq(agentRuntimes.companyId, query.companyId) : inArray(agentRuntimes.companyId, access.companyIds)).orderBy(desc(agentRuntimes.createdAt));
+  });
   app.get('/api/agent-runtimes/health', async (request, reply) => {
-    const user = await requireAuth(request, reply); if (!user) return reply;
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    if (access.companyIds.length === 0) return [];
     const [runtimeRows, agentRows, recentRuns] = await Promise.all([
-      db.select().from(agentRuntimes).orderBy(desc(agentRuntimes.createdAt)),
-      db.select().from(agents),
-      db.select().from(heartbeatRuns).orderBy(desc(heartbeatRuns.createdAt)).limit(300),
+      db.select().from(agentRuntimes).where(inArray(agentRuntimes.companyId, access.companyIds)).orderBy(desc(agentRuntimes.createdAt)),
+      db.select().from(agents).where(inArray(agents.companyId, access.companyIds)),
+      db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.companyId, access.companyIds)).orderBy(desc(heartbeatRuns.createdAt)).limit(300),
     ]);
     return runtimeRows.map((runtime) => {
       const attachedAgents = agentRows.filter((agent) => agent.runtimeId === runtime.id);
@@ -510,16 +751,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     });
   });
   app.post('/api/agent-runtimes', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createAgentRuntimeSchema.parse(request.body);
-    const [row] = await db.insert(agentRuntimes).values(input).returning();
+    const companyId = input.companyId ?? await defaultCompanyId();
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
+    const [row] = await db.insert(agentRuntimes).values({ ...input, companyId }).returning();
     return reply.code(201).send(row);
   });
   app.put('/api/agent-runtimes/:id', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = createAgentRuntimeSchema.partial().parse(request.body);
+    const [existing] = await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, id)).limit(1);
+    if (!existing?.companyId) return reply.code(404).send({ error: 'runtime_not_found' });
+    const companyId = input.companyId ?? existing.companyId;
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     const [row] = await db.update(agentRuntimes).set({
+      companyId: input.companyId,
       name: input.name,
       adapterType: input.adapterType,
       config: input.config,
@@ -530,18 +776,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return row;
   });
   app.delete('/api/agent-runtimes/:id', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
+    const [runtime] = await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, id)).limit(1);
+    if (!runtime?.companyId) return reply.code(404).send({ error: 'runtime_not_found' });
+    const user = await requireCompanyRole(request, reply, runtime.companyId, 'operator'); if (!user) return reply;
     await db.update(agents).set({ runtimeId: null }).where(eq(agents.runtimeId, id));
     await db.delete(agentRuntimes).where(eq(agentRuntimes.id, id));
     return { ok: true };
   });
 
   app.post('/api/agents/:id/test-connection', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const [agent] = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    const user = await requireCompanyRole(request, reply, agent.companyId, 'operator'); if (!user) return reply;
     try {
       const adapter = getAdapter(agent.adapterType ?? 'hermes');
       let runtimeConfig: Record<string, unknown> = {};
@@ -559,51 +807,65 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : 'connection_failed' }); }
   });
 
-  app.get('/api/projects', async (request) => {
+  app.get('/api/projects', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string };
-    return db.select().from(projects).where(query.companyId ? eq(projects.companyId, query.companyId) : undefined).orderBy(desc(projects.createdAt));
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
+    return db.select().from(projects).where(query.companyId ? eq(projects.companyId, query.companyId) : inArray(projects.companyId, access.companyIds)).orderBy(desc(projects.createdAt));
   });
   app.post('/api/projects', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createProjectSchema.parse(request.body);
-    const [row] = await db.insert(projects).values({ companyId: input.companyId ?? await defaultCompanyId(), name: input.name, description: input.description }).returning();
+    const companyId = input.companyId ?? await defaultCompanyId();
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
+    const [row] = await db.insert(projects).values({ companyId, name: input.name, description: input.description }).returning();
     return reply.code(201).send(row);
   });
-  app.get('/api/goals', async (request) => {
+  app.get('/api/goals', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string };
-    return db.select().from(goals).where(query.companyId ? eq(goals.companyId, query.companyId) : undefined).orderBy(desc(goals.createdAt));
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
+    return db.select().from(goals).where(query.companyId ? eq(goals.companyId, query.companyId) : inArray(goals.companyId, access.companyIds)).orderBy(desc(goals.createdAt));
   });
   app.post('/api/goals', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createGoalSchema.parse(request.body);
-    const [row] = await db.insert(goals).values({ companyId: input.companyId ?? await defaultCompanyId(), title: input.title, body: input.body }).returning();
+    const companyId = input.companyId ?? await defaultCompanyId();
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
+    const [row] = await db.insert(goals).values({ companyId, title: input.title, body: input.body }).returning();
     return reply.code(201).send(row);
   });
-  app.get('/api/knowledge-docs', async (request) => {
+  app.get('/api/knowledge-docs', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string; tag?: string };
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
     const filters = [
-      query.companyId ? eq(knowledgeDocs.companyId, query.companyId) : undefined,
+      query.companyId ? eq(knowledgeDocs.companyId, query.companyId) : inArray(knowledgeDocs.companyId, access.companyIds),
       query.tag ? drizzleSql`${query.tag} = ANY(${knowledgeDocs.tags})` : undefined,
     ].filter(Boolean);
     return db.select().from(knowledgeDocs).where(filters.length ? and(...filters) : undefined).orderBy(desc(knowledgeDocs.updatedAt));
   });
   app.post('/api/knowledge-docs', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createKnowledgeDocSchema.parse(request.body);
+    const user = await requireCompanyRole(request, reply, input.companyId, 'operator'); if (!user) return reply;
     const [row] = await db.insert(knowledgeDocs).values({ ...input, createdBy: user.id }).returning();
     return reply.code(201).send(row);
   });
   app.put('/api/knowledge-docs/:id', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const id = (request.params as { id: string }).id;
     const input = createKnowledgeDocSchema.partial().parse(request.body);
+    const [existing] = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'knowledge_doc_not_found' });
+    const companyId = input.companyId ?? existing.companyId;
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     const [row] = await db.update(knowledgeDocs).set({ ...input, updatedAt: new Date() }).where(eq(knowledgeDocs.id, id)).returning();
     if (!row) return reply.code(404).send({ error: 'knowledge_doc_not_found' });
     return row;
   });
   app.delete('/api/knowledge-docs/:id', async (request, reply) => {
-    const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
-    await db.delete(knowledgeDocs).where(eq(knowledgeDocs.id, (request.params as { id: string }).id));
+    const id = (request.params as { id: string }).id;
+    const [existing] = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'knowledge_doc_not_found' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    await db.delete(knowledgeDocs).where(eq(knowledgeDocs.id, id));
     return { ok: true };
   });
 
@@ -643,7 +905,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await db.update(agents).set({ spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${body.costUsd}` }).where(eq(agents.id, card.assigneeId));
       await db.insert(costEvents).values({ companyId: card.companyId, agentId: card.assigneeId, cardId: card.id, projectId: card.projectId, goalId: card.goalId, provider: 'webhook', model: 'external', costUsd: body.costUsd.toString() });
     }
-    if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: nextStatus === 'blocked' ? 'failed' : 'success', completedAt: new Date(), error: nextStatus === 'blocked' ? body.summary ?? 'blocked_by_webhook' : null, costUsd: body.costUsd?.toString() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
+    if (card.activeHeartbeatRunId) {
+      await db.update(heartbeatRuns).set({ status: nextStatus === 'blocked' ? 'failed' : 'success', completedAt: new Date(), error: nextStatus === 'blocked' ? body.summary ?? 'blocked_by_webhook' : null, costUsd: body.costUsd?.toString() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
+      await db.update(taskRuns).set({ status: nextStatus === 'blocked' ? 'failed' : 'success', completedAt: new Date(), error: nextStatus === 'blocked' ? body.summary ?? 'blocked_by_webhook' : null, output: executionLog, costUsd: body.costUsd?.toString(), updatedAt: new Date() }).where(eq(taskRuns.heartbeatRunId, card.activeHeartbeatRunId));
+    }
     await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: `webhook.task_${nextStatus}`, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd } });
     if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
     return { ok: true, cardId: body.cardId, newStatus: nextStatus };

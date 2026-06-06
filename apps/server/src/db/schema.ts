@@ -24,6 +24,17 @@ export const companies = pgTable('companies', {
   autoDispatchEnabled: boolean('auto_dispatch_enabled').default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
+
+export const companyMemberships = pgTable('company_memberships', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  userId: uuid('user_id').notNull().references(() => users.id),
+  role: text('role').notNull().default('viewer'),
+  status: text('status').notNull().default('active'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+}, (table) => ({ companyUserUnique: unique().on(table.companyId, table.userId) }));
+
 export const departments = pgTable('departments', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), name: text('name').notNull(), slug: text('slug').notNull(), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
 export const projects = pgTable('projects', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), name: text('name').notNull(), description: text('description'), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
 export const goals = pgTable('goals', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), title: text('title').notNull(), body: text('body'), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
@@ -53,6 +64,7 @@ export const agents = pgTable('agents', {
 
 export const agentRuntimes = pgTable('agent_runtimes', {
   id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').references(() => companies.id),
   name: text('name').notNull(),
   adapterType: text('adapter_type').notNull(),
   config: jsonb('config').default({}),
@@ -113,6 +125,31 @@ export const heartbeatRuns = pgTable('heartbeat_runs', {
   inputTokens: integer('input_tokens').default(0),
   outputTokens: integer('output_tokens').default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+export const taskRuns = pgTable('task_runs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
+  agentId: uuid('agent_id').references(() => agents.id),
+  heartbeatRunId: uuid('heartbeat_run_id').references(() => heartbeatRuns.id),
+  kind: text('kind').notNull().default('dispatch'),
+  source: text('source').notNull().default('queue'),
+  status: text('status').notNull().default('queued'),
+  priority: integer('priority').default(0),
+  attemptNumber: integer('attempt_number').default(1),
+  maxAttempts: integer('max_attempts').default(1),
+  requestedByUserId: uuid('requested_by_user_id').references(() => users.id),
+  lockedBy: text('locked_by'),
+  lockedAt: timestamp('locked_at', { withTimezone: true }),
+  startedAt: timestamp('started_at', { withTimezone: true }),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  durationSeconds: integer('duration_seconds'),
+  error: text('error'),
+  output: text('output'),
+  costUsd: numeric('cost_usd', { precision: 10, scale: 4 }),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 
 export const taskLogs = pgTable('task_logs', {

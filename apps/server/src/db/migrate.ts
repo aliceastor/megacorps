@@ -8,12 +8,16 @@ CREATE TABLE IF NOT EXISTS companies (id UUID PRIMARY KEY DEFAULT gen_random_uui
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS mission TEXT;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS dispatch_interval_seconds INTEGER DEFAULT 10;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS auto_dispatch_enabled BOOLEAN DEFAULT true;
+CREATE TABLE IF NOT EXISTS company_memberships (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), user_id UUID NOT NULL REFERENCES users(id), role TEXT NOT NULL DEFAULT 'viewer', status TEXT NOT NULL DEFAULT 'active', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now(), UNIQUE(company_id, user_id));
+CREATE INDEX IF NOT EXISTS company_memberships_user_status_idx ON company_memberships(user_id, status);
+CREATE INDEX IF NOT EXISTS company_memberships_company_role_idx ON company_memberships(company_id, role);
 CREATE TABLE IF NOT EXISTS departments (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, slug TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT now());
 CREATE TABLE IF NOT EXISTS projects (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, description TEXT, created_at TIMESTAMPTZ DEFAULT now());
 CREATE TABLE IF NOT EXISTS goals (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), title TEXT NOT NULL, body TEXT, created_at TIMESTAMPTZ DEFAULT now());
 CREATE TABLE IF NOT EXISTS agents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), department_id UUID REFERENCES departments(id), slug TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL, title TEXT, adapter_type TEXT NOT NULL DEFAULT 'hermes', adapter_config JSONB DEFAULT '{}', runtime_id UUID, hermes_profile TEXT, boss_id UUID REFERENCES agents(id), budget_per_task NUMERIC(10,4), budget_monthly NUMERIC(10,4), spent_this_month NUMERIC(10,4) DEFAULT 0, capabilities TEXT[] DEFAULT '{}', is_busy BOOLEAN DEFAULT false, is_active BOOLEAN DEFAULT true, current_session_id TEXT, created_at TIMESTAMPTZ DEFAULT now(), UNIQUE(company_id, slug));
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS runtime_id UUID;
-CREATE TABLE IF NOT EXISTS agent_runtimes (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, adapter_type TEXT NOT NULL, config JSONB DEFAULT '{}', is_active BOOLEAN DEFAULT true, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE IF NOT EXISTS agent_runtimes (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID REFERENCES companies(id), name TEXT NOT NULL, adapter_type TEXT NOT NULL, config JSONB DEFAULT '{}', is_active BOOLEAN DEFAULT true, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS company_id UUID REFERENCES companies(id);
 ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 CREATE TABLE IF NOT EXISTS kanban_cards (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), department_id UUID REFERENCES departments(id), project_id UUID REFERENCES projects(id), goal_id UUID REFERENCES goals(id), parent_card_id UUID REFERENCES kanban_cards(id), title TEXT NOT NULL, body TEXT NOT NULL, column_status TEXT DEFAULT 'todo', priority INTEGER DEFAULT 0, tags TEXT[] DEFAULT '{}', assignee_id UUID REFERENCES agents(id), reviewer_id UUID REFERENCES agents(id), dependency_card_ids UUID[] DEFAULT '{}', requires_approval BOOLEAN DEFAULT false, retry_count INTEGER DEFAULT 0, max_retries INTEGER DEFAULT 3, next_run_at TIMESTAMPTZ, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, last_error TEXT, review_feedback TEXT, created_by UUID REFERENCES users(id), execution_log TEXT, session_id TEXT, cost_usd NUMERIC(10,4), created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
 ALTER TABLE kanban_cards ALTER COLUMN column_status SET DEFAULT 'todo';
@@ -34,6 +38,10 @@ CREATE INDEX IF NOT EXISTS kanban_cards_execution_lock_expires_at_idx ON kanban_
 CREATE TABLE IF NOT EXISTS heartbeat_runs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), card_id UUID REFERENCES kanban_cards(id), agent_id UUID REFERENCES agents(id), source TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running', lock_acquired_at TIMESTAMPTZ, started_at TIMESTAMPTZ DEFAULT now(), completed_at TIMESTAMPTZ, duration_seconds INTEGER, error TEXT, cost_usd NUMERIC(10,4), input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, created_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS heartbeat_runs_company_created_at_idx ON heartbeat_runs(company_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS heartbeat_runs_card_created_at_idx ON heartbeat_runs(card_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS task_runs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), card_id UUID NOT NULL REFERENCES kanban_cards(id), agent_id UUID REFERENCES agents(id), heartbeat_run_id UUID REFERENCES heartbeat_runs(id), kind TEXT NOT NULL DEFAULT 'dispatch', source TEXT NOT NULL DEFAULT 'queue', status TEXT NOT NULL DEFAULT 'queued', priority INTEGER DEFAULT 0, attempt_number INTEGER DEFAULT 1, max_attempts INTEGER DEFAULT 1, requested_by_user_id UUID REFERENCES users(id), locked_by TEXT, locked_at TIMESTAMPTZ, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, duration_seconds INTEGER, error TEXT, output TEXT, cost_usd NUMERIC(10,4), created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX IF NOT EXISTS task_runs_company_created_at_idx ON task_runs(company_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS task_runs_card_created_at_idx ON task_runs(card_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS task_runs_status_created_at_idx ON task_runs(status, created_at ASC);
 CREATE TABLE IF NOT EXISTS cron_runs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'loop', status TEXT NOT NULL DEFAULT 'running', started_at TIMESTAMPTZ DEFAULT now(), completed_at TIMESTAMPTZ, duration_seconds INTEGER, error TEXT, details JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS cron_runs_name_created_at_idx ON cron_runs(name, created_at DESC);
 CREATE TABLE IF NOT EXISTS task_logs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), card_id UUID NOT NULL REFERENCES kanban_cards(id), agent_id UUID REFERENCES agents(id), type TEXT NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL, output TEXT, cost_usd NUMERIC(10,4), duration_seconds INTEGER, created_at TIMESTAMPTZ DEFAULT now());
@@ -67,8 +75,15 @@ INSERT INTO task_logs (card_id, type, status, message, created_at)
 SELECT kc.id, 'stage', 'success', 'Initial stage recorded: ' || kc.column_status, kc.created_at
 FROM kanban_cards kc
 WHERE NOT EXISTS (SELECT 1 FROM task_logs tl WHERE tl.card_id = kc.id AND tl.type = 'stage');`);
-  const companies = await sql`SELECT id FROM companies WHERE slug = 'default' LIMIT 1`;
+const companies = await sql`SELECT id FROM companies WHERE slug = 'default' LIMIT 1`;
   if (companies.length === 0) await sql`INSERT INTO companies (name, slug) VALUES ('Default Company', 'default')`;
+  await sql`INSERT INTO company_memberships (company_id, user_id, role, status)
+SELECT c.id, u.id, CASE WHEN u.role IN ('admin', 'operator') THEN u.role ELSE 'viewer' END, 'active'
+FROM companies c CROSS JOIN users u
+WHERE NOT EXISTS (
+  SELECT 1 FROM company_memberships cm WHERE cm.company_id = c.id AND cm.user_id = u.id
+)`;
+  await sql`UPDATE agent_runtimes SET company_id = (SELECT id FROM companies WHERE slug = 'default' LIMIT 1) WHERE company_id IS NULL`;
   const runtimes = await sql`SELECT id FROM agent_runtimes WHERE name = 'Local Mock Runtime' LIMIT 1`;
-  if (runtimes.length === 0) await sql`INSERT INTO agent_runtimes (name, adapter_type, config, is_active) VALUES ('Local Mock Runtime', 'mock', '{}', true)`;
+  if (runtimes.length === 0) await sql`INSERT INTO agent_runtimes (company_id, name, adapter_type, config, is_active) VALUES ((SELECT id FROM companies WHERE slug = 'default' LIMIT 1), 'Local Mock Runtime', 'mock', '{}', true)`;
 }

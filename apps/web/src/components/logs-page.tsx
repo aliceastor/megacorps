@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 type ApiEvent = { id: string; method: string; path: string; statusCode?: number; error?: string | null; durationMs?: number; requestBody?: unknown; responseBody?: unknown; createdAt?: string };
 type ActivityEvent = { id: string; action: string; entityType: string; entityId: string; actorType: string; actorId: string; details?: unknown; createdAt?: string };
 type HeartbeatRun = { id: string; cardId?: string | null; agentId?: string | null; source: string; status: string; error?: string | null; costUsd?: string | null; durationSeconds?: number | null; createdAt?: string };
+type TaskRun = { id: string; cardId: string; agentId?: string | null; heartbeatRunId?: string | null; kind: string; source: string; status: string; attemptNumber?: number | null; error?: string | null; costUsd?: string | null; durationSeconds?: number | null; createdAt?: string };
 type CronRun = { id: string; name: string; source: string; status: string; error?: string | null; durationSeconds?: number | null; details?: unknown; createdAt?: string };
 type CronStatus = { enabled: boolean; intervalMs: number; running: boolean; lastStatus: string; lastStartedAt?: string | null; lastCompletedAt?: string | null; lastError?: string | null; recentRuns: CronRun[] };
 
@@ -13,6 +14,7 @@ export function LogsPage() {
   const [logs, setLogs] = useState<ApiEvent[]>([]);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [runs, setRuns] = useState<HeartbeatRun[]>([]);
+  const [taskRuns, setTaskRuns] = useState<TaskRun[]>([]);
   const [cron, setCron] = useState<CronStatus | null>(null);
   const [filter, setFilter] = useState('');
   const [cronRunning, setCronRunning] = useState(false);
@@ -22,13 +24,15 @@ export function LogsPage() {
       api<ApiEvent[]>('/api/system-logs?limit=300'),
       api<ActivityEvent[]>('/api/activity?limit=300'),
       api<HeartbeatRun[]>('/api/heartbeat-runs?limit=300'),
+      api<TaskRun[]>('/api/task-runs?limit=300'),
       api<CronStatus>('/api/cron/status'),
-    ]).then(([apiLogs, activityLogs, heartbeatRows, cronStatus]) => {
+    ]).then(([apiLogs, activityLogs, heartbeatRows, taskRunRows, cronStatus]) => {
       setLogs(apiLogs);
       setActivity(activityLogs);
       setRuns(heartbeatRows);
+      setTaskRuns(taskRunRows);
       setCron(cronStatus);
-    }).catch(() => { setLogs([]); setActivity([]); setRuns([]); setCron(null); });
+    }).catch(() => { setLogs([]); setActivity([]); setRuns([]); setTaskRuns([]); setCron(null); });
   }
 
   useEffect(() => { void refresh(); }, []);
@@ -46,6 +50,7 @@ export function LogsPage() {
   const visible = logs.filter((log) => !filter || `${log.method} ${log.path} ${log.error ?? ''}`.toLowerCase().includes(filter.toLowerCase()));
   const visibleActivity = activity.filter((event) => !filter || `${event.action} ${event.entityType} ${event.entityId}`.toLowerCase().includes(filter.toLowerCase()));
   const visibleRuns = runs.filter((run) => !filter || `${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(filter.toLowerCase()));
+  const visibleTaskRuns = taskRuns.filter((run) => !filter || `${run.kind} ${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(filter.toLowerCase()));
   const visibleCronRuns = (cron?.recentRuns ?? []).filter((run) => !filter || `${run.name} ${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(filter.toLowerCase()));
 
   return <div style={{ display: 'grid', gap: 16 }}>
@@ -79,6 +84,17 @@ export function LogsPage() {
             <b>{event.action}</b>
             <p>{event.actorType}:{event.actorId} / {event.entityType}:{event.entityId} / {event.createdAt ? new Date(event.createdAt).toLocaleString() : ''}</p>
             <pre className="log-block">{JSON.stringify(event.details ?? {}, null, 2)}</pre>
+          </article>)}
+        </div>
+      </section>
+      <section className="card section-card">
+        <h2>Task runs</h2>
+        <div className="table-list">
+          {visibleTaskRuns.map((run) => <article className="list-row" key={run.id}>
+            <b>{run.kind} / {run.status}</b>
+            <p>{run.cardId} / {run.agentId ?? 'no agent'} / attempt {run.attemptNumber ?? 1} / {run.durationSeconds ?? 0}s / ${run.costUsd ?? '0'}</p>
+            <p>heartbeat {run.heartbeatRunId ?? 'pending'} / {run.createdAt ? new Date(run.createdAt).toLocaleString() : ''}</p>
+            {run.error && <p className="form-error">{run.error}</p>}
           </article>)}
         </div>
       </section>

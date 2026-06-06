@@ -82,10 +82,25 @@ export const createAgentSchema = z.object({
 });
 
 export const createAgentRuntimeSchema = z.object({
+  companyId: z.string().uuid().optional(),
   name: z.string().trim().min(1).max(120),
   adapterType: z.enum(agentAdapterTypes),
   config: z.record(z.string(), z.unknown()).default({}),
   isActive: z.boolean().default(true),
+});
+
+export const companyMemberRoleSchema = z.enum(['viewer', 'operator', 'admin']);
+export const createCompanyMembershipSchema = z.object({
+  companyId: z.string().uuid(),
+  userId: z.string().uuid().optional(),
+  email: z.string().email().optional(),
+  role: companyMemberRoleSchema.default('viewer'),
+  status: z.enum(['active', 'disabled']).default('active'),
+}).refine((value) => value.userId || value.email, { message: 'userId or email is required', path: ['userId'] });
+
+export const updateCompanyMembershipSchema = z.object({
+  role: companyMemberRoleSchema.optional(),
+  status: z.enum(['active', 'disabled']).optional(),
 });
 
 export const createCardCommentSchema = z.object({
@@ -139,7 +154,7 @@ export const approvalDecisionSchema = z.object({
   decisionNote: z.string().trim().max(4000).optional(),
 });
 
-export const taskLogTypes = ['dispatch', 'retry', 'review', 'decomposition', 'cascade', 'webhook', 'manual', 'stage', 'comment', 'lock', 'recovery', 'budget', 'approval'] as const;
+export const taskLogTypes = ['dispatch', 'retry', 'review', 'decomposition', 'cascade', 'webhook', 'manual', 'stage', 'comment', 'lock', 'recovery', 'budget', 'approval', 'queue'] as const;
 export type TaskLogType = (typeof taskLogTypes)[number];
 
 export const taskLogSchema = z.object({
@@ -168,6 +183,8 @@ export type CreateCardInput = z.infer<typeof createCardSchema>;
 export type UpdateCardInput = z.infer<typeof updateCardSchema>;
 export type CreateAgentInput = z.infer<typeof createAgentSchema>;
 export type CreateAgentRuntimeInput = z.infer<typeof createAgentRuntimeSchema>;
+export type CreateCompanyMembershipInput = z.infer<typeof createCompanyMembershipSchema>;
+export type UpdateCompanyMembershipInput = z.infer<typeof updateCompanyMembershipSchema>;
 export type CreateCompanyInput = z.infer<typeof createCompanySchema>;
 export type CreateDepartmentInput = z.infer<typeof createDepartmentSchema>;
 export type CreateCardCommentInput = z.infer<typeof createCardCommentSchema>;

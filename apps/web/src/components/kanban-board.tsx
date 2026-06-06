@@ -50,6 +50,7 @@ type Department = { id: string; companyId: string; name: string };
 type Project = { id: string; companyId: string; name: string };
 type Goal = { id: string; companyId: string; title: string };
 type TaskLog = { id: string; type: string; status: string; message: string; output?: string; costUsd?: string; durationSeconds?: number; createdAt?: string };
+type TaskRun = { id: string; cardId: string; kind: string; status: string };
 type ApiEvent = { id: string; method: string; path: string; statusCode?: number; requestBody?: unknown; responseBody?: unknown; error?: string | null; durationMs?: number; createdAt?: string };
 type CardComment = { id: string; body: string; action: string; authorType: string; agentId?: string | null; authorId?: string | null; createdAt?: string };
 
@@ -336,15 +337,19 @@ export function KanbanBoard() {
     if (!selected) return;
     setBusy(true);
     try {
-      const result = await api<Card | Card[]>(path, { method: 'POST' });
+      const result = await api<Card | Card[] | TaskRun>(path, { method: 'POST' });
       if (Array.isArray(result)) {
         setCards([...result, ...cards]);
         setTab('subtasks');
+        setToast({ message, type: 'success' });
+      } else if ('kind' in result && 'cardId' in result) {
+        setToast({ message: `${result.kind} queued (${result.status})`, type: 'success' });
+        await refresh();
       } else {
         setCards(cards.map((card) => (card.id === result.id ? result : card)));
         setSelected(result);
+        setToast({ message, type: 'success' });
       }
-      setToast({ message, type: 'success' });
       if (selected) setLogs(await api<TaskLog[]>(`/api/cards/${selected.id}/logs`));
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : 'Action failed', type: 'error' });
