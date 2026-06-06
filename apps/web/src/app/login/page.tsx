@@ -7,6 +7,7 @@ import { api } from '@/lib/api';
 type AuthStatus = {
   signupEnabled: boolean;
   firstAccountWillBeAdmin: boolean;
+  nextSignupWillBeAdmin: boolean;
 };
 
 export default function LoginPage() {
@@ -58,7 +59,7 @@ export default function LoginPage() {
       {status === undefined && <p className="auth-note">Checking onboarding status...</p>}
       {status === null && <p className="auth-note">Onboarding status is unavailable. Check that the API is reachable from this browser.</p>}
       {status && (status.signupEnabled
-        ? <Link className="muted-link" href="/signup">{status.firstAccountWillBeAdmin ? 'Create the first admin account' : 'Do not have an account? Sign up'}</Link>
+        ? <Link className="muted-link" href="/signup">{status.nextSignupWillBeAdmin ? 'Create the admin account' : 'Do not have an account? Sign up'}</Link>
         : <p className="auth-note">Signup is disabled by an admin. Use an invite link or ask an admin to re-enable signup.</p>)}
     </form>
   </main>;

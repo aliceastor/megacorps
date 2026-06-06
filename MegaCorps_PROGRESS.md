@@ -26,7 +26,7 @@ Latest verified baseline:
 - In-app rate limiting is enabled by default, and API Help now includes required roles for endpoints.
 - Company-owned read APIs now scope results to the current user's company memberships.
 - Company-owned mutation/manual execution APIs now require company operator/admin membership checks.
-- Production auth onboarding now uses DB-backed `auth.signup_enabled` and `auth.jwt_secret`; signup defaults to enabled, the first signup becomes admin, and the Admin page manages all accounts.
+- Production auth onboarding now uses DB-backed `auth.signup_enabled` and `auth.jwt_secret`; signup defaults to enabled, signup becomes admin when no active admin exists, and the Admin page manages all accounts.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 
 ## Paperclip Research Summary
@@ -126,7 +126,7 @@ Implemented:
 - Language foundation.
 - Better validation error handling.
 - API unreachable handling for frontend `fetch` failures.
-- First signup creates a global admin and default-company admin membership; later self-signups become viewer accounts with default-company viewer membership.
+- Signup creates a global admin and default-company admin membership when no active admin exists; later self-signups become viewer accounts with default-company viewer membership.
 
 Notes:
 
@@ -500,7 +500,7 @@ Implemented:
   - writes: 120/min
   - reads: 600/min
 - Fail-closed webhook shared-secret guard; task completion callbacks require `WEBHOOK_SHARED_SECRET`.
-- Production onboarding now uses first-signup admin creation plus hashed one-time invite tokens.
+- Production onboarding now uses no-active-admin signup promotion plus hashed one-time invite tokens.
 - Runtime health API and Settings panel.
 - Next.js error boundary with retry/dashboard recovery.
 

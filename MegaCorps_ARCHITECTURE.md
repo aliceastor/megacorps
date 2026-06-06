@@ -11,8 +11,8 @@ Completed in this pass:
 - Added `app_settings` for DB-backed application settings.
 - Moved session signing secret to DB setting `auth.jwt_secret`, generated automatically on migration/on-demand.
 - Moved signup control to DB setting `auth.signup_enabled`, defaulting to `true`.
-- Changed fresh onboarding so the first `/signup` account becomes global admin and default-company admin.
-- Later self-signup accounts become global viewer and default-company viewer.
+- Changed onboarding so `/signup` becomes global admin and default-company admin when no active admin exists.
+- Later self-signup accounts become global viewer and default-company viewer once an active admin exists.
 - Added global Admin APIs for signup settings and account management.
 - Added Admin Web UI for all accounts, roles, status, password resets, and signup control.
 - Removed the need for `JWT_SECRET`, `BOOTSTRAP_TOKEN`, and `SIGNUP_*` env vars from Docker/Compose onboarding.
@@ -291,7 +291,7 @@ The older phase checklist later in this document is kept as historical design no
 
 - [x] `company_memberships` table.
 - [x] Migration backfill for existing users and companies.
-- [x] First signup creates admin membership for the default company; later self-signups create viewer membership.
+- [x] Signup creates admin membership for the default company when no active admin exists; later self-signups create viewer membership.
 - [x] Company-scoped read filters for company-owned resources.
 - [x] Company operator/admin checks for company-owned mutations.
 - [x] Company admin checks for membership management.

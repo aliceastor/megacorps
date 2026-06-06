@@ -108,7 +108,7 @@ export function AdminPage() {
           <input type="checkbox" checked={settings?.signupEnabled ?? true} onChange={(event) => setSettings({ signupEnabled: event.target.checked })} />
           Signup enabled
         </label>
-        <p className="auth-note">Signup defaults to enabled in the DB. On a fresh DB, the first signup becomes global admin and default-company admin.</p>
+        <p className="auth-note">Signup defaults to enabled in the DB. If no active admin exists, the next signup becomes global admin and default-company admin.</p>
         <button className="btn btn-primary" onClick={saveSettings} disabled={busy || !settings}><Save size={15} /> Save settings</button>
       </section>
 

@@ -7,6 +7,7 @@ import { api } from '@/lib/api';
 type AuthStatus = {
   signupEnabled: boolean;
   firstAccountWillBeAdmin: boolean;
+  nextSignupWillBeAdmin: boolean;
 };
 
 type InviteAcceptResponse = {
@@ -59,7 +60,7 @@ export default function SignupPage() {
         <h1>{inviteToken ? 'Accept invite' : 'Sign up'}</h1>
       </div>
       {inviteToken && <p className="auth-note">Invite token detected. Set your name and password to join the company.</p>}
-      {!inviteToken && status?.firstAccountWillBeAdmin && <p className="auth-note">This is a fresh deployment. The first account will become global admin and default-company admin.</p>}
+      {!inviteToken && status?.nextSignupWillBeAdmin && <p className="auth-note">{status.firstAccountWillBeAdmin ? 'This is a fresh deployment.' : 'No active admin exists.'} This account will become global admin and default-company admin.</p>}
       <label className="field-label">Name
         <input className="input" value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required />
       </label>

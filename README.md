@@ -52,7 +52,7 @@ Adapter egress blocks localhost/link-local metadata targets by default. Set `ADA
 
 Production onboarding:
 
-1. Open `/signup` on a fresh DB and create the first account. The first signup becomes global admin and default-company admin.
+1. Open `/signup` and create the first account. If no active admin exists, that signup becomes global admin and default-company admin.
 2. Open `Admin` to manage all accounts, roles, account status, password resets, and the DB-backed signup switch.
 3. Later users can self-signup while signup is enabled, or accept `/signup?invite=...` invite links from an admin.
 4. Existing users receiving invites get the new membership but must log in with their existing password.

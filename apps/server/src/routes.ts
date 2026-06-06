@@ -86,6 +86,11 @@ async function userCount(): Promise<number> {
   return Number(row?.count ?? 0);
 }
 
+async function hasActiveGlobalAdmin(): Promise<boolean> {
+  const [row] = await db.select({ id: users.id }).from(users).where(and(eq(users.role, 'admin'), eq(users.status, 'active'))).limit(1);
+  return Boolean(row);
+}
+
 async function hasOtherActiveGlobalAdmin(userId: string): Promise<boolean> {
   const [row] = await db.select({ id: users.id }).from(users).where(and(eq(users.role, 'admin'), eq(users.status, 'active'), ne(users.id, userId))).limit(1);
   return Boolean(row);
@@ -200,10 +205,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/auth/status', async () => {
     const count = await userCount();
+    const hasAdmin = await hasActiveGlobalAdmin();
     return {
       signupEnabled: await signupEnabled(),
       userCount: count,
       firstAccountWillBeAdmin: count === 0,
+      nextSignupWillBeAdmin: !hasAdmin,
     };
   });
 
@@ -216,19 +223,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await tx.execute(drizzleSql`SELECT pg_advisory_xact_lock(7042024060601)`);
       const [countRow] = await tx.select({ count: drizzleSql<number>`count(*)::int` }).from(users);
       const firstAccount = Number(countRow?.count ?? 0) === 0;
-      const role = firstAccount ? 'admin' : 'viewer';
-      const companyRole = firstAccount ? 'admin' : 'viewer';
+      const [adminRow] = await tx.select({ id: users.id }).from(users).where(and(eq(users.role, 'admin'), eq(users.status, 'active'))).limit(1);
+      const nextSignupAdmin = !adminRow;
+      const role = nextSignupAdmin ? 'admin' : 'viewer';
+      const companyRole = nextSignupAdmin ? 'admin' : 'viewer';
       const [company] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
       if (!company) throw new Error('Default company missing. Run migrations.');
       const [created] = await tx.insert(users).values({ email: input.email, name: input.name, passwordHash, role, status: 'active' }).returning();
       if (!created) throw new Error('signup_failed');
       const [membership] = await tx.insert(companyMemberships).values({ companyId: company.id, userId: created.id, role: companyRole, status: 'active' }).onConflictDoNothing().returning();
-      await tx.insert(activityLog).values({ companyId: company.id, actorType: 'user', actorId: created.id, userId: created.id, action: firstAccount ? 'auth.first_admin_signup' : 'auth.signup', entityType: 'user', entityId: created.id, details: { email: created.email, role, companyRole } });
-      return { user: created, membership, firstAccount };
+      await tx.insert(activityLog).values({ companyId: company.id, actorType: 'user', actorId: created.id, userId: created.id, action: nextSignupAdmin ? 'auth.first_admin_signup' : 'auth.signup', entityType: 'user', entityId: created.id, details: { email: created.email, role, companyRole, firstAccount } });
+      return { user: created, membership, firstAccount, nextSignupAdmin };
     });
     const user = result.user;
     if (!user) return reply.code(500).send({ error: 'signup_failed' });
-    const token = await signSession({ id: user.id, email: user.email, role: user.role ?? (result.firstAccount ? 'admin' : 'viewer') });
+    const token = await signSession({ id: user.id, email: user.email, role: user.role ?? (result.nextSignupAdmin ? 'admin' : 'viewer') });
     setSessionCookie(reply, token);
     return { user: { id: user.id, email: user.email, name: user.name, role: user.role }, firstAccount: result.firstAccount, membership: result.membership };
   });
