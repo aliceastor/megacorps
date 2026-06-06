@@ -19,20 +19,28 @@ export function LogsPage() {
   const [filter, setFilter] = useState('');
   const [cronRunning, setCronRunning] = useState(false);
 
+  async function safe<T>(promise: Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await promise;
+    } catch {
+      return fallback;
+    }
+  }
+
   async function refresh() {
     await Promise.all([
-      api<ApiEvent[]>('/api/system-logs?limit=300'),
-      api<ActivityEvent[]>('/api/activity?limit=300'),
-      api<HeartbeatRun[]>('/api/heartbeat-runs?limit=300'),
-      api<TaskRun[]>('/api/task-runs?limit=300'),
-      api<CronStatus>('/api/cron/status'),
+      safe(api<ApiEvent[]>('/api/system-logs?limit=300'), []),
+      safe(api<ActivityEvent[]>('/api/activity?limit=300'), []),
+      safe(api<HeartbeatRun[]>('/api/heartbeat-runs?limit=300'), []),
+      safe(api<TaskRun[]>('/api/task-runs?limit=300'), []),
+      safe(api<CronStatus>('/api/cron/status'), null),
     ]).then(([apiLogs, activityLogs, heartbeatRows, taskRunRows, cronStatus]) => {
       setLogs(apiLogs);
       setActivity(activityLogs);
       setRuns(heartbeatRows);
       setTaskRuns(taskRunRows);
       setCron(cronStatus);
-    }).catch(() => { setLogs([]); setActivity([]); setRuns([]); setTaskRuns([]); setCron(null); });
+    });
   }
 
   useEffect(() => { void refresh(); }, []);

@@ -9,26 +9,34 @@ Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm work
 
 ## Run locally
 
-1. Copy `.env.example` to `.env` and set `PORTAINER_PASS`.
+1. Copy `.env.example` to `.env`, set `JWT_SECRET` to a random value of at least 32 characters, and set any adapter credentials such as `PORTAINER_PASS`.
 2. Install dependencies with `npm install`.
 3. Start the full stack with `docker compose up -d --build`.
 4. Open `http://localhost:3000`.
+
+The sample `DATABASE_URL` is for the Docker Compose network (`postgres:5432`). If you run the server directly on the host instead of through Compose, change the host to `localhost` and expose or provide a local PostgreSQL instance.
 
 Default local URLs:
 
 - Web UI: `http://localhost:3000`
 - API: `http://localhost:4000`
 
-NAS / remote Docker note:
+Remote Docker note:
 
-- The web client auto-detects the browser host first. If the UI is opened at `http://192.168.1.180:3000`, API calls use `http://192.168.1.180:4000` before trying the baked `NEXT_PUBLIC_API_URL`.
-- Set `NEXT_PUBLIC_API_URL` only when the API is on a different host/domain. A baked `localhost` default will not override the browser-host fallback on NAS.
+- The web client auto-detects the browser host first. If the UI is opened at `http://megacorps.example.internal:3000`, API calls use `http://megacorps.example.internal:4000` before trying the baked `NEXT_PUBLIC_API_URL`.
+- Set `NEXT_PUBLIC_API_URL` only when the API is on a different host/domain. A baked `localhost` default will not override the browser-host fallback on remote Docker.
 
 ## Scripts
 
 - `npm run test`
 - `npm run typecheck`
 - `npm run build`
+
+Local red-team cleanup:
+
+```powershell
+Get-Content scripts/cleanup-redteam-data.sql | docker exec -i megacorps-postgres psql -U megacorps -d megacorps -v ON_ERROR_STOP=1
+```
 
 ## How to use agent adapters
 
@@ -37,7 +45,17 @@ MegaCorps now has two configuration layers:
 1. Open `Settings -> Agent runtimes` and create a reusable runtime preset.
 2. Open `Agents`, select an agent, then choose a runtime preset or fill the adapter override fields on that agent.
 
-Agent overrides win over runtime presets. Runtime presets win over `.env` defaults.
+Agent overrides win over runtime presets. When `.env` adapter fallback is enabled, runtime presets win over `.env` defaults.
+In production, external adapters (`hermes`, `hermes-ssh`, `hermes-gateway`, `webhook`, `openclaw`) require a company-scoped runtime preset by default. `.env` adapter fallback is disabled unless `ADAPTER_ENV_FALLBACK_ENABLED=true`, which should be reserved for local development/debugging.
+Production signup is disabled by default (`SIGNUP_ENABLED=false`). Create users through a controlled bootstrap/invite flow, or explicitly enable signup only for a trusted deployment window.
+Adapter egress blocks localhost/link-local metadata targets by default. Set `ADAPTER_TARGET_ALLOWLIST` to comma-separated hostnames or wildcard domains such as `hermes.example.internal,*.agents.example.com` when production should restrict agent runtimes to known hosts.
+
+Production onboarding:
+
+1. Set `BOOTSTRAP_TOKEN` temporarily and call `POST /api/auth/bootstrap` with the first admin's email/name/password. The endpoint fails once any active company admin exists.
+2. Remove `BOOTSTRAP_TOKEN` after the first admin is created.
+3. Use `POST /api/auth/invites` as a company admin to create one-time invite tokens for later users.
+4. New users accept with `POST /api/auth/accept-invite`. Existing users receive the new membership but must log in with their existing password.
 
 Supported runtime fields:
 
@@ -49,7 +67,7 @@ Supported runtime fields:
 - `openclaw`: `openclawUrl`.
 
 For Hermes Portainer, the agent still needs a `hermesProfile`; the runtime tells MegaCorps where to execute it.
-For Hermes SSH, create a runtime preset with `adapterType=hermes-ssh`, set `sshHost=192.168.1.172`, set the SSH user/key path reachable inside the server container, and set each agent's `hermesProfile` to the Hermes profile name such as `alice`. The SSH user defaults to `root` and can be overridden.
+For Hermes SSH, create a runtime preset with `adapterType=hermes-ssh`, set `sshHost` to your Hermes host, set the SSH user/key path reachable inside the server container, and set each agent's `hermesProfile` to the Hermes profile name such as `alice`. The SSH user defaults to `root` and can be overridden.
 For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or the agent override panel.
 
 ## Web UI pages
@@ -187,7 +205,7 @@ Phase 8/9 safety behavior:
 - Work completed by a subordinate moves to `in_review` for the reporting manager by default, creating a bottom-up review path back toward the top-level member.
 - In-app IP rate limiting is enabled by default. Tune `RATE_LIMIT_*` env vars or set `RATE_LIMIT_ENABLED=false` for local stress tests.
 - Mutation/manual execution routes require operator/admin roles. Viewer role can read authenticated UI data.
-- If `WEBHOOK_SHARED_SECRET` is set, task completion webhooks must send either `X-MegaCorps-Webhook-Secret` or `Authorization: Bearer`.
+- Task completion webhooks require `WEBHOOK_SHARED_SECRET` and must send either `X-MegaCorps-Webhook-Secret` or `Authorization: Bearer`.
 - Monthly agent spend resets on `BUDGET_RESET_DAY` UTC, default day 1, and the reset is marked in `cron_runs`.
 - Company membership rows scope visible companies and company-owned entities. Company operators/admins can mutate company data; company admins can manage memberships.
 - Manual Run/Review and cron dispatch now enqueue `task_runs`; the in-process worker claims the queue and records linked `heartbeat_runs`.
@@ -197,7 +215,7 @@ No pnpm. No Redis.
 ## Production launch checklist
 
 - Put the app behind TLS, a reverse proxy, and external rate limits in addition to the in-app limiter.
-- Set strong `JWT_SECRET`, `WEBHOOK_SHARED_SECRET`, SSH keys, and external database credentials.
+- Set strong `JWT_SECRET`, `WEBHOOK_SHARED_SECRET`, SSH keys, and external database credentials. `JWT_SECRET` is required by Compose and must not use an example/default value.
 - Encrypt or externalize adapter/runtime secrets before multi-user production.
 - Move the current in-process DB task-run worker into a separate sidecar/replica-safe worker for heavy production usage.
 - Add WebSocket/SSE consumers for live task/chat/log updates.

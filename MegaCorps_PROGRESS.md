@@ -21,7 +21,7 @@ Latest verified baseline:
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
 - API discovery is available at `GET /api/help`, `GET /api/help?format=markdown`, and the Web UI Help page, with response schema examples and rate-limit notes for every endpoint.
 - Sidebar navigation now keeps Help and Settings in the bottom utility area, with the collapse toggle inside the sidebar.
-- Hermes SSH adapter is implemented for direct `ssh -> hermes chat --profile {profile}` dispatch against the Hermes host, defaulting to `root@192.168.1.172`.
+- Hermes SSH adapter is implemented for direct `ssh -> hermes chat --profile {profile}` dispatch against the configured Hermes host. No production SSH host is hardcoded.
 - Browser API fallback now tries the current browser hostname on port `4000` before falling back to baked `NEXT_PUBLIC_API_URL`, which avoids NAS deployments accidentally calling unreachable `localhost` or stale IPs.
 - In-app rate limiting is enabled by default, and API Help now includes required roles for endpoints.
 - Company-owned read APIs now scope results to the current user's company memberships.
@@ -498,7 +498,8 @@ Implemented:
   - operator actions: 20/min
   - writes: 120/min
   - reads: 600/min
-- Webhook shared-secret guard when `WEBHOOK_SHARED_SECRET` is set.
+- Fail-closed webhook shared-secret guard; task completion callbacks require `WEBHOOK_SHARED_SECRET`.
+- Production onboarding now uses one-shot first-admin bootstrap plus hashed one-time invite tokens.
 - Runtime health API and Settings panel.
 - Next.js error boundary with retry/dashboard recovery.
 

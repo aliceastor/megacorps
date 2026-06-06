@@ -1,12 +1,12 @@
 import { createChatMessageSchema, createChatSessionSchema } from '@megacorps/shared';
-import { and, desc, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { requireAuth } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole } from './access.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { db } from './db/client.ts';
 import { activityLog, agents, chatMessages, chatSessions, companies, costEvents, heartbeatRuns } from './db/schema.ts';
-import { buildCompanyKanbanContext, buildExecutionAgent } from './dispatch.ts';
+import { budgetOk, buildCompanyKanbanContext, buildExecutionAgent, getBudgetGuard } from './dispatch.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -71,7 +71,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/chat/sessions', async (request, reply) => {
     const input = createChatSessionSchema.parse(request.body);
     const user = await requireCompanyRole(request, reply, input.companyId, 'operator'); if (!user) return reply;
-    const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId)).limit(1);
+    const [agent] = await db.select().from(agents).where(and(eq(agents.id, input.agentId), isNull(agents.deletedAt))).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     if (agent.companyId !== input.companyId) return reply.code(400).send({ error: 'agent_company_mismatch' });
     const [session] = await db.insert(chatSessions).values({
@@ -104,7 +104,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     const [session] = await db.select().from(chatSessions).where(eq(chatSessions.id, id)).limit(1);
     if (!session) return reply.code(404).send({ error: 'chat_session_not_found' });
     const user = await requireCompanyRole(request, reply, session.companyId, 'operator'); if (!user) return reply;
-    const [agent] = await db.select().from(agents).where(eq(agents.id, session.agentId)).limit(1);
+    const [agent] = await db.select().from(agents).where(and(eq(agents.id, session.agentId), isNull(agents.deletedAt))).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     const [company] = await db.select().from(companies).where(eq(companies.id, session.companyId)).limit(1);
 
@@ -137,6 +137,21 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       }).returning();
       await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: 'chat.agent_paused', sessionId: session.id });
       return reply.code(409).send({ error: 'agent_paused', userMessage, systemMessage });
+    }
+
+    if (!(await budgetOk(agent))) {
+      await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, agent.id));
+      const [systemMessage] = await db.insert(chatMessages).values({
+        sessionId: session.id,
+        companyId: session.companyId,
+        agentId: session.agentId,
+        userId: user.id,
+        authorType: 'system',
+        body: `${agent.name} is over budget and was paused before starting a direct chat run.`,
+        metadata: { error: 'agent_budget_exceeded' },
+      }).returning();
+      await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: 'chat.budget_blocked', sessionId: session.id });
+      return reply.code(409).send({ error: 'agent_budget_exceeded', userMessage, systemMessage });
     }
 
     const [busyAgent] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, agent.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
@@ -177,9 +192,11 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       );
       if (!result.success) throw new Error(result.output || 'agent_chat_failed');
 
+      const guard = await getBudgetGuard(agent);
       const nextSpend = Number(agent.spentThisMonth ?? 0) + result.costUsd;
-      const monthlyLimit = agent.budgetMonthly ? Number(agent.budgetMonthly) : null;
-      const overBudget = monthlyLimit !== null && monthlyLimit > 0 && nextSpend >= monthlyLimit;
+      const monthlyExceeded = guard.monthlyLimit !== null && nextSpend >= guard.monthlyLimit;
+      const taskExceeded = guard.perTaskLimit !== null && result.costUsd > guard.perTaskLimit;
+      const overBudget = guard.hardStop && (monthlyExceeded || taskExceeded);
       await db.update(agents).set({
         isBusy: false,
         isActive: overBudget ? false : undefined,
@@ -214,7 +231,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         agentSessionId: result.sessionId,
         updatedAt: new Date(),
       }).where(eq(chatSessions.id, session.id)).returning();
-      await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: 'chat.reply_received', sessionId: session.id, details: { runId: run.id, costUsd: result.costUsd, overBudget } });
+      await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: overBudget ? 'chat.budget_hard_stop' : 'chat.reply_received', sessionId: session.id, details: { runId: run.id, costUsd: result.costUsd, overBudget, monthlyExceeded, taskExceeded } });
       return { session: updatedSession, userMessage, agentMessage };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'agent_chat_failed';

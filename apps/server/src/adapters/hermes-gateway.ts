@@ -1,17 +1,10 @@
 import type { AgentLike, TaskContext, TaskResult } from './hermes.ts';
 import { buildAgentPrompt, estimateTokens, estimateCost } from './hermes.ts';
-
-function getConfig(agent: AgentLike, key: string, envName: string, fallback?: string): string {
-  const configured = agent.adapterConfig?.[key];
-  const value = (typeof configured === 'string' && configured.length > 0 ? configured : undefined) ?? process.env[envName] ?? fallback;
-  if (!value) throw new Error(`${key} (${envName}) is required`);
-  return value;
-}
+import { assertAdapterTargetAllowed, getAdapterOptionalStringConfig, getAdapterStringConfig } from './config.ts';
 
 async function hermesFetch(agent: AgentLike, path: string, init: RequestInit = {}): Promise<Response> {
-  const base = getConfig(agent, 'hermesGatewayUrl', 'HERMES_GATEWAY_URL', 'http://192.168.1.172:9119');
-  const configuredToken = agent.adapterConfig?.hermesDashboardToken;
-  const token = (typeof configuredToken === 'string' && configuredToken.length > 0 ? configuredToken : undefined) ?? process.env.HERMES_DASHBOARD_TOKEN;
+  const base = assertAdapterTargetAllowed(getAdapterStringConfig(agent, 'hermesGatewayUrl', 'HERMES_GATEWAY_URL'), 'HERMES_GATEWAY_URL');
+  const token = getAdapterOptionalStringConfig(agent, 'hermesDashboardToken', 'HERMES_DASHBOARD_TOKEN');
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'application/json');
   if (token) headers.set('Authorization', `Bearer ${token}`);

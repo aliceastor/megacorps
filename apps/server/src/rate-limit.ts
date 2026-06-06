@@ -18,6 +18,10 @@ function envNumber(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? Math.round(value) : fallback;
 }
 
+function truthy(value: string | undefined): boolean {
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on';
+}
+
 export function rateLimitPolicyForPath(method: string, path: string): RateLimitPolicy | null {
   if (process.env.RATE_LIMIT_ENABLED === 'false') return null;
   if (path === '/health' || path.startsWith('/api/help')) return null;
@@ -32,7 +36,7 @@ export function rateLimitPolicyForPath(method: string, path: string): RateLimitP
 }
 
 function clientKey(request: FastifyRequest): string {
-  const forwarded = request.headers['x-forwarded-for'];
+  const forwarded = truthy(process.env.TRUST_PROXY) ? request.headers['x-forwarded-for'] : undefined;
   const ip = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0]?.trim();
   return ip || request.ip || 'unknown';
 }

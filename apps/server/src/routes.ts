@@ -1,13 +1,15 @@
 import bcrypt from 'bcryptjs';
-import { and, desc, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
-import type { FastifyInstance } from 'fastify';
-import { approvalDecisionSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema } from '@megacorps/shared';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { and, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
+import type { FastifyInstance, FastifyReply } from 'fastify';
+import { acceptInviteSchema, approvalDecisionSchema, bootstrapAdminSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema } from '@megacorps/shared';
 import { signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, apiEvents, approvals, budgetPolicies, cardComments, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, users } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, apiEvents, approvals, budgetPolicies, cardComments, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, userInvites, users } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
-import { cascadeParentStatus, decomposeCard, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
+import { adapterRequiresRuntime } from './adapters/config.ts';
+import { buildExecutionAgent, cascadeParentStatus, decomposeCard, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
 import { registerChatRoutes } from './chat.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
@@ -21,18 +23,119 @@ async function defaultCompanyId(): Promise<string> {
 function priorityToNumber(priority: string | undefined): number { return priority === 'urgent' ? 3 : priority === 'high' ? 2 : priority === 'low' ? -1 : 0; }
 function actorLabel(user: { email?: string; id?: string } | null): string { return user?.email ?? user?.id ?? 'system'; }
 
+const REDACTED = '[redacted]';
+const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|keyPath|privateKey)/i;
+const validGlobalRoles = new Set(['viewer', 'operator', 'admin']);
+const validCompanyRoles = new Set(['viewer', 'operator', 'admin']);
+
+function truthy(value: string | undefined): boolean {
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on';
+}
+
+function envRole(value: string | undefined, fallback: 'viewer' | 'operator' | 'admin'): 'viewer' | 'operator' | 'admin' {
+  return validGlobalRoles.has(value ?? '') ? value as 'viewer' | 'operator' | 'admin' : fallback;
+}
+
+function envCompanyRole(value: string | undefined, fallback: 'viewer' | 'operator' | 'admin'): 'viewer' | 'operator' | 'admin' {
+  return validCompanyRoles.has(value ?? '') ? value as 'viewer' | 'operator' | 'admin' : fallback;
+}
+
+function signupEnabled(): boolean {
+  if (process.env.SIGNUP_ENABLED !== undefined) return truthy(process.env.SIGNUP_ENABLED);
+  return process.env.NODE_ENV !== 'production';
+}
+
+function attachDefaultCompanyOnSignup(): boolean {
+  if (process.env.SIGNUP_ATTACH_DEFAULT_COMPANY !== undefined) return truthy(process.env.SIGNUP_ATTACH_DEFAULT_COMPANY);
+  return process.env.NODE_ENV !== 'production';
+}
+
+function isLocalWebOrigin(): boolean {
+  const origin = process.env.WEB_ORIGIN ?? '';
+  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(origin);
+}
+
+function sessionCookieSecure(): boolean {
+  if (process.env.COOKIE_SECURE !== undefined) return truthy(process.env.COOKIE_SECURE);
+  return process.env.NODE_ENV === 'production' && !isLocalWebOrigin();
+}
+
+function setSessionCookie(reply: FastifyReply, token: string): void {
+  reply.setCookie('session', token, { httpOnly: true, sameSite: 'lax', path: '/', secure: sessionCookieSecure() });
+}
+
+function safeSecretEqual(provided: string | undefined, expected: string): boolean {
+  if (!provided) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function generateInviteToken(): string {
+  return randomBytes(32).toString('base64url');
+}
+
+function webUrl(path: string): string | null {
+  const origin = process.env.WEB_ORIGIN;
+  if (!origin) return null;
+  return `${origin.replace(/\/$/, '')}${path}`;
+}
+
+function headerSecret(value: unknown): string | undefined {
+  return Array.isArray(value) ? value[0] : typeof value === 'string' ? value : undefined;
+}
+
+async function hasActiveCompanyAdmin(): Promise<boolean> {
+  const [row] = await db.select({ id: companyMemberships.id }).from(companyMemberships).where(and(eq(companyMemberships.role, 'admin'), eq(companyMemberships.status, 'active'))).limit(1);
+  return Boolean(row);
+}
+
+function redactSecrets(value: unknown, depth = 0): unknown {
+  if (depth > 8 || value === null || value === undefined) return value;
+  if (Array.isArray(value)) return value.map((item) => redactSecrets(item, depth + 1));
+  if (typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+      key,
+      SENSITIVE_CONFIG_KEY.test(key) ? REDACTED : redactSecrets(item, depth + 1),
+    ]));
+  }
+  return value;
+}
+
+function preserveRedactedSecrets(input: unknown, existing: unknown): unknown {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const previous = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing as Record<string, unknown> : {};
+  return Object.fromEntries(Object.entries(input as Record<string, unknown>).map(([key, value]) => {
+    if (value === REDACTED && Object.prototype.hasOwnProperty.call(previous, key)) return [key, previous[key]];
+    if (value && typeof value === 'object' && !Array.isArray(value)) return [key, preserveRedactedSecrets(value, previous[key])];
+    return [key, value];
+  }));
+}
+
+function redactAgent<T extends { adapterConfig?: unknown }>(agent: T): T {
+  return { ...agent, adapterConfig: redactSecrets(agent.adapterConfig) } as T;
+}
+
+function redactRuntime<T extends { config?: unknown }>(runtime: T): T {
+  return { ...runtime, config: redactSecrets(runtime.config) } as T;
+}
+
 async function cardCompanyId(cardId: string): Promise<string | null> {
-  const [card] = await db.select({ companyId: kanbanCards.companyId }).from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  const [card] = await db.select({ companyId: kanbanCards.companyId }).from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   return card?.companyId ?? null;
 }
 
 async function agentCompanyId(agentId: string): Promise<string | null> {
-  const [agent] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, agentId)).limit(1);
+  const [agent] = await db.select({ companyId: agents.companyId }).from(agents).where(and(eq(agents.id, agentId), isNull(agents.deletedAt))).limit(1);
   return agent?.companyId ?? null;
 }
 
 async function ensureVisibleCard(request: Parameters<typeof requireVisibleCompany>[0], reply: Parameters<typeof requireVisibleCompany>[1], cardId: string) {
-  const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) {
     await reply.code(404).send({ error: 'card_not_found' });
     return null;
@@ -51,6 +154,7 @@ async function ensureCompanyReferences(companyId: string, input: {
   parentCardId?: string | null;
   dependencyCardIds?: string[];
   runtimeId?: string | null;
+  adapterType?: string | null;
 }) {
   if (input.departmentId) {
     const [row] = await db.select({ id: departments.id }).from(departments).where(and(eq(departments.id, input.departmentId), eq(departments.companyId, companyId))).limit(1);
@@ -77,9 +181,11 @@ async function ensureCompanyReferences(companyId: string, input: {
     const rows = await db.select({ id: kanbanCards.id }).from(kanbanCards).where(and(inArray(kanbanCards.id, input.dependencyCardIds), eq(kanbanCards.companyId, companyId)));
     if (rows.length !== input.dependencyCardIds.length) throw new Error('dependency_card_company_mismatch');
   }
+  if (input.adapterType && adapterRequiresRuntime(input.adapterType) && !input.runtimeId) throw new Error('agent_runtime_required');
   if (input.runtimeId) {
-    const [runtime] = await db.select({ companyId: agentRuntimes.companyId }).from(agentRuntimes).where(eq(agentRuntimes.id, input.runtimeId)).limit(1);
+    const [runtime] = await db.select({ companyId: agentRuntimes.companyId, adapterType: agentRuntimes.adapterType }).from(agentRuntimes).where(eq(agentRuntimes.id, input.runtimeId)).limit(1);
     if (!runtime || runtime.companyId !== companyId) throw new Error('runtime_company_mismatch');
+    if (input.adapterType && runtime.adapterType !== input.adapterType) throw new Error('runtime_adapter_mismatch');
   }
 }
 
@@ -95,15 +201,49 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return apiHelpCatalog();
   });
 
+  app.post('/api/auth/bootstrap', async (request, reply) => {
+    const expectedToken = process.env.BOOTSTRAP_TOKEN;
+    if (!expectedToken || expectedToken.length < 16) return reply.code(503).send({ error: 'bootstrap_not_configured' });
+    const input = bootstrapAdminSchema.parse(request.body);
+    const providedToken = input.bootstrapToken ?? headerSecret(request.headers['x-megacorps-bootstrap-token']);
+    if (!safeSecretEqual(providedToken, expectedToken)) return reply.code(401).send({ error: 'bootstrap_token_required' });
+    if (await hasActiveCompanyAdmin()) return reply.code(409).send({ error: 'bootstrap_already_completed' });
+
+    const companyId = input.companyId ?? await defaultCompanyId();
+    const [company] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
+    if (!company) return reply.code(404).send({ error: 'company_not_found' });
+
+    const passwordHash = await bcrypt.hash(input.password, 12);
+    const [existingUser] = await db.select().from(users).where(eq(users.email, input.email)).limit(1);
+    const [user] = existingUser
+      ? await db.update(users).set({ name: input.name, passwordHash, role: 'admin', updatedAt: new Date() }).where(eq(users.id, existingUser.id)).returning()
+      : await db.insert(users).values({ email: input.email, name: input.name, passwordHash, role: 'admin' }).returning();
+    if (!user) return reply.code(500).send({ error: 'bootstrap_user_failed' });
+
+    const [membership] = await db.insert(companyMemberships).values({ companyId, userId: user.id, role: 'admin', status: 'active' }).onConflictDoUpdate({
+      target: [companyMemberships.companyId, companyMemberships.userId],
+      set: { role: 'admin', status: 'active', updatedAt: new Date() },
+    }).returning();
+    await db.insert(activityLog).values({ companyId, actorType: 'system', actorId: 'bootstrap', userId: user.id, action: 'auth.bootstrap_admin', entityType: 'user', entityId: user.id, details: { email: user.email } });
+    const token = await signSession({ id: user.id, email: user.email, role: user.role ?? 'admin' });
+    setSessionCookie(reply, token);
+    return reply.code(201).send({ ok: true, user: { id: user.id, email: user.email, name: user.name, role: user.role }, membership });
+  });
+
   app.post('/api/auth/signup', async (request, reply) => {
+    if (!signupEnabled()) return reply.code(403).send({ error: 'signup_disabled' });
     const input = signupSchema.parse(request.body);
     const passwordHash = await bcrypt.hash(input.password, 12);
-    const [user] = await db.insert(users).values({ email: input.email, name: input.name, passwordHash, role: 'admin' }).returning();
+    const defaultRole = envRole(process.env.SIGNUP_DEFAULT_ROLE, 'viewer');
+    const [user] = await db.insert(users).values({ email: input.email, name: input.name, passwordHash, role: defaultRole }).returning();
     if (!user) return reply.code(500).send({ error: 'signup_failed' });
-    const companyId = await defaultCompanyId();
-    await db.insert(companyMemberships).values({ companyId, userId: user.id, role: 'admin', status: 'active' }).onConflictDoNothing();
-    const token = await signSession({ id: user.id, email: user.email, role: user.role ?? 'admin' });
-    reply.setCookie('session', token, { httpOnly: true, sameSite: 'lax', path: '/', secure: false });
+    if (attachDefaultCompanyOnSignup()) {
+      const companyId = await defaultCompanyId();
+      const defaultCompanyRole = envCompanyRole(process.env.SIGNUP_DEFAULT_COMPANY_ROLE, 'viewer');
+      await db.insert(companyMemberships).values({ companyId, userId: user.id, role: defaultCompanyRole, status: 'active' }).onConflictDoNothing();
+    }
+    const token = await signSession({ id: user.id, email: user.email, role: user.role ?? 'viewer' });
+    setSessionCookie(reply, token);
     return { user: { id: user.id, email: user.email, name: user.name } };
   });
 
@@ -112,11 +252,76 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [user] = await db.select().from(users).where(eq(users.email, input.email)).limit(1);
     if (!user?.passwordHash || !(await bcrypt.compare(input.password, user.passwordHash))) return reply.code(401).send({ error: 'invalid_credentials' });
     const token = await signSession({ id: user.id, email: user.email, role: user.role ?? 'viewer' });
-    reply.setCookie('session', token, { httpOnly: true, sameSite: 'lax', path: '/', secure: false });
+    setSessionCookie(reply, token);
     return { user: { id: user.id, email: user.email, name: user.name } };
   });
 
   app.post('/api/auth/logout', async (_request, reply) => { reply.clearCookie('session', { path: '/' }); return { ok: true }; });
+  app.post('/api/auth/invites', async (request, reply) => {
+    const input = createInviteSchema.parse(request.body);
+    const actor = await requireCompanyRole(request, reply, input.companyId, 'admin'); if (!actor) return reply;
+    const token = generateInviteToken();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + input.expiresInDays * 24 * 60 * 60 * 1000);
+    await db.update(userInvites).set({ status: 'superseded', updatedAt: now }).where(and(eq(userInvites.companyId, input.companyId), eq(userInvites.email, input.email), eq(userInvites.status, 'pending')));
+    const [invite] = await db.insert(userInvites).values({
+      companyId: input.companyId,
+      email: input.email,
+      name: input.name ?? null,
+      role: input.role,
+      tokenHash: sha256(token),
+      status: 'pending',
+      invitedByUserId: actor.id,
+      expiresAt,
+    }).returning();
+    if (!invite) return reply.code(500).send({ error: 'invite_create_failed' });
+    await db.insert(activityLog).values({ companyId: input.companyId, actorType: 'user', actorId: actor.id, userId: actor.id, action: 'invite.created', entityType: 'user_invite', entityId: invite.id, details: { email: invite.email, role: invite.role, expiresAt: invite.expiresAt } });
+    const acceptPath = `/signup?invite=${encodeURIComponent(token)}`;
+    return reply.code(201).send({
+      invite: { id: invite.id, companyId: invite.companyId, email: invite.email, name: invite.name, role: invite.role, status: invite.status, expiresAt: invite.expiresAt },
+      token,
+      acceptUrl: webUrl(acceptPath),
+    });
+  });
+
+  app.post('/api/auth/accept-invite', async (request, reply) => {
+    const input = acceptInviteSchema.parse(request.body);
+    const [invite] = await db.select().from(userInvites).where(eq(userInvites.tokenHash, sha256(input.token))).limit(1);
+    if (!invite) return reply.code(404).send({ error: 'invite_not_found' });
+    if (invite.status !== 'pending') return reply.code(409).send({ error: 'invite_not_pending', status: invite.status });
+    const now = new Date();
+    if (invite.expiresAt && invite.expiresAt < now) {
+      await db.update(userInvites).set({ status: 'expired', updatedAt: now }).where(eq(userInvites.id, invite.id));
+      return reply.code(410).send({ error: 'invite_expired' });
+    }
+
+    const [existingUser] = await db.select().from(users).where(eq(users.email, invite.email)).limit(1);
+    const passwordHash = await bcrypt.hash(input.password, 12);
+    const nextName = input.name ?? invite.name ?? invite.email.split('@')[0] ?? 'Invited User';
+    let shouldSetSession = false;
+    const [user] = existingUser
+      ? await db.update(users).set({
+        name: input.name ?? existingUser.name,
+        passwordHash: existingUser.passwordHash ? existingUser.passwordHash : passwordHash,
+        updatedAt: now,
+      }).where(eq(users.id, existingUser.id)).returning()
+      : await db.insert(users).values({ email: invite.email, name: nextName, passwordHash, role: 'viewer' }).returning();
+    if (!user) return reply.code(500).send({ error: 'invite_user_failed' });
+    shouldSetSession = !existingUser || !existingUser.passwordHash;
+
+    const [membership] = await db.insert(companyMemberships).values({ companyId: invite.companyId, userId: user.id, role: invite.role, status: 'active' }).onConflictDoUpdate({
+      target: [companyMemberships.companyId, companyMemberships.userId],
+      set: { role: invite.role, status: 'active', updatedAt: now },
+    }).returning();
+    await db.update(userInvites).set({ status: 'accepted', acceptedByUserId: user.id, acceptedAt: now, updatedAt: now }).where(eq(userInvites.id, invite.id));
+    await db.insert(activityLog).values({ companyId: invite.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'invite.accepted', entityType: 'user_invite', entityId: invite.id, details: { email: invite.email, role: invite.role } });
+    if (shouldSetSession) {
+      const token = await signSession({ id: user.id, email: user.email, role: user.role ?? 'viewer' });
+      setSessionCookie(reply, token);
+    }
+    return { ok: true, user: { id: user.id, email: user.email, name: user.name, role: user.role }, membership, loginRequired: !shouldSetSession };
+  });
+
   app.get('/api/me', async (request, reply) => {
     const user = await requireAuth(request, reply);
     if (!user) return reply;
@@ -127,7 +332,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireAuth(request, reply); if (!user) return reply;
     const query = request.query as { limit?: string };
     const limit = Math.min(Math.max(Number(query.limit ?? 100), 1), 500);
-    return db.select().from(apiEvents).orderBy(desc(apiEvents.createdAt)).limit(limit);
+    return db.select().from(apiEvents).where(eq(apiEvents.userId, user.id)).orderBy(desc(apiEvents.createdAt)).limit(limit);
   });
   app.get('/api/activity', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
@@ -200,7 +405,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       updatedAt: new Date(),
     }).where(eq(approvals.id, id)).returning();
     if (approval.cardId) {
-      const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, approval.cardId)).limit(1);
+        const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, approval.cardId), isNull(kanbanCards.deletedAt))).limit(1);
       if (card && input.status !== 'cancelled') {
         const nextStatus = input.status === 'approved' ? 'done' : 'todo';
         await db.update(kanbanCards).set({ columnStatus: nextStatus, completedAt: nextStatus === 'done' ? new Date() : null, reviewFeedback: input.decisionNote ?? card.reviewFeedback, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
@@ -243,11 +448,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = createBudgetPolicySchema.partial().parse(request.body);
     const [existing] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, id)).limit(1);
     if (!existing) return reply.code(404).send({ error: 'budget_policy_not_found' });
-    const companyId = input.companyId ?? existing.companyId;
+    if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'budget_policy_company_immutable' });
+    const companyId = existing.companyId;
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     await ensureCompanyReferences(companyId, { assigneeId: input.agentId ?? existing.agentId });
     const [policy] = await db.update(budgetPolicies).set({
-      companyId: input.companyId,
       agentId: input.agentId,
       name: input.name,
       monthlyLimitUsd: input.monthlyLimitUsd === undefined ? undefined : input.monthlyLimitUsd?.toString() ?? null,
@@ -280,7 +485,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       db.select().from(agents).where(inArray(agents.companyId, access.companyIds)),
       db.select().from(companies).where(inArray(companies.id, access.companyIds)),
       db.select().from(taskLogs).innerJoin(kanbanCards, eq(taskLogs.cardId, kanbanCards.id)).where(inArray(kanbanCards.companyId, access.companyIds)).orderBy(desc(taskLogs.createdAt)).limit(20),
-      db.select().from(apiEvents).orderBy(desc(apiEvents.createdAt)).limit(20),
+      db.select().from(apiEvents).where(eq(apiEvents.userId, access.user.id)).orderBy(desc(apiEvents.createdAt)).limit(20),
       db.select().from(activityLog).where(inArray(activityLog.companyId, access.companyIds)).orderBy(desc(activityLog.createdAt)).limit(20),
       db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.companyId, access.companyIds)).orderBy(desc(heartbeatRuns.createdAt)).limit(20),
       db.select().from(approvals).where(and(inArray(approvals.companyId, access.companyIds), eq(approvals.status, 'pending'))).orderBy(desc(approvals.createdAt)).limit(50),
@@ -436,6 +641,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const status = normalizeCardStatus(query.status);
     const filters = [
       query.companyId ? eq(kanbanCards.companyId, query.companyId) : inArray(kanbanCards.companyId, access.companyIds),
+      isNull(kanbanCards.deletedAt),
       status ? eq(kanbanCards.columnStatus, status) : undefined,
       query.assigneeId ? eq(kanbanCards.assigneeId, query.assigneeId) : undefined,
       query.priority ? eq(kanbanCards.priority, priorityToNumber(query.priority)) : undefined,
@@ -487,7 +693,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.put('/api/cards/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const input = updateCardSchema.parse(request.body);
-    const [existing] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
+    const [existing] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, id), isNull(kanbanCards.deletedAt))).limit(1);
     if (!existing) return reply.code(404).send({ error: 'card_not_found' });
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
     try {
@@ -537,14 +743,22 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete('/api/cards/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
-    const [existing] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
+    const [existing] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, id), isNull(kanbanCards.deletedAt))).limit(1);
     if (!existing) return reply.code(404).send({ error: 'card_not_found' });
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    const now = new Date();
     await db.update(kanbanCards).set({ parentCardId: null }).where(eq(kanbanCards.parentCardId, id));
-    await db.delete(taskRuns).where(eq(taskRuns.cardId, id));
-    await db.delete(cardComments).where(eq(cardComments.cardId, id));
-    await db.delete(taskLogs).where(eq(taskLogs.cardId, id));
-    await db.delete(kanbanCards).where(eq(kanbanCards.id, id));
+    await db.update(taskRuns).set({ status: 'cancelled', completedAt: now, updatedAt: now, error: 'card_archived' }).where(and(eq(taskRuns.cardId, id), inArray(taskRuns.status, ['queued', 'running'])));
+    if (existing.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', completedAt: now, error: 'card_archived' }).where(eq(heartbeatRuns.id, existing.activeHeartbeatRunId));
+    await db.update(kanbanCards).set({
+      deletedAt: now,
+      executionLockId: null,
+      executionLockedByAgentId: null,
+      executionLockedAt: null,
+      executionLockExpiresAt: null,
+      activeHeartbeatRunId: null,
+      updatedAt: now,
+    }).where(eq(kanbanCards.id, id));
     await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'card.deleted', entityType: 'card', entityId: id, details: { title: existing.title } });
     return { ok: true };
   });
@@ -561,11 +775,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/cards/:id/comments', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const input = createCardCommentSchema.parse(request.body);
-    const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, id)).limit(1);
+    const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, id), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
     const user = await requireCompanyRole(request, reply, card.companyId, 'operator'); if (!user) return reply;
     if (input.agentId && !['comment', 'agent_note'].includes(input.action)) return reply.code(400).send({ error: 'agent_comments_cannot_control_task' });
-    const [authorAgent] = input.agentId ? await db.select().from(agents).where(eq(agents.id, input.agentId)).limit(1) : [];
+    const [authorAgent] = input.agentId ? await db.select().from(agents).where(and(eq(agents.id, input.agentId), isNull(agents.deletedAt))).limit(1) : [];
     if (input.agentId && !authorAgent) return reply.code(404).send({ error: 'agent_not_found' });
     if (authorAgent && authorAgent.companyId !== card.companyId) return reply.code(400).send({ error: 'agent_company_mismatch' });
     const authorType = authorAgent ? 'agent' : 'user';
@@ -625,25 +839,36 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (access.companyIds.length === 0) return [];
     const query = request.query as { companyId?: string };
     if (query.companyId && !access.companyIds.includes(query.companyId)) return [];
-    return db.select().from(agents).where(query.companyId ? eq(agents.companyId, query.companyId) : inArray(agents.companyId, access.companyIds));
+    const rows = await db.select().from(agents).where(and(
+      query.companyId ? eq(agents.companyId, query.companyId) : inArray(agents.companyId, access.companyIds),
+      isNull(agents.deletedAt),
+    ));
+    return rows.map(redactAgent);
   });
   app.post('/api/agents', async (request, reply) => {
     const input = createAgentSchema.parse(request.body);
     const companyId = input.companyId ?? await defaultCompanyId();
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
-    try { await ensureCompanyReferences(companyId, { departmentId: input.departmentId, bossId: input.bossId, runtimeId: input.runtimeId }); }
+    try { await ensureCompanyReferences(companyId, { departmentId: input.departmentId, bossId: input.bossId, runtimeId: input.runtimeId, adapterType: input.adapterType }); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
     const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
     if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
-    return reply.code(201).send(agent);
+    return reply.code(201).send(agent ? redactAgent(agent) : agent);
   });
   app.delete('/api/agents/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
-    const [agent] = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
+    const [agent] = await db.select().from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     const user = await requireCompanyRole(request, reply, agent.companyId, 'operator'); if (!user) return reply;
     await db.update(kanbanCards).set({ assigneeId: null }).where(eq(kanbanCards.assigneeId, id));
-    await db.delete(agents).where(eq(agents.id, id));
+    await db.update(kanbanCards).set({ reviewerId: null }).where(eq(kanbanCards.reviewerId, id));
+    await db.update(agents).set({ bossId: null }).where(eq(agents.bossId, id));
+    await db.update(agents).set({
+      isActive: false,
+      isBusy: false,
+      slug: `${agent.slug}-deleted-${id.slice(0, 8)}`,
+      deletedAt: new Date(),
+    }).where(eq(agents.id, id));
     await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'agent.deleted', entityType: 'agent', entityId: id, details: { name: agent.name } });
     return { ok: true };
   });
@@ -680,11 +905,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.put('/api/agents/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const input = createAgentSchema.partial().parse(request.body);
-    const [existing] = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
+    const [existing] = await db.select().from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
     if (!existing) return reply.code(404).send({ error: 'agent_not_found' });
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
-    try { await ensureCompanyReferences(existing.companyId, { departmentId: input.departmentId, bossId: input.bossId, runtimeId: input.runtimeId }); }
+    const nextAdapterType = input.adapterType ?? existing.adapterType;
+    const nextRuntimeId = input.runtimeId === undefined ? existing.runtimeId : input.runtimeId;
+    try { await ensureCompanyReferences(existing.companyId, { departmentId: input.departmentId, bossId: input.bossId, runtimeId: nextRuntimeId, adapterType: nextAdapterType }); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
+    const nextAdapterConfig = input.adapterConfig === undefined ? undefined : preserveRedactedSecrets(input.adapterConfig, existing.adapterConfig);
     const [agent] = await db.update(agents).set({
       name: input.name,
       slug: input.slug,
@@ -692,7 +920,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       title: input.title,
       departmentId: input.departmentId,
       adapterType: input.adapterType,
-      adapterConfig: input.adapterConfig,
+      adapterConfig: nextAdapterConfig,
       runtimeId: input.runtimeId,
       hermesProfile: input.hermesProfile,
       bossId: input.bossId,
@@ -701,7 +929,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.updated', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
-    return agent;
+    return redactAgent(agent);
   });
 
   app.get('/api/agent-runtimes', async (request, reply) => {
@@ -709,7 +937,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (access.companyIds.length === 0) return [];
     const query = request.query as { companyId?: string };
     if (query.companyId && !access.companyIds.includes(query.companyId)) return [];
-    return db.select().from(agentRuntimes).where(query.companyId ? eq(agentRuntimes.companyId, query.companyId) : inArray(agentRuntimes.companyId, access.companyIds)).orderBy(desc(agentRuntimes.createdAt));
+    const rows = await db.select().from(agentRuntimes).where(query.companyId ? eq(agentRuntimes.companyId, query.companyId) : inArray(agentRuntimes.companyId, access.companyIds)).orderBy(desc(agentRuntimes.createdAt));
+    return rows.map(redactRuntime);
   });
   app.get('/api/agent-runtimes/health', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
@@ -755,25 +984,25 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const companyId = input.companyId ?? await defaultCompanyId();
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     const [row] = await db.insert(agentRuntimes).values({ ...input, companyId }).returning();
-    return reply.code(201).send(row);
+    return reply.code(201).send(row ? redactRuntime(row) : row);
   });
   app.put('/api/agent-runtimes/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const input = createAgentRuntimeSchema.partial().parse(request.body);
     const [existing] = await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, id)).limit(1);
     if (!existing?.companyId) return reply.code(404).send({ error: 'runtime_not_found' });
-    const companyId = input.companyId ?? existing.companyId;
-    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
+    if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'runtime_company_immutable' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    const nextConfig = input.config === undefined ? undefined : preserveRedactedSecrets(input.config, existing.config);
     const [row] = await db.update(agentRuntimes).set({
-      companyId: input.companyId,
       name: input.name,
       adapterType: input.adapterType,
-      config: input.config,
+      config: nextConfig,
       isActive: input.isActive,
       updatedAt: new Date(),
     }).where(eq(agentRuntimes.id, id)).returning();
     if (!row) return reply.code(404).send({ error: 'runtime_not_found' });
-    return row;
+    return redactRuntime(row);
   });
   app.delete('/api/agent-runtimes/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
@@ -787,22 +1016,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/agents/:id/test-connection', async (request, reply) => {
     const id = (request.params as { id: string }).id;
-    const [agent] = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
+    const [agent] = await db.select().from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     const user = await requireCompanyRole(request, reply, agent.companyId, 'operator'); if (!user) return reply;
     try {
       const adapter = getAdapter(agent.adapterType ?? 'hermes');
-      let runtimeConfig: Record<string, unknown> = {};
-      if (agent.runtimeId) {
-        const [runtime] = await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, agent.runtimeId)).limit(1);
-        if (runtime && runtime.isActive === false) return reply.code(400).send({ error: 'runtime_inactive' });
-        runtimeConfig = (runtime?.config as Record<string, unknown> | null) ?? {};
-      }
-      return await adapter.dispatch({
-        hermesProfile: agent.hermesProfile,
-        currentSessionId: agent.currentSessionId,
-        adapterConfig: { ...runtimeConfig, ...((agent.adapterConfig as Record<string, unknown> | null) ?? {}) },
-      }, { id: 'test', title: 'Connection test', body: 'Return OK.', timeoutSeconds: 30 });
+      return await adapter.dispatch(await buildExecutionAgent(agent), { id: 'test', title: 'Connection test', body: 'Return OK.', timeoutSeconds: 30 });
     }
     catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : 'connection_failed' }); }
   });
@@ -854,9 +1073,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = createKnowledgeDocSchema.partial().parse(request.body);
     const [existing] = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.id, id)).limit(1);
     if (!existing) return reply.code(404).send({ error: 'knowledge_doc_not_found' });
-    const companyId = input.companyId ?? existing.companyId;
-    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
-    const [row] = await db.update(knowledgeDocs).set({ ...input, updatedAt: new Date() }).where(eq(knowledgeDocs.id, id)).returning();
+    if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'knowledge_doc_company_immutable' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    const { companyId: _companyId, ...updates } = input;
+    const [row] = await db.update(knowledgeDocs).set({ ...updates, updatedAt: new Date() }).where(eq(knowledgeDocs.id, id)).returning();
     if (!row) return reply.code(404).send({ error: 'knowledge_doc_not_found' });
     return row;
   });
@@ -871,19 +1091,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/webhook/task-complete', async (request, reply) => {
     const expectedSecret = process.env.WEBHOOK_SHARED_SECRET;
-    if (expectedSecret) {
-      const headerSecret = request.headers['x-megacorps-webhook-secret'];
-      const bearer = typeof request.headers.authorization === 'string' && request.headers.authorization.startsWith('Bearer ')
-        ? request.headers.authorization.slice('Bearer '.length)
-        : undefined;
-      const providedSecret = Array.isArray(headerSecret) ? headerSecret[0] : headerSecret;
-      if (providedSecret !== expectedSecret && bearer !== expectedSecret) return reply.code(401).send({ error: 'webhook_auth_required' });
-    }
+    if (!expectedSecret || expectedSecret.length < 16) return reply.code(503).send({ error: 'webhook_secret_not_configured' });
+    const headerSecret = request.headers['x-megacorps-webhook-secret'];
+    const bearer = typeof request.headers.authorization === 'string' && request.headers.authorization.startsWith('Bearer ')
+      ? request.headers.authorization.slice('Bearer '.length)
+      : undefined;
+    const providedSecret = Array.isArray(headerSecret) ? headerSecret[0] : headerSecret;
+    if (!safeSecretEqual(providedSecret, expectedSecret) && !safeSecretEqual(bearer, expectedSecret)) return reply.code(401).send({ error: 'webhook_auth_required' });
     const body = request.body as { cardId?: string; status?: string; summary?: string; output?: string; costUsd?: number };
     if (!body.cardId || !body.status) return reply.code(400).send({ error: 'missing_fields' });
     const nextStatus = normalizeCardStatus(body.status);
     if (!nextStatus) return reply.code(400).send({ error: 'invalid_status', allowed: ['todo', 'in_progress', 'in_review', 'done', 'blocked'], legacyAliases: { backlog: 'todo' } });
-    const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, body.cardId)).limit(1);
+    const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, body.cardId), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
     const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
     await db.update(kanbanCards).set({

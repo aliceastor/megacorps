@@ -1,23 +1,12 @@
+import { getAdapterStringConfig } from './config.ts';
+
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
 export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' };
 export type TaskResult = { success: boolean; output: string; sessionId: string; tokensUsed: number; costUsd: number; durationSeconds: number };
 export type AgentLike = { hermesProfile: string | null; currentSessionId: string | null; adapterConfig?: Record<string, unknown> | null };
 
-function getConfig(agent: AgentLike | null, key: string, envName: string, fallback?: string): string {
-  const configured = agent?.adapterConfig?.[key];
-  const value = (typeof configured === 'string' && configured.length > 0 ? configured : undefined) ?? process.env[envName] ?? fallback;
-  if (!value) throw new Error(`${key} (${envName}) is required`);
-  return value;
-}
-
-function getEnv(name: string, fallback?: string): string {
-  const value = process.env[name] ?? fallback;
-  if (!value) throw new Error(`${name} is required`);
-  return value;
-}
-
 async function portainerFetch(agent: AgentLike | null, path: string, init: RequestInit = {}, token?: string): Promise<Response> {
-  const base = getConfig(agent, 'portainerUrl', 'PORTAINER_URL', 'https://192.168.1.180:31015');
+  const base = getAdapterStringConfig(agent ?? { hermesProfile: null, currentSessionId: null }, 'portainerUrl', 'PORTAINER_URL');
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'application/json');
   if (token) headers.set('Authorization', `Bearer ${token}`);
@@ -26,12 +15,13 @@ async function portainerFetch(agent: AgentLike | null, path: string, init: Reque
 
 export async function portainerLogin(agent: AgentLike | null, retries = 3): Promise<string> {
   let lastError = 'unknown';
+  const configAgent = agent ?? { hermesProfile: null, currentSessionId: null };
   for (let i = 0; i < retries; i += 1) {
     const response = await portainerFetch(agent, '/api/auth', {
       method: 'POST',
       body: JSON.stringify({
-        username: getConfig(agent, 'portainerUser', 'PORTAINER_USER'),
-        password: getConfig(agent, 'portainerPass', 'PORTAINER_PASS'),
+        username: getAdapterStringConfig(configAgent, 'portainerUser', 'PORTAINER_USER'),
+        password: getAdapterStringConfig(configAgent, 'portainerPass', 'PORTAINER_PASS'),
       }),
     });
     if (response.ok) {
@@ -64,8 +54,8 @@ function decodeDockerMultiplexed(buffer: ArrayBuffer): { stdout: string; stderr:
 export async function portainerExec(agent: AgentLike, cmd: string[], timeoutSec = 300): Promise<ExecResult> {
   const started = Date.now();
   const token = await portainerLogin(agent);
-  const endpoint = getConfig(agent, 'portainerEndpointId', 'PORTAINER_ENDPOINT_ID', '4');
-  const containerName = getConfig(agent, 'hermesContainer', 'HERMES_CONTAINER', 'hermes-suite');
+  const endpoint = getAdapterStringConfig(agent, 'portainerEndpointId', 'PORTAINER_ENDPOINT_ID', '4');
+  const containerName = getAdapterStringConfig(agent, 'hermesContainer', 'HERMES_CONTAINER', 'hermes-suite');
   const containersResponse = await portainerFetch(agent, `/api/endpoints/${endpoint}/docker/containers/json`, { method: 'GET' }, token);
   if (!containersResponse.ok) throw new Error(`Portainer container query failed: ${containersResponse.status}`);
   const containers = await containersResponse.json() as Array<{ Id: string; Names: string[]; State: string }>;
@@ -111,7 +101,7 @@ ${task.body}
 Respond to the user directly. Do not report task completion or call the Kanban webhook unless the user explicitly asks you to create or update MegaCorps work items.`;
   }
 
-  const apiUrl = (typeof agent.adapterConfig?.publicApiUrl === 'string' && agent.adapterConfig.publicApiUrl) || process.env.MEGACORPS_PUBLIC_URL || 'http://192.168.1.180:4000';
+  const apiUrl = (typeof agent.adapterConfig?.publicApiUrl === 'string' && agent.adapterConfig.publicApiUrl) || process.env.MEGACORPS_PUBLIC_URL || 'http://localhost:4000';
   return `You are now working under PLATFORM MegaCorps at ${apiUrl}.
 
 === Common API Endpoints ===

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { AgentLike, TaskContext, TaskResult } from './hermes.ts';
 import { buildAgentPrompt, estimateCost, estimateTokens, extractSessionId } from './hermes.ts';
+import { assertAdapterTargetAllowed, getAdapterNumberConfig, getAdapterOptionalStringConfig, getAdapterStringConfig } from './config.ts';
 
 type SshRunResult = {
   stdout: string;
@@ -8,26 +9,6 @@ type SshRunResult = {
   exitCode: number;
   duration: number;
 };
-
-function getStringConfig(agent: AgentLike, key: string, envName: string, fallback?: string): string {
-  const configured = agent.adapterConfig?.[key];
-  const value = (typeof configured === 'string' && configured.trim().length > 0 ? configured.trim() : undefined) ?? process.env[envName] ?? fallback;
-  if (!value) throw new Error(`${key} (${envName}) is required`);
-  return value;
-}
-
-function getOptionalStringConfig(agent: AgentLike, key: string, envName: string): string | undefined {
-  const configured = agent.adapterConfig?.[key];
-  const value = (typeof configured === 'string' && configured.trim().length > 0 ? configured.trim() : undefined) ?? process.env[envName];
-  return value && value.trim().length > 0 ? value.trim() : undefined;
-}
-
-function getNumberConfig(agent: AgentLike, key: string, envName: string, fallback: number): number {
-  const configured = agent.adapterConfig?.[key];
-  const raw = typeof configured === 'number' ? configured : typeof configured === 'string' ? Number(configured) : Number(process.env[envName] ?? fallback);
-  if (!Number.isFinite(raw) || raw <= 0) return fallback;
-  return Math.round(raw);
-}
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -41,9 +22,9 @@ function splitExtraOptions(value: string | undefined): string[] {
 function buildRemoteCommand(agent: AgentLike, task: TaskContext): string {
   if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
   const prompt = buildAgentPrompt(agent, task);
-  const hermesCommand = getStringConfig(agent, 'hermesCommand', 'HERMES_SSH_COMMAND', 'hermes');
-  const maxTurns = getNumberConfig(agent, 'maxTurns', 'HERMES_MAX_TURNS', 60);
-  const reasoningEffort = getOptionalStringConfig(agent, 'reasoningEffort', 'HERMES_REASONING_EFFORT') ?? 'medium';
+  const hermesCommand = getAdapterStringConfig(agent, 'hermesCommand', 'HERMES_SSH_COMMAND', 'hermes');
+  const maxTurns = getAdapterNumberConfig(agent, 'maxTurns', 'HERMES_MAX_TURNS', 60);
+  const reasoningEffort = getAdapterOptionalStringConfig(agent, 'reasoningEffort', 'HERMES_REASONING_EFFORT') ?? 'medium';
   const command = [
     hermesCommand,
     'chat',
@@ -61,12 +42,12 @@ function buildRemoteCommand(agent: AgentLike, task: TaskContext): string {
 
 async function runSsh(agent: AgentLike, remoteCommand: string, timeoutSec: number): Promise<SshRunResult> {
   const started = Date.now();
-  const host = getStringConfig(agent, 'sshHost', 'HERMES_SSH_HOST', '192.168.1.172');
-  const user = getOptionalStringConfig(agent, 'sshUser', 'HERMES_SSH_USER') ?? 'root';
-  const port = getNumberConfig(agent, 'sshPort', 'HERMES_SSH_PORT', 22);
-  const keyPath = getOptionalStringConfig(agent, 'sshKeyPath', 'HERMES_SSH_KEY_PATH');
-  const sshBin = getOptionalStringConfig(agent, 'sshBin', 'HERMES_SSH_BIN') ?? 'ssh';
-  const sshOptions = splitExtraOptions(getOptionalStringConfig(agent, 'sshOptions', 'HERMES_SSH_OPTIONS'));
+  const host = assertAdapterTargetAllowed(getAdapterStringConfig(agent, 'sshHost', 'HERMES_SSH_HOST'), 'HERMES_SSH_HOST');
+  const user = getAdapterOptionalStringConfig(agent, 'sshUser', 'HERMES_SSH_USER') ?? 'root';
+  const port = getAdapterNumberConfig(agent, 'sshPort', 'HERMES_SSH_PORT', 22);
+  const keyPath = getAdapterOptionalStringConfig(agent, 'sshKeyPath', 'HERMES_SSH_KEY_PATH');
+  const sshBin = getAdapterOptionalStringConfig(agent, 'sshBin', 'HERMES_SSH_BIN') ?? 'ssh';
+  const sshOptions = splitExtraOptions(getAdapterOptionalStringConfig(agent, 'sshOptions', 'HERMES_SSH_OPTIONS'));
   const target = user ? `${user}@${host}` : host;
   const args = [
     '-p',

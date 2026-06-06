@@ -35,6 +35,22 @@ export const companyMemberships = pgTable('company_memberships', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 }, (table) => ({ companyUserUnique: unique().on(table.companyId, table.userId) }));
 
+export const userInvites = pgTable('user_invites', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  email: text('email').notNull(),
+  name: text('name'),
+  role: text('role').notNull().default('viewer'),
+  tokenHash: text('token_hash').notNull().unique(),
+  status: text('status').notNull().default('pending'),
+  invitedByUserId: uuid('invited_by_user_id').references(() => users.id),
+  acceptedByUserId: uuid('accepted_by_user_id').references(() => users.id),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  acceptedAt: timestamp('accepted_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
+
 export const departments = pgTable('departments', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), name: text('name').notNull(), slug: text('slug').notNull(), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
 export const projects = pgTable('projects', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), name: text('name').notNull(), description: text('description'), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
 export const goals = pgTable('goals', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), title: text('title').notNull(), body: text('body'), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
@@ -59,6 +75,7 @@ export const agents = pgTable('agents', {
   isBusy: boolean('is_busy').default(false),
   isActive: boolean('is_active').default(true),
   currentSessionId: text('current_session_id'),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 }, (table) => ({ companySlugUnique: unique().on(table.companyId, table.slug) }));
 
@@ -105,6 +122,7 @@ export const kanbanCards = pgTable('kanban_cards', {
   executionLockedAt: timestamp('execution_locked_at', { withTimezone: true }),
   executionLockExpiresAt: timestamp('execution_lock_expires_at', { withTimezone: true }),
   activeHeartbeatRunId: uuid('active_heartbeat_run_id'),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });

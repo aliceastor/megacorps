@@ -8,8 +8,13 @@ type LoggedRequest = AuthenticatedRequest & {
   requestBodyForLog?: unknown;
 };
 
-const SENSITIVE_KEY = /(password|pass|token|secret|jwt)/i;
+const SENSITIVE_KEY = /(password|pass|token|secret|jwt|apiKey|keyPath|privateKey)/i;
 const MAX_TEXT = 3000;
+const REDACTED_PAYLOAD = '[redacted]';
+
+function suppressPayloadLogging(path: string): boolean {
+  return path.startsWith('/api/auth/') || path.startsWith('/api/webhook/');
+}
 
 function trimText(value: string): string {
   return value.length > MAX_TEXT ? `${value.slice(0, MAX_TEXT)}... [truncated]` : value;
@@ -59,14 +64,16 @@ export function registerRequestLogging(app: FastifyInstance): void {
   });
 
   app.addHook('preHandler', async (request) => {
-    (request as LoggedRequest).requestBodyForLog = sanitize(request.body);
+    const path = request.routeOptions.url ?? request.url.split('?')[0] ?? request.url;
+    (request as LoggedRequest).requestBodyForLog = suppressPayloadLogging(path) ? REDACTED_PAYLOAD : sanitize(request.body);
   });
 
   app.addHook('onSend', async (request: FastifyRequest, reply, payload) => {
     if (!request.url.startsWith('/api/')) return payload;
 
     const loggedRequest = request as LoggedRequest;
-    const responseBody = sanitize(parsePayload(payload));
+    const path = request.routeOptions.url ?? request.url.split('?')[0] ?? request.url;
+    const responseBody = suppressPayloadLogging(path) ? REDACTED_PAYLOAD : sanitize(parsePayload(payload));
     const statusCode = reply.statusCode;
 
     await db.insert(apiEvents).values({

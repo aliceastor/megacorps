@@ -50,13 +50,14 @@ Completed in this pass:
 - Rebuilt the Companies/Agents O-chart into a real top-down tree canvas with connector lines, department lanes, clickable member nodes, and preserved member edit behavior.
 - Added role helper `requireRole` and enforced operator/admin access for mutation-heavy control actions: cards create/update/delete/run/review/decompose, comments/interventions, agents CRUD/actions/tests, runtime CRUD, budget policy CRUD, approval decisions, company/department changes, projects/goals/knowledge writes, and manual cron.
 - Added in-app IP-based rate limiting with configurable buckets for auth, chat, webhooks, operator actions, writes, and reads.
-- Added webhook shared-secret validation when `WEBHOOK_SHARED_SECRET` is configured.
+- Added fail-closed webhook shared-secret validation; task completion webhooks require `WEBHOOK_SHARED_SECRET`.
+- Added one-shot first-admin bootstrap plus hashed one-time invite tokens for controlled production onboarding while signup remains disabled by default.
 - Added `GET /api/agent-runtimes/health` runtime health summary with attached agent counts, last run status/error, and adapter capabilities.
 - Added Settings UI runtime health panel.
 - Added monthly budget reset cron behavior, marked durably in `cron_runs`, defaulting to UTC day 1.
 - Added Next.js error boundary with retry/dashboard recovery.
 - Updated API Help with `requiredRole` and current enforced rate-limit notes.
-- Updated Docker compose and `.env.example` with rate-limit, webhook-secret, and budget-reset knobs.
+- Updated Docker compose and `.env.example` with rate-limit, required webhook-secret, signup, cookie, proxy, and budget-reset knobs.
 
 ## Architecture Update v0.9 - Hermes SSH and Agent-Facing API Schemas
 
@@ -66,7 +67,7 @@ Completed in this pass:
 
 - Added the `hermes-ssh` adapter.
 - The server container now includes `openssh-client`.
-- Hermes SSH dispatch connects to the configured SSH host, defaults to `root@192.168.1.172`, and runs `hermes chat --profile {profile} "{prompt}"`.
+- Hermes SSH dispatch connects to the configured SSH host and runs `hermes chat --profile {profile} "{prompt}"`. No production SSH host is hardcoded.
 - SSH stdout/stderr, exit code, duration, estimated tokens, cost, and session id are recorded through the normal adapter result path.
 - `Settings -> Agent runtimes` and `Agents -> select agent` now expose Hermes SSH fields: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `publicApiUrl`, `reasoningEffort`, and `maxTurns`.
 - Docker compose and `.env.example` include Hermes SSH environment fallbacks.
@@ -630,7 +631,7 @@ Current implementation note, 2026-06-06:
 
 - `hermes` remains the Portainer-backed adapter.
 - `hermes-ssh` is now the direct SSH-backed Hermes CLI adapter.
-- `hermes-ssh` defaults to SSH host `192.168.1.172` and SSH user `root`.
+- `hermes-ssh` requires a configured SSH host. The SSH user defaults to `root` when no user is configured.
 - The remote command shape is `hermes chat --profile {profile} "{prompt}"`, with optional `--resume`, `--max-turns`, and `--reasoning-effort`.
 - Use `Settings -> Agent runtimes` to configure SSH host/user/port/key path, then attach that runtime to agents in `Agents`.
 

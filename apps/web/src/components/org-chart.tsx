@@ -347,7 +347,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
         <option value="webhook">Webhook</option>
         <option value="openclaw">OpenClaw</option>
       </select>
-      <select className="input" value={runtimeId} onChange={(e) => setRuntimeId(e.target.value)}><option value="">Runtime</option>{runtimes.filter((runtime) => runtime.adapterType === adapterType && (!companyId || runtime.companyId === companyId)).map((runtime) => <option value={runtime.id} key={runtime.id}>{runtime.name}</option>)}</select>
+      <select className="input" value={runtimeId} onChange={(e) => setRuntimeId(e.target.value)}><option value="">Runtime required for external adapters</option>{runtimes.filter((runtime) => runtime.adapterType === adapterType && (!companyId || runtime.companyId === companyId)).map((runtime) => <option value={runtime.id} key={runtime.id}>{runtime.name}</option>)}</select>
       <button className="btn btn-primary" onClick={create} disabled={creating}>{creating ? <Loader2 size={14} className="spin" /> : <Plus size={14} />} New</button>
     </div>
 
@@ -400,7 +400,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
                 <option value="webhook">Webhook</option>
                 <option value="openclaw">OpenClaw</option>
               </select></label>
-               <label className="field-label">Runtime preset<select className="input" value={String(agentDraft?.runtimeId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), runtimeId: e.target.value || null })}><option value="">Use env / agent override</option>{runtimes.filter((runtime) => runtime.adapterType === String(agentDraft?.adapterType ?? selected.adapterType ?? 'mock') && runtime.companyId === selected.companyId).map((runtime) => <option value={runtime.id} key={runtime.id}>{runtime.name}</option>)}</select></label>
+               <label className="field-label">Runtime preset<select className="input" value={String(agentDraft?.runtimeId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), runtimeId: e.target.value || null })}><option value="">No runtime (mock/dev only)</option>{runtimes.filter((runtime) => runtime.adapterType === String(agentDraft?.adapterType ?? selected.adapterType ?? 'mock') && runtime.companyId === selected.companyId).map((runtime) => <option value={runtime.id} key={runtime.id}>{runtime.name}</option>)}</select></label>
               <label className="field-label">Department<select className="input" value={String(agentDraft?.departmentId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), departmentId: e.target.value || null })}><option value="">No department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
               <label className="field-label">Reports to<select className="input" value={String(agentDraft?.bossId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), bossId: e.target.value || null })}><option value="">Top-level member</option>{visibleAgents.filter((agent) => agent.id !== selected.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
               <label className="field-label">Monthly budget<input className="input" type="number" min={0} step="0.01" value={String(agentDraft?.budgetMonthly ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), budgetMonthly: e.target.value })} /></label>

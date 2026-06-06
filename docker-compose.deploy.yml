@@ -10,21 +10,29 @@ services:
       NODE_ENV: production
       PORT: 4000
       DATABASE_URL: ${DATABASE_URL:?Set external PostgreSQL connection string}
-      WEB_ORIGIN: ${WEB_ORIGIN:-http://192.168.1.180:3000}
+      WEB_ORIGIN: ${WEB_ORIGIN:?Set WEB_ORIGIN}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
-      PORTAINER_URL: ${PORTAINER_URL:-https://192.168.1.180:31015}
+      BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      SIGNUP_ENABLED: ${SIGNUP_ENABLED:-false}
+      SIGNUP_ATTACH_DEFAULT_COMPANY: ${SIGNUP_ATTACH_DEFAULT_COMPANY:-false}
+      SIGNUP_DEFAULT_ROLE: ${SIGNUP_DEFAULT_ROLE:-viewer}
+      SIGNUP_DEFAULT_COMPANY_ROLE: ${SIGNUP_DEFAULT_COMPANY_ROLE:-viewer}
+      PORTAINER_URL: ${PORTAINER_URL:-}
       PORTAINER_USER: ${PORTAINER_USER:-}
       PORTAINER_PASS: ${PORTAINER_PASS:-}
       PORTAINER_ENDPOINT_ID: ${PORTAINER_ENDPOINT_ID:-4}
       HERMES_CONTAINER: ${HERMES_CONTAINER:-hermes-suite}
-      HERMES_GATEWAY_URL: ${HERMES_GATEWAY_URL:-http://192.168.1.172:9119}
+      HERMES_GATEWAY_URL: ${HERMES_GATEWAY_URL:-}
       HERMES_DASHBOARD_TOKEN: ${HERMES_DASHBOARD_TOKEN:-}
-      HERMES_SSH_HOST: ${HERMES_SSH_HOST:-192.168.1.172}
+      HERMES_SSH_HOST: ${HERMES_SSH_HOST:-}
       HERMES_SSH_USER: ${HERMES_SSH_USER:-root}
       HERMES_SSH_PORT: ${HERMES_SSH_PORT:-22}
       HERMES_SSH_KEY_PATH: ${HERMES_SSH_KEY_PATH:-}
       HERMES_SSH_COMMAND: ${HERMES_SSH_COMMAND:-hermes}
       HERMES_SSH_OPTIONS: ${HERMES_SSH_OPTIONS:-}
+      ADAPTER_ENV_FALLBACK_ENABLED: ${ADAPTER_ENV_FALLBACK_ENABLED:-false}
+      ADAPTER_TARGET_ALLOWLIST: ${ADAPTER_TARGET_ALLOWLIST:-}
       WEBHOOK_ADAPTER_URL: ${WEBHOOK_ADAPTER_URL:-}
       OPENCLAW_WEBHOOK_URL: ${OPENCLAW_WEBHOOK_URL:-}
       WEBHOOK_SHARED_SECRET: ${WEBHOOK_SHARED_SECRET:-}
@@ -36,6 +44,7 @@ services:
       RATE_LIMIT_OPERATOR_PER_MINUTE: ${RATE_LIMIT_OPERATOR_PER_MINUTE:-20}
       RATE_LIMIT_WRITE_PER_MINUTE: ${RATE_LIMIT_WRITE_PER_MINUTE:-120}
       RATE_LIMIT_READ_PER_MINUTE: ${RATE_LIMIT_READ_PER_MINUTE:-600}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
       DISPATCH_LOOP_ENABLED: ${DISPATCH_LOOP_ENABLED:-true}
       DISPATCH_LOOP_INTERVAL_MS: ${DISPATCH_LOOP_INTERVAL_MS:-30000}
       BUDGET_RESET_ENABLED: ${BUDGET_RESET_ENABLED:-true}
@@ -47,7 +56,7 @@ services:
     ports:
       - "4000:4000"
     volumes:
-      - /mnt/Rklink_pool/VM/_Self_Docker/megacorps/server:/app/data
+      - server_data:/app/data
     networks:
       - megacorps
 
@@ -59,14 +68,18 @@ services:
       - server
     environment:
       NODE_ENV: production
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://192.168.1.180:4000}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?Set NEXT_PUBLIC_API_URL}
     ports:
       - "3000:3000"
     volumes:
-      - /mnt/Rklink_pool/VM/_Self_Docker/megacorps/web-cache:/app/apps/web/.next/cache
+      - web_cache:/app/apps/web/.next/cache
     networks:
       - megacorps
 
 networks:
   megacorps:
     driver: bridge
+
+volumes:
+  server_data:
+  web_cache:

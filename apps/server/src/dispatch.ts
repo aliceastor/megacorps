@@ -1,8 +1,9 @@
-import { and, desc, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { db } from './db/client.ts';
+import { db, sql as rawSql } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardComments, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
+import { adapterRequiresRuntime } from './adapters/config.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -23,6 +24,7 @@ const BUDGET_RESET_DAY = Number(process.env.BUDGET_RESET_DAY ?? 1);
 const TASK_RUN_WORKER_INTERVAL_MS = Number(process.env.TASK_RUN_WORKER_INTERVAL_MS ?? 2_000);
 const TASK_RUN_WORKER_BATCH_SIZE = Number(process.env.TASK_RUN_WORKER_BATCH_SIZE ?? 2);
 const TASK_RUN_WORKER_ID = process.env.TASK_RUN_WORKER_ID ?? `server-${Math.random().toString(36).slice(2, 10)}`;
+const TASK_RUN_STALE_MS = Number(process.env.TASK_RUN_STALE_MS ?? 10 * 60 * 1000);
 let loopRunning = false;
 let taskRunWorkerRunning = false;
 const companyLastTick = new Map<string, number>();
@@ -137,7 +139,7 @@ async function completeTaskRun(runId: string | null | undefined, input: {
 }
 
 export async function enqueueTaskRun(cardId: string, kind: TaskRunKind = 'dispatch', source: TaskRunSource = 'manual', requestedByUserId?: string | null): Promise<TaskRunRow> {
-  const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
   const [existing] = await db.select().from(taskRuns).where(and(
     eq(taskRuns.cardId, cardId),
@@ -188,6 +190,26 @@ async function claimNextTaskRun(): Promise<TaskRunRow | null> {
   return claimed ?? null;
 }
 
+async function recoverStaleTaskRuns(app: FastifyInstance): Promise<number> {
+  const staleMs = Math.max(60_000, Number.isFinite(TASK_RUN_STALE_MS) ? TASK_RUN_STALE_MS : 10 * 60 * 1000);
+  const rows = await rawSql`
+    UPDATE task_runs
+    SET status = 'queued',
+        locked_by = NULL,
+        locked_at = NULL,
+        started_at = NULL,
+        error = 'Recovered stale task-run claim.',
+        updated_at = now()
+    WHERE status = 'running'
+      AND heartbeat_run_id IS NULL
+      AND locked_at IS NOT NULL
+      AND locked_at < now() - (${staleMs} * interval '1 millisecond')
+    RETURNING id
+  `;
+  if (rows.length > 0) app.log.warn({ count: rows.length }, 'stale task-run claims requeued');
+  return rows.length;
+}
+
 async function finishWorkerTaskRun(run: TaskRunRow, work: () => Promise<CardRow>) {
   const started = Date.now();
   await addTaskRunLog(run, 'running', `${run.kind} task run started by ${TASK_RUN_WORKER_ID}.`);
@@ -215,6 +237,7 @@ export async function processTaskRunQueue(app: FastifyInstance): Promise<{ claim
   taskRunWorkerRunning = true;
   const result = { claimed: 0, completed: 0, failed: 0 };
   try {
+    await recoverStaleTaskRuns(app);
     for (let index = 0; index < Math.max(1, TASK_RUN_WORKER_BATCH_SIZE); index += 1) {
       const run = await claimNextTaskRun();
       if (!run) break;
@@ -241,7 +264,7 @@ async function dependenciesMet(card: CardRow): Promise<boolean> {
   return rows.length === ids.length && rows.every((row) => row.columnStatus === 'done');
 }
 
-async function getBudgetGuard(agent: AgentRow): Promise<{ monthlyLimit: number | null; perTaskLimit: number | null; warnAtPercent: number; hardStop: boolean }> {
+export async function getBudgetGuard(agent: AgentRow): Promise<{ monthlyLimit: number | null; perTaskLimit: number | null; warnAtPercent: number; hardStop: boolean }> {
   const rows = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, agent.companyId), eq(budgetPolicies.isActive, true)));
   const applicable = rows.filter((policy) => !policy.agentId || policy.agentId === agent.id);
   const monthlyLimits = [
@@ -260,17 +283,21 @@ async function getBudgetGuard(agent: AgentRow): Promise<{ monthlyLimit: number |
   };
 }
 
-async function budgetOk(agent: AgentRow): Promise<boolean> {
+export async function budgetOk(agent: AgentRow): Promise<boolean> {
   const guard = await getBudgetGuard(agent);
   if (!guard.monthlyLimit) return true;
   return Number(agent.spentThisMonth ?? 0) < guard.monthlyLimit;
 }
 
 export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: string | null) {
+  const adapterType = agent.adapterType ?? 'hermes';
   let runtimeConfig: Record<string, unknown> = {};
+  if (adapterRequiresRuntime(adapterType) && !agent.runtimeId) throw new Error('agent_runtime_required');
   if (agent.runtimeId) {
     const [runtime] = await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, agent.runtimeId)).limit(1);
+    if (!runtime) throw new Error('agent_runtime_not_found');
     if (runtime && runtime.isActive === false) throw new Error('agent_runtime_inactive');
+    if (runtime.adapterType !== adapterType) throw new Error('agent_runtime_adapter_mismatch');
     runtimeConfig = (runtime?.config as Record<string, unknown> | null) ?? {};
   }
   return {
@@ -296,7 +323,7 @@ function matchScore(card: CardRow, agent: AgentRow): number {
 }
 
 async function selectBestAgent(card: CardRow): Promise<AgentRow | null> {
-  const rows = await db.select().from(agents).where(eq(agents.companyId, card.companyId));
+  const rows = await db.select().from(agents).where(and(eq(agents.companyId, card.companyId), isNull(agents.deletedAt)));
   const available = [];
   for (const agent of rows) {
     if (!agent.isActive || agent.isBusy) continue;
@@ -456,7 +483,7 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
   if (!parentCardId) return;
   const children = await db.select().from(kanbanCards).where(eq(kanbanCards.parentCardId, parentCardId));
   if (children.length === 0 || !children.every((child) => child.columnStatus === 'done')) return;
-  const [parent] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, parentCardId)).limit(1);
+  const [parent] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, parentCardId), isNull(kanbanCards.deletedAt))).limit(1);
   await db.update(kanbanCards).set({ columnStatus: 'done', completedAt: new Date(), updatedAt: new Date() }).where(eq(kanbanCards.id, parentCardId));
   if (parent?.columnStatus !== 'done') await addStageLog(parentCardId, null, parent?.columnStatus ?? null, 'done', 'cascade');
   await addTaskLog({ cardId: parentCardId, type: 'cascade', status: 'success', message: 'All sub-tasks completed; parent card marked done.' });
@@ -498,7 +525,7 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
 }
 
 export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = 'manual', options: { taskRunId?: string | null } = {}): Promise<CardRow> {
-  let [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  let [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
   if (!card.assigneeId) {
     const assigned = await ensureAssigned(card, source);
@@ -506,7 +533,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     card = assigned;
   }
   if (!card.assigneeId) throw new Error('card_has_no_assignee');
-  const [agent] = await db.select().from(agents).where(eq(agents.id, card.assigneeId)).limit(1);
+  const [agent] = await db.select().from(agents).where(and(eq(agents.id, card.assigneeId), isNull(agents.deletedAt))).limit(1);
   if (!agent) throw new Error('agent_not_found');
   if (!agent.isActive) throw new Error('agent_paused');
   if (agent.isBusy) throw new Error('agent_busy');
@@ -586,7 +613,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
 }
 
 export async function reviewCard(cardId: string, options: { taskRunId?: string | null } = {}): Promise<CardRow> {
-  const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
   if (!card.reviewerId) {
     const [updated] = await db.update(kanbanCards).set({ columnStatus: 'done', completedAt: new Date(), updatedAt: new Date() }).where(eq(kanbanCards.id, card.id)).returning();
@@ -599,7 +626,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     return updated;
   }
 
-  const [reviewer] = await db.select().from(agents).where(eq(agents.id, card.reviewerId)).limit(1);
+  const [reviewer] = await db.select().from(agents).where(and(eq(agents.id, card.reviewerId), isNull(agents.deletedAt))).limit(1);
   if (!reviewer) throw new Error('reviewer_not_found');
   if (reviewer.isBusy) throw new Error('reviewer_busy');
 
@@ -653,10 +680,10 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
 }
 
 export async function decomposeCard(cardId: string): Promise<CardRow[]> {
-  const [parent] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
+  const [parent] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!parent) throw new Error('card_not_found');
   const directReports = parent.assigneeId
-    ? await db.select().from(agents).where(and(eq(agents.bossId, parent.assigneeId), eq(agents.isActive, true)))
+    ? await db.select().from(agents).where(and(eq(agents.bossId, parent.assigneeId), eq(agents.isActive, true), isNull(agents.deletedAt)))
     : [];
   const items = parent.body
     .split(/\r?\n/)
@@ -853,7 +880,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
     result.activeCompanies = activeCompanyIds.length;
 
     if (activeCompanyIds.length > 0) {
-      const cards = await db.select().from(kanbanCards).where(inArray(kanbanCards.companyId, activeCompanyIds));
+      const cards = await db.select().from(kanbanCards).where(and(inArray(kanbanCards.companyId, activeCompanyIds), isNull(kanbanCards.deletedAt)));
       result.cardsScanned = cards.length;
       for (const card of cards) {
         if (card.columnStatus === 'backlog' || card.columnStatus === 'todo') {
@@ -970,11 +997,11 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
   const state = { remaining: budget, sections: [] as string[], truncated: false };
   const [company] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
   const [companyAgents, companyDepartments, companyProjects, companyGoals, companyCards, recentActivity, recentRuns] = await Promise.all([
-    db.select().from(agents).where(eq(agents.companyId, companyId)),
+    db.select().from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.deletedAt))),
     db.select().from(departments).where(eq(departments.companyId, companyId)),
     db.select().from(projects).where(eq(projects.companyId, companyId)),
     db.select().from(goals).where(eq(goals.companyId, companyId)),
-    db.select().from(kanbanCards).where(eq(kanbanCards.companyId, companyId)).orderBy(desc(kanbanCards.updatedAt)),
+    db.select().from(kanbanCards).where(and(eq(kanbanCards.companyId, companyId), isNull(kanbanCards.deletedAt))).orderBy(desc(kanbanCards.updatedAt)),
     db.select().from(activityLog).where(eq(activityLog.companyId, companyId)).orderBy(desc(activityLog.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
     db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)).orderBy(desc(heartbeatRuns.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
   ]);
@@ -1083,8 +1110,8 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
   const [company] = await db.select().from(companies).where(eq(companies.id, card.companyId)).limit(1);
   const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
   const [goal] = card.goalId ? await db.select().from(goals).where(eq(goals.id, card.goalId)).limit(1) : [];
-  const [assignee] = card.assigneeId ? await db.select().from(agents).where(eq(agents.id, card.assigneeId)).limit(1) : [];
-  const [manager] = assignee?.bossId ? await db.select().from(agents).where(eq(agents.id, assignee.bossId)).limit(1) : [];
+  const [assignee] = card.assigneeId ? await db.select().from(agents).where(and(eq(agents.id, card.assigneeId), isNull(agents.deletedAt))).limit(1) : [];
+  const [manager] = assignee?.bossId ? await db.select().from(agents).where(and(eq(agents.id, assignee.bossId), isNull(agents.deletedAt))).limit(1) : [];
   const reports = assignee ? await db.select().from(agents).where(eq(agents.bossId, assignee.id)) : [];
   const docs = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.companyId, card.companyId)).orderBy(desc(knowledgeDocs.updatedAt)).limit(10);
   const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.assigneeId });
