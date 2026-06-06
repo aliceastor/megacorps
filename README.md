@@ -9,7 +9,7 @@ Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm work
 
 ## Run locally
 
-1. Copy `.env.example` to `.env`, set `JWT_SECRET` to a random value of at least 32 characters, and set any adapter credentials such as `PORTAINER_PASS`.
+1. Copy `.env.example` to `.env`, set `JWT_SECRET` to a stable random value of at least 32 characters, and set any adapter credentials such as `PORTAINER_PASS`.
 2. Install dependencies with `npm install`.
 3. Start the full stack with `docker compose up -d --build`.
 4. Open `http://localhost:3000`.
@@ -52,10 +52,16 @@ Adapter egress blocks localhost/link-local metadata targets by default. Set `ADA
 
 Production onboarding:
 
-1. Set `BOOTSTRAP_TOKEN` temporarily and call `POST /api/auth/bootstrap` with the first admin's email/name/password. The endpoint fails once any active company admin exists.
-2. Remove `BOOTSTRAP_TOKEN` after the first admin is created.
-3. Use `POST /api/auth/invites` as a company admin to create one-time invite tokens for later users.
-4. New users accept with `POST /api/auth/accept-invite`. Existing users receive the new membership but must log in with their existing password.
+1. Set `JWT_SECRET` to a real stable secret. Generate one with `openssl rand -base64 32`.
+2. Set `BOOTSTRAP_TOKEN` temporarily and open `/setup` in the Web UI, or call `POST /api/auth/bootstrap` with the first admin's email/name/password. The endpoint fails once any active company admin exists.
+3. Remove `BOOTSTRAP_TOKEN` after the first admin is created.
+4. Use `POST /api/auth/invites` as a company admin to create one-time invite tokens for later users.
+5. New users accept with `/signup?invite=...` or `POST /api/auth/accept-invite`. Existing users receive the new membership but must log in with their existing password.
+
+Common login/onboarding errors:
+
+- `JWT_SECRET must be at least 32 characters and not use an insecure default`: set a real `JWT_SECRET` in the server environment or Portainer stack variables, then restart the server container. Do not use the `.env.example` placeholder.
+- `signup_disabled`: expected in production when `SIGNUP_ENABLED=false`. Use `/setup` for the first admin, then invite users from an admin account. Only set `SIGNUP_ENABLED=true` for a trusted temporary signup window.
 
 Supported runtime fields:
 

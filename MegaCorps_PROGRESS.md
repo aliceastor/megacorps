@@ -26,6 +26,7 @@ Latest verified baseline:
 - In-app rate limiting is enabled by default, and API Help now includes required roles for endpoints.
 - Company-owned read APIs now scope results to the current user's company memberships.
 - Company-owned mutation/manual execution APIs now require company operator/admin membership checks.
+- Production auth onboarding now has a first-admin `/setup` UI, public auth status endpoint, invite-aware signup flow, and clearer `JWT_SECRET`/`signup_disabled` handling.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 
 ## Paperclip Research Summary

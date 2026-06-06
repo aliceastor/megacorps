@@ -2,6 +2,18 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.3 - Auth Onboarding Hardening
+
+Date: 2026-06-06
+
+Completed in this pass:
+
+- Added `GET /api/auth/status` so the Web UI can detect public signup, first-admin bootstrap availability, and existing admin state.
+- Added a Web UI `/setup` page for one-shot first-admin bootstrap using `BOOTSTRAP_TOKEN`.
+- Updated the login/signup pages so production `SIGNUP_ENABLED=false` is handled as expected onboarding state, not a raw error.
+- Updated invite signup handling so `/signup?invite=...` calls `POST /api/auth/accept-invite`.
+- Treated `.env.example` JWT placeholders as insecure defaults and clarified Docker/README guidance for real `JWT_SECRET` generation.
+
 ## Architecture Update v1.2 - Phase 14-15 RBAC and Task Runs
 
 Date: 2026-06-06

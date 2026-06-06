@@ -60,8 +60,21 @@ function errorMessage(data: unknown): string {
   if (data && typeof data === 'object' && 'issues' in data && Array.isArray((data as { issues?: unknown }).issues)) {
     return (data as { issues: unknown[] }).issues.map(formatIssue).join('\n');
   }
-  if (data && typeof data === 'object' && 'error' in data) return String((data as { error?: unknown }).error);
-  return typeof data === 'string' ? data : 'request_failed';
+  const raw = data && typeof data === 'object' && 'error' in data
+    ? String((data as { error?: unknown }).error)
+    : typeof data === 'string' ? data : 'request_failed';
+  return friendlyError(raw);
+}
+
+function friendlyError(message: string): string {
+  if (message === 'signup_disabled') return 'Public signup is disabled. Use an invite link or the first-admin setup page.';
+  if (message === 'bootstrap_not_configured') return 'First-admin setup is not configured. Set BOOTSTRAP_TOKEN in the server environment.';
+  if (message === 'bootstrap_token_required') return 'Bootstrap token is missing or incorrect.';
+  if (message === 'bootstrap_already_completed') return 'First-admin setup has already been completed. Log in or ask an admin to invite you.';
+  if (message === 'invalid_credentials') return 'Invalid email or password.';
+  if (message === 'JWT_SECRET is required in production') return 'Server JWT_SECRET is missing. Set a stable random value of at least 32 characters and restart the server.';
+  if (message === 'JWT_SECRET must be at least 32 characters and not use an insecure default') return 'Server JWT_SECRET is invalid. Set a stable random value of at least 32 characters and restart the server.';
+  return message;
 }
 
 function formatIssue(issue: unknown): string {

@@ -1,14 +1,30 @@
 'use client';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { LogIn } from 'lucide-react';
 import { api } from '@/lib/api';
+
+type AuthStatus = {
+  signupEnabled: boolean;
+  canBootstrap: boolean;
+};
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<AuthStatus | null | undefined>(undefined);
+
+  useEffect(() => {
+    let active = true;
+    api<AuthStatus>('/api/auth/status').then((value) => {
+      if (active) setStatus(value);
+    }).catch(() => {
+      if (active) setStatus(null);
+    });
+    return () => { active = false; };
+  }, []);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -39,7 +55,12 @@ export default function LoginPage() {
       </label>
       {error && <p className="form-error">{error}</p>}
       <button className="btn btn-primary" disabled={busy}><LogIn size={16} /> {busy ? 'Logging in...' : 'Login'}</button>
-      <Link className="muted-link" href="/signup">Do not have an account? Sign up</Link>
+      {status === undefined && <p className="auth-note">Checking onboarding status...</p>}
+      {status === null && <p className="auth-note">Onboarding status is unavailable. Check that the API is reachable from this browser.</p>}
+      {status?.canBootstrap && <Link className="muted-link" href="/setup">First time here? Run admin setup</Link>}
+      {status && (status.signupEnabled
+        ? <Link className="muted-link" href="/signup">Do not have an account? Sign up</Link>
+        : <p className="auth-note">Public signup is disabled. Use an invite link or ask an admin to invite you.</p>)}
     </form>
   </main>;
 }

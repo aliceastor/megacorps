@@ -3,7 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { acceptInviteSchema, approvalDecisionSchema, bootstrapAdminSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema } from '@megacorps/shared';
-import { signSession, requireAuth, requireRole } from './auth.ts';
+import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, apiEvents, approvals, budgetPolicies, cardComments, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, userInvites, users } from './db/schema.ts';
@@ -201,7 +201,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return apiHelpCatalog();
   });
 
+  app.get('/api/auth/status', async () => {
+    const bootstrapConfigured = Boolean(process.env.BOOTSTRAP_TOKEN && process.env.BOOTSTRAP_TOKEN.length >= 16);
+    const hasAdmin = await hasActiveCompanyAdmin();
+    return {
+      signupEnabled: signupEnabled(),
+      bootstrapConfigured,
+      canBootstrap: bootstrapConfigured && !hasAdmin,
+      hasActiveCompanyAdmin: hasAdmin,
+    };
+  });
+
   app.post('/api/auth/bootstrap', async (request, reply) => {
+    assertSessionSecretReady();
     const expectedToken = process.env.BOOTSTRAP_TOKEN;
     if (!expectedToken || expectedToken.length < 16) return reply.code(503).send({ error: 'bootstrap_not_configured' });
     const input = bootstrapAdminSchema.parse(request.body);
@@ -231,6 +243,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/auth/signup', async (request, reply) => {
+    assertSessionSecretReady();
     if (!signupEnabled()) return reply.code(403).send({ error: 'signup_disabled' });
     const input = signupSchema.parse(request.body);
     const passwordHash = await bcrypt.hash(input.password, 12);
@@ -248,6 +261,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/auth/login', async (request, reply) => {
+    assertSessionSecretReady();
     const input = loginSchema.parse(request.body);
     const [user] = await db.select().from(users).where(eq(users.email, input.email)).limit(1);
     if (!user?.passwordHash || !(await bcrypt.compare(input.password, user.passwordHash))) return reply.code(401).send({ error: 'invalid_credentials' });
@@ -285,6 +299,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/auth/accept-invite', async (request, reply) => {
+    assertSessionSecretReady();
     const input = acceptInviteSchema.parse(request.body);
     const [invite] = await db.select().from(userInvites).where(eq(userInvites.tokenHash, sha256(input.token))).limit(1);
     if (!invite) return reply.code(404).send({ error: 'invite_not_found' });

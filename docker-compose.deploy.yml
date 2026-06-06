@@ -11,7 +11,7 @@ services:
       PORT: 4000
       DATABASE_URL: ${DATABASE_URL:?Set external PostgreSQL connection string}
       WEB_ORIGIN: ${WEB_ORIGIN:?Set WEB_ORIGIN}
-      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET to a random value of at least 32 characters}
       BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       SIGNUP_ENABLED: ${SIGNUP_ENABLED:-false}

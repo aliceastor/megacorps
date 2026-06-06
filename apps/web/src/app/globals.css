@@ -429,6 +429,11 @@ button.card {
 .auth-card h1 { margin: 0; font-size: 28px; }
 .muted-link { color: var(--muted); font-size: 14px; }
 .muted-link:hover { color: var(--primary-strong); }
+.auth-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
 .form-error { color: var(--danger); margin: 0; font-size: 14px; }
 
 .input-wrap {

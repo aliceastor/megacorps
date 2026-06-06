@@ -7,7 +7,13 @@ import { users } from './db/schema.ts';
 export type AuthUser = { id: string; email: string; role: string };
 export type AuthenticatedRequest = FastifyRequest & { authUser?: AuthUser };
 
-const weakProductionSecrets = new Set(['dev-secret-change-me', 'change-me-in-production', 'change-me-in-dev']);
+const weakProductionSecrets = new Set([
+  'dev-secret-change-me',
+  'change-me-in-production',
+  'change-me-in-dev',
+  'replace-with-at-least-32-random-characters',
+  'CHANGE_ME_GENERATE_WITH_OPENSSL_RAND_BASE64_32',
+]);
 
 function jwtSecret(): Uint8Array {
   const raw = process.env.JWT_SECRET;
@@ -17,6 +23,10 @@ function jwtSecret(): Uint8Array {
     throw new Error('JWT_SECRET must be at least 32 characters and not use an insecure default');
   }
   return new TextEncoder().encode(raw);
+}
+
+export function assertSessionSecretReady(): void {
+  jwtSecret();
 }
 
 export async function signSession(user: AuthUser): Promise<string> {
