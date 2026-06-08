@@ -8,6 +8,7 @@ import { registerRoutes } from './routes.ts';
 import { startDispatchLoop } from './dispatch.ts';
 import { registerRequestLogging } from './request-log.ts';
 import { registerRateLimit } from './rate-limit.ts';
+import { registerLiveRoutes } from './live.ts';
 
 export async function buildServer() {
   const app = Fastify({ logger: true });
@@ -28,6 +29,7 @@ export async function buildServer() {
     else request.log.warn({ error: err.message, status }, 'client request failed');
     reply.code(status).send({ error: err.message });
   });
+  await registerLiveRoutes(app);
   await registerRoutes(app);
   startDispatchLoop(app);
   return app;

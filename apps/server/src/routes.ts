@@ -3,11 +3,11 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, ne, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema } from '@megacorps/shared';
+import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createProjectSchema, createWorkProductSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema } from '@megacorps/shared';
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, userInvites, users } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { buildExecutionAgent, cascadeParentStatus, decomposeCard, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
@@ -15,6 +15,7 @@ import { registerChatRoutes } from './chat.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
+import { publishLiveEvent } from './live.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
@@ -840,6 +841,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }).returning();
     if (card) await db.insert(taskLogs).values({ cardId: card.id, type: 'stage', status: 'success', message: `Stage set to ${card.columnStatus ?? 'todo'} by ${actorLabel(user)}` });
     if (card) await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'card.created', entityType: 'card', entityId: card.id, details: { title: card.title, stage: card.columnStatus } });
+    if (card) publishLiveEvent({ type: 'card.created', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId });
     return reply.code(201).send(card);
   });
 
@@ -898,6 +900,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       });
     }
     if (card) await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: card.assigneeId, action: input.columnStatus && input.columnStatus !== existing.columnStatus ? 'card.stage_changed' : 'card.updated', entityType: 'card', entityId: card.id, details: { from: existing.columnStatus, to: input.columnStatus, title: card.title } });
+    if (card) publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: input.columnStatus && input.columnStatus !== existing.columnStatus ? 'card.stage_changed' : 'card.updated' });
     return card;
   });
 
@@ -936,6 +939,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await db.insert(taskLogs).values({ cardId: id, agentId: existing.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${existing.columnStatus ?? 'todo'} to cancelled by ${actorLabel(user)}.` });
     }
     await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: existing.assigneeId, action: 'card.cancelled', entityType: 'card', entityId: id, details: { title: existing.title, reason } });
+    publishLiveEvent({ type: 'card.updated', companyId: existing.companyId, entityType: 'card', entityId: id, cardId: id, projectId: existing.projectId, action: 'card.cancelled' });
     return card;
   });
 
@@ -960,6 +964,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       updatedAt: now,
     }).where(eq(kanbanCards.id, id));
     await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'card.deleted', entityType: 'card', entityId: id, details: { title: existing.title } });
+    publishLiveEvent({ type: 'card.deleted', companyId: existing.companyId, entityType: 'card', entityId: id, cardId: id, projectId: existing.projectId });
     return { ok: true };
   });
   app.get('/api/cards/:id/logs', async (request, reply) => {
@@ -971,6 +976,45 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
     if (!card) return reply;
     return db.select().from(cardComments).where(eq(cardComments.cardId, card.id)).orderBy(desc(cardComments.createdAt));
+  });
+  app.get('/api/cards/:id/work-products', async (request, reply) => {
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    return db.select().from(workProducts).where(eq(workProducts.cardId, card.id)).orderBy(desc(workProducts.createdAt));
+  });
+  app.post('/api/cards/:id/work-products', async (request, reply) => {
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    const user = await requireCompanyRole(request, reply, card.companyId, 'operator'); if (!user) return reply;
+    const input = createWorkProductSchema.parse(request.body);
+    if (input.projectId && input.projectId !== card.projectId) return reply.code(400).send({ error: 'work_product_project_mismatch' });
+    if (input.agentId) {
+      const company = await agentCompanyId(input.agentId);
+      if (company !== card.companyId) return reply.code(400).send({ error: 'work_product_agent_mismatch' });
+    }
+    if (input.taskRunId) {
+      const [run] = await db.select({ cardId: taskRuns.cardId }).from(taskRuns).where(eq(taskRuns.id, input.taskRunId)).limit(1);
+      if (!run || run.cardId !== card.id) return reply.code(400).send({ error: 'work_product_task_run_mismatch' });
+    }
+    const [row] = await db.insert(workProducts).values({
+      companyId: card.companyId,
+      cardId: card.id,
+      projectId: input.projectId ?? card.projectId,
+      agentId: input.agentId ?? card.assigneeId,
+      taskRunId: input.taskRunId ?? null,
+      type: input.type,
+      title: input.title,
+      summary: input.summary ?? null,
+      url: input.url ?? null,
+      repoProvider: input.repoProvider ?? null,
+      repoUrl: input.repoUrl ?? null,
+      branch: input.branch ?? null,
+      commitSha: input.commitSha ?? null,
+      pullRequestUrl: input.pullRequestUrl ?? null,
+      metadata: input.metadata,
+    }).returning();
+    if (row) publishLiveEvent({ type: 'work_product.created', companyId: card.companyId, entityType: 'work_product', entityId: row.id, cardId: card.id, projectId: row.projectId });
+    return reply.code(201).send(row);
   });
   app.post('/api/cards/:id/comments', async (request, reply) => {
     const id = (request.params as { id: string }).id;
@@ -987,6 +1031,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const effectiveAgentId = authorAgent?.id ?? card.assigneeId;
     const authorName = authorAgent ? authorAgent.name : actorLabel(user);
     const [comment] = await db.insert(cardComments).values({ cardId: id, authorType, authorId: authorAgent ? null : user.id, agentId: authorAgent?.id ?? null, body: input.body, action: effectiveAction }).returning();
+    if (comment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: comment.id, cardId: card.id, projectId: card.projectId, action: effectiveAction });
     await db.insert(taskLogs).values({ cardId: id, agentId: effectiveAgentId, type: 'comment', status: 'success', message: `${authorName} added a ${effectiveAction} message.`, output: input.body });
     await db.insert(activityLog).values({ companyId: card.companyId, actorType: authorType, actorId: authorAgent?.id ?? user.id, userId: user.id, agentId: effectiveAgentId, action: `comment.${effectiveAction}`, entityType: 'card', entityId: card.id, details: { commentId: comment?.id, authorAgentId: authorAgent?.id } });
     if (input.action === 'pause_agent') {
@@ -1004,10 +1049,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', error: `Paused by ${actorLabel(user)}`, completedAt: new Date() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
       await db.update(taskRuns).set({ status: 'cancelled', error: `Paused by ${actorLabel(user)}`, completedAt: new Date(), updatedAt: new Date() }).where(and(eq(taskRuns.cardId, id), inArray(taskRuns.status, ['queued', 'running'])));
       await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to blocked by ${actorLabel(user)}.` });
+      publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'card.blocked' });
     } else if (input.action === 'continue_run') {
       if (card.assigneeId) await db.update(agents).set({ isActive: true, isBusy: false }).where(eq(agents.id, card.assigneeId));
       await db.update(kanbanCards).set({ columnStatus: 'todo', lastError: null, nextRunAt: null, updatedAt: new Date() }).where(eq(kanbanCards.id, id));
       await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to todo by ${actorLabel(user)}.` });
+      publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'card.continue_run' });
     } else if (input.action === 'send_to_agent') {
       await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'comment', status: 'queued', message: 'Comment queued for agent context on the next run.', output: input.body });
     } else if (input.action === 'escalate_to_reviewer') {
@@ -1041,6 +1088,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await db.insert(taskLogs).values({ cardId: id, agentId: reviewerId ?? card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by ${actorLabel(user)}.` });
       await db.insert(taskLogs).values({ cardId: id, agentId: reviewerId ?? card.assigneeId, type: 'escalation', status: reviewerId ? 'queued' : 'failed', message: reason, output: input.body });
       await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: reviewerId ?? card.assigneeId, action: reviewerId ? 'card.escalated_to_reviewer' : 'card.escalation_blocked', entityType: 'card', entityId: card.id, details: { commentId: comment?.id, reviewerId, reason } });
+      publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: reviewerId ? 'card.escalated_to_reviewer' : 'card.escalation_blocked' });
       if (reviewerId) await enqueueTaskRun(id, 'review', 'manual', user.id);
     }
     return reply.code(201).send(comment);
@@ -1269,8 +1317,53 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = createProjectSchema.parse(request.body);
     const companyId = input.companyId ?? await defaultCompanyId();
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
-    const [row] = await db.insert(projects).values({ companyId, name: input.name, description: input.description }).returning();
+    const [row] = await db.insert(projects).values({
+      companyId,
+      name: input.name,
+      description: input.description,
+      repoProvider: input.repoProvider,
+      repoUrl: input.repoUrl ?? null,
+      defaultBranch: input.defaultBranch,
+      protectedBranches: input.protectedBranches,
+      workBranchPattern: input.workBranchPattern,
+      pullBeforeRun: input.pullBeforeRun,
+      pushAfterRun: input.pushAfterRun,
+      completionPolicy: input.completionPolicy,
+      setupCommand: input.setupCommand ?? null,
+      testCommand: input.testCommand ?? null,
+      runtimeServices: input.runtimeServices,
+      workspacePathHint: input.workspacePathHint ?? null,
+    }).returning();
+    if (row) publishLiveEvent({ type: 'project.created', companyId: row.companyId, entityType: 'project', entityId: row.id });
     return reply.code(201).send(row);
+  });
+  app.put('/api/projects/:id', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const input = createProjectSchema.partial().parse(request.body);
+    const [existing] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'project_not_found' });
+    if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'project_company_immutable' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    const [row] = await db.update(projects).set({
+      name: input.name,
+      description: input.description,
+      repoProvider: input.repoProvider,
+      repoUrl: input.repoUrl,
+      defaultBranch: input.defaultBranch,
+      protectedBranches: input.protectedBranches,
+      workBranchPattern: input.workBranchPattern,
+      pullBeforeRun: input.pullBeforeRun,
+      pushAfterRun: input.pushAfterRun,
+      completionPolicy: input.completionPolicy,
+      setupCommand: input.setupCommand,
+      testCommand: input.testCommand,
+      runtimeServices: input.runtimeServices,
+      workspacePathHint: input.workspacePathHint,
+      updatedAt: new Date(),
+    }).where(eq(projects.id, id)).returning();
+    if (!row) return reply.code(404).send({ error: 'project_not_found' });
+    publishLiveEvent({ type: 'project.updated', companyId: row.companyId, entityType: 'project', entityId: row.id });
+    return row;
   });
   app.get('/api/goals', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
@@ -1355,6 +1448,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       summary: z.string().optional(),
       output: z.string().optional(),
       costUsd: z.number().nonnegative().optional(),
+      workProducts: z.array(createWorkProductSchema).default([]),
     }).safeParse(request.body);
     if (!parsedBody.success) return reply.code(400).send({ error: 'invalid_body', issues: parsedBody.error.issues });
     const body = parsedBody.data;
@@ -1363,6 +1457,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!requestedStatus) return reply.code(400).send({ error: 'invalid_status', allowed: cardStatuses, legacyAliases: { backlog: 'todo' } });
     const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, body.cardId), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
+    if (body.workProducts.some((product) => product.projectId && product.projectId !== card.projectId)) return reply.code(400).send({ error: 'work_product_project_mismatch' });
     const [webhookTaskRun] = taskRunId ? await db.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).limit(1) : [];
     if (taskRunId && !webhookTaskRun) return reply.code(404).send({ error: 'task_run_not_found' });
     if (webhookTaskRun && webhookTaskRun.cardId !== card.id) return reply.code(409).send({ error: 'task_run_card_mismatch' });
@@ -1399,17 +1494,40 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }).where(eq(kanbanCards.id, body.cardId));
     if (nextStatus !== card.columnStatus) await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by webhook` });
     await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: escalation ? 'escalation' : 'webhook', status: nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : nextStatus === 'needs_review' ? 'queued' : 'success', message: escalation ? (nextStatus === 'needs_review' ? 'Webhook requested reviewer guidance; help review queued.' : 'Webhook requested guidance but no reviewer is available; card blocked.') : body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
-    await db.insert(cardComments).values({
+    const [webhookComment] = await db.insert(cardComments).values({
       cardId: body.cardId,
       agentId: card.assigneeId,
       authorType: card.assigneeId ? 'agent' : 'system',
       action: nextStatus === 'needs_review' ? 'agent_escalated' : nextStatus === 'blocked' ? 'agent_blocked' : nextStatus === 'cancelled' ? 'agent_cancelled' : 'agent_update',
       body: [body.summary, body.output].filter(Boolean).join('\n\n') || `Webhook marked card ${nextStatus}`,
-    });
+    }).returning();
+    publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: `webhook.task_${nextStatus}` });
+    if (webhookComment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: webhookComment.id, cardId: card.id, projectId: card.projectId, action: webhookComment.action });
     if (completesRun && card.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, card.assigneeId));
     if (completesRun && card.assigneeId && body.costUsd) {
       await db.update(agents).set({ spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${body.costUsd}` }).where(eq(agents.id, card.assigneeId));
       await db.insert(costEvents).values({ companyId: card.companyId, agentId: card.assigneeId, cardId: card.id, projectId: card.projectId, goalId: card.goalId, provider: 'webhook', model: 'external', costUsd: body.costUsd.toString() });
+    }
+    if (body.workProducts.length > 0) {
+      const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
+      const insertedProducts = await db.insert(workProducts).values(body.workProducts.map((product) => ({
+        companyId: card.companyId,
+        cardId: card.id,
+        projectId: product.projectId ?? card.projectId,
+        agentId: product.agentId ?? actorAgentId,
+        taskRunId: product.taskRunId ?? taskRunId ?? null,
+        type: product.type,
+        title: product.title,
+        summary: product.summary ?? null,
+        url: product.url ?? null,
+        repoProvider: product.repoProvider ?? project?.repoProvider ?? null,
+        repoUrl: product.repoUrl ?? project?.repoUrl ?? null,
+        branch: product.branch ?? null,
+        commitSha: product.commitSha ?? null,
+        pullRequestUrl: product.pullRequestUrl ?? null,
+        metadata: product.metadata,
+      }))).returning();
+      for (const product of insertedProducts) publishLiveEvent({ type: 'work_product.created', companyId: card.companyId, entityType: 'work_product', entityId: product.id, cardId: card.id, projectId: product.projectId });
     }
     const heartbeatRunId = webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId;
     if (completesRun) {

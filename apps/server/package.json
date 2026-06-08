@@ -14,6 +14,7 @@
     "@fastify/cookie": "latest",
     "@fastify/cors": "latest",
     "@fastify/helmet": "latest",
+    "@fastify/websocket": "^11.2.0",
     "@megacorps/shared": "file:../../packages/shared",
     "bcryptjs": "latest",
     "drizzle-orm": "latest",
@@ -22,5 +23,9 @@
     "postgres": "latest",
     "zod": "latest"
   },
-  "devDependencies": { "@types/node": "latest", "tsx": "latest", "typescript": "latest" }
+  "devDependencies": {
+    "@types/node": "latest",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
 }

@@ -7,11 +7,13 @@ import { getAdapter } from './adapters/registry.ts';
 import { db } from './db/client.ts';
 import { activityLog, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, projects } from './db/schema.ts';
 import { budgetOk, buildCompanyKanbanContext, buildExecutionAgent, getBudgetGuard } from './dispatch.ts';
+import { publishLiveEvent } from './live.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
 type CompanyRow = typeof companies.$inferSelect;
 type GoalRow = typeof goals.$inferSelect;
+type ProjectRow = typeof projects.$inferSelect;
 
 function titleFromMessage(body: string, agentName: string): string {
   const firstLine = body.replace(/\s+/g, ' ').trim().slice(0, 72);
@@ -23,6 +25,24 @@ function formatGoal(goal: GoalRow): string {
   return `- ${scope}: ${goal.title}${goal.body ? `\n  ${goal.body.slice(0, 1200)}` : ''}`;
 }
 
+function projectRepoContext(project: ProjectRow | null | undefined): string {
+  if (!project) return 'Project repository: none';
+  return [
+    `Project repository provider: ${project.repoProvider ?? 'github'}`,
+    `Project repository URL: ${project.repoUrl ?? 'not configured'}`,
+    `Default branch: ${project.defaultBranch ?? 'main'}`,
+    `Task branch pattern: ${project.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}'}`,
+    `Pull before run: ${project.pullBeforeRun === false ? 'no' : 'yes'}`,
+    `Push after run: ${project.pushAfterRun === false ? 'no' : 'yes'}`,
+    `Completion policy: ${project.completionPolicy ?? 'push_or_pr'}`,
+    project.setupCommand ? `Setup command: ${project.setupCommand}` : '',
+    project.testCommand ? `Test command: ${project.testCommand}` : '',
+    project.repoUrl
+      ? 'Repository rule: use your runtime-owned local clone, pull/rebase before code changes, commit and push/PR completed work, and report PR/commit/preview links rather than local-only paths.'
+      : 'Repository rule: no repo is configured, so do not invent local workspace paths.',
+  ].filter(Boolean).join('\n');
+}
+
 async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, projectId: string | null): Promise<string> {
   const [project] = projectId ? await db.select().from(projects).where(eq(projects.id, projectId)).limit(1) : [];
   const [department] = agent.departmentId ? await db.select().from(departments).where(eq(departments.id, agent.departmentId)).limit(1) : [];
@@ -30,6 +50,7 @@ async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, pr
   return [
     `Project: ${project?.name ?? 'No project / general chat'}`,
     project?.description ? `Project description: ${project.description}` : '',
+    projectRepoContext(project),
     `Department: ${department?.name ?? 'none'}`,
     `Company goals:\n${companyGoals.filter((goal) => !goal.departmentId && !goal.projectId).map(formatGoal).join('\n') || 'none'}`,
     `Department goals:\n${agent.departmentId ? companyGoals.filter((goal) => goal.departmentId === agent.departmentId).map(formatGoal).join('\n') || 'none' : 'none'}`,
@@ -146,6 +167,15 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       metadata: {},
     }).returning();
     if (!userMessage) return reply.code(500).send({ error: 'chat_message_create_failed' });
+    publishLiveEvent({
+      type: 'chat.message.created',
+      companyId: session.companyId,
+      entityType: 'chat_message',
+      entityId: userMessage.id,
+      sessionId: session.id,
+      projectId: session.projectId,
+      data: { authorType: 'user', agentId: session.agentId },
+    });
 
     await db.update(chatSessions).set({
       title: session.title.startsWith('Chat with ') ? titleFromMessage(input.body, agent.name) : session.title,
@@ -163,6 +193,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         metadata: { error: 'agent_paused' },
       }).returning();
       await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: 'chat.agent_paused', sessionId: session.id });
+      if (systemMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: systemMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'system', agentId: session.agentId, error: 'agent_paused' } });
       return reply.code(409).send({ error: 'agent_paused', userMessage, systemMessage });
     }
 
@@ -178,6 +209,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         metadata: { error: 'agent_budget_exceeded' },
       }).returning();
       await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: 'chat.budget_blocked', sessionId: session.id });
+      if (systemMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: systemMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'system', agentId: session.agentId, error: 'agent_budget_exceeded' } });
       return reply.code(409).send({ error: 'agent_budget_exceeded', userMessage, systemMessage });
     }
 
@@ -193,6 +225,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         metadata: { error: 'agent_busy' },
       }).returning();
       await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: 'chat.agent_busy', sessionId: session.id });
+      if (systemMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: systemMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'system', agentId: session.agentId, error: 'agent_busy' } });
       return reply.code(409).send({ error: 'agent_busy', userMessage, systemMessage });
     }
 
@@ -209,6 +242,15 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     }
 
     try {
+      publishLiveEvent({
+        type: 'chat.reply.started',
+        companyId: session.companyId,
+        entityType: 'chat_session',
+        entityId: session.id,
+        sessionId: session.id,
+        projectId: session.projectId,
+        data: { agentId: agent.id, runId: run.id },
+      });
       const recent = await db.select().from(chatMessages).where(eq(chatMessages.sessionId, session.id)).orderBy(desc(chatMessages.createdAt)).limit(30);
       const kanbanContext = await buildCompanyKanbanContext(session.companyId, { focusAgentId: agent.id, budgetChars: 20_000 });
       const goalContext = await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
@@ -261,6 +303,8 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         updatedAt: new Date(),
       }).where(eq(chatSessions.id, session.id)).returning();
       await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: overBudget ? 'chat.budget_hard_stop' : 'chat.reply_received', sessionId: session.id, details: { runId: run.id, costUsd: result.costUsd, overBudget, monthlyExceeded, taskExceeded } });
+      if (agentMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: agentMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'agent', agentId: session.agentId, runId: run.id } });
+      publishLiveEvent({ type: 'chat.reply.finished', companyId: session.companyId, entityType: 'chat_session', entityId: session.id, sessionId: session.id, projectId: session.projectId, data: { agentId: agent.id, runId: run.id, status: 'success' } });
       return { session: updatedSession, userMessage, agentMessage };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'agent_chat_failed';
@@ -276,6 +320,8 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         metadata: { runId: run.id, error: message },
       }).returning();
       await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: 'chat.failed', sessionId: session.id, details: { runId: run.id, error: message } });
+      if (systemMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: systemMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'system', agentId: session.agentId, runId: run.id, error: message } });
+      publishLiveEvent({ type: 'chat.reply.finished', companyId: session.companyId, entityType: 'chat_session', entityId: session.id, sessionId: session.id, projectId: session.projectId, data: { agentId: agent.id, runId: run.id, status: 'failed', error: message } });
       return reply.code(502).send({ error: message, userMessage, systemMessage });
     }
   });

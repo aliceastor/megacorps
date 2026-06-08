@@ -1,4 +1,4 @@
-# MegaCorps Phase 1-16 Control Plane MVP
+# MegaCorps Phase 1-18 Control Plane MVP
 
 Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm workspaces.
 
@@ -91,12 +91,12 @@ Hermes suite operational notes:
 - `Dashboard`: operating overview, stage counts, recent task logs, recent API lifecycle events.
 - `Companies`: company registry, company settings, department settings, reporting structure, and delegation closure.
 - `Direct Chat`: company -> project/no-project -> agent -> session direct messaging with resumable adapter sessions.
-- `Kanban`: task UUIDs, stage, project filter, scoped goals, details, per-task message board, sub-tasks, logs, run/review/decompose/delete.
+- `Kanban`: task UUIDs, stage, project filter, scoped goals, details, per-task message board, work products, sub-tasks, logs, run/review/decompose/delete.
 - `Agents`: member hierarchy, agent CRUD, pause/resume/fire/reset, runtime and adapter configuration.
 - `Budget`: spend and budget visibility for agents and tasks.
 - `Logs`: cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
-- `Workspaces`: project-focused setup for company, department, and project goals.
+- `Workspaces`: project-focused setup for company, department, project goals, and repo-centric workspace policy.
 - `Admin`: global account management, signup switch, roles, account status, and password resets.
 - `Settings`: company heartbeat settings, departments, runtime presets, adapter endpoints.
   Runtime health summaries show adapter status, attached agents, last run status, and capabilities. Company members can be managed by email with viewer/operator/admin roles.
@@ -119,12 +119,14 @@ Hermes suite operational notes:
 - Phase 14: company memberships, company-scoped read filters, company operator/admin mutation checks, runtime company scoping, and Settings member management.
 - Phase 15: database-backed `task_runs` queue, background task-run worker, queued manual run/review, queued cron dispatch/review, and Logs task-run visibility.
 - Phase 16: help/escalation review via `needs_review`, scoped company/department/project goals, project-scoped Direct Chat, and project-focused Workspaces.
+- Phase 17: React Query browser cache plus authenticated WebSocket live events for chat, Kanban card updates, task logs, comments, projects, goals, and work products.
+- Phase 18: repo-centric project workspace policy, pull-before-run/push-after-run prompt protocol, and first-class task work products for PRs, commits, previews, reports, screenshots, and artifacts.
 
 Reference-informed next phases:
 
-- Phase 16: dependency/blocker graph with derived ready state and reclaim policy.
-- Phase 17: chain-of-command context, manager review, escalation, and delegation loop.
-- Phase 18: work products, attachments, preview links, and company template import/export.
+- Phase 19: dependency/blocker graph with derived ready state and richer handoff records.
+- Phase 20: company template import/export with secret references.
+- Phase 21: worker sidecar, distributed queue locks, and richer runtime liveness probes.
 
 ## Paperclip-inspired loop
 
@@ -164,6 +166,7 @@ Open `Direct Chat` in the sidebar:
 5. Send a message.
 
 Every chat session stores its own `agentSessionId` and optional `projectId`, so a user can keep several separate conversations with the same agent by project or no-project context. Chat messages are stored in `chat_messages`, sessions in `chat_sessions`, and every agent reply is also recorded through `heartbeat_runs`, `activity_log`, and `cost_events`. The UI shows the user's outgoing message optimistically and displays an agent typing indicator while the adapter run is still pending.
+The web app uses React Query plus an authenticated `/api/live` WebSocket to invalidate chat session/message caches as soon as the server stores user, agent, or system messages. This makes outgoing messages appear immediately and keeps other open browser tabs in sync without manual refresh.
 
 ## Task message board and intervention
 
@@ -177,7 +180,13 @@ Open a task and use the Message Board tab:
 - `Continue run with comment`: reactivate the assignee and move the task back to `todo`.
 
 Dispatch/review/webhook completions now also create agent-authored messages on the task board, so task discussion is not hidden only in logs.
-Kanban task detail tabs use a short-lived browser session cache for message board, task logs, and filtered API lifecycle rows. Selecting a task renders details immediately, then prefetches cached tab data in the background; mutating the task or adding comments refreshes the affected cache entries.
+Kanban task detail tabs use React Query plus a short-lived browser session cache for message board, task logs, work products, and filtered API lifecycle rows. Selecting a task renders details immediately, then prefetches cached tab data in the background; live events invalidate only the affected card caches.
+
+## Project repo workspaces and work products
+
+Projects are repo-centric. MegaCorps stores the shared Git repository and policy, while each remote agent runtime uses its own local clone/folder. A project can define `repoProvider`, `repoUrl`, `defaultBranch`, protected branches, `workBranchPattern`, pull-before-run, push-after-run, completion policy, setup command, test command, runtime service metadata, and an optional local workspace hint. Prompt injection tells agents to pull/rebase before editing, work on a task branch, avoid protected branches, validate, then push or open a PR according to the project policy.
+
+Task outputs are no longer limited to comments/logs. `work_products` records reviewable deliverables such as PRs, commits, preview URLs, reports, screenshots, files, artifacts, and external links. The task-complete webhook accepts a `workProducts` array, and Kanban task details include a Work Products tab so reviewers can inspect the actual deliverable instead of reading logs only.
 
 `Split into Sub-tasks` decomposes a larger task into child Kanban tasks. It uses the task body lines when available, otherwise it creates Plan / Execute / Review sub-tasks.
 
@@ -193,6 +202,7 @@ Every task dispatch, review, and direct chat invocation receives a bounded Kanba
 - focus agent open work and review queue,
 - latest task message board entries,
 - latest task lifecycle logs,
+- project repository policy and Git workflow instructions,
 - recent company activity,
 - recent heartbeat runs.
 
@@ -218,6 +228,7 @@ MegaCorps stores two complementary log streams:
 - `cron_runs`: every dispatch heartbeat tick with source, status, counts, duration, and errors.
 - `chat_sessions` / `chat_messages`: direct agent conversation lifecycle and agent reply metadata.
 - `card_comments`: per-task message board entries from users, agents, system/webhook completions, and intervention actions.
+- `work_products`: reviewable deliverables by card/project/agent/task-run, including repo URLs, branches, commits, PRs, previews, reports, screenshots, artifacts, and external URLs.
 
 Phase 8/9 safety behavior:
 
@@ -245,7 +256,6 @@ No pnpm. No Redis.
 - Set strong `WEBHOOK_SHARED_SECRET`, SSH keys, and external database credentials. Use `BOOTSTRAP_TOKEN` only temporarily for admin recovery, then remove it. The session signing secret is generated automatically into DB `app_settings.auth.jwt_secret`.
 - Encrypt or externalize adapter/runtime secrets before multi-user production.
 - Move the current in-process DB task-run worker into a separate sidecar/replica-safe worker for heavy production usage.
-- Add WebSocket/SSE consumers for live task/chat/log updates.
 - Extend company-scoped membership/RBAC with invite flow, service-agent keys, and emergency break-glass admin policy.
 - Add database backup/restore, retention, migration rollback, metrics, alerts, and incident runbooks.
 

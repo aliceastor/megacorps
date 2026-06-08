@@ -135,6 +135,18 @@ export const createProjectSchema = z.object({
   companyId: z.string().uuid().optional(),
   name: z.string().trim().min(1).max(160),
   description: z.string().trim().max(4000).optional(),
+  repoProvider: z.enum(['github', 'gitlab', 'gitea', 'generic']).default('github'),
+  repoUrl: z.string().trim().max(1000).nullable().optional(),
+  defaultBranch: z.string().trim().min(1).max(120).default('main'),
+  protectedBranches: z.array(z.string().trim().min(1).max(120)).default(['main', 'master']),
+  workBranchPattern: z.string().trim().min(1).max(200).default('megacorps/card-{cardId}-{agentSlug}'),
+  pullBeforeRun: z.boolean().default(true),
+  pushAfterRun: z.boolean().default(true),
+  completionPolicy: z.enum(['push_branch', 'pull_request', 'push_or_pr', 'manual']).default('push_or_pr'),
+  setupCommand: z.string().trim().max(2000).nullable().optional(),
+  testCommand: z.string().trim().max(2000).nullable().optional(),
+  runtimeServices: z.record(z.string(), z.unknown()).default({}),
+  workspacePathHint: z.string().trim().max(1000).nullable().optional(),
 });
 
 export const createGoalSchema = z.object({
@@ -143,6 +155,26 @@ export const createGoalSchema = z.object({
   projectId: z.string().uuid().nullable().optional(),
   title: z.string().trim().min(1).max(160),
   body: z.string().trim().max(4000).optional(),
+});
+
+export const workProductTypes = ['report', 'file', 'preview_url', 'pull_request', 'commit', 'screenshot', 'artifact', 'external'] as const;
+export type WorkProductType = (typeof workProductTypes)[number];
+
+export const createWorkProductSchema = z.object({
+  cardId: z.string().uuid().optional(),
+  projectId: z.string().uuid().nullable().optional(),
+  agentId: z.string().uuid().nullable().optional(),
+  taskRunId: z.string().uuid().nullable().optional(),
+  type: z.enum(workProductTypes).default('external'),
+  title: z.string().trim().min(1).max(200),
+  summary: z.string().trim().max(4000).nullable().optional(),
+  url: z.string().trim().max(2000).nullable().optional(),
+  repoProvider: z.string().trim().max(80).nullable().optional(),
+  repoUrl: z.string().trim().max(1000).nullable().optional(),
+  branch: z.string().trim().max(240).nullable().optional(),
+  commitSha: z.string().trim().max(80).nullable().optional(),
+  pullRequestUrl: z.string().trim().max(2000).nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
 });
 
 export const createBudgetPolicySchema = z.object({
@@ -231,6 +263,7 @@ export type CreateChatMessageInput = z.infer<typeof createChatMessageSchema>;
 export type CreateKnowledgeDocInput = z.infer<typeof createKnowledgeDocSchema>;
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
 export type CreateGoalInput = z.infer<typeof createGoalSchema>;
+export type CreateWorkProductInput = z.infer<typeof createWorkProductSchema>;
 export type CreateBudgetPolicyInput = z.infer<typeof createBudgetPolicySchema>;
 export type ApprovalDecisionInput = z.infer<typeof approvalDecisionSchema>;
 export type TaskLogInput = z.infer<typeof taskLogSchema>;

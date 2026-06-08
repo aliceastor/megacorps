@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { BriefcaseBusiness, Building2, Circle, Loader2, MessageSquare, Plus, Send } from 'lucide-react';
 import { ApiError, api } from '@/lib/api';
 
@@ -47,6 +48,11 @@ type ChatSendResult = {
   systemMessage?: ChatMessage;
 };
 
+type LiveEvent = {
+  type: string;
+  sessionId?: string | null;
+};
+
 function pendingUserMessage(session: ChatSession, body: string): ChatMessage {
   return {
     id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -79,7 +85,26 @@ function agentStatus(agent?: Agent | null): { label: string; color: string } {
   return { label: 'Idle', color: 'var(--primary)' };
 }
 
+async function fetchChatBase(): Promise<{ companies: Company[]; agents: Agent[]; projects: Project[] }> {
+  const [companies, agents, projects] = await Promise.all([
+    api<Company[]>('/api/companies'),
+    api<Agent[]>('/api/agents'),
+    api<Project[]>('/api/projects'),
+  ]);
+  return { companies, agents, projects };
+}
+
+async function fetchChatSessions(companyId: string, agentId: string, projectFilter: string): Promise<ChatSession[]> {
+  const projectQuery = projectFilter === 'all' ? '' : `&projectId=${projectFilter === '__none' ? 'none' : projectFilter}`;
+  return api<ChatSession[]>(`/api/chat/sessions?companyId=${companyId}&agentId=${agentId}${projectQuery}`);
+}
+
+async function fetchChatMessages(sessionId: string): Promise<ChatMessage[]> {
+  return api<ChatMessage[]>(`/api/chat/sessions/${sessionId}/messages`);
+}
+
 export function ChatPage() {
+  const queryClient = useQueryClient();
   const [companies, setCompanies] = useState<Company[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -95,6 +120,17 @@ export function ChatPage() {
   const [replyingSessionId, setReplyingSessionId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const messageEndRef = useRef<HTMLDivElement>(null);
+  const baseQuery = useQuery({ queryKey: ['chatBase'], queryFn: fetchChatBase });
+  const sessionsQuery = useQuery({
+    queryKey: ['chatSessions', companyId, agentId, projectFilter],
+    queryFn: () => fetchChatSessions(companyId, agentId, projectFilter),
+    enabled: Boolean(companyId && agentId),
+  });
+  const messagesQuery = useQuery({
+    queryKey: ['chatMessages', sessionId],
+    queryFn: () => fetchChatMessages(sessionId),
+    enabled: Boolean(sessionId),
+  });
 
   const companyAgents = useMemo(() => agents.filter((agent) => agent.companyId === companyId), [agents, companyId]);
   const companyProjects = useMemo(() => projects.filter((project) => project.companyId === companyId), [projects, companyId]);
@@ -108,11 +144,7 @@ export function ChatPage() {
     setLoading(true);
     setError('');
     try {
-      const [companyRows, agentRows] = await Promise.all([
-        api<Company[]>('/api/companies'),
-        api<Agent[]>('/api/agents'),
-      ]);
-      const projectRows = await api<Project[]>('/api/projects');
+      const { companies: companyRows, agents: agentRows, projects: projectRows } = await queryClient.fetchQuery({ queryKey: ['chatBase'], queryFn: fetchChatBase });
       setCompanies(companyRows);
       setProjects(projectRows);
       setAgents(agentRows);
@@ -134,8 +166,10 @@ export function ChatPage() {
       setMessages([]);
       return;
     }
-    const projectQuery = nextProjectFilter === 'all' ? '' : `&projectId=${nextProjectFilter === '__none' ? 'none' : nextProjectFilter}`;
-    const rows = await api<ChatSession[]>(`/api/chat/sessions?companyId=${nextCompanyId}&agentId=${nextAgentId}${projectQuery}`);
+    const rows = await queryClient.fetchQuery({
+      queryKey: ['chatSessions', nextCompanyId, nextAgentId, nextProjectFilter],
+      queryFn: () => fetchChatSessions(nextCompanyId, nextAgentId, nextProjectFilter),
+    });
     setSessions(rows);
     const nextSession = rows.find((session) => session.id === sessionId) ?? rows[0];
     setSessionId(nextSession?.id ?? '');
@@ -147,14 +181,44 @@ export function ChatPage() {
       setMessages([]);
       return;
     }
-    const rows = await api<ChatMessage[]>(`/api/chat/sessions/${nextSessionId}/messages`);
+    const rows = await queryClient.fetchQuery({ queryKey: ['chatMessages', nextSessionId], queryFn: () => fetchChatMessages(nextSessionId) });
     setMessages((current) => {
       const pending = current.filter((message) => message.sessionId === nextSessionId && message.metadata?.pending);
       return mergeMessages(rows, pending);
     });
   }
 
-  useEffect(() => { void refreshBase(); }, []);
+  useEffect(() => {
+    if (!baseQuery.data) return;
+    setCompanies(baseQuery.data.companies);
+    setProjects(baseQuery.data.projects);
+    setAgents(baseQuery.data.agents);
+    const nextCompany = baseQuery.data.companies.find((company) => company.id === companyId) ?? baseQuery.data.companies[0];
+    const nextAgent = nextCompany ? baseQuery.data.agents.find((agent) => agent.companyId === nextCompany.id && agent.id === agentId) ?? baseQuery.data.agents.find((agent) => agent.companyId === nextCompany.id) : undefined;
+    setCompanyId(nextCompany?.id ?? '');
+    setAgentId(nextAgent?.id ?? '');
+    setLoading(false);
+  }, [baseQuery.data]);
+  useEffect(() => {
+    if (baseQuery.error) {
+      setError(baseQuery.error instanceof Error ? baseQuery.error.message : 'Failed to load chat data');
+      setLoading(false);
+    }
+  }, [baseQuery.error]);
+  useEffect(() => {
+    if (!sessionsQuery.data) return;
+    setSessions(sessionsQuery.data);
+    const nextSession = sessionsQuery.data.find((session) => session.id === sessionId) ?? sessionsQuery.data[0];
+    setSessionId(nextSession?.id ?? '');
+    if (!nextSession) setMessages([]);
+  }, [sessionsQuery.data]);
+  useEffect(() => {
+    if (!messagesQuery.data || !sessionId) return;
+    setMessages((current) => {
+      const pending = current.filter((message) => message.sessionId === sessionId && message.metadata?.pending);
+      return mergeMessages(messagesQuery.data, pending);
+    });
+  }, [messagesQuery.data, sessionId]);
   useEffect(() => {
     if (!companyId) return;
     if (!companyAgents.some((agent) => agent.id === agentId)) {
@@ -168,6 +232,18 @@ export function ChatPage() {
   }, [companyProjects, projectFilter]);
   useEffect(() => { void loadSessions(); }, [agentId, companyId, projectFilter]);
   useEffect(() => { void loadMessages(); }, [sessionId]);
+  useEffect(() => {
+    function onLive(event: Event) {
+      const detail = (event as CustomEvent<LiveEvent>).detail;
+      if (!detail?.type.startsWith('chat.')) return;
+      if (detail.type === 'chat.reply.started' && detail.sessionId === sessionId) setReplyingSessionId(sessionId);
+      if (detail.type === 'chat.reply.finished' && detail.sessionId === sessionId) setReplyingSessionId(null);
+      if (detail.sessionId === sessionId) void loadMessages(detail.sessionId);
+      void loadSessions(agentId, companyId, projectFilter);
+    }
+    window.addEventListener('megacorps-live', onLive);
+    return () => window.removeEventListener('megacorps-live', onLive);
+  }, [agentId, companyId, projectFilter, sessionId]);
   useEffect(() => { messageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages.length, replyingSessionId]);
 
   async function createSession(select = true): Promise<ChatSession | null> {
@@ -207,12 +283,15 @@ export function ChatPage() {
       const nextMessages = [result.userMessage, result.agentMessage, result.systemMessage].filter(Boolean) as ChatMessage[];
       setMessages((current) => mergeMessages(current, nextMessages, optimisticId));
       if (result.session) setSessions((current) => current.map((session) => session.id === result.session?.id ? result.session : session));
+      void queryClient.invalidateQueries({ queryKey: ['chatMessages', target.id] });
+      void queryClient.invalidateQueries({ queryKey: ['chatSessions'] });
       await loadSessions(agentId, companyId, projectFilter);
     } catch (err) {
       const apiError = err instanceof ApiError ? err : null;
       const data = apiError?.data as Partial<ChatSendResult> | undefined;
       const nextMessages = [data?.userMessage, data?.agentMessage, data?.systemMessage].filter(Boolean) as ChatMessage[];
       if (nextMessages.length) setMessages((current) => mergeMessages(current, nextMessages, optimisticId));
+      if (selectedSession) void queryClient.invalidateQueries({ queryKey: ['chatMessages', selectedSession.id] });
       setError(err instanceof Error ? err.message : 'Message failed');
     } finally {
       setSending(false);

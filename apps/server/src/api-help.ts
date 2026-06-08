@@ -31,6 +31,7 @@ const defaultRateLimit = 'In-app IP-based rate limiting is enforced by route buc
 const endpoints: ApiEndpoint[] = [
   { method: 'GET', path: '/health', group: 'System', auth: 'none', summary: 'Read server health.', response: '{ ok: true }' },
   { method: 'GET', path: '/api/help', group: 'System', auth: 'none', summary: 'List MegaCorps API endpoints and usage.', query: { format: 'Optional. Use markdown or md for text/markdown output.' }, responseSchema: { service: 'string', help: 'object', auth: 'object', rateLimits: 'object', kanban: 'object', adapters: 'string[]', endpoints: 'ApiHelpEndpoint[]' }, responseExample: { service: 'MegaCorps API', endpoints: [{ method: 'GET', path: '/health', responseSchema: { ok: 'boolean' }, responseExample: { ok: true } }] } },
+  { method: 'GET', path: '/api/live', group: 'System', auth: 'session', summary: 'WebSocket live event stream for React Query cache invalidation. Events are filtered to the authenticated user company memberships.' },
   { method: 'GET', path: '/api/auth/status', group: 'Auth', auth: 'none', summary: 'Read public onboarding state. Signup is DB-configured and defaults to enabled; signup becomes admin when no active admin exists.' },
   { method: 'POST', path: '/api/auth/bootstrap', group: 'Auth', auth: 'none', summary: 'Bootstrap or recover the global admin account when BOOTSTRAP_TOKEN is configured and no active admin exists.', body: { token: 'BOOTSTRAP_TOKEN value or send X-MegaCorps-Bootstrap-Token header', email: 'admin@example.com', name: 'Admin', password: 'at least 8 chars' } },
   { method: 'POST', path: '/api/auth/signup', group: 'Auth', auth: 'none', summary: 'Create a user when DB auth.signup_enabled=true. If no active admin exists, this account becomes global admin and default-company admin.', body: { email: 'user@example.com', name: 'Operator', password: 'at least 8 chars' } },
@@ -68,11 +69,13 @@ const endpoints: ApiEndpoint[] = [
   { method: 'DELETE', path: '/api/cards/:id', group: 'Kanban', auth: 'session', summary: 'Archive a task while preserving historical logs, runs, and cost records.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/logs', group: 'Kanban', auth: 'session', summary: 'Read full task logs.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/comments', group: 'Kanban', auth: 'session', summary: 'Read task message board comments.', params: { id: 'Task UUID.' } },
+  { method: 'GET', path: '/api/cards/:id/work-products', group: 'Kanban', auth: 'session', summary: 'Read reviewable work products for a task: PRs, commits, preview URLs, reports, screenshots, and artifacts.', params: { id: 'Task UUID.' } },
+  { method: 'POST', path: '/api/cards/:id/work-products', group: 'Kanban', auth: 'session', summary: 'Attach a reviewable work product to a task. Prefer Git/URL metadata over local-only paths for multi-system agents.', params: { id: 'Task UUID.' }, body: { type: 'pull_request | commit | preview_url | report | screenshot | artifact | file | external', title: 'PR #42', summary: 'What changed', url: 'https://...', repoUrl: 'https://github.com/org/repo', branch: 'megacorps/card-1234-alice', commitSha: 'abc123', pullRequestUrl: 'https://github.com/org/repo/pull/42' } },
   { method: 'POST', path: '/api/cards/:id/comments', group: 'Kanban', auth: 'session', summary: 'Add a task message board comment or intervention. escalate_to_reviewer moves the card to needs_review and queues a help review when an independent reviewer exists; otherwise it blocks the card.', params: { id: 'Task UUID.' }, body: { body: 'Instruction, blocker, or reviewer question', action: 'comment | agent_note | pause_agent | send_to_agent | continue_run | escalate_to_reviewer', agentId: 'optional agent UUID for agent-authored note' } },
   { method: 'POST', path: '/api/cards/:id/run', group: 'Kanban', auth: 'session', summary: 'Queue a dispatch task-run attempt for the background worker.', params: { id: 'Task UUID.' } },
   { method: 'POST', path: '/api/cards/:id/review', group: 'Kanban', auth: 'session', summary: 'Queue a review task-run attempt for the background worker.', params: { id: 'Task UUID.' } },
   { method: 'POST', path: '/api/cards/:id/decompose', group: 'Kanban', auth: 'session', summary: 'Split a task into sub-tasks.', params: { id: 'Task UUID.' } },
-  { method: 'POST', path: '/api/webhook/task-complete', group: 'Kanban', auth: 'none', summary: 'External agent callback to report task progress/completion. Send taskRunId for idempotent completion processing. status=needs_review means the assignee cannot finish and needs reviewer guidance; blocked with guidance/escalation wording is also promoted to help review when a reviewer exists.', body: { cardId: 'uuid', taskRunId: 'task-run uuid from prompt', status: 'done | blocked | needs_review | in_review | in_progress | todo | cancelled', summary: 'Short result or needs reviewer guidance', output: 'Full output/log with attempted methods, blocker, reviewer questions, partial output', costUsd: 0.05 } },
+  { method: 'POST', path: '/api/webhook/task-complete', group: 'Kanban', auth: 'none', summary: 'External agent callback to report task progress/completion. Send taskRunId for idempotent completion processing. status=needs_review means the assignee cannot finish and needs reviewer guidance; blocked with guidance/escalation wording is also promoted to help review when a reviewer exists.', body: { cardId: 'uuid', taskRunId: 'task-run uuid from prompt', status: 'done | blocked | needs_review | in_review | in_progress | todo | cancelled', summary: 'Short result or needs reviewer guidance', output: 'Full output/log with attempted methods, blocker, reviewer questions, partial output', costUsd: 0.05, workProducts: [{ type: 'pull_request', title: 'PR for task', pullRequestUrl: 'https://github.com/org/repo/pull/42', branch: 'megacorps/card-1234-alice', commitSha: 'abc123' }] } },
 
   { method: 'GET', path: '/api/agents', group: 'Agents', auth: 'session', summary: 'List agents visible to the current user.', query: { companyId: 'Optional company UUID.' } },
   { method: 'POST', path: '/api/agents', group: 'Agents', auth: 'session', summary: 'Create an agent.', body: { companyId: 'uuid optional', departmentId: 'uuid optional', name: 'Builder', slug: 'builder', role: 'worker', title: 'Backend Engineer', adapterType: 'mock', runtimeId: 'uuid optional', bossId: null, budgetPerTask: 1, budgetMonthly: 20 } },
@@ -94,7 +97,8 @@ const endpoints: ApiEndpoint[] = [
   { method: 'POST', path: '/api/chat/sessions/:id/messages', group: 'Chat', auth: 'session', summary: 'Send a message to an agent and store the response.', params: { id: 'Chat session UUID.' }, body: { body: 'Message for the agent' } },
 
   { method: 'GET', path: '/api/projects', group: 'Context', auth: 'session', summary: 'List visible projects.', query: { companyId: 'Optional company UUID.' } },
-  { method: 'POST', path: '/api/projects', group: 'Context', auth: 'session', summary: 'Create a project.', body: { companyId: 'uuid optional', name: 'Project name', description: 'Optional description' } },
+  { method: 'POST', path: '/api/projects', group: 'Context', auth: 'session', summary: 'Create a project with optional repo binding. The repo is the shared truth; each remote agent uses its own runtime-local clone.', body: { companyId: 'uuid optional', name: 'Project name', description: 'Optional description', repoProvider: 'github', repoUrl: 'https://github.com/org/repo', defaultBranch: 'main', workBranchPattern: 'megacorps/card-{cardId}-{agentSlug}', pullBeforeRun: true, pushAfterRun: true, completionPolicy: 'push_or_pr', setupCommand: 'npm install', testCommand: 'npm test', workspacePathHint: 'optional local hint only' } },
+  { method: 'PUT', path: '/api/projects/:id', group: 'Context', auth: 'session', summary: 'Update a project repo binding, branch policy, setup/test commands, or description.', params: { id: 'Project UUID.' } },
   { method: 'GET', path: '/api/goals', group: 'Context', auth: 'session', summary: 'List visible goals. Goals are scoped to exactly one of company, department, or project.', query: { companyId: 'Optional company UUID.', scope: 'company | department | project', departmentId: 'Optional department UUID.', projectId: 'Optional project UUID.' } },
   { method: 'POST', path: '/api/goals', group: 'Context', auth: 'session', summary: 'Create a company, department, or project goal. Do not send both departmentId and projectId.', body: { companyId: 'uuid optional', departmentId: null, projectId: null, title: 'Goal title', body: 'Goal detail' } },
   { method: 'GET', path: '/api/knowledge-docs', group: 'Context', auth: 'session', summary: 'List visible knowledge documents.', query: { companyId: 'Optional company UUID.' } },
@@ -117,6 +121,8 @@ const endpoints: ApiEndpoint[] = [
 function entityFromEndpoint(endpoint: ApiEndpoint): string {
   if (endpoint.path.includes('/companies')) return 'company';
   if (endpoint.path.includes('/departments')) return 'department';
+  if (endpoint.path.includes('/work-products')) return 'workProduct';
+  if (endpoint.path.includes('/api/live')) return 'liveEvent';
   if (endpoint.path.includes('/cards') || endpoint.path.includes('/webhook/task-complete')) return 'card';
   if (endpoint.path.includes('/agents') && !endpoint.path.includes('/agent-runtimes')) return 'agent';
   if (endpoint.path.includes('/agent-runtimes')) return 'agentRuntime';
@@ -207,6 +213,12 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
     const comment = { id: 'comment-uuid', cardId: 'card-uuid', authorType: 'user | agent | system', body: 'Comment body', action: 'comment', createdAt: '2026-06-06T00:00:00.000Z' };
     if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: comment }, responseExample: [comment], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
     return { responseSchema: comment, responseExample: comment, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path.includes('/cards/:id/work-products')) {
+    const product = { id: 'work-product-uuid', cardId: 'card-uuid', type: 'pull_request', title: 'PR for task', url: 'https://...', repoUrl: 'https://github.com/org/repo', branch: 'megacorps/card-1234-alice', commitSha: 'abc123', pullRequestUrl: 'https://github.com/org/repo/pull/42' };
+    if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: product }, responseExample: [product], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: product, responseExample: product, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/task-runs') || endpoint.path.endsWith('/run') || endpoint.path.endsWith('/review')) {

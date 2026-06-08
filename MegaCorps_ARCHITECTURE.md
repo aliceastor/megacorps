@@ -2,6 +2,19 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.8 - Live UI, Repo Workspaces, and Work Products
+
+Date: 2026-06-08
+
+Completed in this pass:
+
+- Added authenticated WebSocket live events at `GET /api/live`, filtered by company membership. The web app now uses React Query as the browser cache layer and live events invalidate chat sessions/messages, Kanban cards, card comments/logs, projects, goals, and work products.
+- Direct Chat now publishes live events as soon as the server stores the user message, when the agent run starts, and when the reply or failure is stored. The UI keeps optimistic outgoing messages and the typing indicator, while server events keep other tabs current.
+- Reworked project workspaces into repo-centric project policy. Projects now store provider, repo URL, default/protected branches, work branch pattern, pull-before-run, push-after-run, completion policy, setup/test commands, runtime service metadata, and an optional local workspace hint.
+- Prompt injection now tells agents that local clone paths are runtime-owned and not a MegaCorps source of truth. Agents must pull/rebase before repo work, work on a task branch, validate, then push a branch or PR and report reviewable URLs/commits.
+- Added `work_products` as first-class task deliverables. Webhooks can submit `workProducts`, operators can attach them to cards, and Kanban details now include a Work Products tab for PRs, commits, previews, reports, screenshots, artifacts, and external URLs.
+- Updated API Help, README, Workspaces UI, and prompt documentation for repo project policy and work products.
+
 ## Architecture Update v1.7 - Project Workspaces, Scoped Goals, and Help Review
 
 Date: 2026-06-08
@@ -103,7 +116,8 @@ Reference-informed next phases:
 - [x] Phase 15: Async worker queue plus first-class task-run attempts.
 - [ ] Phase 16: Dependency/blocker graph with derived ready state, reclaim policy, and structured handoff records.
 - [ ] Phase 17: Chain-of-command context, manager review, escalation, and delegation loop.
-- [ ] Phase 18: Work products, attachments, preview links, and company template import/export.
+- [x] Phase 18: Repo-centric project workspace policy and first-class work products.
+- [ ] Phase 19: Company template import/export and secret references.
 
 ## Architecture Update v1.0 - Production Hardening and Real O-chart
 
@@ -254,7 +268,7 @@ The older phase checklist later in this document is kept as historical design no
 - [x] Context includes recent task messages, logs, board snapshot, activity, runs, and matching knowledge docs.
 - [x] Project-focused Workspaces page and scoped project/goal context.
 - [ ] Git worktree/branch/commit/merge automation.
-- [ ] Work product/artifact attachment tracking.
+- [x] Work product/artifact attachment tracking.
 
 #### Phase 7 - Dashboard and Observability
 
@@ -265,7 +279,7 @@ The older phase checklist later in this document is kept as historical design no
 - [x] Cron status/history/manual tick API.
 - [x] Cron status/history UI.
 - [x] Runtime health summary API and Settings UI.
-- [ ] WebSocket/SSE realtime updates.
+- [x] Authenticated WebSocket live updates with React Query cache invalidation.
 - [ ] Notification bell/panel.
 - [~] Runtime health/version/capability heartbeat.
 
@@ -963,6 +977,8 @@ Request 進入
 ### 7.1 設計
 
 每個 **Project** 有一個共享 git repo 作為工作區：
+
+> Superseded by v1.8 repo-centric project workspaces: MegaCorps stores repo provider/URL/branch policy/setup/test commands and injects Git protocol into prompts. Remote agents use their own runtime-local folders; `/workspaces/...` style server-local paths are only legacy design notes or optional hints, not the source of truth.
 
 ```
 /workspaces/<company_slug>/<project_slug>/

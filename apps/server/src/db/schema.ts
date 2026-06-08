@@ -59,7 +59,26 @@ export const userInvites = pgTable('user_invites', {
 });
 
 export const departments = pgTable('departments', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), name: text('name').notNull(), slug: text('slug').notNull(), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
-export const projects = pgTable('projects', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), name: text('name').notNull(), description: text('description'), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
+export const projects = pgTable('projects', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  name: text('name').notNull(),
+  description: text('description'),
+  repoProvider: text('repo_provider').default('github'),
+  repoUrl: text('repo_url'),
+  defaultBranch: text('default_branch').default('main'),
+  protectedBranches: text('protected_branches').array().default(['main', 'master']),
+  workBranchPattern: text('work_branch_pattern').default('megacorps/card-{cardId}-{agentSlug}'),
+  pullBeforeRun: boolean('pull_before_run').default(true),
+  pushAfterRun: boolean('push_after_run').default(true),
+  completionPolicy: text('completion_policy').default('push_or_pr'),
+  setupCommand: text('setup_command'),
+  testCommand: text('test_command'),
+  runtimeServices: jsonb('runtime_services').default({}),
+  workspacePathHint: text('workspace_path_hint'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
 export const goals = pgTable('goals', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), departmentId: uuid('department_id').references(() => departments.id), projectId: uuid('project_id').references(() => projects.id), title: text('title').notNull(), body: text('body'), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
 
 export const agents = pgTable('agents', {
@@ -198,6 +217,26 @@ export const cardComments = pgTable('card_comments', {
   agentId: uuid('agent_id').references(() => agents.id),
   body: text('body').notNull(),
   action: text('action').notNull().default('comment'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+export const workProducts = pgTable('work_products', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  cardId: uuid('card_id').references(() => kanbanCards.id),
+  projectId: uuid('project_id').references(() => projects.id),
+  agentId: uuid('agent_id').references(() => agents.id),
+  taskRunId: uuid('task_run_id').references(() => taskRuns.id),
+  type: text('type').notNull().default('external'),
+  title: text('title').notNull(),
+  summary: text('summary'),
+  url: text('url'),
+  repoProvider: text('repo_provider'),
+  repoUrl: text('repo_url'),
+  branch: text('branch'),
+  commitSha: text('commit_sha'),
+  pullRequestUrl: text('pull_request_url'),
+  metadata: jsonb('metadata').default({}),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 

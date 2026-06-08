@@ -5,10 +5,12 @@ import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardComm
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
+import { publishLiveEvent } from './live.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
 type GoalRow = typeof goals.$inferSelect;
+type ProjectRow = typeof projects.$inferSelect;
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
 type LogStatus = 'queued' | 'running' | 'success' | 'warning' | 'failed';
@@ -90,6 +92,43 @@ function formatGoal(goal: GoalRow): string {
   return `- ${goalScopeLabel(goal)}: ${goal.title}${goal.body ? `\n  ${clipText(goal.body, 1200)}` : ''}`;
 }
 
+function projectRepoLines(project: ProjectRow | null | undefined): string[] {
+  if (!project) return ['Project repository: none'];
+  return [
+    `Project repository provider: ${project.repoProvider ?? 'github'}`,
+    `Project repository URL: ${project.repoUrl ?? 'not configured'}`,
+    `Default branch: ${project.defaultBranch ?? 'main'}`,
+    `Protected branches: ${(project.protectedBranches ?? ['main', 'master']).join(', ') || 'none'}`,
+    `Task branch pattern: ${project.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}'}`,
+    `Pull before run: ${project.pullBeforeRun === false ? 'no' : 'yes'}`,
+    `Push after run: ${project.pushAfterRun === false ? 'no' : 'yes'}`,
+    `Completion policy: ${project.completionPolicy ?? 'push_or_pr'}`,
+    project.setupCommand ? `Setup command: ${project.setupCommand}` : '',
+    project.testCommand ? `Test command: ${project.testCommand}` : '',
+    project.workspacePathHint ? `MegaCorps workspace path hint: ${project.workspacePathHint}` : '',
+    `Runtime services: ${clipText(JSON.stringify(project.runtimeServices ?? {}), 1200)}`,
+  ].filter(Boolean);
+}
+
+function projectGitProtocol(project: ProjectRow | null | undefined, card: CardRow, agent: AgentRow | null | undefined): string {
+  if (!project?.repoUrl) return 'No repository is configured for this project. Do not invent local file paths; report external work products by URL when available.';
+  const branchPattern = project.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}';
+  const branch = branchPattern
+    .replaceAll('{cardId}', card.id.slice(0, 8))
+    .replaceAll('{agentSlug}', agent?.slug ?? 'agent')
+    .replaceAll('{projectId}', project.id.slice(0, 8));
+  return [
+    'Repository workflow:',
+    `1. Use repo ${project.repoUrl}. Your local clone path is runtime-owned; MegaCorps does not assume a shared folder path.`,
+    project.pullBeforeRun === false ? '2. Pull-before-run is disabled for this project.' : `2. Before editing, fetch the latest ${project.defaultBranch ?? 'main'} and pull/rebase so your local workspace is current.`,
+    `3. Work on branch ${branch}; do not push directly to protected branches (${(project.protectedBranches ?? ['main', 'master']).join(', ') || 'none'}).`,
+    project.setupCommand ? `4. Run setup when needed: ${project.setupCommand}` : '4. Run project setup only when needed and report any failure.',
+    project.testCommand ? `5. Validate with: ${project.testCommand}` : '5. Run the most relevant tests/checks available in the repo.',
+    project.pushAfterRun === false ? '6. Push-after-run is disabled; report the local result and blocker clearly.' : `6. Commit and push your branch when work is complete. Prefer a pull request when policy is ${project.completionPolicy ?? 'push_or_pr'}.`,
+    '7. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, or external metadata as applicable.',
+  ].join('\n');
+}
+
 function scopedGoals(goalsRows: GoalRow[], input: { departmentId?: string | null; projectId?: string | null; selectedGoalId?: string | null }): GoalRow[] {
   const selected = input.selectedGoalId ? goalsRows.find((goal) => goal.id === input.selectedGoalId) : undefined;
   const rows = goalsRows.filter((goal) => {
@@ -112,7 +151,7 @@ async function addTaskLog(input: {
   costUsd?: number;
   durationSeconds?: number;
 }) {
-  await db.insert(taskLogs).values({
+  const [log] = await db.insert(taskLogs).values({
     cardId: input.cardId,
     agentId: input.agentId ?? null,
     type: input.type,
@@ -121,18 +160,22 @@ async function addTaskLog(input: {
     output: input.output,
     costUsd: input.costUsd?.toString(),
     durationSeconds: input.durationSeconds,
-  });
+  }).returning();
+  const [card] = await db.select({ companyId: kanbanCards.companyId, projectId: kanbanCards.projectId }).from(kanbanCards).where(eq(kanbanCards.id, input.cardId)).limit(1);
+  if (card && log) publishLiveEvent({ type: 'task_log.created', companyId: card.companyId, entityType: 'task_log', entityId: log.id, cardId: input.cardId, projectId: card.projectId, action: input.type });
 }
 
 async function addCardMessage(input: { cardId: string; agentId?: string | null; authorType?: 'agent' | 'system'; action: string; body: string }) {
-  await db.insert(cardComments).values({
+  const [comment] = await db.insert(cardComments).values({
     cardId: input.cardId,
     agentId: input.agentId ?? null,
     authorType: input.authorType ?? 'agent',
     authorId: null,
     action: input.action,
     body: clipText(input.body, MESSAGE_BOARD_COMMENT_LIMIT),
-  });
+  }).returning();
+  const [card] = await db.select({ companyId: kanbanCards.companyId, projectId: kanbanCards.projectId }).from(kanbanCards).where(eq(kanbanCards.id, input.cardId)).limit(1);
+  if (card && comment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: comment.id, cardId: input.cardId, projectId: card.projectId, action: input.action });
 }
 
 async function addStageLog(cardId: string, agentId: string | null, from: string | null, to: string, actor = 'system') {
@@ -155,7 +198,7 @@ async function addActivity(input: {
   entityId: string;
   details?: Record<string, unknown>;
 }) {
-  await db.insert(activityLog).values({
+  const [event] = await db.insert(activityLog).values({
     companyId: input.companyId,
     actorType: input.actorType ?? 'system',
     actorId: input.actorId ?? input.agentId ?? 'system',
@@ -164,7 +207,8 @@ async function addActivity(input: {
     entityType: input.entityType,
     entityId: input.entityId,
     details: input.details ?? {},
-  });
+  }).returning();
+  if (event) publishLiveEvent({ type: 'activity.created', companyId: input.companyId, entityType: input.entityType, entityId: input.entityId, action: input.action, data: { activityId: event.id } });
 }
 
 async function addTaskRunLog(run: TaskRunRow, status: LogStatus, message: string, output?: string) {
@@ -1323,6 +1367,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
       `Priority: ${focusCard.priority ?? 0}`,
       `Department: ${focusCard.departmentId ? departmentById.get(focusCard.departmentId)?.name ?? focusCard.departmentId : 'none'}`,
       `Project: ${focusCard.projectId ? projectById.get(focusCard.projectId)?.name ?? focusCard.projectId : 'none'}`,
+      `Project repo:\n${projectRepoLines(focusCard.projectId ? projectById.get(focusCard.projectId) : null).join('\n')}`,
       `Goal: ${focusCard.goalId ? goalById.get(focusCard.goalId)?.title ?? focusCard.goalId : 'none'}`,
       `Scoped goals:\n${scopedGoals(companyGoals, { departmentId: focusCard.departmentId, projectId: focusCard.projectId, selectedGoalId: focusCard.goalId }).map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
       `Assignee: ${focusAssignee?.name ?? focusCard.assigneeId ?? 'unassigned'}`,
@@ -1385,7 +1430,7 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
   }).slice(0, 5);
   return [
     company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
-    project ? `Project: ${project.name}\n${project.description ?? ''}` : '',
+    project ? `Project: ${project.name}\n${project.description ?? ''}\n${projectRepoLines(project).join('\n')}` : '',
     goal ? `Goal: ${goal.title}\n${goal.body ?? ''}` : '',
     assignee ? [
       `Assigned member: ${assignee.name}`,
@@ -1409,11 +1454,13 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
     card.reviewFeedback ? `Previous review feedback:\n${card.reviewFeedback}` : '',
     kanbanContext ? `Kanban context snapshot:\n${kanbanContext}` : '',
     matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
+    `Repository protocol:\n${projectGitProtocol(project, card, assignee)}`,
     'Task body:',
     clipText(card.body, TASK_BODY_CHAR_LIMIT),
     'Completion protocol:',
     [
       `If you can complete the task, post the final answer back through the MegaCorps webhook with status="done".`,
+      `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, report URL, screenshot URL, or artifact URL instead of local-only file paths.`,
       `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
       `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
       `If no reviewer/manager exists, the server will move top-level escalations to blocked for human intervention.`,

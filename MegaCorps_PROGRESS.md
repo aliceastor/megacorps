@@ -14,8 +14,8 @@ The current local stack runs with Docker:
 
 Latest verified baseline:
 
-- Phase 1-16 operational MVP flows are implemented.
-- Company registry page, company memberships, company-scoped RBAC, department setup, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, project-scoped direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention/escalation, lifecycle logs, knowledge docs, company/department/project goal context, execution locks, stale-lock retry/block recovery, DB-backed task-run queue, idempotent task-complete webhooks, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
+- Phase 1-18 operational MVP flows are implemented.
+- Company registry page, company memberships, company-scoped RBAC, department setup, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, project-scoped direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention/escalation, lifecycle logs, knowledge docs, company/department/project goal context, repo-centric project workspace policy, work products, React Query browser cache, WebSocket live events, execution locks, stale-lock retry/block recovery, DB-backed task-run queue, idempotent task-complete webhooks, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
 - Deployment is user-managed. Local-only Docker was used for QA in this pass; NAS/server deployment remains user-managed.
 - Browser plugin QA verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text.
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
@@ -92,7 +92,7 @@ Paperclip is closer to the product MegaCorps should become. It is a company cont
 - Work products should be first-class: files, reports, links, screenshots, PRs, previews, and artifacts should attach to the task that produced them.
 - Company templates/import/export matter once the system can run more than one organization.
 
-MegaCorps already mirrors Paperclip in the high-level model: companies, departments, company memberships, company-scoped RBAC, O-chart, agents, goals, Kanban, budgets, approvals, logs, direct chat, runtime presets, task-run queue attempts, and Help/API discovery. The missing Paperclip-style work is service-agent keys/invites, chain-of-command context in every run, richer dependency/blocker modeling, work products, portable company templates, and durable worker execution outside the API process.
+MegaCorps already mirrors Paperclip in the high-level model: companies, departments, company memberships, company-scoped RBAC, O-chart, agents, goals, Kanban, budgets, approvals, logs, direct chat, runtime presets, task-run queue attempts, repo-centric project workspace policy, work products, React Query/WebSocket live updates, and Help/API discovery. The remaining Paperclip-style work is secret references, company template import/export, plugin architecture, richer dependency/blocker modeling, and durable worker execution outside the API process.
 
 ### MegaCorps Direction After This Review
 
@@ -112,8 +112,9 @@ Recommended next phases:
 
 1. Phase 16: Dependency/blocker graph with ready-state derivation and reclaim policy.
 2. Phase 17: Chain-of-command delegation context and manager review/escalation loop.
-3. Phase 18: Work products, attachments, preview links, and company template import/export.
-4. Phase 19: Worker sidecar, distributed queue locks, and run progress streaming.
+3. Phase 18: Repo-centric project workspace policy and first-class work products. Completed.
+4. Phase 19: Secret references plus company template import/export.
+5. Phase 20: Worker sidecar, distributed queue locks, and deeper runtime liveness/recovery.
 
 ## Current MegaCorps Implementation
 
@@ -633,6 +634,9 @@ Implemented or partially implemented:
 - Task and API logs.
 - Sub-task creation and parent cascade.
 - Company/project/goal ancestry in prompts.
+- Repo-centric project workspace policy with pull-before-run and push/PR completion protocol.
+- Work products for PRs, commits, previews, reports, screenshots, artifacts, and external URLs.
+- React Query browser cache and authenticated WebSocket live event invalidation.
 - Knowledge base CRUD and tag-based prompt injection.
 - Project/workspace/goal setup UI.
 - Dashboard, direct chat, logs, budget, settings, knowledge, and workspace pages.
@@ -643,15 +647,14 @@ Still missing:
 - Dedicated async worker sidecar for long-running Hermes jobs.
 - Distributed queue locks/retries with BullMQ/Redis or equivalent.
 - Active external runtime probes, runtime versions, and adapter-reported capabilities.
-- A richer event bus/streaming layer beyond the current `activity_log`.
+- A richer durable event bus/streaming layer beyond the current in-process WebSocket broadcaster and `activity_log`.
 - Multi-stage approval policy UI.
-- Project git worktrees, branches, commits, and merge/review flow.
-- Work products and attachments.
+- Deeper repo integration such as automated PR creation, merge checks, and branch cleanup.
 - Company template import/export with secret scrubbing.
 - Plugin architecture.
 - Secret encryption/external secret store for adapter credentials.
 - End-to-end browser test suite.
-- WebSocket/SSE realtime updates for chat, task progress, logs, and dashboard counters.
+- Multi-process WebSocket/SSE backplane for chat, task progress, logs, and dashboard counters.
 - Multi-process/distributed rate limiting and advanced abuse controls.
 - Replica-safe company membership enforcement for future multi-server deployments.
 - Versioned migrations with rollback strategy; current migration is idempotent bootstrap SQL.
@@ -678,9 +681,9 @@ The Phase 1-15 operational MVP is usable for controlled local/NAS debugging, but
    - continue tightening system-level audit scoping for multi-tenant deployments
 
 4. Workspaces:
-   - project workspace path
-   - agent branch/worktree
-   - output/work-product tracking
+   - repo provider credentials and secret refs
+   - automated branch/PR lifecycle
+   - optional runtime-local workspace hints without making local folders the source of truth
 
 5. Async execution:
    - move the current in-process DB queue worker into a dedicated sidecar
@@ -694,8 +697,8 @@ The Phase 1-15 operational MVP is usable for controlled local/NAS debugging, but
    - approval queue filters
 
 7. Realtime collaboration:
-   - WebSocket or SSE for chat, run progress, logs, and dashboard updates
-   - reconnect and backfill behavior
+   - replace the in-process live broadcaster with a multi-replica event backplane
+   - extend live events to streamed adapter progress and dashboard counters
 
 8. Browser QA:
    - manual Browser plugin pass is complete for the current UI
