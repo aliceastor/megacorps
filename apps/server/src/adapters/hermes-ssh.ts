@@ -23,16 +23,12 @@ export function buildHermesSshRemoteCommand(agent: AgentLike, task: TaskContext)
   if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
   const prompt = buildAgentPrompt(agent, task);
   const hermesCommand = getAdapterStringConfig(agent, 'hermesCommand', 'HERMES_SSH_COMMAND', 'hermes');
-  const maxTurns = getAdapterNumberConfig(agent, 'maxTurns', 'HERMES_MAX_TURNS', 60);
   const command = [
     hermesCommand,
-    'chat',
+    '-z',
+    prompt,
     '--profile',
     agent.hermesProfile,
-    ...(agent.currentSessionId ? ['--resume', agent.currentSessionId] : []),
-    '--max-turns',
-    String(maxTurns),
-    prompt,
   ];
   return command.map(shellQuote).join(' ');
 }

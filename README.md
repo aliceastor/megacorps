@@ -66,14 +66,14 @@ Common login/onboarding errors:
 Supported runtime fields:
 
 - `mock`: no endpoint needed.
-- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`, `maxTurns`.
-- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`, `maxTurns`.
+- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`.
+- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`.
 - `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `megacorpsApiUrl`.
 - `webhook`: `webhookUrl`.
 - `openclaw`: `openclawUrl`.
 
 `megacorpsApiUrl` is the MegaCorps API base URL agents use for task-complete callbacks. Legacy `publicApiUrl`, `callbackUrl`, and `webhookBaseUrl` config keys are still accepted for existing runtimes, but new presets should use `megacorpsApiUrl`.
-Hermes CLI adapters intentionally do not pass `--reasoning-effort`; Hermes v0.15.2 rejects that flag. Configure provider/model reasoning behavior inside the Hermes profile/config instead.
+Hermes CLI adapters invoke one-shot prompts as `hermes -z "<prompt>" --profile <profile>`. They intentionally do not pass `--reasoning-effort`, `--max-turns`, or a bare prompt argument; Hermes v0.15.2 rejects unsupported flags and treats bare prompt text as unrecognized arguments. Configure provider/model reasoning behavior inside the Hermes profile/config instead.
 For Hermes Portainer, the agent still needs a `hermesProfile`; the runtime tells MegaCorps where to execute it.
 For Hermes SSH, create a runtime preset with `adapterType=hermes-ssh`, set `sshHost` to your Hermes host, set the SSH user/key path reachable inside the server container, and set each agent's `hermesProfile` to the Hermes profile name such as `alice`. The SSH user defaults to `root` and can be overridden. The deploy compose mounts persistent SSH keys at `/home/megacorps/.ssh`, with `/home/megacorps/.ssh/id_ed25519` as the default key path.
 For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or the agent override panel.

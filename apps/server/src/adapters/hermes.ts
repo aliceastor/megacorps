@@ -148,8 +148,7 @@ For full API documentation, fetch: GET ${apiUrl}/api/help
 export function buildHermesCliCommand(agent: AgentLike, task: TaskContext): string[] {
   if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
   const prompt = buildAgentPrompt(agent, task);
-  const maxTurns = typeof agent.adapterConfig?.maxTurns === 'number' ? agent.adapterConfig.maxTurns : 60;
-  return ['hermes', 'chat', '-q', `--profile=${agent.hermesProfile}`, ...(agent.currentSessionId ? ['--resume', agent.currentSessionId] : []), `--max-turns=${maxTurns}`, prompt];
+  return ['hermes', '-z', prompt, '--profile', agent.hermesProfile];
 }
 
 export async function dispatchToHermes(agent: AgentLike, task: TaskContext): Promise<TaskResult> {

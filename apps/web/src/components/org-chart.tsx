@@ -41,7 +41,6 @@ function adapterFields(adapterType?: string): ConfigField[] {
     { key: 'portainerEndpointId', label: 'Endpoint ID' },
     { key: 'hermesContainer', label: 'Hermes container' },
     { key: 'megacorpsApiUrl', label: 'MegaCorps callback URL', description: megacorpsApiDescription },
-    { key: 'maxTurns', label: 'Max turns', type: 'number' },
   ];
   if (adapterType === 'hermes-ssh') return [
     { key: 'sshHost', label: 'SSH host' },
@@ -51,7 +50,6 @@ function adapterFields(adapterType?: string): ConfigField[] {
     { key: 'sshOptions', label: 'SSH extra options' },
     { key: 'hermesCommand', label: 'Hermes command' },
     { key: 'megacorpsApiUrl', label: 'MegaCorps callback URL', description: megacorpsApiDescription },
-    { key: 'maxTurns', label: 'Max turns', type: 'number' },
   ];
   if (adapterType === 'hermes-gateway') return [
     { key: 'hermesGatewayUrl', label: 'Hermes HTTP API URL' },

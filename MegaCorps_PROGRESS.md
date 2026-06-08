@@ -21,7 +21,7 @@ Latest verified baseline:
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
 - API discovery is available at `GET /api/help`, `GET /api/help?format=markdown`, and the Web UI Help page, with response schema examples and rate-limit notes for every endpoint.
 - Sidebar navigation now keeps Help and Settings in the bottom utility area, with the collapse toggle inside the sidebar.
-- Hermes SSH adapter is implemented for direct `ssh -> hermes chat --profile {profile}` dispatch against the configured Hermes host. No production SSH host is hardcoded.
+- Hermes SSH adapter is implemented for direct `ssh -> hermes -z "{prompt}" --profile {profile}` dispatch against the configured Hermes host. No production SSH host is hardcoded.
 - Browser API fallback now tries the current browser hostname on port `4000` before falling back to baked `NEXT_PUBLIC_API_URL`, which avoids NAS deployments accidentally calling unreachable `localhost` or stale IPs.
 - In-app rate limiting is enabled by default, and API Help now includes required roles for endpoints.
 - Company-owned read APIs now scope results to the current user's company memberships.
@@ -459,8 +459,8 @@ Where to configure:
 Runtime fields:
 
 - `mock`: no endpoint required.
-- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`, `maxTurns`.
-- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`, `maxTurns`.
+- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`.
+- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`.
 - `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `megacorpsApiUrl`.
 - `webhook`: `webhookUrl`.
 - `openclaw`: `openclawUrl`.
@@ -468,13 +468,13 @@ Runtime fields:
 Compatibility notes:
 
 - `megacorpsApiUrl` is the MegaCorps callback/API base URL injected into task prompts. Existing `publicApiUrl`, `callbackUrl`, and `webhookBaseUrl` keys are still read for legacy runtime presets.
-- Hermes CLI adapters do not pass `--reasoning-effort`; Hermes v0.15.2 rejects that flag. Reasoning behavior belongs in the Hermes profile/config, not the MegaCorps command line.
+- Hermes CLI adapters pass prompts with `-z` and do not pass `--reasoning-effort`, `--max-turns`, or bare prompt arguments. Hermes v0.15.2 rejects unsupported CLI flags and bare prompt text. Reasoning behavior belongs in the Hermes profile/config, not the MegaCorps command line.
 
 Current behavior:
 
 - `mock` completes local smoke tasks.
-- Hermes Portainer executes `hermes chat -q` through Portainer exec using runtime/agent configuration.
-- Hermes SSH executes `hermes chat --profile {profile} "{prompt}"` through OpenSSH and captures stdout/stderr as the adapter result.
+- Hermes Portainer executes `hermes -z "{prompt}" --profile {profile}` through Portainer exec using runtime/agent configuration.
+- Hermes SSH executes `hermes -z "{prompt}" --profile {profile}` through OpenSSH and captures stdout/stderr as the adapter result.
 - Hermes HTTP API calls the configured gateway URL.
 - Webhook and OpenClaw adapters post to their configured URLs.
 - Hermes adapter stores session id, cost, duration, and output.

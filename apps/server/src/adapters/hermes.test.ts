@@ -21,11 +21,34 @@ test('Hermes CLI commands do not pass unsupported reasoning-effort flag', () => 
 
   const portainerCommand = buildHermesCliCommand(agent, task);
   assert.equal(portainerCommand.some((item) => item.includes('reasoning-effort')), false);
-  assert.ok(portainerCommand.includes('--max-turns=7'));
+  assert.equal(portainerCommand.includes('chat'), false);
+  assert.equal(portainerCommand.includes('--max-turns=7'), false);
+  assert.equal(portainerCommand[0], 'hermes');
+  assert.equal(portainerCommand[1], '-z');
+  assert.equal(portainerCommand[3], '--profile');
+  assert.equal(portainerCommand[4], 'alice');
 
   const sshCommand = buildHermesSshRemoteCommand(agent, task);
   assert.equal(sshCommand.includes('reasoning-effort'), false);
-  assert.match(sshCommand, /'--max-turns' '7'/);
+  assert.equal(sshCommand.includes("'chat'"), false);
+  assert.equal(sshCommand.includes("'--max-turns'"), false);
+  assert.match(sshCommand, /^'\/opt\/hermes\/\.venv\/bin\/hermes' '-z' '.+' '--profile' 'alice'$/s);
+});
+
+test('Hermes SSH command shell-quotes prompt passed through -z', () => {
+  const command = buildHermesSshRemoteCommand({
+    hermesProfile: 'alice',
+    currentSessionId: null,
+    adapterConfig: { hermesCommand: 'hermes' },
+  }, {
+    id: 'chat-1',
+    title: 'Direct chat',
+    body: "Don't expand $HOME or `whoami`.",
+    kind: 'chat',
+  });
+
+  assert.match(command, /^'hermes' '-z' '.+' '--profile' 'alice'$/s);
+  assert.match(command, /Don'\\''t expand \$HOME or `whoami`\./);
 });
 
 test('agent prompts prefer megacorpsApiUrl while accepting legacy publicApiUrl', () => {
