@@ -7,11 +7,12 @@ import { Ban, Bot, GitBranch, GripVertical, ListChecks, MessageSquare, Play, Plu
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
-const statuses = ['todo', 'in_progress', 'in_review', 'done', 'blocked', 'cancelled'] as const;
+const statuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'done', 'blocked', 'cancelled'] as const;
 const statusLabels: Record<string, Record<string, string>> = {
   todo: { 'zh-TW': '待辦', en: 'Todo', ja: '未着手' },
   in_progress: { 'zh-TW': '執行中', en: 'In Progress', ja: '進行中' },
   in_review: { 'zh-TW': '審核中', en: 'In Review', ja: 'レビュー中' },
+  needs_review: { 'zh-TW': '求助審核', en: 'Needs Review', ja: '支援レビュー' },
   done: { 'zh-TW': '完成', en: 'Done', ja: '完了' },
   blocked: { 'zh-TW': '受阻', en: 'Blocked', ja: 'ブロック' },
   cancelled: { 'zh-TW': '已取消', en: 'Cancelled', ja: 'キャンセル' },
@@ -49,7 +50,7 @@ type Agent = { id: string; companyId?: string; name: string; role?: string; adap
 type Company = { id: string; name: string };
 type Department = { id: string; companyId: string; name: string };
 type Project = { id: string; companyId: string; name: string };
-type Goal = { id: string; companyId: string; title: string };
+type Goal = { id: string; companyId: string; departmentId?: string | null; projectId?: string | null; title: string };
 type TaskLog = { id: string; type: string; status: string; message: string; output?: string; costUsd?: string; durationSeconds?: number; createdAt?: string };
 type TaskRun = { id: string; cardId: string; kind: string; status: string };
 type ApiEvent = { id: string; method: string; path: string; statusCode?: number; requestBody?: unknown; responseBody?: unknown; error?: string | null; durationMs?: number; createdAt?: string };
@@ -113,7 +114,24 @@ function statusColor(status: string) {
   if (status === 'cancelled') return '#64748b';
   if (status === 'in_progress') return '#2563eb';
   if (status === 'in_review') return '#9333ea';
+  if (status === 'needs_review') return '#ca8a04';
   return 'var(--border)';
+}
+
+function goalScope(goal: Goal): string {
+  if (goal.projectId) return 'Project';
+  if (goal.departmentId) return 'Department';
+  return 'Company';
+}
+
+function scopedGoalOptions(goals: Goal[], input: { companyId?: string; departmentId?: string | null; projectId?: string | null }) {
+  return goals.filter((goal) => {
+    if (input.companyId && goal.companyId !== input.companyId) return false;
+    if (!goal.departmentId && !goal.projectId) return true;
+    if (goal.departmentId && input.departmentId && goal.departmentId === input.departmentId) return true;
+    if (goal.projectId && input.projectId && goal.projectId === input.projectId) return true;
+    return false;
+  });
 }
 
 function priorityLabel(priority: number) {
@@ -215,7 +233,7 @@ export function KanbanBoard() {
   const [tabLoading, setTabLoading] = useState<Record<CardTabKey, boolean>>({ comments: false, logs: false, apiLogs: false });
   const [tab, setTab] = useState<'details' | 'comments' | 'logs' | 'subtasks'>('details');
   const [commentBody, setCommentBody] = useState('');
-  const [commentAction, setCommentAction] = useState<'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run'>('comment');
+  const [commentAction, setCommentAction] = useState<'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run' | 'escalate_to_reviewer'>('comment');
   const [commentAgentId, setCommentAgentId] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
@@ -229,6 +247,7 @@ export function KanbanBoard() {
   const [requiresApproval, setRequiresApproval] = useState(false);
   const [filterStatus, setFilterStatus] = useState('');
   const [filterAssignee, setFilterAssignee] = useState('');
+  const [filterProject, setFilterProject] = useState('');
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -383,9 +402,11 @@ export function KanbanBoard() {
   const visibleCards = useMemo(() => cards.filter((card) => {
     if (filterStatus && card.columnStatus !== filterStatus) return false;
     if (filterAssignee && card.assigneeId !== filterAssignee) return false;
+    if (filterProject === '__none' && card.projectId) return false;
+    if (filterProject && filterProject !== '__none' && card.projectId !== filterProject) return false;
     if (query && !`${card.title} ${card.body} ${(card.tags ?? []).join(' ')}`.toLowerCase().includes(query.toLowerCase())) return false;
     return true;
-  }), [cards, filterAssignee, filterStatus, query]);
+  }), [cards, filterAssignee, filterProject, filterStatus, query]);
   const subtasks = selected ? cards.filter((card) => card.parentCardId === selected.id) : [];
 
   async function create() {
@@ -549,7 +570,7 @@ export function KanbanBoard() {
       setComments(nextComments);
       saveCardTabCache(selected.id, { comments: { rows: nextComments, cachedAt: Date.now() } });
       setCommentBody('');
-      setToast({ message: effectiveAction === 'pause_agent' ? 'Agent paused and task blocked' : effectiveAction === 'continue_run' ? 'Task queued to continue' : 'Message added', type: 'success' });
+      setToast({ message: effectiveAction === 'pause_agent' ? 'Agent paused and task blocked' : effectiveAction === 'continue_run' ? 'Task queued to continue' : effectiveAction === 'escalate_to_reviewer' ? 'Task escalated for review' : 'Message added', type: 'success' });
       await refresh();
       await Promise.all([loadCardLogs(selected, true), loadCardApiLogs(selected, true)]);
     } catch (err) {
@@ -569,6 +590,11 @@ export function KanbanBoard() {
       <select className="input compact" value={filterAssignee} onChange={(e) => setFilterAssignee(e.target.value)}>
         <option value="">All agents</option>
         {agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}
+      </select>
+      <select className="input compact" value={filterProject} onChange={(e) => setFilterProject(e.target.value)}>
+        <option value="">All projects</option>
+        <option value="__none">No project</option>
+        {projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}
       </select>
       <button className="btn" onClick={() => void refresh()}><RefreshCw size={15} /></button>
       <button className="btn btn-primary" onClick={() => setModalOpen(true)}><Plus size={15} /> {t('newCard')}</button>
@@ -591,9 +617,9 @@ export function KanbanBoard() {
             <textarea className="input" placeholder="Description" value={newBody} onChange={(e) => setNewBody(e.target.value)} rows={5} />
             <div className="form-grid">
               <select className="input" value={newCompany} onChange={(e) => { setNewCompany(e.target.value); setNewDepartment(''); setNewProject(''); setNewGoal(''); }}><option value="">Company</option>{companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}</select>
-              <select className="input" value={newDepartment} onChange={(e) => setNewDepartment(e.target.value)}><option value="">Department</option>{departments.filter((department) => !newCompany || department.companyId === newCompany).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select>
-              <select className="input" value={newProject} onChange={(e) => setNewProject(e.target.value)}><option value="">Project</option>{projects.filter((project) => !newCompany || project.companyId === newCompany).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>
-              <select className="input" value={newGoal} onChange={(e) => setNewGoal(e.target.value)}><option value="">Goal</option>{goals.filter((goal) => !newCompany || goal.companyId === newCompany).map((goal) => <option value={goal.id} key={goal.id}>{goal.title}</option>)}</select>
+              <select className="input" value={newDepartment} onChange={(e) => { setNewDepartment(e.target.value); setNewGoal(''); }}><option value="">Department</option>{departments.filter((department) => !newCompany || department.companyId === newCompany).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select>
+              <select className="input" value={newProject} onChange={(e) => { setNewProject(e.target.value); setNewGoal(''); }}><option value="">Project</option>{projects.filter((project) => !newCompany || project.companyId === newCompany).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>
+              <select className="input" value={newGoal} onChange={(e) => setNewGoal(e.target.value)}><option value="">Goal</option>{scopedGoalOptions(goals, { companyId: newCompany, departmentId: newDepartment, projectId: newProject }).map((goal) => <option value={goal.id} key={goal.id}>{goalScope(goal)} / {goal.title}</option>)}</select>
               <select className="input" value={newAssignee} onChange={(e) => setNewAssignee(e.target.value)}><option value="">Assignee</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
               <select className="input" value={newReviewer} onChange={(e) => setNewReviewer(e.target.value)}><option value="">Reviewer</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
             </div>
@@ -626,9 +652,9 @@ export function KanbanBoard() {
             <div className="form-grid">
               <label className="field-label">Assignee<select className="input" value={draft?.assigneeId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), assigneeId: e.target.value || null })}><option value="">Assignee</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
               <label className="field-label">Reviewer<select className="input" value={draft?.reviewerId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), reviewerId: e.target.value || null, requiresApproval: Boolean(e.target.value) })}><option value="">Reviewer</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
-              <label className="field-label">Department<select className="input" value={draft?.departmentId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), departmentId: e.target.value || null })}><option value="">Department</option>{departments.filter((department) => !selected.companyId || department.companyId === selected.companyId).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
-              <label className="field-label">Project<select className="input" value={draft?.projectId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), projectId: e.target.value || null })}><option value="">Project</option>{projects.filter((project) => !selected.companyId || project.companyId === selected.companyId).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label>
-              <label className="field-label">Goal<select className="input" value={draft?.goalId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), goalId: e.target.value || null })}><option value="">Goal</option>{goals.filter((goal) => !selected.companyId || goal.companyId === selected.companyId).map((goal) => <option value={goal.id} key={goal.id}>{goal.title}</option>)}</select></label>
+              <label className="field-label">Department<select className="input" value={draft?.departmentId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), departmentId: e.target.value || null, goalId: null })}><option value="">Department</option>{departments.filter((department) => !selected.companyId || department.companyId === selected.companyId).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
+              <label className="field-label">Project<select className="input" value={draft?.projectId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), projectId: e.target.value || null, goalId: null })}><option value="">Project</option>{projects.filter((project) => !selected.companyId || project.companyId === selected.companyId).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label>
+              <label className="field-label">Goal<select className="input" value={draft?.goalId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), goalId: e.target.value || null })}><option value="">Goal</option>{scopedGoalOptions(goals, { companyId: selected.companyId, departmentId: draft?.departmentId ?? selected.departmentId, projectId: draft?.projectId ?? selected.projectId }).map((goal) => <option value={goal.id} key={goal.id}>{goalScope(goal)} / {goal.title}</option>)}</select></label>
             </div>
             <div className="form-grid">
               <label className="field-label">Max retries<input className="input" type="number" min={1} max={10} value={Number(draft?.maxRetries ?? 3)} onChange={(e) => setDraft({ ...(draft ?? {}), maxRetries: Number(e.target.value) })} /></label>
@@ -675,6 +701,7 @@ export function KanbanBoard() {
                   <option value="comment">Comment only</option>
                   <option value="agent_note">Agent note</option>
                   <option value="pause_agent">Stop agent now and block task</option>
+                  <option value="escalate_to_reviewer">Escalate to reviewer</option>
                   <option value="send_to_agent">Send comment to agent context</option>
                   <option value="continue_run">Continue run with comment</option>
                 </select>

@@ -8,6 +8,7 @@ import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
+type GoalRow = typeof goals.$inferSelect;
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
 type LogStatus = 'queued' | 'running' | 'success' | 'warning' | 'failed';
@@ -56,13 +57,49 @@ function terminalRunStatus(status: string | null | undefined): 'success' | 'fail
 }
 
 function reviewCanRun(status: string | null | undefined): boolean {
-  return status === 'in_review' || status === 'done';
+  return status === 'in_review' || status === 'needs_review' || status === 'done';
 }
 
 function resolveEffectiveReviewerId(card: CardRow, agent: AgentRow): string | null {
   if (card.reviewerId && card.reviewerId !== agent.id) return card.reviewerId;
   if (agent.bossId && agent.bossId !== agent.id) return agent.bossId;
   return null;
+}
+
+function assigneeNeedsReview(output: string | null | undefined): boolean {
+  const text = output ?? '';
+  return /\b(needs[_ -]?review|needs[_ -]?guidance|needs[_ -]?reviewer|escalat(?:e|ed|ion)|cannot[_ -]?complete|unable[_ -]?to[_ -]?complete|stuck|blocked:)\b/i.test(text);
+}
+
+type ReviewDecision = 'approved' | 'revision_requested' | 'escalate';
+
+function reviewDecision(output: string, mode: 'quality' | 'help'): ReviewDecision {
+  if (/\b(escalate|needs[_ -]?higher|needs[_ -]?boss|needs[_ -]?manager|cannot[_ -]?resolve|unable[_ -]?to[_ -]?resolve)\b/i.test(output)) return 'escalate';
+  if (/\b(revision[_ -]?requested|request[_ -]?revision|needs[_ -]?rework|redo|retry|reject|rejected|fail|failed|blocked|not\s+approved|not\s+acceptable|cannot\s+approve)\b/i.test(output)) return 'revision_requested';
+  if (/\b(pass|approve|approved|done|complete|completed|resolved)\b/i.test(output)) return 'approved';
+  return mode === 'help' ? 'revision_requested' : 'approved';
+}
+
+function goalScopeLabel(goal: GoalRow): string {
+  if (goal.projectId) return 'Project goal';
+  if (goal.departmentId) return 'Department goal';
+  return 'Company goal';
+}
+
+function formatGoal(goal: GoalRow): string {
+  return `- ${goalScopeLabel(goal)}: ${goal.title}${goal.body ? `\n  ${clipText(goal.body, 1200)}` : ''}`;
+}
+
+function scopedGoals(goalsRows: GoalRow[], input: { departmentId?: string | null; projectId?: string | null; selectedGoalId?: string | null }): GoalRow[] {
+  const selected = input.selectedGoalId ? goalsRows.find((goal) => goal.id === input.selectedGoalId) : undefined;
+  const rows = goalsRows.filter((goal) => {
+    if (!goal.departmentId && !goal.projectId) return true;
+    if (goal.departmentId && input.departmentId && goal.departmentId === input.departmentId) return true;
+    if (goal.projectId && input.projectId && goal.projectId === input.projectId) return true;
+    return false;
+  });
+  if (selected && !rows.some((goal) => goal.id === selected.id)) rows.push(selected);
+  return rows;
 }
 
 async function addTaskLog(input: {
@@ -650,7 +687,10 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       throw new Error(result.output || 'adapter_reported_failure');
     }
     const effectiveReviewerId = resolveEffectiveReviewerId(card, agent);
-    const nextStatus = effectiveReviewerId ? 'in_review' : 'done';
+    const needsHelpReview = assigneeNeedsReview(result.output);
+    const nextStatus = needsHelpReview
+      ? effectiveReviewerId ? 'needs_review' : 'blocked'
+      : effectiveReviewerId ? 'in_review' : 'done';
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
     const [updated] = await db.update(kanbanCards).set({
@@ -659,9 +699,10 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       sessionId: result.sessionId,
       costUsd: result.costUsd.toString(),
       reviewerId: effectiveReviewerId,
-      retryCount: 0,
+      retryCount: nextStatus === 'blocked' ? card.retryCount : 0,
       nextRunAt: null,
       completedAt: nextStatus === 'done' ? new Date() : null,
+      lastError: nextStatus === 'blocked' ? 'Assignee requested reviewer guidance, but no reviewer or manager is available.' : null,
       executionLockId: null,
       executionLockedByAgentId: null,
       executionLockedAt: null,
@@ -674,18 +715,28 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     await addTaskLog({
       cardId: card.id,
       agentId: agent.id,
-      type: 'dispatch',
-      status: result.success ? 'success' : 'failed',
-      message: nextStatus === 'in_review' ? 'Dispatch completed; card moved to review.' : 'Dispatch completed; card marked done.',
+      type: needsHelpReview ? 'escalation' : 'dispatch',
+      status: nextStatus === 'blocked' ? 'failed' : 'success',
+      message: needsHelpReview
+        ? nextStatus === 'needs_review'
+          ? 'Assignee requested reviewer guidance; help review queued.'
+          : 'Assignee requested guidance but no reviewer or manager is available; card blocked.'
+        : nextStatus === 'in_review'
+          ? 'Dispatch completed; card moved to quality review.'
+          : 'Dispatch completed; card marked done.',
       output: result.output,
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
     });
-    await addCardMessage({ cardId: card.id, agentId: agent.id, action: 'agent_update', body: result.output });
-    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, nextStatus, costUsd: result.costUsd, budgetPaused } });
-    await completeTaskRun(options.taskRunId, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+    await addCardMessage({ cardId: card.id, agentId: agent.id, action: needsHelpReview ? (nextStatus === 'blocked' ? 'agent_blocked' : 'agent_escalated') : 'agent_update', body: result.output });
+    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: needsHelpReview ? (nextStatus === 'blocked' ? 'dispatch.blocked' : 'dispatch.needs_review') : 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, nextStatus, costUsd: result.costUsd, budgetPaused, reviewerId: effectiveReviewerId, escalation: needsHelpReview } });
+    await completeTaskRun(options.taskRunId, { status: nextStatus === 'blocked' ? 'failed' : 'success', error: nextStatus === 'blocked' ? 'no_reviewer_available' : null, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
     if (nextStatus === 'in_review') await createPendingApproval(updated, agent.id, card.reviewerId === effectiveReviewerId ? 'Reviewer approval required' : 'Reports-to review required');
+    if (nextStatus === 'needs_review') {
+      await createPendingApproval(updated, agent.id, 'Assignee needs reviewer guidance');
+      await enqueueTaskRun(updated.id, 'review', 'queue');
+    }
     if (nextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
     return updated;
   } catch (error) {
@@ -702,19 +753,44 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     await completeTaskRun(options.taskRunId, { status, output: `Card is already ${card.columnStatus}.` });
     return card;
   }
-  if (card.columnStatus !== 'in_review') throw new Error(`card_not_ready_for_review:${card.columnStatus ?? 'todo'}`);
-  if (!card.reviewerId) {
-    const [updated] = await db.update(kanbanCards).set({ columnStatus: 'done', completedAt: new Date(), updatedAt: new Date() }).where(eq(kanbanCards.id, card.id)).returning();
-    await addStageLog(card.id, null, card.columnStatus, 'done', 'review');
-    await addTaskLog({ cardId: card.id, type: 'review', status: 'success', message: 'No reviewer configured; card approved automatically.' });
-    await resolvePendingApproval(card, 'approved', 'No reviewer configured; approved automatically.');
-    await completeTaskRun(options.taskRunId, { status: 'success', output: 'No reviewer configured; approved automatically.' });
+  if (card.columnStatus !== 'in_review' && card.columnStatus !== 'needs_review') throw new Error(`card_not_ready_for_review:${card.columnStatus ?? 'todo'}`);
+  const reviewMode = card.columnStatus === 'needs_review' ? 'help' : 'quality';
+  let reviewerId = card.reviewerId;
+  if (reviewerId && reviewerId === card.assigneeId) {
+    const [assignee] = await db.select().from(agents).where(and(eq(agents.id, reviewerId), isNull(agents.deletedAt))).limit(1);
+    reviewerId = assignee?.bossId && assignee.bossId !== assignee.id && assignee.bossId !== card.assigneeId ? assignee.bossId : null;
+    if (reviewerId) {
+      await db.update(kanbanCards).set({ reviewerId, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
+      if (options.taskRunId) await db.update(taskRuns).set({ agentId: reviewerId, updatedAt: new Date() }).where(eq(taskRuns.id, options.taskRunId));
+      await addTaskLog({ cardId: card.id, agentId: reviewerId, type: 'review', status: 'warning', message: 'Self-review prevented; review reassigned to the assignee manager.' });
+    }
+  }
+  if (!reviewerId) {
+    const reason = reviewMode === 'help'
+      ? 'Escalation requested but no reviewer or manager is available; card blocked.'
+      : 'Review requested but no independent reviewer or manager is available; card blocked.';
+    const [updated] = await db.update(kanbanCards).set({
+      columnStatus: 'blocked',
+      lastError: reason,
+      completedAt: null,
+      executionLockId: null,
+      executionLockedByAgentId: null,
+      executionLockedAt: null,
+      executionLockExpiresAt: null,
+      activeHeartbeatRunId: null,
+      updatedAt: new Date(),
+    }).where(eq(kanbanCards.id, card.id)).returning();
+    await addStageLog(card.id, null, card.columnStatus, 'blocked', 'review');
+    await addTaskLog({ cardId: card.id, type: 'review', status: 'failed', message: reason });
+    await addCardMessage({ cardId: card.id, authorType: 'system', action: 'review_blocked', body: reason });
+    await resolvePendingApproval(card, 'cancelled', reason);
+    await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'review', action: 'review.blocked', entityType: 'card', entityId: card.id, details: { reason, mode: reviewMode } });
+    await completeTaskRun(options.taskRunId, { status: 'failed', error: reason, output: reason });
     if (!updated) throw new Error('card_update_failed');
-    await cascadeParentStatus(updated.parentCardId);
     return updated;
   }
 
-  const [reviewer] = await db.select().from(agents).where(and(eq(agents.id, card.reviewerId), isNull(agents.deletedAt))).limit(1);
+  const [reviewer] = await db.select().from(agents).where(and(eq(agents.id, reviewerId), isNull(agents.deletedAt))).limit(1);
   if (!reviewer) throw new Error('reviewer_not_found');
   if (reviewer.isBusy) throw new Error('reviewer_busy');
 
@@ -724,9 +800,10 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
   await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'running', message: 'Review started.' });
   try {
     const adapter = getAdapter(reviewer.adapterType ?? 'hermes');
+    const promptCard = reviewerId === card.reviewerId ? card : { ...card, reviewerId };
     const result = await adapter.dispatch(
       await buildExecutionAgent(reviewer),
-      { id: card.id, title: `Review: ${card.title}`, body: await buildReviewPrompt(card), timeoutSeconds: 180, taskRunId: options.taskRunId },
+      { id: card.id, title: `Review: ${card.title}`, body: await buildReviewPrompt(promptCard), timeoutSeconds: 180, taskRunId: options.taskRunId },
     );
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && latest.columnStatus !== card.columnStatus && latest.activeHeartbeatRunId !== run.id) {
@@ -751,8 +828,57 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     }
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     if (!result.success) throw new Error(result.output || 'review_adapter_reported_failure');
-    const rejected = /\b(reject|rejected|fail|failed|blocked)\b/i.test(result.output);
+    const decision = reviewDecision(result.output, reviewMode);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
+
+    if (decision === 'escalate') {
+      const nextReviewerId = reviewer.bossId && reviewer.bossId !== reviewer.id && reviewer.bossId !== card.assigneeId ? reviewer.bossId : null;
+      if (nextReviewerId) {
+        const [updated] = await db.update(kanbanCards).set({
+          columnStatus: 'needs_review',
+          reviewerId: nextReviewerId,
+          reviewFeedback: result.output,
+          completedAt: null,
+          updatedAt: new Date(),
+        }).where(eq(kanbanCards.id, card.id)).returning();
+        await addTaskLog({
+          cardId: card.id,
+          agentId: reviewer.id,
+          type: 'review',
+          status: 'warning',
+          message: 'Reviewer escalated the help review to their manager.',
+          output: result.output,
+          costUsd: result.costUsd,
+          durationSeconds: result.durationSeconds,
+        });
+        await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: 'review_escalated', body: result.output });
+        await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
+        await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: 'review.escalated', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, nextReviewerId } });
+        await completeTaskRun(options.taskRunId, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+        if (!updated) throw new Error('card_update_failed');
+        await enqueueTaskRun(updated.id, 'review', 'queue');
+        return updated;
+      }
+      const reason = 'Reviewer could not resolve the task and has no manager to escalate to; card blocked.';
+      const [updated] = await db.update(kanbanCards).set({
+        columnStatus: 'blocked',
+        reviewFeedback: result.output,
+        lastError: reason,
+        completedAt: null,
+        updatedAt: new Date(),
+      }).where(eq(kanbanCards.id, card.id)).returning();
+      await addStageLog(card.id, reviewer.id, card.columnStatus, 'blocked', 'review');
+      await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'failed', message: reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: 'review_blocked', body: result.output });
+      await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), durationSeconds: result.durationSeconds, error: reason }).where(eq(heartbeatRuns.id, run.id));
+      await resolvePendingApproval(card, 'cancelled', reason, reviewer.id);
+      await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: 'review.blocked', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, reason } });
+      await completeTaskRun(options.taskRunId, { status: 'failed', error: reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      if (!updated) throw new Error('card_update_failed');
+      return updated;
+    }
+
+    const rejected = decision === 'revision_requested';
     const [updated] = await db.update(kanbanCards).set({
       columnStatus: rejected ? 'todo' : 'done',
       reviewFeedback: result.output,
@@ -765,15 +891,17 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       agentId: reviewer.id,
       type: 'review',
       status: result.success ? 'success' : 'failed',
-      message: rejected ? 'Review rejected; card returned to todo.' : 'Review passed; card marked done.',
+      message: rejected
+        ? reviewMode === 'help' ? 'Reviewer provided guidance; card returned to todo for rework.' : 'Review rejected; card returned to todo.'
+        : reviewMode === 'help' ? 'Reviewer resolved the escalated task; card marked done.' : 'Review passed; card marked done.',
       output: result.output,
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
     });
-    await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: rejected ? 'review_rejected' : 'review_note', body: result.output });
+    await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: rejected ? (reviewMode === 'help' ? 'review_guidance' : 'review_rejected') : 'review_note', body: result.output });
     await db.update(heartbeatRuns).set({ status: result.success ? 'success' : 'failed', completedAt: new Date(), durationSeconds: result.durationSeconds, error: result.success ? null : result.output }).where(eq(heartbeatRuns.id, run.id));
-    await resolvePendingApproval(card, rejected ? 'rejected' : 'approved', rejected ? result.output : 'Reviewer approved task.', reviewer.id);
-    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: rejected ? 'review.rejected' : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd } });
+    await resolvePendingApproval(card, rejected ? (reviewMode === 'help' ? 'revision_requested' : 'rejected') : 'approved', rejected ? result.output : 'Reviewer approved task.', reviewer.id);
+    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: rejected ? (reviewMode === 'help' ? 'review.revision_requested' : 'review.rejected') : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, mode: reviewMode } });
     await completeTaskRun(options.taskRunId, { status: rejected ? 'failed' : 'success', error: rejected ? result.output : null, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
     if (!rejected) await cascadeParentStatus(updated.parentCardId);
@@ -1030,7 +1158,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
             result.errors += 1;
             app.log.warn({ error, cardId: card.id }, 'dispatch cron skipped card');
           }
-        } else if (card.columnStatus === 'in_review') {
+        } else if (card.columnStatus === 'in_review' || card.columnStatus === 'needs_review') {
           try {
             await enqueueTaskRun(card.id, 'review', source === 'manual' ? 'manual' : 'loop');
             result.reviewed += 1;
@@ -1151,7 +1279,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
     `Dispatch interval seconds: ${company?.dispatchIntervalSeconds ?? 10}`,
     `Departments: ${companyDepartments.map((department) => `${department.name} (${department.slug})`).join(', ') || 'none'}`,
     `Projects: ${companyProjects.map((project) => project.name).join(', ') || 'none'}`,
-    `Goals: ${companyGoals.map((goal) => goal.title).join(', ') || 'none'}`,
+    `Goals:\n${companyGoals.map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
   ].join('\n'), 2600);
 
   const statusCounts = companyCards.reduce<Record<string, number>>((acc, card) => {
@@ -1171,7 +1299,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
     const manager = focusAgent.bossId ? agentById.get(focusAgent.bossId) : undefined;
     const reports = companyAgents.filter((agent) => agent.bossId === focusAgent.id);
     const assigned = companyCards.filter((card) => card.assigneeId === focusAgent.id && !['done', 'blocked', 'cancelled'].includes(card.columnStatus ?? 'todo')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
-    const reviews = companyCards.filter((card) => card.reviewerId === focusAgent.id || reports.some((report) => report.id === card.assigneeId && card.columnStatus === 'in_review')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
+    const reviews = companyCards.filter((card) => card.reviewerId === focusAgent.id || reports.some((report) => report.id === card.assigneeId && ['in_review', 'needs_review'].includes(card.columnStatus ?? 'todo'))).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
     addContextSection(state, 'Invocation Agent Work Context', [
       `Agent: ${focusAgent.name}`,
       `Identity label: ${focusAgent.role}`,
@@ -1196,6 +1324,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
       `Department: ${focusCard.departmentId ? departmentById.get(focusCard.departmentId)?.name ?? focusCard.departmentId : 'none'}`,
       `Project: ${focusCard.projectId ? projectById.get(focusCard.projectId)?.name ?? focusCard.projectId : 'none'}`,
       `Goal: ${focusCard.goalId ? goalById.get(focusCard.goalId)?.title ?? focusCard.goalId : 'none'}`,
+      `Scoped goals:\n${scopedGoals(companyGoals, { departmentId: focusCard.departmentId, projectId: focusCard.projectId, selectedGoalId: focusCard.goalId }).map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
       `Assignee: ${focusAssignee?.name ?? focusCard.assigneeId ?? 'unassigned'}`,
       `Reviewer: ${focusReviewer?.name ?? focusCard.reviewerId ?? 'none'}`,
       `Parent: ${parent ? compactCardLine(parent, agentById) : 'none'}`,
@@ -1240,11 +1369,14 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
 
 async function buildTaskPrompt(card: CardRow): Promise<string> {
   const [company] = await db.select().from(companies).where(eq(companies.id, card.companyId)).limit(1);
+  const [department] = card.departmentId ? await db.select().from(departments).where(eq(departments.id, card.departmentId)).limit(1) : [];
   const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
   const [goal] = card.goalId ? await db.select().from(goals).where(eq(goals.id, card.goalId)).limit(1) : [];
   const [assignee] = card.assigneeId ? await db.select().from(agents).where(and(eq(agents.id, card.assigneeId), isNull(agents.deletedAt))).limit(1) : [];
   const [manager] = assignee?.bossId ? await db.select().from(agents).where(and(eq(agents.id, assignee.bossId), isNull(agents.deletedAt))).limit(1) : [];
   const reports = assignee ? await db.select().from(agents).where(eq(agents.bossId, assignee.id)) : [];
+  const companyGoals = await db.select().from(goals).where(eq(goals.companyId, card.companyId)).orderBy(desc(goals.createdAt));
+  const relevantGoals = scopedGoals(companyGoals, { departmentId: card.departmentId, projectId: card.projectId, selectedGoalId: card.goalId });
   const docs = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.companyId, card.companyId)).orderBy(desc(knowledgeDocs.updatedAt)).limit(10);
   const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.assigneeId });
   const matchingDocs = docs.filter((doc) => {
@@ -1261,6 +1393,16 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
       `Reports to: ${manager?.name ?? 'top-level'}`,
       `Direct reports: ${reports.length ? reports.map((report) => `${report.name} (${report.role})`).join(', ') : 'none'}`,
     ].join('\n') : '',
+    [
+      'Goal context:',
+      `Company goals:\n${companyGoals.filter((row) => !row.departmentId && !row.projectId).map((row) => formatGoal(row)).join('\n') || 'none'}`,
+      `Department: ${department?.name ?? 'none'}`,
+      `Department goals:\n${card.departmentId ? companyGoals.filter((row) => row.departmentId === card.departmentId).map((row) => formatGoal(row)).join('\n') || 'none' : 'none'}`,
+      `Project: ${project?.name ?? 'none'}`,
+      `Project goals:\n${card.projectId ? companyGoals.filter((row) => row.projectId === card.projectId).map((row) => formatGoal(row)).join('\n') || 'none' : 'none'}`,
+      `Selected card goal:\n${goal ? formatGoal(goal) : 'none'}`,
+      `Effective goal stack:\n${relevantGoals.map((row) => formatGoal(row)).join('\n') || 'none'}`,
+    ].join('\n'),
     `Card: ${card.title}`,
     `Status: ${card.columnStatus}`,
     `Priority: ${card.priority ?? 0}`,
@@ -1269,14 +1411,26 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
     matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
     'Task body:',
     clipText(card.body, TASK_BODY_CHAR_LIMIT),
+    'Completion protocol:',
+    [
+      `If you can complete the task, post the final answer back through the MegaCorps webhook with status="done".`,
+      `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
+      `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
+      `If no reviewer/manager exists, the server will move top-level escalations to blocked for human intervention.`,
+    ].join('\n'),
   ].filter(Boolean).join('\n\n');
 }
 
 async function buildReviewPrompt(card: CardRow): Promise<string> {
   const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.reviewerId });
+  const helpReview = card.columnStatus === 'needs_review';
   return [
-    `Review the completed work for card ${card.id}: ${card.title}.`,
-    'Return PASS if it is acceptable, or REJECT with feedback if it needs more work.',
+    helpReview
+      ? `Help-review an escalated card ${card.id}: ${card.title}.`
+      : `Quality-review the completed work for card ${card.id}: ${card.title}.`,
+    helpReview
+      ? 'The assignee says they cannot complete the task. Decide one of: APPROVE/DONE if you can finish it directly, REVISION_REQUESTED with concrete guidance if the assignee should retry, or ESCALATE if your manager must decide.'
+      : 'Return PASS/APPROVED if it is acceptable, or REJECT/REVISION_REQUESTED with feedback if it needs more work. Use ESCALATE only if your manager must decide.',
     'Use the Kanban context, message board, lifecycle logs, dependencies, and company state when deciding.',
     'Kanban context snapshot:',
     kanbanContext,

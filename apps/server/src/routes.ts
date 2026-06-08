@@ -29,6 +29,20 @@ function normalizedReviewerId(assigneeId: string | null | undefined, reviewerId:
   return reviewerId === assigneeId ? null : reviewerId;
 }
 
+function isGuidanceEscalation(status: string, text: string): boolean {
+  if (status === 'needs_review') return true;
+  if (status !== 'blocked') return false;
+  return /\b(needs[_ -]?review|needs[_ -]?guidance|needs[_ -]?reviewer|escalat(?:e|ed|ion)|cannot[_ -]?complete|unable[_ -]?to[_ -]?complete|stuck)\b/i.test(text);
+}
+
+async function resolveIndependentReviewerForCard(card: typeof kanbanCards.$inferSelect, actorAgentId?: string | null): Promise<string | null> {
+  if (card.reviewerId && card.reviewerId !== card.assigneeId && card.reviewerId !== actorAgentId) return card.reviewerId;
+  if (!card.assigneeId) return null;
+  const [assignee] = await db.select({ bossId: agents.bossId }).from(agents).where(and(eq(agents.id, card.assigneeId), isNull(agents.deletedAt))).limit(1);
+  if (assignee?.bossId && assignee.bossId !== card.assigneeId && assignee.bossId !== actorAgentId) return assignee.bossId;
+  return null;
+}
+
 function webhookRunStatus(status: string): 'success' | 'failed' | 'cancelled' {
   if (status === 'cancelled') return 'cancelled';
   if (status === 'blocked') return 'failed';
@@ -195,8 +209,10 @@ async function ensureCompanyReferences(companyId: string, input: {
     if (!row) throw new Error('project_company_mismatch');
   }
   if (input.goalId) {
-    const [row] = await db.select({ id: goals.id }).from(goals).where(and(eq(goals.id, input.goalId), eq(goals.companyId, companyId))).limit(1);
+    const [row] = await db.select({ id: goals.id, departmentId: goals.departmentId, projectId: goals.projectId }).from(goals).where(and(eq(goals.id, input.goalId), eq(goals.companyId, companyId))).limit(1);
     if (!row) throw new Error('goal_company_mismatch');
+    if (row.departmentId && input.departmentId !== row.departmentId) throw new Error('goal_department_mismatch');
+    if (row.projectId && input.projectId !== row.projectId) throw new Error('goal_project_mismatch');
   }
   for (const [key, id] of [['assignee_company_mismatch', input.assigneeId], ['reviewer_company_mismatch', input.reviewerId], ['boss_company_mismatch', input.bossId]] as const) {
     if (!id) continue;
@@ -771,7 +787,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/cards', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     if (access.companyIds.length === 0) return [];
-    const query = request.query as { companyId?: string; status?: string; assigneeId?: string; tag?: string; priority?: string; limit?: string; offset?: string };
+    const query = request.query as { companyId?: string; status?: string; assigneeId?: string; projectId?: string; tag?: string; priority?: string; limit?: string; offset?: string };
     if (query.companyId && !access.companyIds.includes(query.companyId)) return [];
     const status = normalizeCardStatus(query.status);
     const filters = [
@@ -779,6 +795,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       isNull(kanbanCards.deletedAt),
       status ? eq(kanbanCards.columnStatus, status) : undefined,
       query.assigneeId ? eq(kanbanCards.assigneeId, query.assigneeId) : undefined,
+      query.projectId === 'none' ? isNull(kanbanCards.projectId) : query.projectId ? eq(kanbanCards.projectId, query.projectId) : undefined,
       query.priority ? eq(kanbanCards.priority, priorityToNumber(query.priority)) : undefined,
       query.tag ? drizzleSql`${query.tag} = ANY(${kanbanCards.tags})` : undefined,
     ].filter(Boolean);
@@ -832,35 +849,40 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [existing] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, id), isNull(kanbanCards.deletedAt))).limit(1);
     if (!existing) return reply.code(404).send({ error: 'card_not_found' });
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    const nextDepartmentId = input.departmentId === undefined ? existing.departmentId : input.departmentId ?? null;
+    const nextProjectId = input.projectId === undefined ? existing.projectId : input.projectId ?? null;
+    const nextGoalId = input.goalId === undefined ? existing.goalId : input.goalId ?? null;
+    const nextAssigneeId = input.assigneeId === undefined ? existing.assigneeId : input.assigneeId ?? null;
+    const nextReviewerId = normalizedReviewerId(nextAssigneeId, input.reviewerId === undefined ? existing.reviewerId : input.reviewerId ?? null);
+    const nextParentCardId = input.parentCardId === undefined ? existing.parentCardId : input.parentCardId ?? null;
+    const nextDependencyCardIds = input.dependencyCardIds === undefined ? existing.dependencyCardIds ?? [] : input.dependencyCardIds;
     try {
       await ensureCompanyReferences(existing.companyId, {
-        departmentId: input.departmentId,
-        projectId: input.projectId,
-        goalId: input.goalId,
-        assigneeId: input.assigneeId,
-        reviewerId: input.reviewerId,
-        parentCardId: input.parentCardId,
-        dependencyCardIds: input.dependencyCardIds,
+        departmentId: nextDepartmentId,
+        projectId: nextProjectId,
+        goalId: nextGoalId,
+        assigneeId: nextAssigneeId,
+        reviewerId: nextReviewerId,
+        parentCardId: nextParentCardId,
+        dependencyCardIds: nextDependencyCardIds,
       });
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' });
     }
     if (input.updatedAt && existing.updatedAt && new Date(input.updatedAt).getTime() !== existing.updatedAt.getTime()) return reply.code(409).send({ error: 'card_modified' });
-    const nextAssigneeId = input.assigneeId === undefined ? existing.assigneeId : input.assigneeId ?? null;
-    const nextReviewerId = normalizedReviewerId(nextAssigneeId, input.reviewerId === undefined ? existing.reviewerId : input.reviewerId ?? null);
     const [card] = await db.update(kanbanCards).set({
       title: input.title,
       body: input.body,
       columnStatus: input.columnStatus,
       priority: input.priority ? priorityToNumber(input.priority) : undefined,
       tags: input.tags,
-      departmentId: input.departmentId,
-      assigneeId: input.assigneeId,
+      departmentId: nextDepartmentId,
+      assigneeId: nextAssigneeId,
       reviewerId: nextReviewerId,
-      projectId: input.projectId,
-      goalId: input.goalId,
-      parentCardId: input.parentCardId,
-      dependencyCardIds: input.dependencyCardIds,
+      projectId: nextProjectId,
+      goalId: nextGoalId,
+      parentCardId: nextParentCardId,
+      dependencyCardIds: nextDependencyCardIds,
       requiresApproval: input.requiresApproval,
       maxRetries: input.maxRetries,
       completedAt: input.columnStatus === 'done' ? new Date() : input.columnStatus ? null : undefined,
@@ -988,6 +1010,38 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to todo by ${actorLabel(user)}.` });
     } else if (input.action === 'send_to_agent') {
       await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'comment', status: 'queued', message: 'Comment queued for agent context on the next run.', output: input.body });
+    } else if (input.action === 'escalate_to_reviewer') {
+      const reviewerId = await resolveIndependentReviewerForCard(card, card.assigneeId);
+      const nextStatus = reviewerId ? 'needs_review' : 'blocked';
+      const reason = reviewerId
+        ? `Escalated to reviewer by ${actorLabel(user)}.`
+        : `Escalation requested by ${actorLabel(user)}, but no independent reviewer or manager is available.`;
+      await db.update(taskRuns).set({
+        status: 'cancelled',
+        completedAt: new Date(),
+        updatedAt: new Date(),
+        lockedBy: null,
+        lockedAt: null,
+        error: reason,
+      }).where(and(eq(taskRuns.cardId, id), eq(taskRuns.kind, 'dispatch'), inArray(taskRuns.status, ['queued', 'running'])));
+      if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', error: reason, completedAt: new Date() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
+      if (card.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, card.assigneeId));
+      await db.update(kanbanCards).set({
+        columnStatus: nextStatus,
+        reviewerId,
+        reviewFeedback: input.body,
+        lastError: reviewerId ? null : reason,
+        executionLockId: null,
+        executionLockedByAgentId: null,
+        executionLockedAt: null,
+        executionLockExpiresAt: null,
+        activeHeartbeatRunId: null,
+        updatedAt: new Date(),
+      }).where(eq(kanbanCards.id, id));
+      await db.insert(taskLogs).values({ cardId: id, agentId: reviewerId ?? card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by ${actorLabel(user)}.` });
+      await db.insert(taskLogs).values({ cardId: id, agentId: reviewerId ?? card.assigneeId, type: 'escalation', status: reviewerId ? 'queued' : 'failed', message: reason, output: input.body });
+      await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: reviewerId ?? card.assigneeId, action: reviewerId ? 'card.escalated_to_reviewer' : 'card.escalation_blocked', entityType: 'card', entityId: card.id, details: { commentId: comment?.id, reviewerId, reason } });
+      if (reviewerId) await enqueueTaskRun(id, 'review', 'manual', user.id);
     }
     return reply.code(201).send(comment);
   });
@@ -1220,15 +1274,30 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.get('/api/goals', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { companyId?: string };
+    const query = request.query as { companyId?: string; departmentId?: string; projectId?: string; scope?: 'company' | 'department' | 'project' };
     if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
-    return db.select().from(goals).where(query.companyId ? eq(goals.companyId, query.companyId) : inArray(goals.companyId, access.companyIds)).orderBy(desc(goals.createdAt));
+    const filters = [
+      query.companyId ? eq(goals.companyId, query.companyId) : inArray(goals.companyId, access.companyIds),
+      query.scope === 'company' ? isNull(goals.departmentId) : undefined,
+      query.scope === 'company' ? isNull(goals.projectId) : undefined,
+      query.scope === 'department' ? drizzleSql`${goals.departmentId} IS NOT NULL` : undefined,
+      query.scope === 'project' ? drizzleSql`${goals.projectId} IS NOT NULL` : undefined,
+      query.departmentId ? eq(goals.departmentId, query.departmentId) : undefined,
+      query.projectId ? eq(goals.projectId, query.projectId) : undefined,
+    ].filter(Boolean);
+    return db.select().from(goals).where(filters.length ? and(...filters) : undefined).orderBy(desc(goals.createdAt));
   });
   app.post('/api/goals', async (request, reply) => {
     const input = createGoalSchema.parse(request.body);
     const companyId = input.companyId ?? await defaultCompanyId();
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
-    const [row] = await db.insert(goals).values({ companyId, title: input.title, body: input.body }).returning();
+    if (input.departmentId && input.projectId) return reply.code(400).send({ error: 'goal_scope_conflict' });
+    try {
+      await ensureCompanyReferences(companyId, { departmentId: input.departmentId, projectId: input.projectId });
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' });
+    }
+    const [row] = await db.insert(goals).values({ companyId, departmentId: input.departmentId ?? null, projectId: input.projectId ?? null, title: input.title, body: input.body }).returning();
     return reply.code(201).send(row);
   });
   app.get('/api/knowledge-docs', async (request, reply) => {
@@ -1290,14 +1359,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!parsedBody.success) return reply.code(400).send({ error: 'invalid_body', issues: parsedBody.error.issues });
     const body = parsedBody.data;
     const taskRunId = body.taskRunId ?? body.idempotencyKey;
-    const nextStatus = normalizeCardStatus(body.status);
-    if (!nextStatus) return reply.code(400).send({ error: 'invalid_status', allowed: cardStatuses, legacyAliases: { backlog: 'todo' } });
-    const completesRun = nextStatus !== 'in_progress';
+    const requestedStatus = normalizeCardStatus(body.status);
+    if (!requestedStatus) return reply.code(400).send({ error: 'invalid_status', allowed: cardStatuses, legacyAliases: { backlog: 'todo' } });
     const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, body.cardId), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
     const [webhookTaskRun] = taskRunId ? await db.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).limit(1) : [];
     if (taskRunId && !webhookTaskRun) return reply.code(404).send({ error: 'task_run_not_found' });
     if (webhookTaskRun && webhookTaskRun.cardId !== card.id) return reply.code(409).send({ error: 'task_run_card_mismatch' });
+    const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
+    const actorAgentId = webhookTaskRun?.agentId ?? card.assigneeId;
+    const escalation = isGuidanceEscalation(requestedStatus, executionLog);
+    const escalationReviewerId = escalation ? await resolveIndependentReviewerForCard(card, actorAgentId) : null;
+    const nextStatus = escalation ? escalationReviewerId ? 'needs_review' : 'blocked' : requestedStatus;
+    const completesRun = nextStatus !== 'in_progress';
     if (taskRunId && completesRun) {
       const [existingWebhook] = await db.select({ id: activityLog.id }).from(activityLog).where(and(
         eq(activityLog.entityId, card.id),
@@ -1307,15 +1381,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       )).limit(1);
       if (existingWebhook) return { ok: true, duplicate: true, cardId: body.cardId, taskRunId, newStatus: card.columnStatus };
     }
-    const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
     await db.update(kanbanCards).set({
       columnStatus: nextStatus,
       executionLog,
+      reviewerId: escalation ? escalationReviewerId : undefined,
       costUsd: completesRun ? body.costUsd?.toString() : undefined,
       completedAt: nextStatus === 'done' ? new Date() : completesRun ? null : undefined,
       retryCount: nextStatus === 'done' ? 0 : undefined,
       nextRunAt: completesRun ? null : undefined,
-      lastError: nextStatus === 'blocked' || nextStatus === 'cancelled' ? body.summary ?? `webhook_${nextStatus}` : undefined,
+      lastError: nextStatus === 'blocked' || nextStatus === 'cancelled' ? body.summary ?? `webhook_${nextStatus}` : escalation ? null : undefined,
       executionLockId: completesRun ? null : undefined,
       executionLockedByAgentId: completesRun ? null : undefined,
       executionLockedAt: completesRun ? null : undefined,
@@ -1324,12 +1398,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, body.cardId));
     if (nextStatus !== card.columnStatus) await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by webhook` });
-    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'webhook', status: nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : 'success', message: body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
+    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: escalation ? 'escalation' : 'webhook', status: nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : nextStatus === 'needs_review' ? 'queued' : 'success', message: escalation ? (nextStatus === 'needs_review' ? 'Webhook requested reviewer guidance; help review queued.' : 'Webhook requested guidance but no reviewer is available; card blocked.') : body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
     await db.insert(cardComments).values({
       cardId: body.cardId,
       agentId: card.assigneeId,
       authorType: card.assigneeId ? 'agent' : 'system',
-      action: nextStatus === 'blocked' ? 'agent_blocked' : nextStatus === 'cancelled' ? 'agent_cancelled' : 'agent_update',
+      action: nextStatus === 'needs_review' ? 'agent_escalated' : nextStatus === 'blocked' ? 'agent_blocked' : nextStatus === 'cancelled' ? 'agent_cancelled' : 'agent_update',
       body: [body.summary, body.output].filter(Boolean).join('\n\n') || `Webhook marked card ${nextStatus}`,
     });
     if (completesRun && card.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, card.assigneeId));
@@ -1348,8 +1422,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await db.update(taskRuns).set({ status: runStatus, completedAt: new Date(), lockedBy: null, lockedAt: null, error, output: executionLog, costUsd: body.costUsd?.toString(), updatedAt: new Date() }).where(eq(taskRuns.heartbeatRunId, heartbeatRunId));
       }
     }
-    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: `webhook.task_${nextStatus}`, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId } });
+    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: `webhook.task_${nextStatus}`, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId, requestedStatus, escalation, reviewerId: escalationReviewerId } });
+    if (nextStatus === 'needs_review') await enqueueTaskRun(card.id, 'review', 'queue');
     if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
-    return { ok: true, cardId: body.cardId, taskRunId, newStatus: nextStatus };
+    return { ok: true, cardId: body.cardId, taskRunId, requestedStatus, newStatus: nextStatus, reviewerId: escalationReviewerId };
   });
 }

@@ -335,12 +335,12 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const companyCards = companyId ? cards.filter((card) => card.companyId === companyId) : [];
   const middleAgents = visibleAgents.filter((agent) => visibleAgents.some((item) => item.bossId === agent.id) && Boolean(agent.bossId));
   const leafAgents = visibleAgents.filter((agent) => !visibleAgents.some((item) => item.bossId === agent.id));
-  const reviewCards = companyCards.filter((card) => card.columnStatus === 'in_review');
+  const reviewCards = companyCards.filter((card) => card.columnStatus === 'in_review' || card.columnStatus === 'needs_review');
   const openCards = companyCards.filter((card) => !['done', 'blocked', 'cancelled'].includes(card.columnStatus ?? 'todo'));
   const selectedManager = selected?.bossId ? visibleAgents.find((agent) => agent.id === selected.bossId) : null;
   const selectedReports = selected ? visibleAgents.filter((agent) => agent.bossId === selected.id) : [];
   const selectedAssignedCards = selected ? companyCards.filter((card) => card.assigneeId === selected.id) : [];
-  const selectedReviewCards = selected ? companyCards.filter((card) => card.reviewerId === selected.id || selectedReports.some((report) => report.id === card.assigneeId && card.columnStatus === 'in_review')) : [];
+  const selectedReviewCards = selected ? companyCards.filter((card) => card.reviewerId === selected.id || selectedReports.some((report) => report.id === card.assigneeId && ['in_review', 'needs_review'].includes(card.columnStatus ?? 'todo'))) : [];
   const selectedAdapterType = String(agentDraft?.adapterType ?? selected?.adapterType ?? 'mock');
   const selectedRuntimeId = String(agentDraft?.runtimeId ?? selected?.runtimeId ?? '');
   const selectedRuntime = selectedRuntimeId ? runtimes.find((runtime) => runtime.id === selectedRuntimeId) : undefined;

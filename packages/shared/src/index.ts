@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const cardStatuses = ['todo', 'in_progress', 'in_review', 'done', 'blocked', 'cancelled'] as const;
+export const cardStatuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'done', 'blocked', 'cancelled'] as const;
 export type CardStatus = (typeof cardStatuses)[number];
 export const legacyCardStatusAliases = { backlog: 'todo' } as const;
 const cardStatusInputs = ['backlog', ...cardStatuses] as const;
@@ -9,8 +9,9 @@ export type AgentAdapterType = (typeof agentAdapterTypes)[number];
 
 const allowedTransitions: Record<CardStatus, CardStatus[]> = {
   todo: ['in_progress', 'blocked', 'cancelled'],
-  in_progress: ['in_review', 'done', 'blocked', 'cancelled'],
+  in_progress: ['in_review', 'needs_review', 'done', 'blocked', 'cancelled'],
   in_review: ['done', 'in_progress', 'blocked', 'cancelled'],
+  needs_review: ['todo', 'in_progress', 'done', 'blocked', 'cancelled'],
   done: [],
   blocked: ['todo', 'cancelled'],
   cancelled: ['todo'],
@@ -108,13 +109,14 @@ export const updateCompanyMembershipSchema = z.object({
 
 export const createCardCommentSchema = z.object({
   body: z.string().trim().min(1).max(5000),
-  action: z.enum(['comment', 'agent_note', 'pause_agent', 'send_to_agent', 'continue_run']).default('comment'),
+  action: z.enum(['comment', 'agent_note', 'pause_agent', 'send_to_agent', 'continue_run', 'escalate_to_reviewer']).default('comment'),
   agentId: z.string().uuid().nullable().optional(),
 });
 
 export const createChatSessionSchema = z.object({
   companyId: z.string().uuid(),
   agentId: z.string().uuid(),
+  projectId: z.string().uuid().nullable().optional(),
   title: z.string().trim().min(1).max(160).optional(),
 });
 
@@ -137,6 +139,8 @@ export const createProjectSchema = z.object({
 
 export const createGoalSchema = z.object({
   companyId: z.string().uuid().optional(),
+  departmentId: z.string().uuid().nullable().optional(),
+  projectId: z.string().uuid().nullable().optional(),
   title: z.string().trim().min(1).max(160),
   body: z.string().trim().max(4000).optional(),
 });
@@ -157,7 +161,7 @@ export const approvalDecisionSchema = z.object({
   decisionNote: z.string().trim().max(4000).optional(),
 });
 
-export const taskLogTypes = ['dispatch', 'retry', 'review', 'decomposition', 'cascade', 'webhook', 'manual', 'stage', 'comment', 'lock', 'lock_expired', 'recovery', 'cancel', 'budget', 'approval', 'queue'] as const;
+export const taskLogTypes = ['dispatch', 'retry', 'review', 'escalation', 'decomposition', 'cascade', 'webhook', 'manual', 'stage', 'comment', 'lock', 'lock_expired', 'recovery', 'cancel', 'budget', 'approval', 'queue'] as const;
 export type TaskLogType = (typeof taskLogTypes)[number];
 
 export const taskLogSchema = z.object({

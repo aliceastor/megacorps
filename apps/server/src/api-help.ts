@@ -61,18 +61,18 @@ const endpoints: ApiEndpoint[] = [
   { method: 'GET', path: '/api/departments', group: 'Companies', auth: 'session', summary: 'List departments visible to the current user.', query: { companyId: 'Optional company UUID.' } },
   { method: 'POST', path: '/api/departments', group: 'Companies', auth: 'session', summary: 'Create a department.', body: { companyId: 'uuid', name: 'Engineering', slug: 'engineering' } },
 
-  { method: 'GET', path: '/api/cards', group: 'Kanban', auth: 'session', summary: 'List Kanban tasks visible to the current user.', query: { companyId: 'Optional company UUID.', status: `Optional. One of ${cardStatuses.join(', ')}. Legacy backlog maps to todo.`, assigneeId: 'Optional agent UUID.', tag: 'Optional tag.', priority: 'urgent | high | normal | low.', limit: 'Default 100.', offset: 'Default 0.' } },
-  { method: 'POST', path: '/api/cards', group: 'Kanban', auth: 'session', summary: 'Create a Kanban task. New tasks default to todo.', body: { companyId: 'uuid optional', title: 'Task title', body: 'Full task detail', priority: 'normal', tags: ['backend'], assigneeId: null, reviewerId: null, requiresApproval: false } },
-  { method: 'PUT', path: '/api/cards/:id', group: 'Kanban', auth: 'session', summary: 'Update a Kanban task. Include updatedAt for optimistic locking.', params: { id: 'Task UUID.' }, body: { title: 'Updated title', body: 'Updated detail', columnStatus: 'todo', updatedAt: 'ISO datetime from existing card' } },
+  { method: 'GET', path: '/api/cards', group: 'Kanban', auth: 'session', summary: 'List Kanban tasks visible to the current user.', query: { companyId: 'Optional company UUID.', status: `Optional. One of ${cardStatuses.join(', ')}. Legacy backlog maps to todo.`, assigneeId: 'Optional agent UUID.', projectId: 'Optional project UUID, or none for no-project tasks.', tag: 'Optional tag.', priority: 'urgent | high | normal | low.', limit: 'Default 100.', offset: 'Default 0.' } },
+  { method: 'POST', path: '/api/cards', group: 'Kanban', auth: 'session', summary: 'Create a Kanban task. New tasks default to todo. departmentId/projectId/goalId determine scoped prompt goals.', body: { companyId: 'uuid optional', departmentId: null, projectId: null, goalId: null, title: 'Task title', body: 'Full task detail', priority: 'normal', tags: ['backend'], assigneeId: null, reviewerId: null, requiresApproval: false } },
+  { method: 'PUT', path: '/api/cards/:id', group: 'Kanban', auth: 'session', summary: 'Update a Kanban task. Include updatedAt for optimistic locking. Goal scope is validated against the effective department/project.', params: { id: 'Task UUID.' }, body: { title: 'Updated title', body: 'Updated detail', columnStatus: 'todo | in_progress | in_review | needs_review | done | blocked | cancelled', projectId: 'uuid | null', goalId: 'uuid | null', updatedAt: 'ISO datetime from existing card' } },
   { method: 'POST', path: '/api/cards/:id/cancel', group: 'Kanban', auth: 'session', summary: 'Cancel an active or queued task without archiving its history. Releases execution locks and cancels queued/running task-runs.', params: { id: 'Task UUID.' }, body: { reason: 'Optional cancellation reason.' } },
   { method: 'DELETE', path: '/api/cards/:id', group: 'Kanban', auth: 'session', summary: 'Archive a task while preserving historical logs, runs, and cost records.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/logs', group: 'Kanban', auth: 'session', summary: 'Read full task logs.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/comments', group: 'Kanban', auth: 'session', summary: 'Read task message board comments.', params: { id: 'Task UUID.' } },
-  { method: 'POST', path: '/api/cards/:id/comments', group: 'Kanban', auth: 'session', summary: 'Add a task message board comment or intervention.', params: { id: 'Task UUID.' }, body: { body: 'Instruction or comment', action: 'comment | agent_note | pause_agent | send_to_agent | continue_run', agentId: 'optional agent UUID for agent-authored note' } },
+  { method: 'POST', path: '/api/cards/:id/comments', group: 'Kanban', auth: 'session', summary: 'Add a task message board comment or intervention. escalate_to_reviewer moves the card to needs_review and queues a help review when an independent reviewer exists; otherwise it blocks the card.', params: { id: 'Task UUID.' }, body: { body: 'Instruction, blocker, or reviewer question', action: 'comment | agent_note | pause_agent | send_to_agent | continue_run | escalate_to_reviewer', agentId: 'optional agent UUID for agent-authored note' } },
   { method: 'POST', path: '/api/cards/:id/run', group: 'Kanban', auth: 'session', summary: 'Queue a dispatch task-run attempt for the background worker.', params: { id: 'Task UUID.' } },
   { method: 'POST', path: '/api/cards/:id/review', group: 'Kanban', auth: 'session', summary: 'Queue a review task-run attempt for the background worker.', params: { id: 'Task UUID.' } },
   { method: 'POST', path: '/api/cards/:id/decompose', group: 'Kanban', auth: 'session', summary: 'Split a task into sub-tasks.', params: { id: 'Task UUID.' } },
-  { method: 'POST', path: '/api/webhook/task-complete', group: 'Kanban', auth: 'none', summary: 'External agent callback to report task progress/completion. Send taskRunId for idempotent completion processing.', body: { cardId: 'uuid', taskRunId: 'task-run uuid from prompt', status: 'done | blocked | in_review | in_progress | todo | cancelled', summary: 'Short result', output: 'Full output/log', costUsd: 0.05 } },
+  { method: 'POST', path: '/api/webhook/task-complete', group: 'Kanban', auth: 'none', summary: 'External agent callback to report task progress/completion. Send taskRunId for idempotent completion processing. status=needs_review means the assignee cannot finish and needs reviewer guidance; blocked with guidance/escalation wording is also promoted to help review when a reviewer exists.', body: { cardId: 'uuid', taskRunId: 'task-run uuid from prompt', status: 'done | blocked | needs_review | in_review | in_progress | todo | cancelled', summary: 'Short result or needs reviewer guidance', output: 'Full output/log with attempted methods, blocker, reviewer questions, partial output', costUsd: 0.05 } },
 
   { method: 'GET', path: '/api/agents', group: 'Agents', auth: 'session', summary: 'List agents visible to the current user.', query: { companyId: 'Optional company UUID.' } },
   { method: 'POST', path: '/api/agents', group: 'Agents', auth: 'session', summary: 'Create an agent.', body: { companyId: 'uuid optional', departmentId: 'uuid optional', name: 'Builder', slug: 'builder', role: 'worker', title: 'Backend Engineer', adapterType: 'mock', runtimeId: 'uuid optional', bossId: null, budgetPerTask: 1, budgetMonthly: 20 } },
@@ -88,15 +88,15 @@ const endpoints: ApiEndpoint[] = [
   { method: 'PUT', path: '/api/agent-runtimes/:id', group: 'Agents', auth: 'session', summary: 'Update a runtime preset.', params: { id: 'Runtime UUID.' } },
   { method: 'DELETE', path: '/api/agent-runtimes/:id', group: 'Agents', auth: 'session', summary: 'Delete a runtime preset.', params: { id: 'Runtime UUID.' } },
 
-  { method: 'GET', path: '/api/chat/sessions', group: 'Chat', auth: 'session', summary: 'List direct-chat sessions.', query: { companyId: 'Optional company UUID.', agentId: 'Optional agent UUID.', limit: '1-200, default 100.' } },
-  { method: 'POST', path: '/api/chat/sessions', group: 'Chat', auth: 'session', summary: 'Create a direct-chat session with an agent.', body: { companyId: 'uuid', agentId: 'uuid', title: 'Session title optional' } },
+  { method: 'GET', path: '/api/chat/sessions', group: 'Chat', auth: 'session', summary: 'List direct-chat sessions.', query: { companyId: 'Optional company UUID.', agentId: 'Optional agent UUID.', projectId: 'Optional project UUID, or none for no-project chat.', limit: '1-200, default 100.' } },
+  { method: 'POST', path: '/api/chat/sessions', group: 'Chat', auth: 'session', summary: 'Create a direct-chat session with an agent. projectId scopes the prompt goal context; null keeps the session in no-project chat.', body: { companyId: 'uuid', agentId: 'uuid', projectId: null, title: 'Session title optional' } },
   { method: 'GET', path: '/api/chat/sessions/:id/messages', group: 'Chat', auth: 'session', summary: 'Read chat messages.', params: { id: 'Chat session UUID.' } },
   { method: 'POST', path: '/api/chat/sessions/:id/messages', group: 'Chat', auth: 'session', summary: 'Send a message to an agent and store the response.', params: { id: 'Chat session UUID.' }, body: { body: 'Message for the agent' } },
 
   { method: 'GET', path: '/api/projects', group: 'Context', auth: 'session', summary: 'List visible projects.', query: { companyId: 'Optional company UUID.' } },
   { method: 'POST', path: '/api/projects', group: 'Context', auth: 'session', summary: 'Create a project.', body: { companyId: 'uuid optional', name: 'Project name', description: 'Optional description' } },
-  { method: 'GET', path: '/api/goals', group: 'Context', auth: 'session', summary: 'List visible goals.', query: { companyId: 'Optional company UUID.' } },
-  { method: 'POST', path: '/api/goals', group: 'Context', auth: 'session', summary: 'Create a goal.', body: { companyId: 'uuid optional', title: 'Goal title', body: 'Goal detail' } },
+  { method: 'GET', path: '/api/goals', group: 'Context', auth: 'session', summary: 'List visible goals. Goals are scoped to exactly one of company, department, or project.', query: { companyId: 'Optional company UUID.', scope: 'company | department | project', departmentId: 'Optional department UUID.', projectId: 'Optional project UUID.' } },
+  { method: 'POST', path: '/api/goals', group: 'Context', auth: 'session', summary: 'Create a company, department, or project goal. Do not send both departmentId and projectId.', body: { companyId: 'uuid optional', departmentId: null, projectId: null, title: 'Goal title', body: 'Goal detail' } },
   { method: 'GET', path: '/api/knowledge-docs', group: 'Context', auth: 'session', summary: 'List visible knowledge documents.', query: { companyId: 'Optional company UUID.' } },
   { method: 'POST', path: '/api/knowledge-docs', group: 'Context', auth: 'session', summary: 'Create a knowledge document.', body: { companyId: 'uuid', title: 'Runbook', tags: ['ops'], body: 'Document body' } },
   { method: 'PUT', path: '/api/knowledge-docs/:id', group: 'Context', auth: 'session', summary: 'Update a knowledge document.', params: { id: 'Knowledge document UUID.' } },
@@ -163,7 +163,7 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
   if (endpoint.path === '/api/dashboard') {
     return {
       responseSchema: { stats: 'object', stageCounts: 'Record<CardStatus, number>', recentTaskLogs: 'TaskLog[]', recentApiEvents: 'ApiEvent[]' },
-      responseExample: { stats: { cards: 12, agents: 5, activeAgents: 4 }, stageCounts: { todo: 3, in_progress: 2, in_review: 1, done: 7, blocked: 1, cancelled: 0 }, recentTaskLogs: [], recentApiEvents: [] },
+      responseExample: { stats: { cards: 12, agents: 5, activeAgents: 4 }, stageCounts: { todo: 3, in_progress: 2, in_review: 1, needs_review: 1, done: 7, blocked: 1, cancelled: 0 }, recentTaskLogs: [], recentApiEvents: [] },
       rateLimit: endpoint.rateLimit ?? defaultRateLimit,
       requiredRole: roleDefault(endpoint),
     };
@@ -239,7 +239,7 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
   }
 
   if (endpoint.path.includes('/webhook/task-complete')) {
-    return { responseSchema: { ok: 'boolean', duplicate: 'boolean optional', cardId: 'uuid', taskRunId: 'uuid optional', newStatus: 'CardStatus' }, responseExample: { ok: true, cardId: 'card-uuid', taskRunId: 'task-run-uuid', newStatus: 'done' }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: { ok: 'boolean', duplicate: 'boolean optional', cardId: 'uuid', taskRunId: 'uuid optional', requestedStatus: 'CardStatus', newStatus: 'CardStatus', reviewerId: 'uuid | null optional' }, responseExample: { ok: true, cardId: 'card-uuid', taskRunId: 'task-run-uuid', requestedStatus: 'needs_review', newStatus: 'needs_review', reviewerId: 'reviewer-uuid' }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   return {
@@ -278,7 +278,7 @@ export function apiHelpCatalog() {
     kanban: {
       stages: cardStatuses,
       legacyAliases: legacyCardStatusAliases,
-      note: 'backlog and todo are merged. Send todo for new work; legacy backlog input is accepted and normalized to todo.',
+      note: 'backlog and todo are merged. Send todo for new work; legacy backlog input is accepted and normalized to todo. in_review is quality review for completed work. needs_review is help/escalation review for work the assignee cannot complete.',
     },
     adapters: agentAdapterTypes,
     endpoints: catalogEndpoints,

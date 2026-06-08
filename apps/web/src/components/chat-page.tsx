@@ -1,9 +1,10 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Building2, Circle, Loader2, MessageSquare, Plus, Send } from 'lucide-react';
+import { BriefcaseBusiness, Building2, Circle, Loader2, MessageSquare, Plus, Send } from 'lucide-react';
 import { ApiError, api } from '@/lib/api';
 
 type Company = { id: string; name: string; slug: string };
+type Project = { id: string; companyId: string; name: string; description?: string | null };
 type Agent = {
   id: string;
   companyId: string;
@@ -18,6 +19,7 @@ type ChatSession = {
   id: string;
   companyId: string;
   agentId: string;
+  projectId?: string | null;
   title: string;
   status: string;
   agentSessionId?: string | null;
@@ -79,11 +81,13 @@ function agentStatus(agent?: Agent | null): { label: string; color: string } {
 
 export function ChatPage() {
   const [companies, setCompanies] = useState<Company[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [companyId, setCompanyId] = useState('');
   const [agentId, setAgentId] = useState('');
+  const [projectFilter, setProjectFilter] = useState('all');
   const [sessionId, setSessionId] = useState('');
   const [draft, setDraft] = useState('');
   const [loading, setLoading] = useState(true);
@@ -93,7 +97,9 @@ export function ChatPage() {
   const messageEndRef = useRef<HTMLDivElement>(null);
 
   const companyAgents = useMemo(() => agents.filter((agent) => agent.companyId === companyId), [agents, companyId]);
+  const companyProjects = useMemo(() => projects.filter((project) => project.companyId === companyId), [projects, companyId]);
   const selectedCompany = companies.find((company) => company.id === companyId) ?? null;
+  const selectedProject = projectFilter !== 'all' && projectFilter !== '__none' ? projects.find((project) => project.id === projectFilter) ?? null : null;
   const selectedAgent = agents.find((agent) => agent.id === agentId) ?? null;
   const selectedSession = sessions.find((session) => session.id === sessionId) ?? null;
   const status = agentStatus(selectedAgent);
@@ -106,7 +112,9 @@ export function ChatPage() {
         api<Company[]>('/api/companies'),
         api<Agent[]>('/api/agents'),
       ]);
+      const projectRows = await api<Project[]>('/api/projects');
       setCompanies(companyRows);
+      setProjects(projectRows);
       setAgents(agentRows);
       const nextCompany = companyRows.find((company) => company.id === companyId) ?? companyRows[0];
       const nextAgent = nextCompany ? agentRows.find((agent) => agent.companyId === nextCompany.id && agent.id === agentId) ?? agentRows.find((agent) => agent.companyId === nextCompany.id) : undefined;
@@ -119,14 +127,15 @@ export function ChatPage() {
     }
   }
 
-  async function loadSessions(nextAgentId = agentId, nextCompanyId = companyId) {
+  async function loadSessions(nextAgentId = agentId, nextCompanyId = companyId, nextProjectFilter = projectFilter) {
     if (!nextAgentId || !nextCompanyId) {
       setSessions([]);
       setSessionId('');
       setMessages([]);
       return;
     }
-    const rows = await api<ChatSession[]>(`/api/chat/sessions?companyId=${nextCompanyId}&agentId=${nextAgentId}`);
+    const projectQuery = nextProjectFilter === 'all' ? '' : `&projectId=${nextProjectFilter === '__none' ? 'none' : nextProjectFilter}`;
+    const rows = await api<ChatSession[]>(`/api/chat/sessions?companyId=${nextCompanyId}&agentId=${nextAgentId}${projectQuery}`);
     setSessions(rows);
     const nextSession = rows.find((session) => session.id === sessionId) ?? rows[0];
     setSessionId(nextSession?.id ?? '');
@@ -154,7 +163,10 @@ export function ChatPage() {
       setMessages([]);
     }
   }, [companyId, companyAgents, agentId]);
-  useEffect(() => { void loadSessions(); }, [agentId, companyId]);
+  useEffect(() => {
+    if (projectFilter !== 'all' && projectFilter !== '__none' && !companyProjects.some((project) => project.id === projectFilter)) setProjectFilter('all');
+  }, [companyProjects, projectFilter]);
+  useEffect(() => { void loadSessions(); }, [agentId, companyId, projectFilter]);
   useEffect(() => { void loadMessages(); }, [sessionId]);
   useEffect(() => { messageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages.length, replyingSessionId]);
 
@@ -163,7 +175,7 @@ export function ChatPage() {
     setError('');
     const session = await api<ChatSession>('/api/chat/sessions', {
       method: 'POST',
-      body: JSON.stringify({ companyId, agentId, title: `Chat with ${selectedAgent.name}` }),
+      body: JSON.stringify({ companyId, agentId, projectId: selectedProject?.id ?? null, title: `Chat with ${selectedAgent.name}` }),
     });
     setSessions((current) => [session, ...current]);
     if (select) {
@@ -195,7 +207,7 @@ export function ChatPage() {
       const nextMessages = [result.userMessage, result.agentMessage, result.systemMessage].filter(Boolean) as ChatMessage[];
       setMessages((current) => mergeMessages(current, nextMessages, optimisticId));
       if (result.session) setSessions((current) => current.map((session) => session.id === result.session?.id ? result.session : session));
-      await loadSessions(agentId, companyId);
+      await loadSessions(agentId, companyId, projectFilter);
     } catch (err) {
       const apiError = err instanceof ApiError ? err : null;
       const data = apiError?.data as Partial<ChatSendResult> | undefined;
@@ -210,7 +222,7 @@ export function ChatPage() {
 
   return <div className="chat-page">
     <div className="page-head">
-      <div><h1>Direct Chat</h1><p>{selectedCompany ? selectedCompany.name : 'Company'} / {selectedAgent ? selectedAgent.name : 'Agent sessions'}</p></div>
+      <div><h1>Direct Chat</h1><p>{selectedCompany ? selectedCompany.name : 'Company'} / {selectedProject?.name ?? (projectFilter === '__none' ? 'No project' : 'All projects')} / {selectedAgent ? selectedAgent.name : 'Agent sessions'}</p></div>
       <button className="btn" onClick={() => void refreshBase()} disabled={loading}>{loading ? <Loader2 size={14} className="spin" /> : <MessageSquare size={14} />} Refresh</button>
     </div>
 
@@ -220,9 +232,18 @@ export function ChatPage() {
       <aside className="chat-rail company-rail">
         <div className="chat-rail-head"><Building2 size={16} /><b>Companies</b></div>
         <div className="chat-list">
-          {companies.map((company) => <button className={`chat-list-item ${company.id === companyId ? 'active' : ''}`} key={company.id} onClick={() => { setCompanyId(company.id); setSessionId(''); setMessages([]); }}>
+          {companies.map((company) => <button className={`chat-list-item ${company.id === companyId ? 'active' : ''}`} key={company.id} onClick={() => { setCompanyId(company.id); setProjectFilter('all'); setSessionId(''); setMessages([]); }}>
             <b>{company.name}</b>
             <span>{agents.filter((agent) => agent.companyId === company.id).length} agents</span>
+          </button>)}
+        </div>
+        <div className="chat-rail-head"><BriefcaseBusiness size={16} /><b>Projects</b></div>
+        <div className="chat-list">
+          <button className={`chat-list-item ${projectFilter === 'all' ? 'active' : ''}`} onClick={() => { setProjectFilter('all'); setSessionId(''); setMessages([]); }}><b>All projects</b><span>{sessions.length} sessions</span></button>
+          <button className={`chat-list-item ${projectFilter === '__none' ? 'active' : ''}`} onClick={() => { setProjectFilter('__none'); setSessionId(''); setMessages([]); }}><b>No project</b><span>General chat</span></button>
+          {companyProjects.map((project) => <button className={`chat-list-item ${project.id === projectFilter ? 'active' : ''}`} key={project.id} onClick={() => { setProjectFilter(project.id); setSessionId(''); setMessages([]); }}>
+            <b>{project.name}</b>
+            <span>{project.description || 'Project chat'}</span>
           </button>)}
         </div>
         <div className="chat-rail-head"><MessageSquare size={16} /><b>Agents</b></div>
@@ -252,7 +273,7 @@ export function ChatPage() {
         <div className="chat-list">
           {sessions.map((session) => <button className={`chat-list-item ${session.id === sessionId ? 'active' : ''}`} key={session.id} onClick={() => setSessionId(session.id)}>
             <b>{session.title}</b>
-            <span>{shortTime(session.updatedAt)} / {session.agentSessionId ? 'resumable' : 'new'}</span>
+            <span>{shortTime(session.updatedAt)} / {session.projectId ? projects.find((project) => project.id === session.projectId)?.name ?? 'project' : 'no project'} / {session.agentSessionId ? 'resumable' : 'new'}</span>
           </button>)}
           {!sessions.length && <p className="chat-empty">No sessions</p>}
         </div>

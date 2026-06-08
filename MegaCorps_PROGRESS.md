@@ -14,8 +14,8 @@ The current local stack runs with Docker:
 
 Latest verified baseline:
 
-- Phase 1-15 operational MVP flows are implemented.
-- Company registry page, company memberships, company-scoped RBAC, department setup, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, stale-lock retry/block recovery, DB-backed task-run queue, idempotent task-complete webhooks, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
+- Phase 1-16 operational MVP flows are implemented.
+- Company registry page, company memberships, company-scoped RBAC, department setup, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, project-scoped direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention/escalation, lifecycle logs, knowledge docs, company/department/project goal context, execution locks, stale-lock retry/block recovery, DB-backed task-run queue, idempotent task-complete webhooks, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
 - Deployment is user-managed. Local-only Docker was used for QA in this pass; NAS/server deployment remains user-managed.
 - Browser plugin QA verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text.
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
@@ -28,7 +28,7 @@ Latest verified baseline:
 - Company-owned mutation/manual execution APIs now require company operator/admin membership checks.
 - Production auth onboarding now uses DB-backed `auth.signup_enabled` and `auth.jwt_secret`; signup defaults to enabled, signup becomes admin when no active admin exists, `POST /api/auth/bootstrap` can recover an admin when `BOOTSTRAP_TOKEN` is configured and no active admin exists, and the Admin page manages all accounts.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
-- Round 3 Kanban reliability fixes are implemented: expired execution locks write `lock_expired/warning`, self-review is skipped unless a distinct reviewer/manager exists, task-complete webhooks dedupe by `taskRunId`, progress webhooks no longer release locks, and `POST /api/cards/:id/cancel` preserves task history while cancelling active work.
+- Round 3/4 Kanban reliability fixes are implemented: expired execution locks write `lock_expired/warning`, self-review is skipped unless a distinct reviewer/manager exists, task-complete webhooks dedupe by `taskRunId`, progress webhooks no longer release locks, `POST /api/cards/:id/cancel` preserves task history while cancelling active work, and `needs_review` separates help/escalation review from ordinary quality review.
 
 ## Paperclip Research Summary
 
@@ -162,6 +162,7 @@ Implemented:
   - `todo`
   - `in_progress`
   - `in_review`
+  - `needs_review`
   - `done`
   - `blocked`
   - `cancelled`
@@ -187,6 +188,8 @@ Implemented:
   - Review
   - Split into sub-tasks
   - Pause with comment
+  - Escalate to reviewer
+  - Cancel task
   - Delete task
 
 `Split into Sub-tasks` means:
@@ -202,6 +205,7 @@ Implemented `card_comments` with these actions:
 - `comment`: record context only.
 - `agent_note`: record a message authored by a specific agent.
 - `pause_agent`: pause the assigned agent, mark the task blocked, write logs.
+- `escalate_to_reviewer`: move the task to `needs_review` and queue help review when an independent reviewer/manager exists; otherwise block the task.
 - `send_to_agent`: store instruction and queue it for agent context.
 - `continue_run`: reactivate the assignee and move task back to `todo`.
 
@@ -212,6 +216,7 @@ Implemented message board behavior:
 - Users can post an agent-authored note by selecting an agent as the author.
 - Agent dispatch output is automatically added as an `agent_update` board message.
 - Reviewer output is automatically added as `review_note` or `review_rejected`.
+- Help-review output can be added as `review_guidance`, `review_escalated`, or `review_blocked`.
 - Dispatch/review failures are automatically added as agent error messages.
 - Webhook completions are also added as agent/system board messages.
 
@@ -223,9 +228,10 @@ Implemented:
 
 - Every task dispatch invocation includes a bounded Kanban context snapshot.
 - Every review invocation includes the same bounded context plus execution output.
-- Every direct chat invocation includes same-company Kanban context and focus-agent work context.
+- Every direct chat invocation includes same-company Kanban context, focus-agent work context, and the selected project/no-project goal context.
 - The snapshot contains:
   - company mission/settings
+  - company, department, and project goals
   - compact same-company Kanban board state
   - stage counts
   - focus task full detail
@@ -250,7 +256,7 @@ Implemented:
 
 - `task_runs` table records queued/running/success/failed/cancelled task-run attempts.
 - Manual `Run Now` and `Review` enqueue `task_runs` and return `202` with the task-run row.
-- Cron heartbeat scans eligible `todo` and `in_review` cards and enqueues dispatch/review task runs instead of executing Hermes work directly inside the heartbeat scan.
+- Cron heartbeat scans eligible `todo`, `in_review`, and `needs_review` cards and enqueues dispatch/review task runs instead of executing Hermes work directly inside the heartbeat scan.
 - In-process task-run worker claims queued rows, marks them running, calls `dispatchCard` or `reviewCard`, links the resulting `heartbeat_runs` row, and records outcome, error, output, cost, and duration.
 - Existing `heartbeat_runs` remains the adapter execution record; `task_runs` is the queue/job attempt record.
 - Logs page shows task runs separately from heartbeat runs.
@@ -302,6 +308,7 @@ Hierarchy lifecycle:
 - `Split into Sub-tasks` delegates child tasks to direct reports when they exist.
 - Child tasks review back to the parent member by default.
 - Subordinate work moves upward through `in_review`, approval records, and parent-card cascade.
+- Work the assignee cannot solve moves upward through `needs_review`; if no independent reviewer/manager exists, the task becomes `blocked`.
 - Parent tasks close when all child tasks are completed, preserving a top-down delegation and bottom-up reporting loop.
 
 ### Direct Agent Chat
@@ -310,8 +317,9 @@ Implemented:
 
 - Sidebar `Direct Chat` page.
 - Company selector showing all agents in the selected company.
+- Project selector for all projects, no-project/general chat, or a specific project.
 - Agent selector with status, identity label, and adapter type.
-- Per-agent session list.
+- Per-agent, per-project session list.
 - New session creation.
 - Session-scoped direct messaging.
 - WhatsApp/Teams-style web layout:
@@ -330,7 +338,7 @@ Implemented:
   - `heartbeat_runs` source `chat`
   - `activity_log` actions
   - `cost_events`
-- Each chat session stores its own `agentSessionId`, so the same agent can have multiple independent conversations.
+- Each chat session stores its own `agentSessionId` and optional `projectId`, so the same agent can have multiple independent conversations by project or no-project context.
 - Direct chat uses the same runtime preset + agent override merge logic as task dispatch.
 
 Current behavior:
@@ -365,8 +373,9 @@ On each eligible company heartbeat:
 7. Dispatch cards to `in_progress`.
 8. Run the selected adapter.
 9. Move completed cards to `in_review` if approval/reviewer exists, otherwise `done`.
-10. Auto-review `in_review` cards when a reviewer is configured.
-11. Cascade parent cards to `done` when all sub-tasks are done.
+10. Move explicit cannot-complete output or webhook `status=needs_review` to help review when an independent reviewer/manager exists, otherwise `blocked`.
+11. Auto-review `in_review` and `needs_review` cards when a reviewer is configured.
+12. Cascade parent cards to `done` when all sub-tasks are done.
 
 ### Cron System
 

@@ -2,13 +2,27 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.7 - Project Workspaces, Scoped Goals, and Help Review
+
+Date: 2026-06-08
+
+Completed in this pass:
+
+- Added `needs_review` as a first-class Kanban stage for help/escalation review. `in_review` is now reserved for quality review of completed work.
+- Assignees that cannot complete a task must return attempted methods, blocker/root cause, reviewer questions, and partial output/logs through webhook `status=needs_review` or an equivalent escalation comment. The server queues review when an independent reviewer/manager exists; top-level/no-reviewer escalations move to `blocked`.
+- Reviewer decisions now support three outcomes: finish directly (`done`), return concrete guidance (`todo`), or escalate to the reviewer's manager (`needs_review`). If a reviewer has no manager and cannot resolve the task, the task becomes `blocked`.
+- Added scoped goals: company goals, department goals, and project goals. Kanban task prompts and Direct Chat prompts inject the effective goal stack from the matching company, department, project, and selected card goal.
+- Reworked Workspaces around Projects. `No project` remains a supported bucket for general Direct Chat and Kanban work.
+- Added `chat_sessions.project_id`; Direct Chat can now filter/create sessions by project or no-project context, and chat cost events carry `project_id`.
+- Updated API Help and prompt documentation. See [MegaCorps_PROMPT_INJECTION.md](./MegaCorps_PROMPT_INJECTION.md) for the exact injected prompt format.
+
 ## Architecture Update v1.6 - Kanban Lifecycle Recovery and Idempotent Webhooks
 
 Date: 2026-06-08
 
 Completed in this pass:
 
-- Kanban stages now include `cancelled` alongside `todo`, `in_progress`, `in_review`, `done`, and `blocked`. `POST /api/cards/:id/cancel` cancels active or queued work without archiving task history.
+- Kanban stages now include `cancelled` alongside `todo`, `in_progress`, `in_review`, `done`, and `blocked`. v1.7 adds `needs_review`. `POST /api/cards/:id/cancel` cancels active or queued work without archiving task history.
 - Expired execution locks are recovered by the dispatch loop with `task_logs.type=lock_expired` and `status=warning`; expired `in_progress` work increments `retry_count`, backs off to `todo`, or moves to `blocked` after `max_retries`.
 - Dispatch completion no longer treats self-review as a valid quality gate. A distinct configured reviewer or distinct reporting manager can review; otherwise successful work goes directly to `done`.
 - Agent prompts include `taskRunId`, and `POST /api/webhook/task-complete` deduplicates repeated webhook completions for the same task run. Duplicate callbacks return `duplicate: true` without writing duplicate cost events, comments, or stage logs.
@@ -176,10 +190,10 @@ The older phase checklist later in this document is kept as historical design no
 
 - [x] `kanban_cards`, `projects`, and `goals` tables.
 - [x] Card list/create/update/delete API.
-- [x] One canonical card stage field with six stages: `todo`, `in_progress`, `in_review`, `done`, `blocked`, `cancelled`.
+- [x] One canonical card stage field with seven stages: `todo`, `in_progress`, `in_review`, `needs_review`, `done`, `blocked`, `cancelled`.
 - [x] Legacy `backlog` input normalized to `todo`.
 - [x] Status/assignee/tag/priority/limit/offset filtering API.
-- [~] Project and goal create/list API.
+- [x] Project and scoped company/department/project goal create/list API.
 - [x] Kanban board page with responsive columns.
 - [x] Drag and drop between columns with `@dnd-kit/core`.
 - [x] Card component with UUID, priority, tags, cost, approval/retry badges, and keyboard-open support.
@@ -238,7 +252,7 @@ The older phase checklist later in this document is kept as historical design no
 - [x] Knowledge docs CRUD and Knowledge page.
 - [x] Bounded Kanban context injection for task dispatch, review, and direct chat.
 - [x] Context includes recent task messages, logs, board snapshot, activity, runs, and matching knowledge docs.
-- [~] Workspaces page and project/goal context.
+- [x] Project-focused Workspaces page and scoped project/goal context.
 - [ ] Git worktree/branch/commit/merge automation.
 - [ ] Work product/artifact attachment tracking.
 
@@ -2492,7 +2506,7 @@ MegaCorps now follows the same product direction as `paperclipai/paperclip`: a c
 - Company: mission, dispatch heartbeat, auto-dispatch switch.
 - Department: grouping unit for agents and tasks.
 - O-chart: agents report to other agents via `bossId`; agents can also belong to departments.
-- Kanban: every task has one UUID and one stage: `todo`, `in_progress`, `in_review`, `done`, `blocked`, `cancelled`. Legacy `backlog` input maps to `todo`.
+- Kanban: every task has one UUID and one stage: `todo`, `in_progress`, `in_review`, `needs_review`, `done`, `blocked`, `cancelled`. Legacy `backlog` input maps to `todo`.
 - Logs: task lifecycle logs plus API lifecycle logs.
 - Intervention: users can comment, stop an agent, send instructions to agent context, and continue a run.
 
@@ -2516,8 +2530,9 @@ On each eligible company heartbeat, MegaCorps:
 3. Prefers same department, then tag/capability/role match.
 4. Moves assigned work to `todo`, then `in_progress`.
 5. Runs the agent adapter.
-6. Moves work to `in_review` when approval/reviewer is required, otherwise `done`.
-7. Reviews `in_review` cards automatically when a reviewer is configured.
+6. Moves completed work to `in_review` when approval/reviewer is required, otherwise `done`.
+7. Moves cannot-complete/escalated work to `needs_review` when an independent reviewer/manager exists, otherwise `blocked`.
+8. Reviews `in_review` and `needs_review` cards automatically when a reviewer is configured.
 8. Cascades parent cards to `done` when all sub-tasks are done.
 
 ### Task Comments

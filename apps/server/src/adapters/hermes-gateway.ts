@@ -35,7 +35,7 @@ export async function dispatchToHermesGateway(agent: AgentLike, task: TaskContex
   // Step 2: Trigger dispatch
   await hermesFetch(agent, '/api/plugins/kanban/dispatch', { method: 'POST' });
 
-  // Step 3: Poll until done/blocked (max timeout)
+  // Step 3: Poll until terminal status (max timeout)
   const timeoutMs = (task.timeoutSeconds ?? 300) * 1000;
   const pollInterval = 10_000;
   let output = '';
@@ -47,7 +47,7 @@ export async function dispatchToHermesGateway(agent: AgentLike, task: TaskContex
     if (!statusResp.ok) continue;
     const detail = await statusResp.json() as { status?: string; summary?: string; result?: string };
     status = detail.status ?? 'running';
-    if (status === 'done' || status === 'blocked' || status === 'cancelled') {
+    if (status === 'done' || status === 'blocked' || status === 'cancelled' || status === 'needs_review') {
       output = detail.summary ?? detail.result ?? '';
       // Try to get worker log for full output
       const logResp = await hermesFetch(agent, `/api/plugins/kanban/tasks/${taskId}/log?tail=50000`);
@@ -59,13 +59,14 @@ export async function dispatchToHermesGateway(agent: AgentLike, task: TaskContex
     }
   }
 
-  if (status !== 'done' && status !== 'blocked' && status !== 'cancelled') {
+  if (status !== 'done' && status !== 'blocked' && status !== 'cancelled' && status !== 'needs_review') {
     throw new Error(`Hermes task ${taskId} timed out after ${Math.round((Date.now() - started) / 1000)}s (status: ${status})`);
   }
 
   const tokensUsed = estimateTokens(output);
+  const guidanceEscalation = /\b(needs[_ -]?review|needs[_ -]?guidance|needs[_ -]?reviewer|escalat(?:e|ed|ion)|cannot[_ -]?complete|unable[_ -]?to[_ -]?complete|stuck)\b/i.test(output);
   return {
-    success: status === 'done',
+    success: status === 'done' || status === 'needs_review' || (status === 'blocked' && guidanceEscalation),
     output,
     sessionId: taskId,
     tokensUsed,

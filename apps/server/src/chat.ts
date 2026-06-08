@@ -5,21 +5,42 @@ import { requireAuth } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole } from './access.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { db } from './db/client.ts';
-import { activityLog, agents, chatMessages, chatSessions, companies, costEvents, heartbeatRuns } from './db/schema.ts';
+import { activityLog, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, projects } from './db/schema.ts';
 import { budgetOk, buildCompanyKanbanContext, buildExecutionAgent, getBudgetGuard } from './dispatch.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
 type CompanyRow = typeof companies.$inferSelect;
+type GoalRow = typeof goals.$inferSelect;
 
 function titleFromMessage(body: string, agentName: string): string {
   const firstLine = body.replace(/\s+/g, ' ').trim().slice(0, 72);
   return firstLine || `Chat with ${agentName}`;
 }
 
-function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string): string {
+function formatGoal(goal: GoalRow): string {
+  const scope = goal.projectId ? 'Project goal' : goal.departmentId ? 'Department goal' : 'Company goal';
+  return `- ${scope}: ${goal.title}${goal.body ? `\n  ${goal.body.slice(0, 1200)}` : ''}`;
+}
+
+async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, projectId: string | null): Promise<string> {
+  const [project] = projectId ? await db.select().from(projects).where(eq(projects.id, projectId)).limit(1) : [];
+  const [department] = agent.departmentId ? await db.select().from(departments).where(eq(departments.id, agent.departmentId)).limit(1) : [];
+  const companyGoals = await db.select().from(goals).where(eq(goals.companyId, companyId)).orderBy(desc(goals.createdAt));
+  return [
+    `Project: ${project?.name ?? 'No project / general chat'}`,
+    project?.description ? `Project description: ${project.description}` : '',
+    `Department: ${department?.name ?? 'none'}`,
+    `Company goals:\n${companyGoals.filter((goal) => !goal.departmentId && !goal.projectId).map(formatGoal).join('\n') || 'none'}`,
+    `Department goals:\n${agent.departmentId ? companyGoals.filter((goal) => goal.departmentId === agent.departmentId).map(formatGoal).join('\n') || 'none' : 'none'}`,
+    `Project goals:\n${projectId ? companyGoals.filter((goal) => goal.projectId === projectId).map(formatGoal).join('\n') || 'none' : 'none'}`,
+  ].filter(Boolean).join('\n');
+}
+
+function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string): string {
   return [
     company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
+    `Goal context:\n${goalContext}`,
     [
       `Agent name: ${agent.name}`,
       `Identity label: ${agent.role}`,
@@ -56,11 +77,12 @@ async function addChatActivity(input: {
 export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/chat/sessions', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { companyId?: string; agentId?: string; limit?: string };
+    const query = request.query as { companyId?: string; agentId?: string; projectId?: string; limit?: string };
     if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
     const filters = [
       query.companyId ? eq(chatSessions.companyId, query.companyId) : inArray(chatSessions.companyId, access.companyIds),
       query.agentId ? eq(chatSessions.agentId, query.agentId) : undefined,
+      query.projectId === 'none' ? isNull(chatSessions.projectId) : query.projectId ? eq(chatSessions.projectId, query.projectId) : undefined,
     ].filter(Boolean);
     return db.select().from(chatSessions)
       .where(filters.length ? and(...filters) : undefined)
@@ -74,9 +96,14 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     const [agent] = await db.select().from(agents).where(and(eq(agents.id, input.agentId), isNull(agents.deletedAt))).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     if (agent.companyId !== input.companyId) return reply.code(400).send({ error: 'agent_company_mismatch' });
+    if (input.projectId) {
+      const [project] = await db.select({ id: projects.id }).from(projects).where(and(eq(projects.id, input.projectId), eq(projects.companyId, input.companyId))).limit(1);
+      if (!project) return reply.code(400).send({ error: 'project_company_mismatch' });
+    }
     const [session] = await db.insert(chatSessions).values({
       companyId: input.companyId,
       agentId: input.agentId,
+      projectId: input.projectId ?? null,
       userId: user.id,
       title: input.title ?? `Chat with ${agent.name}`,
     }).returning();
@@ -184,7 +211,8 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     try {
       const recent = await db.select().from(chatMessages).where(eq(chatMessages.sessionId, session.id)).orderBy(desc(chatMessages.createdAt)).limit(30);
       const kanbanContext = await buildCompanyKanbanContext(session.companyId, { focusAgentId: agent.id, budgetChars: 20_000 });
-      const prompt = buildChatPrompt(company, agent, recent.reverse(), kanbanContext);
+      const goalContext = await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
+      const prompt = buildChatPrompt(company, agent, recent.reverse(), kanbanContext, goalContext);
       const adapter = getAdapter(agent.adapterType ?? 'hermes');
       const result = await adapter.dispatch(
         await buildExecutionAgent(agent, session.agentSessionId ?? null),
@@ -212,6 +240,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       await db.insert(costEvents).values({
         companyId: session.companyId,
         agentId: agent.id,
+        projectId: session.projectId,
         provider: agent.adapterType ?? 'unknown',
         model: agent.hermesProfile ?? 'direct-chat',
         outputTokens: result.tokensUsed,

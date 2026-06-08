@@ -1,0 +1,168 @@
+# MegaCorps Prompt Injection Format
+
+Last updated: 2026-06-08
+
+This document describes the prompt content MegaCorps injects for Direct Chat and Kanban task runs.
+
+## Shared Context Blocks
+
+MegaCorps uses bounded context budgets, so long fields are clipped rather than omitted silently. The common blocks are:
+
+- Company name, mission, dispatch settings
+- Company goals, department goals, project goals
+- Agent identity, title, reporting manager, direct reports
+- Same-company Kanban snapshot with compact card lines
+- Focus-agent assigned work and review queue
+- Recent activity and heartbeat runs
+- Relevant knowledge docs
+
+## Goal Stack
+
+Goals are scoped in three layers:
+
+- Company goal: applies to all company work.
+- Department goal: applies when the task or agent is in that department.
+- Project goal: applies when the task or chat session belongs to that project.
+
+For Kanban task dispatch, MegaCorps injects:
+
+```text
+Goal context:
+Company goals:
+- Company goal: <title>
+  <body>
+Department: <department name | none>
+Department goals:
+- Department goal: <title>
+  <body>
+Project: <project name | none>
+Project goals:
+- Project goal: <title>
+  <body>
+Selected card goal:
+- <scope> goal: <title>
+  <body>
+Effective goal stack:
+- <all company + matching department/project + selected goals>
+```
+
+For Direct Chat, the session `projectId` controls the project goal layer. A null `projectId` is treated as no-project/general chat.
+
+## Kanban Dispatch Prompt
+
+Kanban dispatch calls the adapter with a task body shaped like:
+
+```text
+Company: <company name>
+Mission: <company mission>
+
+Project: <project name>
+<project description>
+
+Goal: <selected goal title>
+<selected goal body>
+
+Assigned member: <agent name>
+Identity label: <agent role>
+Reports to: <manager name | top-level>
+Direct reports: <report list | none>
+
+Goal context:
+<company / department / project / selected / effective goals>
+
+Card: <title>
+Status: <columnStatus>
+Priority: <number>
+
+Previous review feedback:
+<feedback, if any>
+
+Kanban context snapshot:
+<bounded company board, focus card, messages, logs, activity, runs>
+
+Company knowledge:
+<matching knowledge docs>
+
+Task body:
+<card body>
+
+Completion protocol:
+If you can complete the task, post the final answer back through the MegaCorps webhook with status="done".
+If you need ordinary QA on completed work, use status="in_review" and include the completed output.
+If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.
+If no reviewer/manager exists, the server will move top-level escalations to blocked for human intervention.
+```
+
+## Review Prompt
+
+There are two review modes.
+
+Quality review (`in_review`):
+
+```text
+Quality-review the completed work for card <id>: <title>.
+Return PASS/APPROVED if it is acceptable, or REJECT/REVISION_REQUESTED with feedback if it needs more work.
+Use ESCALATE only if your manager must decide.
+```
+
+Help/escalation review (`needs_review`):
+
+```text
+Help-review an escalated card <id>: <title>.
+The assignee says they cannot complete the task.
+Decide one of:
+- APPROVE/DONE if you can finish it directly.
+- REVISION_REQUESTED with concrete guidance if the assignee should retry.
+- ESCALATE if your manager must decide.
+```
+
+If the reviewer has no manager and cannot resolve the task, MegaCorps moves the card to `blocked`.
+
+## Direct Chat Prompt
+
+Direct Chat uses the same agent identity and Kanban snapshot, but without the webhook completion protocol:
+
+```text
+Company: <company name>
+Mission: <company mission>
+
+Goal context:
+Project: <project name | No project / general chat>
+Project description: <description, if any>
+Department: <agent department | none>
+Company goals:
+<company goals>
+Department goals:
+<agent department goals>
+Project goals:
+<session project goals>
+
+Agent name: <agent name>
+Identity label: <agent role>
+Title: <agent title | none>
+Adapter: <adapter type>
+
+Kanban context snapshot:
+<bounded same-company board and focus-agent work context>
+
+Conversation history:
+[user] <message>
+[agent] <reply>
+```
+
+## Webhook Escalation Payload
+
+When an assignee cannot solve a task, the preferred callback is:
+
+```json
+{
+  "cardId": "<card uuid>",
+  "taskRunId": "<task run uuid>",
+  "status": "needs_review",
+  "summary": "needs reviewer guidance: <short blocker>",
+  "output": "Attempted methods:\n- ...\n\nBlocker/root cause:\n...\n\nReviewer questions:\n- ...\n\nPartial output/logs:\n...",
+  "costUsd": 0.001
+}
+```
+
+`status=blocked` with explicit needs-guidance/escalation wording is also promoted to `needs_review` when an independent reviewer or manager exists. If none exists, the card becomes `blocked`.

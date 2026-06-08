@@ -126,6 +126,9 @@ Respond to the user directly. Do not report task completion or call the Kanban w
   const webhookBodyExample = task.taskRunId
     ? `{ "cardId": "${task.id}", "taskRunId": "${task.taskRunId}", "status": "done", "summary": "...", "output": "..." }`
     : `{ "cardId": "${task.id}", "status": "done", "summary": "...", "output": "..." }`;
+  const escalationBodyExample = task.taskRunId
+    ? `{ "cardId": "${task.id}", "taskRunId": "${task.taskRunId}", "status": "needs_review", "summary": "needs reviewer guidance: ...", "output": "Attempted methods:\\n- ...\\n\\nBlocker/root cause:\\n...\\n\\nReviewer questions:\\n- ...\\n\\nPartial output/logs:\\n..." }`
+    : `{ "cardId": "${task.id}", "status": "needs_review", "summary": "needs reviewer guidance: ...", "output": "Attempted methods:\\n- ...\\n\\nBlocker/root cause:\\n...\\n\\nReviewer questions:\\n- ...\\n\\nPartial output/logs:\\n..." }`;
   return `You are now working under PLATFORM MegaCorps at ${apiUrl}.
 
 === Common API Endpoints ===
@@ -151,7 +154,10 @@ POST ${apiUrl}/api/webhook/task-complete
 ${taskWebhookSecret ? `Header: X-MegaCorps-Webhook-Secret: ${taskWebhookSecret}` : 'Webhook auth: no shared secret was provided in your runtime config.'}
 Body: ${webhookBodyExample}
 
-If you encounter errors, POST to the same endpoint with status "blocked".
+If the work is complete but needs QA, POST status "in_review" with the completed output.
+If you cannot solve the task, do not mark it done. POST status "needs_review" with attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs:
+Body: ${escalationBodyExample}
+Use status "blocked" only for a hard stop that needs human intervention and cannot be usefully reviewed by another agent.
 
 For full API documentation, fetch: GET ${apiUrl}/api/help
 `;

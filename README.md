@@ -1,4 +1,4 @@
-# MegaCorps Phase 1-15 Control Plane MVP
+# MegaCorps Phase 1-16 Control Plane MVP
 
 Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm workspaces.
 
@@ -6,6 +6,7 @@ Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm work
 
 - [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md): current progress, Paperclip/Hermes Kanban reference review, implemented features, gap analysis, and next phase plan.
 - [MegaCorps_ARCHITECTURE.md](./MegaCorps_ARCHITECTURE.md): long-form architecture notes and implementation updates.
+- [MegaCorps_PROMPT_INJECTION.md](./MegaCorps_PROMPT_INJECTION.md): Direct Chat and Kanban prompt context format, goal scope stack, and escalation webhook payloads.
 
 ## Run locally
 
@@ -89,13 +90,13 @@ Hermes suite operational notes:
 
 - `Dashboard`: operating overview, stage counts, recent task logs, recent API lifecycle events.
 - `Companies`: company registry, company settings, department settings, reporting structure, and delegation closure.
-- `Direct Chat`: company -> agent -> session direct messaging with resumable adapter sessions.
-- `Kanban`: task UUIDs, stage, details, per-task message board, sub-tasks, logs, run/review/decompose/delete.
+- `Direct Chat`: company -> project/no-project -> agent -> session direct messaging with resumable adapter sessions.
+- `Kanban`: task UUIDs, stage, project filter, scoped goals, details, per-task message board, sub-tasks, logs, run/review/decompose/delete.
 - `Agents`: member hierarchy, agent CRUD, pause/resume/fire/reset, runtime and adapter configuration.
 - `Budget`: spend and budget visibility for agents and tasks.
 - `Logs`: cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
-- `Workspaces`: project and goal setup for task context.
+- `Workspaces`: project-focused setup for company, department, and project goals.
 - `Admin`: global account management, signup switch, roles, account status, and password resets.
 - `Settings`: company heartbeat settings, departments, runtime presets, adapter endpoints.
   Runtime health summaries show adapter status, attached agents, last run status, and capabilities. Company members can be managed by email with viewer/operator/admin roles.
@@ -117,6 +118,7 @@ Hermes suite operational notes:
 - Phase 13: real O-chart tree canvas, operator RBAC for mutations/manual execution, in-app rate limiting, runtime health summary, webhook shared-secret guard, monthly budget reset cron, and UI error boundary.
 - Phase 14: company memberships, company-scoped read filters, company operator/admin mutation checks, runtime company scoping, and Settings member management.
 - Phase 15: database-backed `task_runs` queue, background task-run worker, queued manual run/review, queued cron dispatch/review, and Logs task-run visibility.
+- Phase 16: help/escalation review via `needs_review`, scoped company/department/project goals, project-scoped Direct Chat, and project-focused Workspaces.
 
 Reference-informed next phases:
 
@@ -134,8 +136,9 @@ The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds 
 - auto-assign unassigned tasks to an active idle agent, preferring department and tag/capability matches,
 - enqueue dispatch task-run attempts,
 - enqueue review task-run attempts when a reviewer is configured,
-- let the task-run worker claim queued work up to `TASK_RUN_WORKER_BATCH_SIZE`, move assigned work into `in_progress`, run the configured adapter, and move completed work to `in_review` or `done`,
+- let the task-run worker claim queued work up to `TASK_RUN_WORKER_BATCH_SIZE`, move assigned work into `in_progress`, run the configured adapter, and move completed work to `in_review`, `needs_review`, `done`, or `blocked`,
 - hold review task-runs while their card is still `in_progress`, so long-running dispatches do not block unrelated queued work but reviewers do not judge unfinished output,
+- distinguish quality review (`in_review`) from help/escalation review (`needs_review`). If an assignee cannot complete a task, the required output is attempted methods, blocker/root cause, reviewer questions, and partial output/logs. MegaCorps queues review when a distinct reviewer/manager exists, otherwise top-level escalations become `blocked`,
 - recover expired execution locks; expired `in_progress` work increments `retry_count`, returns to `todo` with backoff, or moves to `blocked` after `max_retries`,
 - cascade parent tasks when all sub-tasks are complete.
 
@@ -155,11 +158,12 @@ Cron/debug endpoints:
 Open `Direct Chat` in the sidebar:
 
 1. Pick a company.
-2. Pick an agent in that company.
-3. Select an existing session or create a new session.
-4. Send a message.
+2. Pick a project, or `No project` for general chat.
+3. Pick an agent in that company.
+4. Select an existing session or create a new session.
+5. Send a message.
 
-Every chat session stores its own `agentSessionId`, so a user can keep several separate conversations with the same agent. Chat messages are stored in `chat_messages`, sessions in `chat_sessions`, and every agent reply is also recorded through `heartbeat_runs`, `activity_log`, and `cost_events`. The UI shows the user's outgoing message optimistically and displays an agent typing indicator while the adapter run is still pending.
+Every chat session stores its own `agentSessionId` and optional `projectId`, so a user can keep several separate conversations with the same agent by project or no-project context. Chat messages are stored in `chat_messages`, sessions in `chat_sessions`, and every agent reply is also recorded through `heartbeat_runs`, `activity_log`, and `cost_events`. The UI shows the user's outgoing message optimistically and displays an agent typing indicator while the adapter run is still pending.
 
 ## Task message board and intervention
 
@@ -168,6 +172,7 @@ Open a task and use the Message Board tab:
 - `Comment only`: add audit/context.
 - `Agent note`: leave a task message as a specific agent.
 - `Stop agent now and block task`: mark the task blocked and pause the assignee.
+- `Escalate to reviewer`: move the task to `needs_review` and queue help review when an independent reviewer/manager exists; otherwise block the task.
 - `Send comment to agent context`: queue the instruction for the next run prompt.
 - `Continue run with comment`: reactivate the assignee and move the task back to `todo`.
 
@@ -181,6 +186,7 @@ Kanban task detail tabs use a short-lived browser session cache for message boar
 Every task dispatch, review, and direct chat invocation receives a bounded Kanban context snapshot:
 
 - company mission/settings,
+- company, department, and project goals,
 - compact same-company Kanban board snapshot,
 - focus task details,
 - parent/child/dependency task context,
@@ -223,9 +229,10 @@ Phase 8/9 safety behavior:
 - Member hierarchy is based on `bossId`: the identity label is free text, while the important control-plane relation is who a member reports to and who reports to them.
 - Decomposed sub-tasks are delegated to direct reports when the parent task is assigned to a member with subordinates.
 - Work completed by a subordinate moves to `in_review` for a distinct configured reviewer or reporting manager. Self-review is not treated as a real review gate; if no distinct reviewer is available, successful dispatch goes directly to `done`.
+- Work the assignee cannot solve moves to `needs_review` for a help/escalation review when an independent reviewer or manager exists. Reviewers can finish directly (`done`), return guidance (`todo`), or escalate to their manager. If a top-level reviewer cannot solve it, the card becomes `blocked`.
 - In-app IP rate limiting is enabled by default. Tune `RATE_LIMIT_*` env vars or set `RATE_LIMIT_ENABLED=false` for local stress tests.
 - Mutation/manual execution routes require operator/admin roles. Viewer role can read authenticated UI data.
-- Task completion webhooks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret` with at least 16 characters and must send either `X-MegaCorps-Webhook-Secret` or `Authorization: Bearer`. Agent prompts include `taskRunId`; repeated webhook completions with the same `taskRunId` return `duplicate: true` and do not re-write cost, comments, or stages. A webhook `status=done` updates the card stage, clears active execution locks, and is protected from being overwritten by a late dispatch/review return. `status=in_progress` is a progress update and does not release the active run.
+- Task completion webhooks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret` with at least 16 characters and must send either `X-MegaCorps-Webhook-Secret` or `Authorization: Bearer`. Agent prompts include `taskRunId`; repeated webhook completions with the same `taskRunId` return `duplicate: true` and do not re-write cost, comments, or stages. A webhook `status=done` updates the card stage, clears active execution locks, and is protected from being overwritten by a late dispatch/review return. `status=needs_review` queues help review when possible. `status=in_progress` is a progress update and does not release the active run.
 - Monthly agent spend resets on `BUDGET_RESET_DAY` UTC, default day 1, and the reset is marked in `cron_runs`.
 - Company membership rows scope visible companies and company-owned entities. Company operators/admins can mutate company data; company admins can manage memberships.
 - Manual Run/Review and cron dispatch enqueue `task_runs`; the in-process worker claims queue capacity without waiting for every active adapter call to finish and records linked `heartbeat_runs`.
