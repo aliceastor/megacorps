@@ -24,6 +24,19 @@ function wsUrl(apiUrl: string): string {
   return url.toString();
 }
 
+async function hasLiveSession(apiUrls: string[]): Promise<boolean> {
+  for (const apiUrl of apiUrls) {
+    try {
+      const response = await fetch(`${apiUrl}/api/me`, { credentials: 'include', cache: 'no-store' });
+      if (response.ok) return true;
+      if (response.status === 401 || response.status === 403) return false;
+    } catch {
+      // Try the next API candidate before giving up.
+    }
+  }
+  return false;
+}
+
 function invalidateLiveEvent(queryClient: QueryClient, event: LiveEvent): void {
   if (event.type.startsWith('chat.')) {
     void queryClient.invalidateQueries({ queryKey: ['chatSessions'] });
@@ -56,10 +69,13 @@ function LiveEvents() {
     if (window.location.pathname.startsWith('/login') || window.location.pathname.startsWith('/signup')) return;
     let closed = false;
     let socket: WebSocket | null = null;
-    const candidates = getApiCandidates().map(wsUrl);
+    const apiCandidates = getApiCandidates();
+    const candidates = apiCandidates.map(wsUrl);
     let candidateIndex = 0;
 
-    const connect = () => {
+    const connect = async () => {
+      if (closed) return;
+      if (!(await hasLiveSession(apiCandidates))) return;
       if (closed) return;
       socket = new WebSocket(candidates[candidateIndex] ?? candidates[0] ?? 'ws://localhost:4000/api/live');
       socket.onmessage = (message) => {
