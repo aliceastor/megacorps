@@ -7,6 +7,7 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.equal(typeof catalog.rateLimits.enforced, 'boolean');
   assert.match(catalog.rateLimits.summary, /rate limiting/i);
   assert.ok(catalog.adapters.includes('hermes-ssh'));
+  assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/auth/bootstrap'));
   for (const endpoint of catalog.endpoints) {
     assert.notEqual(endpoint.responseSchema, undefined, `${endpoint.method} ${endpoint.path} missing responseSchema`);
     assert.notEqual(endpoint.responseExample, undefined, `${endpoint.method} ${endpoint.path} missing responseExample`);

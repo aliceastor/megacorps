@@ -15,7 +15,7 @@ Completed in this pass:
 - Later self-signup accounts become global viewer and default-company viewer once an active admin exists.
 - Added global Admin APIs for signup settings and account management.
 - Added Admin Web UI for all accounts, roles, status, password resets, and signup control.
-- Removed the need for `JWT_SECRET`, `BOOTSTRAP_TOKEN`, and `SIGNUP_*` env vars from Docker/Compose onboarding.
+- Removed the need for `JWT_SECRET` and `SIGNUP_*` env vars from Docker/Compose onboarding. `BOOTSTRAP_TOKEN` is optional and only used by `POST /api/auth/bootstrap` when no active admin exists.
 
 ## Architecture Update v1.3 - Auth Onboarding Hardening
 
@@ -77,7 +77,7 @@ Completed in this pass:
 - Rebuilt the Companies/Agents O-chart into a real top-down tree canvas with connector lines, department lanes, clickable member nodes, and preserved member edit behavior.
 - Added role helper `requireRole` and enforced operator/admin access for mutation-heavy control actions: cards create/update/delete/run/review/decompose, comments/interventions, agents CRUD/actions/tests, runtime CRUD, budget policy CRUD, approval decisions, company/department changes, projects/goals/knowledge writes, and manual cron.
 - Added in-app IP-based rate limiting with configurable buckets for auth, chat, webhooks, operator actions, writes, and reads.
-- Added fail-closed webhook shared-secret validation; task completion webhooks require `WEBHOOK_SHARED_SECRET`.
+- Added fail-closed webhook shared-secret validation; task completion webhooks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret`.
 - Added first-admin onboarding plus hashed one-time invite tokens for controlled production account creation.
 - Added `GET /api/agent-runtimes/health` runtime health summary with attached agent counts, last run status/error, and adapter capabilities.
 - Added Settings UI runtime health panel.
@@ -94,7 +94,7 @@ Completed in this pass:
 
 - Added the `hermes-ssh` adapter.
 - The server container now includes `openssh-client`.
-- Hermes SSH dispatch connects to the configured SSH host and runs `hermes -z "{prompt}" --profile {profile}`. No production SSH host is hardcoded.
+- Hermes SSH dispatch connects to the configured SSH host, imports `/proc/1/environ`, and runs `hermes -z "{prompt}" --profile {profile}`. No production SSH host is hardcoded.
 - SSH stdout/stderr, exit code, duration, estimated tokens, cost, and session id are recorded through the normal adapter result path.
 - `Settings -> Agent runtimes` and `Agents -> select agent` now expose Hermes SSH fields: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, and `megacorpsApiUrl`.
 - Docker compose and `.env.example` include Hermes SSH environment fallbacks.
@@ -660,6 +660,7 @@ Current implementation note, 2026-06-06:
 - `hermes-ssh` is now the direct SSH-backed Hermes CLI adapter.
 - `hermes-ssh` requires a configured SSH host. The SSH user defaults to `root` when no user is configured.
 - The remote command shape is `hermes -z "{prompt}" --profile {profile}`. MegaCorps does not pass bare prompt text, `--resume`, or `--max-turns` through these CLI adapters.
+- SSH dispatch imports `/proc/1/environ` before executing Hermes so provider API keys configured on the container remain visible to the SSH session.
 - MegaCorps does not pass `--reasoning-effort`, `--max-turns`, or bare prompt text to Hermes CLI because Hermes v0.15.2 rejects unsupported flags and unwrapped prompt arguments. Configure reasoning behavior in the Hermes profile/config instead.
 - Use `Settings -> Agent runtimes` to configure SSH host/user/port/key path, then attach that runtime to agents in `Agents`.
 

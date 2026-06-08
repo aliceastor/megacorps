@@ -4,6 +4,7 @@ import { db, sql as rawSql } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardComments, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
+import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -308,12 +309,14 @@ export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: st
     if (runtime.adapterType !== adapterType) throw new Error('agent_runtime_adapter_mismatch');
     runtimeConfig = (runtime?.config as Record<string, unknown> | null) ?? {};
   }
+  const webhookSharedSecret = await configuredWebhookSharedSecret();
   return {
     hermesProfile: agent.hermesProfile,
     currentSessionId: currentSessionId === undefined ? agent.currentSessionId : currentSessionId,
     adapterConfig: {
       ...runtimeConfig,
       ...configuredAdapterOverrides(agent.adapterConfig as Record<string, unknown> | null),
+      ...(webhookSharedSecret ? { webhookSharedSecret } : {}),
     },
   };
 }

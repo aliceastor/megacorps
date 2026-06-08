@@ -54,9 +54,10 @@ Adapter egress blocks localhost/link-local metadata targets by default. Set `ADA
 Production onboarding:
 
 1. Open `/signup` and create the first account. If no active admin exists, that signup becomes global admin and default-company admin.
-2. Open `Admin` to manage all accounts, roles, account status, password resets, and the DB-backed signup switch.
-3. Later users can self-signup while signup is enabled, or accept `/signup?invite=...` invite links from an admin.
-4. Existing users receiving invites get the new membership but must log in with their existing password.
+2. If signup is disabled or a deployment has no active admin, set `BOOTSTRAP_TOKEN` temporarily and call `POST /api/auth/bootstrap` with the token, email, name, and password. Bootstrap only works while no active admin exists.
+3. Open `Admin` to manage all accounts, roles, account status, password resets, and the DB-backed signup switch.
+4. Later users can self-signup while signup is enabled, or accept `/signup?invite=...` invite links from an admin.
+5. Existing users receiving invites get the new membership but must log in with their existing password.
 
 Common login/onboarding errors:
 
@@ -75,8 +76,9 @@ Supported runtime fields:
 `megacorpsApiUrl` is the MegaCorps API base URL agents use for task-complete callbacks. Legacy `publicApiUrl`, `callbackUrl`, and `webhookBaseUrl` config keys are still accepted for existing runtimes, but new presets should use `megacorpsApiUrl`.
 Hermes CLI adapters invoke one-shot prompts as `hermes -z "<prompt>" --profile <profile>`. They intentionally do not pass `--reasoning-effort`, `--max-turns`, or a bare prompt argument; Hermes v0.15.2 rejects unsupported flags and treats bare prompt text as unrecognized arguments. Configure provider/model reasoning behavior inside the Hermes profile/config instead.
 For Hermes Portainer, the agent still needs a `hermesProfile`; the runtime tells MegaCorps where to execute it.
-For Hermes SSH, create a runtime preset with `adapterType=hermes-ssh`, set `sshHost` to your Hermes host, set the SSH user/key path reachable inside the server container, and set each agent's `hermesProfile` to the Hermes profile name such as `alice`. The SSH user defaults to `root` and can be overridden. The deploy compose mounts persistent SSH keys at `/home/megacorps/.ssh`, with `/home/megacorps/.ssh/id_ed25519` as the default key path.
+For Hermes SSH, create a runtime preset with `adapterType=hermes-ssh`, set `sshHost` to your Hermes host, set the SSH user/key path reachable inside the server container, and set each agent's `hermesProfile` to the Hermes profile name such as `alice`. The SSH user defaults to `root` and can be overridden. The deploy compose mounts persistent SSH keys at `/home/megacorps/.ssh`, with `/home/megacorps/.ssh/id_ed25519` as the default key path. SSH dispatch imports `/proc/1/environ` before running Hermes so container-level provider API keys remain visible to the SSH session.
 For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or the agent override panel.
+Task-complete webhooks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret` with at least 16 characters. MegaCorps injects the configured secret into dispatched agent prompts as `X-MegaCorps-Webhook-Secret`.
 
 Hermes suite operational notes:
 
@@ -219,7 +221,7 @@ Phase 8/9 safety behavior:
 - Work completed by a subordinate moves to `in_review` for the reporting manager by default, creating a bottom-up review path back toward the top-level member.
 - In-app IP rate limiting is enabled by default. Tune `RATE_LIMIT_*` env vars or set `RATE_LIMIT_ENABLED=false` for local stress tests.
 - Mutation/manual execution routes require operator/admin roles. Viewer role can read authenticated UI data.
-- Task completion webhooks require `WEBHOOK_SHARED_SECRET` and must send either `X-MegaCorps-Webhook-Secret` or `Authorization: Bearer`.
+- Task completion webhooks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret` with at least 16 characters and must send either `X-MegaCorps-Webhook-Secret` or `Authorization: Bearer`.
 - Monthly agent spend resets on `BUDGET_RESET_DAY` UTC, default day 1, and the reset is marked in `cron_runs`.
 - Company membership rows scope visible companies and company-owned entities. Company operators/admins can mutate company data; company admins can manage memberships.
 - Manual Run/Review and cron dispatch now enqueue `task_runs`; the in-process worker claims the queue and records linked `heartbeat_runs`.
@@ -229,7 +231,7 @@ No pnpm. No Redis.
 ## Production launch checklist
 
 - Put the app behind TLS, a reverse proxy, and external rate limits in addition to the in-app limiter.
-- Set strong `WEBHOOK_SHARED_SECRET`, SSH keys, and external database credentials. The session signing secret is generated automatically into DB `app_settings.auth.jwt_secret`.
+- Set strong `WEBHOOK_SHARED_SECRET`, SSH keys, and external database credentials. Use `BOOTSTRAP_TOKEN` only temporarily for admin recovery, then remove it. The session signing secret is generated automatically into DB `app_settings.auth.jwt_secret`.
 - Encrypt or externalize adapter/runtime secrets before multi-user production.
 - Move the current in-process DB task-run worker into a separate sidecar/replica-safe worker for heavy production usage.
 - Add WebSocket/SSE consumers for live task/chat/log updates.

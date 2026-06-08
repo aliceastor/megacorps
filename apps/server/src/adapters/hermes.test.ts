@@ -32,7 +32,10 @@ test('Hermes CLI commands do not pass unsupported reasoning-effort flag', () => 
   assert.equal(sshCommand.includes('reasoning-effort'), false);
   assert.equal(sshCommand.includes("'chat'"), false);
   assert.equal(sshCommand.includes("'--max-turns'"), false);
-  assert.match(sshCommand, /^'\/opt\/hermes\/\.venv\/bin\/hermes' '-z' '.+' '--profile' 'alice'$/s);
+  assert.match(sshCommand, /^'bash' '-lc' /);
+  assert.match(sshCommand, /\/proc\/1\/environ/);
+  assert.match(sshCommand, /exec "\$@"/);
+  assert.match(sshCommand, /'megacorps-hermes' '\/opt\/hermes\/\.venv\/bin\/hermes' '-z' '.+' '--profile' 'alice'$/s);
 });
 
 test('Hermes SSH command shell-quotes prompt passed through -z', () => {
@@ -47,7 +50,10 @@ test('Hermes SSH command shell-quotes prompt passed through -z', () => {
     kind: 'chat',
   });
 
-  assert.match(command, /^'hermes' '-z' '.+' '--profile' 'alice'$/s);
+  assert.match(command, /^'bash' '-lc' /);
+  assert.match(command, /\/proc\/1\/environ/);
+  assert.match(command, /exec "\$@"/);
+  assert.match(command, /'megacorps-hermes' 'hermes' '-z' '.+' '--profile' 'alice'$/s);
   assert.match(command, /Don'\\''t expand \$HOME or `whoami`\./);
 });
 
@@ -63,4 +69,17 @@ test('agent prompts prefer megacorpsApiUrl while accepting legacy publicApiUrl',
 
   assert.match(prompt, /http:\/\/megacorps\.example:4000\/api\/webhook\/task-complete/);
   assert.doesNotMatch(prompt, /legacy\.example/);
+});
+
+test('agent prompts include webhook shared secret header when configured', () => {
+  const prompt = buildAgentPrompt({
+    hermesProfile: 'alice',
+    currentSessionId: null,
+    adapterConfig: {
+      megacorpsApiUrl: 'http://megacorps.example:4000',
+      webhookSharedSecret: 'super-secret-shared-token',
+    },
+  }, { id: 'card-1', title: 'Smoke', body: 'Return OK.' });
+
+  assert.match(prompt, /Header: X-MegaCorps-Webhook-Secret: super-secret-shared-token/);
 });

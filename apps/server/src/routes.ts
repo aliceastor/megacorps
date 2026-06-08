@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, ne, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import { z } from 'zod';
 import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema } from '@megacorps/shared';
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
@@ -13,6 +14,7 @@ import { buildExecutionAgent, cascadeParentStatus, decomposeCard, enqueueTaskRun
 import { registerChatRoutes } from './chat.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
+import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
@@ -26,6 +28,10 @@ function actorLabel(user: { email?: string; id?: string } | null): string { retu
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
 const SIGNUP_ENABLED_SETTING = 'auth.signup_enabled';
+
+const bootstrapSchema = signupSchema.extend({
+  token: z.string().optional(),
+});
 
 function truthy(value: string | undefined): boolean {
   return value === '1' || value === 'true' || value === 'yes' || value === 'on';
@@ -50,6 +56,14 @@ function safeSecretEqual(provided: string | undefined, expected: string): boolea
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function configuredString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function bootstrapToken(): string | undefined {
+  return configuredString(process.env.BOOTSTRAP_TOKEN);
 }
 
 function sha256(value: string): string {
@@ -212,6 +226,42 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       firstAccountWillBeAdmin: count === 0,
       nextSignupWillBeAdmin: !hasAdmin,
     };
+  });
+
+  app.post('/api/auth/bootstrap', async (request, reply) => {
+    await assertSessionSecretReady();
+    const expectedToken = bootstrapToken();
+    if (!expectedToken) return reply.code(503).send({ error: 'bootstrap_token_not_configured' });
+    if (expectedToken.length < 16) return reply.code(503).send({ error: 'bootstrap_token_too_short' });
+    const input = bootstrapSchema.parse(request.body);
+    const headerToken = request.headers['x-megacorps-bootstrap-token'];
+    const providedToken = input.token ?? (Array.isArray(headerToken) ? headerToken[0] : headerToken);
+    if (!safeSecretEqual(providedToken, expectedToken)) return reply.code(401).send({ error: 'bootstrap_auth_required' });
+
+    const passwordHash = await bcrypt.hash(input.password, 12);
+    const now = new Date();
+    const result = await db.transaction(async (tx) => {
+      await tx.execute(drizzleSql`SELECT pg_advisory_xact_lock(7042024060602)`);
+      const [adminRow] = await tx.select({ id: users.id }).from(users).where(and(eq(users.role, 'admin'), eq(users.status, 'active'))).limit(1);
+      if (adminRow) return { blocked: true as const };
+      const [company] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
+      if (!company) throw new Error('Default company missing. Run migrations.');
+      const [existingUser] = await tx.select().from(users).where(eq(users.email, input.email)).limit(1);
+      const [user] = existingUser
+        ? await tx.update(users).set({ name: input.name, passwordHash, role: 'admin', status: 'active', updatedAt: now }).where(eq(users.id, existingUser.id)).returning()
+        : await tx.insert(users).values({ email: input.email, name: input.name, passwordHash, role: 'admin', status: 'active' }).returning();
+      if (!user) throw new Error('bootstrap_user_failed');
+      const [membership] = await tx.insert(companyMemberships).values({ companyId: company.id, userId: user.id, role: 'admin', status: 'active' }).onConflictDoUpdate({
+        target: [companyMemberships.companyId, companyMemberships.userId],
+        set: { role: 'admin', status: 'active', updatedAt: now },
+      }).returning();
+      await tx.insert(activityLog).values({ companyId: company.id, actorType: 'system', actorId: 'bootstrap', userId: user.id, action: existingUser ? 'auth.bootstrap_admin_promoted' : 'auth.bootstrap_admin_created', entityType: 'user', entityId: user.id, details: { email: user.email } });
+      return { blocked: false as const, user, membership };
+    });
+    if (result.blocked) return reply.code(409).send({ error: 'bootstrap_already_has_admin' });
+    const token = await signSession({ id: result.user.id, email: result.user.email, role: 'admin' });
+    setSessionCookie(reply, token);
+    return { user: { id: result.user.id, email: result.user.email, name: result.user.name, role: result.user.role }, membership: result.membership };
   });
 
   app.post('/api/auth/signup', async (request, reply) => {
@@ -1152,8 +1202,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/webhook/task-complete', async (request, reply) => {
-    const expectedSecret = process.env.WEBHOOK_SHARED_SECRET;
-    if (!expectedSecret || expectedSecret.length < 16) return reply.code(503).send({ error: 'webhook_secret_not_configured' });
+    const expectedSecret = await configuredWebhookSharedSecret();
+    if (!expectedSecret) return reply.code(503).send({ error: 'webhook_secret_not_configured' });
+    if (expectedSecret.length < 16) return reply.code(503).send({ error: 'webhook_secret_too_short' });
     const headerSecret = request.headers['x-megacorps-webhook-secret'];
     const bearer = typeof request.headers.authorization === 'string' && request.headers.authorization.startsWith('Bearer ')
       ? request.headers.authorization.slice('Bearer '.length)

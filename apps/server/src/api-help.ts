@@ -32,6 +32,7 @@ const endpoints: ApiEndpoint[] = [
   { method: 'GET', path: '/health', group: 'System', auth: 'none', summary: 'Read server health.', response: '{ ok: true }' },
   { method: 'GET', path: '/api/help', group: 'System', auth: 'none', summary: 'List MegaCorps API endpoints and usage.', query: { format: 'Optional. Use markdown or md for text/markdown output.' }, responseSchema: { service: 'string', help: 'object', auth: 'object', rateLimits: 'object', kanban: 'object', adapters: 'string[]', endpoints: 'ApiHelpEndpoint[]' }, responseExample: { service: 'MegaCorps API', endpoints: [{ method: 'GET', path: '/health', responseSchema: { ok: 'boolean' }, responseExample: { ok: true } }] } },
   { method: 'GET', path: '/api/auth/status', group: 'Auth', auth: 'none', summary: 'Read public onboarding state. Signup is DB-configured and defaults to enabled; signup becomes admin when no active admin exists.' },
+  { method: 'POST', path: '/api/auth/bootstrap', group: 'Auth', auth: 'none', summary: 'Bootstrap or recover the global admin account when BOOTSTRAP_TOKEN is configured and no active admin exists.', body: { token: 'BOOTSTRAP_TOKEN value or send X-MegaCorps-Bootstrap-Token header', email: 'admin@example.com', name: 'Admin', password: 'at least 8 chars' } },
   { method: 'POST', path: '/api/auth/signup', group: 'Auth', auth: 'none', summary: 'Create a user when DB auth.signup_enabled=true. If no active admin exists, this account becomes global admin and default-company admin.', body: { email: 'user@example.com', name: 'Operator', password: 'at least 8 chars' } },
   { method: 'POST', path: '/api/auth/login', group: 'Auth', auth: 'none', summary: 'Log in and set the session cookie.', body: { email: 'user@example.com', password: 'password' } },
   { method: 'POST', path: '/api/auth/logout', group: 'Auth', auth: 'session', summary: 'Clear the session cookie.' },
@@ -185,7 +186,7 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
     return { responseSchema: { user }, responseExample: { user }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
-  if (endpoint.path.includes('/auth/signup') || endpoint.path.includes('/auth/login')) {
+  if (endpoint.path.includes('/auth/signup') || endpoint.path.includes('/auth/login') || endpoint.path.includes('/auth/bootstrap')) {
     return { responseSchema: { user: { id: 'uuid', email: 'string', name: 'string', role: 'string' } }, responseExample: { user: { id: 'user-uuid', email: 'user@example.com', name: 'Operator', role: 'admin' } }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
@@ -258,9 +259,10 @@ export function apiHelpCatalog() {
       ui: '/help',
     },
     auth: {
-      mode: 'Cookie session with company membership role checks. Signup is DB-configured and defaults to enabled; if no active admin exists, the next signup becomes global admin and default-company admin. Viewer can read data for visible companies; company operator/admin is required for company-scoped mutation, run/review/decompose, adapter tests, runtime edits, and budget decisions. Manual cron remains an operator system action.',
+      mode: 'Cookie session with company membership role checks. Signup is DB-configured and defaults to enabled; if no active admin exists, the next signup becomes global admin and default-company admin. If BOOTSTRAP_TOKEN is configured, POST /api/auth/bootstrap can create or recover the admin account only while no active admin exists. Viewer can read data for visible companies; company operator/admin is required for company-scoped mutation, run/review/decompose, adapter tests, runtime edits, and budget decisions. Manual cron remains an operator system action.',
       login: 'POST /api/auth/login',
       signup: 'POST /api/auth/signup',
+      bootstrap: 'POST /api/auth/bootstrap',
       admin: 'GET/PUT /api/admin/settings and GET/PUT /api/admin/users require global admin role.',
     },
     rateLimits: {

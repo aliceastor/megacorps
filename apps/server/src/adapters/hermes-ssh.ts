@@ -19,6 +19,18 @@ function splitExtraOptions(value: string | undefined): string[] {
   return value.split(/\s+/).map((item) => item.trim()).filter(Boolean);
 }
 
+function wrapWithContainerEnv(command: string[]): string {
+  const script = [
+    'if [ -r /proc/1/environ ]; then',
+    'while IFS= read -r -d \'\' env_kv; do',
+    'case "$env_kv" in *=*) export "$env_kv";; esac;',
+    'done < /proc/1/environ;',
+    'fi;',
+    'exec "$@"',
+  ].join(' ');
+  return ['bash', '-lc', script, 'megacorps-hermes', ...command].map(shellQuote).join(' ');
+}
+
 export function buildHermesSshRemoteCommand(agent: AgentLike, task: TaskContext): string {
   if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
   const prompt = buildAgentPrompt(agent, task);
@@ -30,7 +42,7 @@ export function buildHermesSshRemoteCommand(agent: AgentLike, task: TaskContext)
     '--profile',
     agent.hermesProfile,
   ];
-  return command.map(shellQuote).join(' ');
+  return wrapWithContainerEnv(command);
 }
 
 async function runSsh(agent: AgentLike, remoteCommand: string, timeoutSec: number): Promise<SshRunResult> {

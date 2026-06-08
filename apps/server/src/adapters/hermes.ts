@@ -101,6 +101,12 @@ function megacorpsApiUrl(agent: AgentLike): string {
     ?? 'http://localhost:4000';
 }
 
+function webhookSharedSecret(agent: AgentLike): string | undefined {
+  return configuredString(agent.adapterConfig?.webhookSharedSecret)
+    ?? configuredString(agent.adapterConfig?.webhookSecret)
+    ?? configuredString(process.env.WEBHOOK_SHARED_SECRET);
+}
+
 export function buildAgentPrompt(agent: AgentLike, task: TaskContext): string {
   if (task.kind === 'chat') {
     return `You are in a direct MegaCorps chat session.
@@ -116,6 +122,7 @@ Respond to the user directly. Do not report task completion or call the Kanban w
   }
 
   const apiUrl = megacorpsApiUrl(agent);
+  const taskWebhookSecret = webhookSharedSecret(agent);
   return `You are now working under PLATFORM MegaCorps at ${apiUrl}.
 
 === Common API Endpoints ===
@@ -137,6 +144,7 @@ ${task.body}
 === Instructions ===
 When you complete this task, POST your results to:
 POST ${apiUrl}/api/webhook/task-complete
+${taskWebhookSecret ? `Header: X-MegaCorps-Webhook-Secret: ${taskWebhookSecret}` : 'Webhook auth: no shared secret was provided in your runtime config.'}
 Body: { "cardId": "${task.id}", "status": "done", "summary": "...", "output": "..." }
 
 If you encounter errors, POST to the same endpoint with status "blocked".

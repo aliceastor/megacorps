@@ -21,12 +21,12 @@ Latest verified baseline:
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
 - API discovery is available at `GET /api/help`, `GET /api/help?format=markdown`, and the Web UI Help page, with response schema examples and rate-limit notes for every endpoint.
 - Sidebar navigation now keeps Help and Settings in the bottom utility area, with the collapse toggle inside the sidebar.
-- Hermes SSH adapter is implemented for direct `ssh -> hermes -z "{prompt}" --profile {profile}` dispatch against the configured Hermes host. No production SSH host is hardcoded.
+- Hermes SSH adapter is implemented for direct `ssh -> hermes -z "{prompt}" --profile {profile}` dispatch against the configured Hermes host, with `/proc/1/environ` imported before Hermes so container-level provider keys are visible in SSH sessions. No production SSH host is hardcoded.
 - Browser API fallback now tries the current browser hostname on port `4000` before falling back to baked `NEXT_PUBLIC_API_URL`, which avoids NAS deployments accidentally calling unreachable `localhost` or stale IPs.
 - In-app rate limiting is enabled by default, and API Help now includes required roles for endpoints.
 - Company-owned read APIs now scope results to the current user's company memberships.
 - Company-owned mutation/manual execution APIs now require company operator/admin membership checks.
-- Production auth onboarding now uses DB-backed `auth.signup_enabled` and `auth.jwt_secret`; signup defaults to enabled, signup becomes admin when no active admin exists, and the Admin page manages all accounts.
+- Production auth onboarding now uses DB-backed `auth.signup_enabled` and `auth.jwt_secret`; signup defaults to enabled, signup becomes admin when no active admin exists, `POST /api/auth/bootstrap` can recover an admin when `BOOTSTRAP_TOKEN` is configured and no active admin exists, and the Admin page manages all accounts.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 
 ## Paperclip Research Summary
@@ -505,7 +505,7 @@ Implemented:
   - operator actions: 20/min
   - writes: 120/min
   - reads: 600/min
-- Fail-closed webhook shared-secret guard; task completion callbacks require `WEBHOOK_SHARED_SECRET`.
+- Fail-closed webhook shared-secret guard; task completion callbacks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret`, and dispatched agents are prompted to send `X-MegaCorps-Webhook-Secret`.
 - Production onboarding now uses no-active-admin signup promotion plus hashed one-time invite tokens.
 - Runtime health API and Settings panel.
 - Next.js error boundary with retry/dashboard recovery.
