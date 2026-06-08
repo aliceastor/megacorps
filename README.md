@@ -6,7 +6,7 @@ Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm work
 
 - [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md): current progress, Paperclip/Hermes Kanban reference review, implemented features, gap analysis, and next phase plan.
 - [MegaCorps_ARCHITECTURE.md](./MegaCorps_ARCHITECTURE.md): long-form architecture notes and implementation updates.
-- [MegaCorps_PROMPT_INJECTION.md](./MegaCorps_PROMPT_INJECTION.md): Direct Chat and Kanban prompt context format, goal scope stack, and escalation webhook payloads.
+- [MegaCorps_PROMPT_INJECTION.md](./MegaCorps_PROMPT_INJECTION.md): Direct Chat and Kanban prompt context format, company/department/project/card goal context, and escalation webhook payloads.
 
 ## Run locally
 
@@ -92,16 +92,19 @@ Hermes suite operational notes:
 ## Web UI pages
 
 - `Dashboard`: operating overview, stage counts, recent task logs, recent API lifecycle events.
-- `Companies`: company registry, company settings, department settings, reporting structure, and delegation closure.
-- `Direct Chat`: company -> project/no-project -> agent -> session direct messaging with resumable adapter sessions.
-- `Kanban`: task UUIDs, stage, project filter, scoped goals, details, per-task message board, work products, sub-tasks, logs, run/review/decompose/delete.
-- `Agents`: member hierarchy, agent CRUD, pause/resume/fire/reset, runtime and adapter configuration.
-- `Budget`: spend and budget visibility for agents and tasks.
-- `Logs`: cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
+- `Companies`: pure company CRUD plus company goals.
+- `Departments`: department management, department goals, and org lanes.
+- `Agents`: member hierarchy, guided agent creation, pause/resume/fire/reset, runtime and adapter configuration.
+- `Projects`: project CRUD, repo settings, branch policy, runtime services, and project goals.
+- `Workspace`: company folder manager and authoritative workspace paths for non-coding project files.
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
-- `Workspaces`: project-focused setup for company, department, project goals, and repo-centric workspace policy.
-- `Admin`: global account management, signup switch, roles, account status, and password resets.
-- `Settings`: company heartbeat settings, departments, runtime presets, adapter endpoints.
+- `Kanban`: task UUIDs, stage columns, company/project/assignee filters, ticket thread, work products, sub-tasks, logs, run/review/decompose/delete.
+- `Direct Chat`: company -> project/no-project -> agent -> session direct messaging with resumable adapter sessions.
+- `Cron`: dispatch heartbeat status, company ticks, run history, and manual run.
+- `Logs`: cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
+- `Admin`: tabbed global account management, signup switch, invites, roles, account status, and password resets.
+- `Settings`: tabbed runtime presets, company settings, departments, company members, and advanced configuration.
+- `Budget`: direct governance route for budget policies, approvals, spend, and cost events. It is intentionally outside the primary sidebar while the IA is focused on company/department/project/workspace operations.
   Runtime health summaries show adapter status, attached agents, last run status, and capabilities. Company members can be managed by email with viewer/operator/admin roles.
 
 ## Current scope
@@ -121,7 +124,7 @@ Hermes suite operational notes:
 - Phase 13: real O-chart tree canvas, operator RBAC for mutations/manual execution, in-app rate limiting, runtime health summary, webhook shared-secret guard, monthly budget reset cron, and UI error boundary.
 - Phase 14: company memberships, company-scoped read filters, company operator/admin mutation checks, runtime company scoping, and Settings member management.
 - Phase 15: database-backed `task_runs` queue, background task-run worker, queued manual run/review, queued cron dispatch/review, and Logs task-run visibility.
-- Phase 16: help/escalation review via `needs_review`, scoped company/department/project goals, project-scoped Direct Chat, and project-focused Workspaces.
+- Phase 16: help/escalation review via `needs_review`, company/department/project goals, project-scoped Direct Chat, and the Projects/Workspace split.
 - Phase 17: React Query browser cache plus authenticated WebSocket live events for chat, Kanban card updates, task logs, comments, projects, goals, and work products.
 - Phase 18: repo-centric project workspace policy with project-level `repoUrl` and `workPath`, pull-before-run/push-after-run prompt protocol, and first-class task work products for PRs, commits, previews, reports, screenshots, and artifacts.
 - Phase 19: Codex app-server adapter, platform-owned agent `soul`, and durable adapter session records for direct chat and task-scoped Codex threads.
@@ -134,7 +137,7 @@ Reference-informed next phases:
 
 ## Paperclip-inspired loop
 
-MegaCorps follows the same control-plane idea as Paperclip: manage goals and an org chart, not individual terminal sessions. A company owns departments, agents, tasks, goals, and dispatch settings. Agents report through an O-chart (`bossId`) and can be grouped by department. The Companies and Agents pages render this as a real top-down tree canvas with connector lines; clicking any member opens the edit panel for identity, runtime, department, budget, and reporting relation.
+MegaCorps follows the same control-plane idea as Paperclip: manage goals and an org chart, not individual terminal sessions. A company owns departments, agents, tasks, goals, and dispatch settings. Agents report through an O-chart (`bossId`) and can be grouped by department. The Companies page now focuses on company CRUD and company goals; Departments and Agents render the org lanes/tree and agent configuration panels.
 
 The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds with `DISPATCH_LOOP_INTERVAL_MS=10000`; each company also has `dispatchIntervalSeconds` and `autoDispatchEnabled`. On each company heartbeat:
 
@@ -186,11 +189,13 @@ Open a task and use the Message Board tab:
 Dispatch/review/webhook completions now also create agent-authored messages on the task board, so task discussion is not hidden only in logs.
 Kanban task detail tabs use React Query plus a short-lived browser session cache for message board, task logs, work products, and filtered API lifecycle rows. Selecting a task renders details immediately, then prefetches cached tab data in the background; live events invalidate only the affected card caches.
 
-## Project repo workspaces and work products
+## Projects, workspace paths, and work products
 
 Projects are repo/workspace-centric. MegaCorps stores the shared Git repository and project work area, while each remote agent runtime uses its own local clone/folder. A project can define `repoProvider`, `repoUrl`, project-level `workPath`, `defaultBranch`, protected branches, `workBranchPattern`, pull-before-run, push-after-run, completion policy, setup command, test command, runtime service metadata, and an optional runtime-local workspace hint. Runtime presets define the machine-local `localWorkspaceRoot` and `localScratchRoot` used by agents attached to that runtime.
 
 `repoUrl` is the shared Git remote. `workPath` is the repo/workspace-relative path agents should focus on, such as `apps/server`, `reports/final`, or `docs/contracts`; null means project root. `workspacePathHint` is only a local clone/folder hint for a runtime and is not the source of truth. `localWorkspaceRoot` is the runtime's persistent clone/cache root; `localScratchRoot` is for temporary task files. Prompt injection tells agents to pull/rebase before editing, stay inside the project work path unless the task explicitly requires broader edits, work on a task branch, avoid protected branches, validate, then push or open a PR according to the project policy. Final deliverables should be reported as work products, URLs, PRs, commits, or artifacts rather than runtime-local file paths.
+
+The `Projects` page owns project CRUD, repo settings, branch policy, runtime services, and project goals. The `Workspace` page is separate: it is the company folder manager and authority path surface for non-coding project files, using `/workspaces/{company-slug}/...` paths rather than pretending runtime-local folders are shared truth.
 
 Task outputs are no longer limited to comments/logs. `work_products` records reviewable deliverables such as PRs, commits, preview URLs, reports, screenshots, files, artifacts, and external links. The task-complete webhook accepts a `workProducts` array, and Kanban task details include a Work Products tab so reviewers can inspect the actual deliverable instead of reading logs only.
 
@@ -273,4 +278,4 @@ No pnpm. No Redis.
 - `npm test`
 - `npm run build`
 - Authenticated API smoke: runtime, department, agent, project, goal, knowledge doc, task, comment, manual run, dashboard, logs.
-- Web route smoke: `/dashboard`, `/companies`, `/chat`, `/kanban`, `/agents`, `/budget`, `/logs`, `/knowledge`, `/workspaces`, `/settings`.
+- Web route smoke: `/dashboard`, `/companies`, `/departments`, `/agents`, `/projects`, `/workspaces`, `/knowledge`, `/kanban`, `/chat`, `/cron`, `/logs`, `/admin`, `/settings`, `/help`, plus the direct `/budget` governance route.

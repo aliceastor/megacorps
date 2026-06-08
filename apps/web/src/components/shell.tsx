@@ -3,24 +3,25 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, BriefcaseBusiness, Building2, ChartNoAxesColumnIncreasing, CircleHelp, FileClock, Kanban, LayoutDashboard, Languages, LogOut, Menu, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, User, Check } from 'lucide-react';
+import { BookOpen, Building2, CircleHelp, Clock3, FileClock, FolderGit2, FolderOpen, Kanban, LayoutDashboard, Languages, LogOut, Menu, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, User, Check } from 'lucide-react';
 import { useLocale, localeList, localeNames } from '@/lib/locale-context';
 import { api } from '@/lib/api';
 
 const nav = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/companies', label: 'Companies', icon: Building2 },
-  { href: '/chat', label: 'Direct Chat', icon: MessageSquare },
-  { href: '/kanban', label: 'Kanban', icon: Kanban },
+  { href: '/departments', label: 'Departments', icon: Network },
   { href: '/agents', label: 'Agents', icon: Network },
-  { href: '/budget', label: 'Budget', icon: ChartNoAxesColumnIncreasing },
-  { href: '/logs', label: 'Logs', icon: FileClock },
+  { href: '/projects', label: 'Projects', icon: FolderGit2 },
+  { href: '/workspaces', label: 'Workspace', icon: FolderOpen },
   { href: '/knowledge', label: 'Knowledge', icon: BookOpen },
-  { href: '/workspaces', label: 'Workspaces', icon: BriefcaseBusiness },
+  { href: '/kanban', label: 'Kanban', icon: Kanban },
+  { href: '/chat', label: 'Direct Chat', icon: MessageSquare },
+  { href: '/cron', label: 'Cron', icon: Clock3 },
+  { href: '/logs', label: 'Logs', icon: FileClock },
 ];
 
 const utilityNav = [
-  { href: '/help', label: 'Help', icon: CircleHelp },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -102,8 +103,8 @@ export function AppShell({ title, children }: { title: string; children: React.R
       </div>
       <div className="sidebar-footer">
         <nav className="nav-list nav-list-utility" aria-label="Utility">
-          {userRole === 'admin' && <SidebarLink item={adminNav} open={open} pathname={pathname} />}
           {utilityNav.map((item) => <SidebarLink item={item} open={open} pathname={pathname} key={item.href} />)}
+          {userRole === 'admin' && <SidebarLink item={adminNav} open={open} pathname={pathname} />}
         </nav>
         {open && <div className="sidebar-status">
           <span>Heartbeat</span>
@@ -118,6 +119,7 @@ export function AppShell({ title, children }: { title: string; children: React.R
           <strong>{title}</strong>
         </div>
         <span style={{ flex: 1 }} />
+        <Link className="btn icon-btn" href="/help" aria-label="Help" title="Help"><CircleHelp size={16} /></Link>
         <button className="btn icon-btn" aria-label="Toggle theme" onClick={toggleTheme}>{isDark ? <Moon size={16} /> : <Sun size={16} />}</button>
 
         {/* Language Dropdown */}

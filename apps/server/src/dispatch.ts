@@ -148,7 +148,7 @@ function projectGitProtocol(project: ProjectRow | null | undefined, card: CardRo
   ].join('\n');
 }
 
-function scopedGoals(goalsRows: GoalRow[], input: { departmentId?: string | null; projectId?: string | null; selectedGoalId?: string | null }): GoalRow[] {
+function applicableGoals(goalsRows: GoalRow[], input: { departmentId?: string | null; projectId?: string | null; selectedGoalId?: string | null }): GoalRow[] {
   const selected = input.selectedGoalId ? goalsRows.find((goal) => goal.id === input.selectedGoalId) : undefined;
   const rows = goalsRows.filter((goal) => {
     if (!goal.departmentId && !goal.projectId) return true;
@@ -1441,7 +1441,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
       `Project: ${focusCard.projectId ? projectById.get(focusCard.projectId)?.name ?? focusCard.projectId : 'none'}`,
       `Project repo:\n${projectRepoLines(focusCard.projectId ? projectById.get(focusCard.projectId) : null, focusAssigneeRuntime).join('\n')}`,
       `Goal: ${focusCard.goalId ? goalById.get(focusCard.goalId)?.title ?? focusCard.goalId : 'none'}`,
-      `Scoped goals:\n${scopedGoals(companyGoals, { departmentId: focusCard.departmentId, projectId: focusCard.projectId, selectedGoalId: focusCard.goalId }).map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
+      `Applicable goals:\n${applicableGoals(companyGoals, { departmentId: focusCard.departmentId, projectId: focusCard.projectId, selectedGoalId: focusCard.goalId }).map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
       `Assignee: ${focusAssignee?.name ?? focusCard.assigneeId ?? 'unassigned'}`,
       `Reviewer: ${focusReviewer?.name ?? focusCard.reviewerId ?? 'none'}`,
       `Parent: ${parent ? compactCardLine(parent, agentById) : 'none'}`,
@@ -1494,7 +1494,7 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
   const [manager] = assignee?.bossId ? await db.select().from(agents).where(and(eq(agents.id, assignee.bossId), isNull(agents.deletedAt))).limit(1) : [];
   const reports = assignee ? await db.select().from(agents).where(eq(agents.bossId, assignee.id)) : [];
   const companyGoals = await db.select().from(goals).where(eq(goals.companyId, card.companyId)).orderBy(desc(goals.createdAt));
-  const relevantGoals = scopedGoals(companyGoals, { departmentId: card.departmentId, projectId: card.projectId, selectedGoalId: card.goalId });
+  const applicableGoalRows = applicableGoals(companyGoals, { departmentId: card.departmentId, projectId: card.projectId, selectedGoalId: card.goalId });
   const docs = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.companyId, card.companyId)).orderBy(desc(knowledgeDocs.updatedAt)).limit(10);
   const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.assigneeId });
   const matchingDocs = docs.filter((doc) => {
@@ -1520,7 +1520,7 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
       `Project: ${project?.name ?? 'none'}`,
       `Project goals:\n${card.projectId ? companyGoals.filter((row) => row.projectId === card.projectId).map((row) => formatGoal(row)).join('\n') || 'none' : 'none'}`,
       `Selected card goal:\n${goal ? formatGoal(goal) : 'none'}`,
-      `Effective goal stack:\n${relevantGoals.map((row) => formatGoal(row)).join('\n') || 'none'}`,
+      `Applicable goals:\n${applicableGoalRows.map((row) => formatGoal(row)).join('\n') || 'none'}`,
     ].join('\n'),
     `Card: ${card.title}`,
     `Status: ${card.columnStatus}`,

@@ -7,7 +7,7 @@ import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, a
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatSessions, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
+import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { buildExecutionAgent, cascadeParentStatus, decomposeCard, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
@@ -717,6 +717,78 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!company) return reply.code(404).send({ error: 'company_not_found' });
     return company;
   });
+  app.delete('/api/companies/:id', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const user = await requireCompanyRole(request, reply, id, 'admin'); if (!user) return reply;
+    const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id)).limit(1);
+    if (!company) return reply.code(404).send({ error: 'company_not_found' });
+    const [
+      [departmentUsage],
+      [projectUsage],
+      [goalUsage],
+      [runtimeUsage],
+      [agentUsage],
+      [cardUsage],
+      [knowledgeUsage],
+      [budgetUsage],
+      [approvalUsage],
+      [inviteUsage],
+      [activityUsage],
+      [costUsage],
+      [heartbeatUsage],
+      [taskRunUsage],
+      [adapterSessionUsage],
+      [workProductUsage],
+      [chatSessionUsage],
+      [chatMessageUsage],
+    ] = await Promise.all([
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(departments).where(eq(departments.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(projects).where(eq(projects.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(goals).where(eq(goals.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(agentRuntimes).where(eq(agentRuntimes.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(agents).where(eq(agents.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(kanbanCards).where(eq(kanbanCards.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(knowledgeDocs).where(eq(knowledgeDocs.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(budgetPolicies).where(eq(budgetPolicies.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(approvals).where(eq(approvals.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(userInvites).where(eq(userInvites.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(activityLog).where(eq(activityLog.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(costEvents).where(eq(costEvents.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(heartbeatRuns).where(eq(heartbeatRuns.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(taskRuns).where(eq(taskRuns.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(adapterSessions).where(eq(adapterSessions.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(workProducts).where(eq(workProducts.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(chatSessions).where(eq(chatSessions.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(chatMessages).where(eq(chatMessages.companyId, id)),
+    ]);
+    const usage = {
+      departments: departmentUsage?.count ?? 0,
+      projects: projectUsage?.count ?? 0,
+      goals: goalUsage?.count ?? 0,
+      agentRuntimes: runtimeUsage?.count ?? 0,
+      agents: agentUsage?.count ?? 0,
+      cards: cardUsage?.count ?? 0,
+      knowledgeDocs: knowledgeUsage?.count ?? 0,
+      budgetPolicies: budgetUsage?.count ?? 0,
+      approvals: approvalUsage?.count ?? 0,
+      invites: inviteUsage?.count ?? 0,
+      activity: activityUsage?.count ?? 0,
+      costEvents: costUsage?.count ?? 0,
+      heartbeatRuns: heartbeatUsage?.count ?? 0,
+      taskRuns: taskRunUsage?.count ?? 0,
+      adapterSessions: adapterSessionUsage?.count ?? 0,
+      workProducts: workProductUsage?.count ?? 0,
+      chatSessions: chatSessionUsage?.count ?? 0,
+      chatMessages: chatMessageUsage?.count ?? 0,
+    };
+    const blocking = Object.entries(usage ?? {}).filter(([, count]) => Number(count) > 0);
+    if (blocking.length > 0) return reply.code(409).send({ error: 'company_not_empty', blocking: Object.fromEntries(blocking) });
+    await db.transaction(async (tx) => {
+      await tx.delete(companyMemberships).where(eq(companyMemberships.companyId, id));
+      await tx.delete(companies).where(eq(companies.id, id));
+    });
+    return { ok: true };
+  });
 
   app.get('/api/company-memberships', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
@@ -1323,7 +1395,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireCompanyRole(request, reply, agent.companyId, 'operator'); if (!user) return reply;
     try {
       const adapter = getAdapter(agent.adapterType ?? 'hermes');
-      return await adapter.dispatch(await buildExecutionAgent(agent), { id: 'test', title: 'Connection test', body: 'Return OK.', timeoutSeconds: 30 });
+      return await adapter.dispatch(await buildExecutionAgent(agent), { id: 'test', title: 'Connection test', body: 'Return OK.', timeoutSeconds: 300 });
     }
     catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : 'connection_failed' }); }
   });

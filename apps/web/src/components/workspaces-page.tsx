@@ -1,320 +1,154 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
-import { BriefcaseBusiness, Building2, GitBranch, Plus, Save, Target } from 'lucide-react';
+import { Download, FileText, Folder, FolderPlus, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import { api } from '@/lib/api';
 
-type Company = { id: string; name: string };
-type Department = { id: string; companyId: string; name: string };
-type Project = {
-  id: string;
-  companyId: string;
-  name: string;
-  description?: string | null;
-  repoProvider?: 'github' | 'gitlab' | 'gitea' | 'generic' | null;
-  repoUrl?: string | null;
-  workPath?: string | null;
-  defaultBranch?: string | null;
-  protectedBranches?: string[] | null;
-  workBranchPattern?: string | null;
-  pullBeforeRun?: boolean | null;
-  pushAfterRun?: boolean | null;
-  completionPolicy?: 'push_branch' | 'pull_request' | 'push_or_pr' | 'manual' | null;
-  setupCommand?: string | null;
-  testCommand?: string | null;
-  runtimeServices?: Record<string, unknown> | null;
-  workspacePathHint?: string | null;
-  createdAt?: string;
-};
-type Goal = { id: string; companyId: string; departmentId?: string | null; projectId?: string | null; title: string; body?: string | null; createdAt?: string };
+type Company = { id: string; name: string; slug: string };
+type Project = { id: string; companyId: string; name: string; description?: string | null; workPath?: string | null; workspacePathHint?: string | null };
+type WorkspaceNode = { id: string; projectId: string; name: string; kind: 'folder' | 'file'; path: string; body?: string };
 
-function goalScope(goal: Goal): string {
-  if (goal.projectId) return 'Project';
-  if (goal.departmentId) return 'Department';
-  return 'Company';
+function slugify(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project';
+}
+
+function starterNodes(project: Project, company: Company): WorkspaceNode[] {
+  const projectSlug = slugify(project.name);
+  const base = `/workspaces/${company.slug}/${projectSlug}`;
+  return [
+    { id: `${project.id}-readme`, projectId: project.id, kind: 'file', name: 'README.md', path: `${base}/README.md`, body: `# ${project.name}\n\n${project.description || 'Project workspace documentation.'}\n\nAuthority path: ${base}/` },
+    { id: `${project.id}-notes`, projectId: project.id, kind: 'folder', name: 'meeting-notes', path: `${base}/meeting-notes/` },
+    { id: `${project.id}-deliverables`, projectId: project.id, kind: 'folder', name: 'deliverables', path: `${base}/deliverables/` },
+  ];
 }
 
 export function WorkspacesPage() {
   const [companies, setCompanies] = useState<Company[]>([]);
-  const [departments, setDepartments] = useState<Department[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [goals, setGoals] = useState<Goal[]>([]);
   const [companyId, setCompanyId] = useState('');
-  const [selectedProjectId, setSelectedProjectId] = useState('__none');
-  const [projectName, setProjectName] = useState('');
-  const [projectDescription, setProjectDescription] = useState('');
-  const [repoProvider, setRepoProvider] = useState<'github' | 'gitlab' | 'gitea' | 'generic'>('github');
-  const [repoUrl, setRepoUrl] = useState('');
-  const [workPath, setWorkPath] = useState('');
-  const [defaultBranch, setDefaultBranch] = useState('main');
-  const [protectedBranches, setProtectedBranches] = useState('main, master');
-  const [workBranchPattern, setWorkBranchPattern] = useState('megacorps/card-{cardId}-{agentSlug}');
-  const [pullBeforeRun, setPullBeforeRun] = useState(true);
-  const [pushAfterRun, setPushAfterRun] = useState(true);
-  const [completionPolicy, setCompletionPolicy] = useState<'push_branch' | 'pull_request' | 'push_or_pr' | 'manual'>('push_or_pr');
-  const [setupCommand, setSetupCommand] = useState('');
-  const [testCommand, setTestCommand] = useState('');
-  const [runtimeServicesJson, setRuntimeServicesJson] = useState('{}');
-  const [workspacePathHint, setWorkspacePathHint] = useState('');
-  const [goalScopeValue, setGoalScopeValue] = useState<'company' | 'department' | 'project'>('project');
-  const [goalDepartmentId, setGoalDepartmentId] = useState('');
-  const [goalTitle, setGoalTitle] = useState('');
-  const [goalBody, setGoalBody] = useState('');
+  const [nodes, setNodes] = useState<WorkspaceNode[]>([]);
+  const [selectedNodeId, setSelectedNodeId] = useState('');
+  const [newName, setNewName] = useState('');
   const [error, setError] = useState('');
+  const [toast, setToast] = useState('');
 
-  const companyProjects = useMemo(() => projects.filter((project) => project.companyId === companyId), [projects, companyId]);
-  const companyDepartments = useMemo(() => departments.filter((department) => department.companyId === companyId), [departments, companyId]);
-  const selectedProject = selectedProjectId !== '__none' ? companyProjects.find((project) => project.id === selectedProjectId) ?? null : null;
-  const companyGoals = goals.filter((goal) => goal.companyId === companyId && !goal.departmentId && !goal.projectId);
-  const departmentGoals = goals.filter((goal) => goal.companyId === companyId && Boolean(goal.departmentId));
-  const projectGoals = goals.filter((goal) => goal.companyId === companyId && Boolean(goal.projectId));
-  const selectedProjectGoals = selectedProject ? projectGoals.filter((goal) => goal.projectId === selectedProject.id) : [];
-
-  useEffect(() => {
-    if (!selectedProject) return;
-    setProjectName(selectedProject.name);
-    setProjectDescription(selectedProject.description ?? '');
-    setRepoProvider(selectedProject.repoProvider ?? 'github');
-    setRepoUrl(selectedProject.repoUrl ?? '');
-    setWorkPath(selectedProject.workPath ?? '');
-    setDefaultBranch(selectedProject.defaultBranch ?? 'main');
-    setProtectedBranches((selectedProject.protectedBranches?.length ? selectedProject.protectedBranches : ['main', 'master']).join(', '));
-    setWorkBranchPattern(selectedProject.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}');
-    setPullBeforeRun(selectedProject.pullBeforeRun !== false);
-    setPushAfterRun(selectedProject.pushAfterRun !== false);
-    setCompletionPolicy(selectedProject.completionPolicy ?? 'push_or_pr');
-    setSetupCommand(selectedProject.setupCommand ?? '');
-    setTestCommand(selectedProject.testCommand ?? '');
-    setRuntimeServicesJson(JSON.stringify(selectedProject.runtimeServices ?? {}, null, 2));
-    setWorkspacePathHint(selectedProject.workspacePathHint ?? '');
-  }, [selectedProject?.id]);
-
-  function parseList(value: string): string[] {
-    return value.split(',').map((item) => item.trim()).filter(Boolean);
-  }
-
-  function parseRuntimeServices(): Record<string, unknown> | null {
-    try {
-      const parsed = JSON.parse(runtimeServicesJson.trim() || '{}') as unknown;
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
-        setError('Runtime services must be a JSON object.');
-        return null;
-      }
-      return parsed as Record<string, unknown>;
-    } catch {
-      setError('Runtime services must be valid JSON.');
-      return null;
-    }
-  }
-
-  function projectPayload() {
-    const runtimeServices = parseRuntimeServices();
-    if (!runtimeServices) return null;
-    return {
-      name: projectName.trim(),
-      description: projectDescription,
-      repoProvider,
-      repoUrl: repoUrl || null,
-      workPath: workPath || null,
-      defaultBranch,
-      protectedBranches: parseList(protectedBranches).length ? parseList(protectedBranches) : ['main', 'master'],
-      workBranchPattern,
-      pullBeforeRun,
-      pushAfterRun,
-      completionPolicy,
-      setupCommand: setupCommand || null,
-      testCommand: testCommand || null,
-      runtimeServices,
-      workspacePathHint: workspacePathHint || null,
-    };
-  }
+  const selectedCompany = companies.find((company) => company.id === companyId) ?? companies[0] ?? null;
+  const companyProjects = useMemo(() => projects.filter((project) => project.companyId === selectedCompany?.id), [projects, selectedCompany?.id]);
+  const companyNodes = useMemo(() => nodes.filter((node) => companyProjects.some((project) => project.id === node.projectId)), [nodes, companyProjects]);
+  const selectedNode = companyNodes.find((node) => node.id === selectedNodeId) ?? companyNodes[0] ?? null;
+  const rootPath = selectedCompany ? `/workspaces/${selectedCompany.slug}/` : '/workspaces/';
 
   async function refresh(nextCompanyId = companyId) {
     setError('');
     try {
-      const companyRows = await api<Company[]>('/api/companies');
-      const activeCompanyId = nextCompanyId || companyRows[0]?.id || '';
+      const [companyRows, projectRows] = await Promise.all([api<Company[]>('/api/companies'), api<Project[]>('/api/projects')]);
       setCompanies(companyRows);
-      setCompanyId(activeCompanyId);
-      if (!activeCompanyId) return;
-      const [departmentRows, projectRows, goalRows] = await Promise.all([
-        api<Department[]>(`/api/departments?companyId=${activeCompanyId}`),
-        api<Project[]>(`/api/projects?companyId=${activeCompanyId}`),
-        api<Goal[]>(`/api/goals?companyId=${activeCompanyId}`),
-      ]);
-      setDepartments(departmentRows);
       setProjects(projectRows);
-      setGoals(goalRows);
-      if (selectedProjectId !== '__none' && !projectRows.some((project) => project.id === selectedProjectId)) setSelectedProjectId(projectRows[0]?.id ?? '__none');
+      const activeCompany = companyRows.find((company) => company.id === nextCompanyId) ?? companyRows[0] ?? null;
+      setCompanyId(activeCompany?.id ?? '');
+      if (activeCompany) {
+        const seeded = projectRows.filter((project) => project.companyId === activeCompany.id).flatMap((project) => starterNodes(project, activeCompany));
+        setNodes((current) => {
+          const custom = current.filter((node) => !node.id.includes('-readme') && !node.id.includes('-notes') && !node.id.includes('-deliverables'));
+          return [...seeded, ...custom];
+        });
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load workspaces');
+      setError(err instanceof Error ? err.message : 'Failed to load workspace');
     }
   }
 
   useEffect(() => { void refresh(); }, []);
 
-  async function addProject() {
-    if (!companyId || !projectName.trim()) return;
-    setError('');
-    try {
-      const payload = projectPayload();
-      if (!payload) return;
-      const project = await api<Project>('/api/projects', { method: 'POST', body: JSON.stringify({ companyId, ...payload }) });
-      setProjectName('');
-      setProjectDescription('');
-      setRepoUrl('');
-      setWorkPath('');
-      setProtectedBranches('main, master');
-      setRuntimeServicesJson('{}');
-      setSelectedProjectId(project.id);
-      await refresh(companyId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to add project');
+  function addNode(kind: 'folder' | 'file') {
+    if (!selectedCompany || companyProjects.length === 0) {
+      setError('Create a project before adding workspace files.');
+      return;
     }
+    const project = selectedNode ? companyProjects.find((item) => item.id === selectedNode.projectId) ?? companyProjects[0] : companyProjects[0];
+    if (!project) return;
+    const name = newName.trim() || (kind === 'folder' ? 'new-folder' : 'new-file.md');
+    const projectSlug = slugify(project.name);
+    const normalizedName = kind === 'folder' ? name.replace(/\/+$/, '') : name;
+    const path = `/workspaces/${selectedCompany.slug}/${projectSlug}/${normalizedName}${kind === 'folder' ? '/' : ''}`;
+    const node: WorkspaceNode = {
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      projectId: project.id,
+      kind,
+      name: normalizedName,
+      path,
+      body: kind === 'file' ? `# ${normalizedName}\n\nAuthority path: ${path}` : undefined,
+    };
+    setNodes((current) => [node, ...current]);
+    setSelectedNodeId(node.id);
+    setNewName('');
+    setToast(kind === 'folder' ? 'Folder added locally' : 'File added locally');
   }
 
-  async function saveProject() {
-    if (!selectedProject || !projectName.trim()) return;
-    setError('');
-    try {
-      const payload = projectPayload();
-      if (!payload) return;
-      await api<Project>(`/api/projects/${selectedProject.id}`, { method: 'PUT', body: JSON.stringify(payload) });
-      await refresh(companyId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save project');
-    }
+  function deleteSelected() {
+    if (!selectedNode) return;
+    setNodes((current) => current.filter((node) => node.id !== selectedNode.id));
+    setSelectedNodeId('');
+    setToast('Workspace item removed locally');
   }
 
-  async function addGoal() {
-    if (!companyId || !goalTitle.trim()) return;
-    const departmentId = goalScopeValue === 'department' ? goalDepartmentId || null : null;
-    const projectId = goalScopeValue === 'project' ? selectedProject?.id ?? null : null;
-    if (goalScopeValue === 'department' && !departmentId) { setError('Choose a department for a department goal.'); return; }
-    if (goalScopeValue === 'project' && !projectId) { setError('Choose a project for a project goal.'); return; }
-    setError('');
-    try {
-      await api<Goal>('/api/goals', { method: 'POST', body: JSON.stringify({ companyId, departmentId, projectId, title: goalTitle.trim(), body: goalBody }) });
-      setGoalTitle('');
-      setGoalBody('');
-      await refresh(companyId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to add goal');
-    }
-  }
-
-  return <div style={{ display: 'grid', gap: 16 }}>
-    <div className="page-head"><div><h1>Workspaces</h1><p>Projects are the primary workspace. No-project Direct Chat and Kanban remain available for general work.</p></div></div>
+  return <div className="page-stack">
+    <div className="page-head">
+      <div><h1>Workspace</h1><p>Company folder manager and authoritative location path for non-coding project files.</p></div>
+    </div>
+    {toast && <p className="status-pill">{toast}</p>}
     {error && <p className="form-error">{error}</p>}
-    <label className="field-label">Company<select className="input compact" value={companyId} onChange={(event) => { setCompanyId(event.target.value); setSelectedProjectId('__none'); void refresh(event.target.value); }}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
-    <div className="data-grid">
-      <section className="card section-card">
-        <h2><BriefcaseBusiness size={18} /> Projects</h2>
-        <button className={`list-row ${selectedProjectId === '__none' ? 'active' : ''}`} onClick={() => {
-          setSelectedProjectId('__none');
-          setProjectName('');
-          setProjectDescription('');
-          setRepoProvider('github');
-          setRepoUrl('');
-          setWorkPath('');
-          setDefaultBranch('main');
-          setProtectedBranches('main, master');
-          setWorkBranchPattern('megacorps/card-{cardId}-{agentSlug}');
-          setPullBeforeRun(true);
-          setPushAfterRun(true);
-          setCompletionPolicy('push_or_pr');
-          setSetupCommand('');
-          setTestCommand('');
-          setRuntimeServicesJson('{}');
-          setWorkspacePathHint('');
-        }} style={{ textAlign: 'left' }}>
-          <b>No project</b>
-          <p>General Direct Chat and Kanban cards without project scope.</p>
-        </button>
-        <div className="table-list">{companyProjects.map((project) => <button className={`list-row ${project.id === selectedProjectId ? 'active' : ''}`} key={project.id} onClick={() => setSelectedProjectId(project.id)} style={{ textAlign: 'left' }}>
-          <b>{project.name}</b><p>{project.repoUrl || project.description || 'No repository configured'}</p>
-        </button>)}</div>
-        <div style={{ display: 'grid', gap: 10 }}>
-          <label className="field-label">{selectedProject ? 'Project name' : 'New project'}<input className="input" value={projectName} onChange={(event) => setProjectName(event.target.value)} /></label>
-          <label className="field-label">Description<textarea className="input" rows={3} value={projectDescription} onChange={(event) => setProjectDescription(event.target.value)} /></label>
-          <div className="form-grid">
-            <label className="field-label">Repo provider<select className="input" value={repoProvider} onChange={(event) => setRepoProvider(event.target.value as typeof repoProvider)}>
-              <option value="github">GitHub</option>
-              <option value="gitlab">GitLab</option>
-              <option value="gitea">Gitea</option>
-              <option value="generic">Generic Git</option>
-            </select></label>
-            <label className="field-label">Default branch<input className="input" value={defaultBranch} onChange={(event) => setDefaultBranch(event.target.value)} /></label>
-          </div>
-          <label className="field-label">Repository URL<input className="input" value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="https://github.com/org/repo" /></label>
-          <label className="field-label">Project work path<input className="input" value={workPath} onChange={(event) => setWorkPath(event.target.value)} placeholder="Repo/workspace-relative path, e.g. apps/server or reports/final" /></label>
-          <label className="field-label">Protected branches<input className="input" value={protectedBranches} onChange={(event) => setProtectedBranches(event.target.value)} placeholder="main, master, production" /></label>
-          <label className="field-label">Work branch pattern<input className="input" value={workBranchPattern} onChange={(event) => setWorkBranchPattern(event.target.value)} /></label>
-          <div className="form-grid">
-            <label className="check-row"><input type="checkbox" checked={pullBeforeRun} onChange={(event) => setPullBeforeRun(event.target.checked)} /> Pull before every run</label>
-            <label className="check-row"><input type="checkbox" checked={pushAfterRun} onChange={(event) => setPushAfterRun(event.target.checked)} /> Push after completion</label>
-          </div>
-          <label className="field-label">Completion policy<select className="input" value={completionPolicy} onChange={(event) => setCompletionPolicy(event.target.value as typeof completionPolicy)}>
-            <option value="push_or_pr">Push branch or PR</option>
-            <option value="pull_request">Pull request</option>
-            <option value="push_branch">Push branch</option>
-            <option value="manual">Manual evidence</option>
-          </select></label>
-          <label className="field-label">Setup command<textarea className="input" rows={2} value={setupCommand} onChange={(event) => setSetupCommand(event.target.value)} /></label>
-          <label className="field-label">Test command<textarea className="input" rows={2} value={testCommand} onChange={(event) => setTestCommand(event.target.value)} /></label>
-          <label className="field-label">Runtime services JSON<textarea className="input" rows={4} value={runtimeServicesJson} onChange={(event) => setRuntimeServicesJson(event.target.value)} placeholder='{"postgres":"postgres://...","web":"http://localhost:3000"}' /></label>
-          <label className="field-label">Runtime-local path hint<input className="input" value={workspacePathHint} onChange={(event) => setWorkspacePathHint(event.target.value)} placeholder="Optional runtime-local clone/folder hint only" /></label>
-          {selectedProject
-            ? <button className="btn btn-primary" disabled={!projectName.trim()} onClick={saveProject}><Save size={15} /> Save project</button>
-            : <button className="btn btn-primary" disabled={!projectName.trim()} onClick={addProject}><Plus size={15} /> Add project</button>}
-        </div>
+
+    <section className="card section-card">
+      <div className="form-grid">
+        <label className="field-label">Workspace company<select className="input" value={selectedCompany?.id ?? ''} onChange={(event) => { setCompanyId(event.target.value); void refresh(event.target.value); }}>
+          {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+        </select></label>
+        <label className="field-label">Authority root<input className="input" value={rootPath} readOnly /></label>
+      </div>
+      <div className="action-row">
+        <input className="input compact" placeholder="folder-or-file-name" value={newName} onChange={(event) => setNewName(event.target.value)} />
+        <button className="btn" onClick={() => addNode('folder')}><FolderPlus size={15} /> New Folder</button>
+        <button className="btn" onClick={() => addNode('file')}><Plus size={15} /> New File</button>
+        <button className="btn" disabled><Upload size={15} /> Upload</button>
+      </div>
+    </section>
+
+    <div className="workspace-layout">
+      <section className="card section-card workspace-tree">
+        <div className="panel-title"><h2>Files</h2><span className="status-pill">{companyNodes.length} items</span></div>
+        {companyProjects.map((project) => {
+          const projectNodes = companyNodes.filter((node) => node.projectId === project.id);
+          return <div className="workspace-project" key={project.id}>
+            <h3><Folder size={15} /> {project.name}</h3>
+            <div className="table-list">
+              {projectNodes.map((node) => <button className="workspace-node" key={node.id} onClick={() => setSelectedNodeId(node.id)} style={{ borderColor: node.id === selectedNode?.id ? 'var(--primary)' : 'var(--border)' }}>
+                {node.kind === 'folder' ? <Folder size={15} /> : <FileText size={15} />}
+                <span>{node.name}</span>
+                <small>{node.path}</small>
+              </button>)}
+            </div>
+          </div>;
+        })}
+        {companyProjects.length === 0 && <p className="chat-empty">No projects yet. Create project records on the Projects page first.</p>}
       </section>
 
       <section className="card section-card">
-        <h2><GitBranch size={18} /> Repository Protocol</h2>
+        <div className="panel-title">
+          <div><h2>{selectedNode?.name ?? 'No file selected'}</h2><span className="status-pill">{selectedNode?.kind ?? 'empty'}</span></div>
+        </div>
         <div className="meta-grid">
-          <span>Provider <b>{selectedProject?.repoProvider ?? repoProvider}</b></span>
-          <span>Default branch <b>{selectedProject?.defaultBranch ?? defaultBranch}</b></span>
-          <span>Protected branches <b>{(selectedProject?.protectedBranches?.length ? selectedProject.protectedBranches : parseList(protectedBranches)).join(', ') || 'none'}</b></span>
-          <span>Work path <b>{selectedProject?.workPath || workPath || 'project root'}</b></span>
-          <span>Pull before run <b>{(selectedProject?.pullBeforeRun ?? pullBeforeRun) ? 'yes' : 'no'}</b></span>
-          <span>Push after run <b>{(selectedProject?.pushAfterRun ?? pushAfterRun) ? 'yes' : 'no'}</b></span>
+          <span>Path <b>{selectedNode?.path ?? rootPath}</b></span>
+          <span>Authority <b>{selectedCompany?.name ?? 'Company'}{selectedNode ? ` / ${projects.find((project) => project.id === selectedNode.projectId)?.name ?? 'Project'}` : ''}</b></span>
+          <span>Root <b>{rootPath}</b></span>
+          <span>Mode <b>local UI manager</b></span>
         </div>
-        <p className="chat-empty" style={{ textAlign: 'left' }}>Agents use their own runtime-local clone. MegaCorps injects the repo URL, project work path, branch rules, setup/test commands, and requires PR/commit/preview work products instead of local-only file paths.</p>
-      </section>
-
-      <section className="card section-card">
-        <h2><Target size={18} /> Goal Scope</h2>
-        <div className="meta-grid">
-          <span>Selected project <b>{selectedProject?.name ?? 'No project'}</b></span>
-          <span>Company goals <b>{companyGoals.length}</b></span>
-          <span>Department goals <b>{departmentGoals.length}</b></span>
-          <span>Project goals <b>{selectedProject ? selectedProjectGoals.length : projectGoals.length}</b></span>
-        </div>
-        <div className="form-grid">
-          <label className="field-label">Scope<select className="input" value={goalScopeValue} onChange={(event) => setGoalScopeValue(event.target.value as typeof goalScopeValue)}>
-            <option value="company">Company goal</option>
-            <option value="department">Department goal</option>
-            <option value="project">Project goal</option>
-          </select></label>
-          {goalScopeValue === 'department' && <label className="field-label">Department<select className="input" value={goalDepartmentId} onChange={(event) => setGoalDepartmentId(event.target.value)}>
-            <option value="">Choose department</option>
-            {companyDepartments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
-          </select></label>}
-          {goalScopeValue === 'project' && <label className="field-label">Project<input className="input" value={selectedProject?.name ?? 'Select a project on the left'} readOnly /></label>}
-        </div>
-        <label className="field-label">Goal title<input className="input" value={goalTitle} onChange={(event) => setGoalTitle(event.target.value)} /></label>
-        <label className="field-label">Goal body<textarea className="input" rows={4} value={goalBody} onChange={(event) => setGoalBody(event.target.value)} /></label>
-        <button className="btn btn-primary" disabled={!goalTitle.trim()} onClick={addGoal}><Plus size={15} /> Add goal</button>
-      </section>
-
-      <section className="card section-card">
-        <h2><Building2 size={18} /> Effective Goals</h2>
-        <div className="table-list">
-          {[...companyGoals, ...departmentGoals, ...(selectedProject ? selectedProjectGoals : projectGoals)].map((goal) => <div className="list-row" key={goal.id}>
-            <b>{goalScope(goal)} / {goal.title}</b>
-            <p>{goal.body || 'No goal body'}</p>
-          </div>)}
-          {!goals.length && <p className="chat-empty">No goals yet</p>}
+        {selectedNode?.kind === 'file'
+          ? <pre className="log-block workspace-preview">{selectedNode.body}</pre>
+          : <div className="chat-empty-state"><Folder size={28} /><b>{selectedNode?.name ?? 'Workspace'}</b><span>{selectedNode?.path ?? rootPath}</span></div>}
+        <div className="action-row">
+          <button className="btn" disabled={!selectedNode || selectedNode.kind !== 'file'}><Pencil size={15} /> Edit</button>
+          <button className="btn" disabled={!selectedNode || selectedNode.kind !== 'file'}><Download size={15} /> Download</button>
+          <button className="btn" disabled={!selectedNode} onClick={deleteSelected} style={{ color: 'var(--danger)' }}><Trash2 size={15} /> Delete</button>
         </div>
       </section>
     </div>

@@ -1,7 +1,7 @@
 'use client';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useState } from 'react';
-import { Ban, CheckCircle2, Loader2, Pause, Plus, RotateCcw, Save, Trash2, Wifi } from 'lucide-react';
+import { Ban, CheckCircle2, Loader2, Pause, Plus, RotateCcw, Save, Trash2, Wifi, X } from 'lucide-react';
 import { api } from '@/lib/api';
 
 type Agent = {
@@ -120,6 +120,7 @@ function Toast({ message, type, onClose }: { message: string; type: 'success' | 
 
 export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'agents' }) {
   const isCompanySurface = surface === 'companies';
+  const isAgentSurface = surface === 'agents';
   const [agents, setAgents] = useState<Agent[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -148,6 +149,8 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const [departmentId, setDepartmentId] = useState('');
   const [runtimeId, setRuntimeId] = useState('');
   const [adapterType, setAdapterType] = useState('mock');
+  const [agentCreateOpen, setAgentCreateOpen] = useState(false);
+  const [agentCreateStep, setAgentCreateStep] = useState(1);
   const [creating, setCreating] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -241,6 +244,8 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       setAgentCapabilities('');
       setAgentBudgetPerTask('');
       setAgentBudgetMonthly('');
+      setAgentCreateOpen(false);
+      setAgentCreateStep(1);
       setToast({ message: `Agent "${agent.name}" created`, type: 'success' });
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : 'Failed to create agent', type: 'error' });
@@ -398,11 +403,20 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const configuredOverrideAdapterConfig = Object.fromEntries(Object.entries(overrideAdapterConfig).filter(([, value]) => value !== null && value !== undefined && !(typeof value === 'string' && value.trim() === '')));
   const effectiveAdapterConfig = { ...inheritedAdapterConfig, ...configuredOverrideAdapterConfig };
   const selectedAdapterFields = visibleAdapterFields(selectedAdapterType, inheritedAdapterConfig, overrideAdapterConfig);
+  const capabilitySet = new Set(parseCsv(agentCapabilities));
+
+  function toggleCapability(capability: string, checked: boolean) {
+    const next = new Set(parseCsv(agentCapabilities));
+    if (checked) next.add(capability);
+    else next.delete(capability);
+    setAgentCapabilities(Array.from(next).join(', '));
+  }
 
   return <>
     <div className="page-head">
       <div><h1>{isCompanySurface ? 'Companies' : 'Agents'}</h1><p>{isCompanySurface ? 'Company registry, departments, reporting structure, and delegation closure.' : 'Agent members, reporting lines, runtime configuration, and direct reports.'}</p></div>
       {isCompanySurface && <button className="btn" onClick={startNewCompany}><Plus size={14} /> New Company</button>}
+      {isAgentSurface && <button className="btn btn-primary" onClick={() => setAgentCreateOpen(true)}><Plus size={14} /> New Agent</button>}
     </div>
 
     {isCompanySurface && <section className="card section-card" style={{ marginBottom: 16 }}>
@@ -464,30 +478,84 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       </div>
     </section>}
 
-    <div className="card agent-create-grid">
-      <input className="input" placeholder="Agent Name" value={name} onChange={(e) => setName(e.target.value)} />
-      <input className="input" placeholder="Slug" value={slug} onChange={(e) => setSlug(e.target.value)} />
-      <input className="input" placeholder="Profile" value={profile} onChange={(e) => setProfile(e.target.value)} />
-      <input className="input" placeholder="Identity label" value={role} onChange={(e) => setRole(e.target.value)} />
-      <input className="input" placeholder="Title" value={agentTitle} onChange={(e) => setAgentTitle(e.target.value)} />
-      <input className="input" placeholder="Soul / work style" value={soul} onChange={(e) => setSoul(e.target.value)} />
-      <input className="input" placeholder="Capabilities, comma-separated" value={agentCapabilities} onChange={(e) => setAgentCapabilities(e.target.value)} />
-      <input className="input" type="number" min={0} step="0.01" placeholder="Per-task budget USD" value={agentBudgetPerTask} onChange={(e) => setAgentBudgetPerTask(e.target.value)} />
-      <input className="input" type="number" min={0} step="0.01" placeholder="Monthly budget USD" value={agentBudgetMonthly} onChange={(e) => setAgentBudgetMonthly(e.target.value)} />
-      <select className="input" value={departmentId} onChange={(e) => setDepartmentId(e.target.value)}><option value="">Department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select>
-      <select className="input" value={bossId} onChange={(e) => setBossId(e.target.value)}><option value="">Reports to</option>{visibleAgents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
-      <select className="input" value={adapterType} onChange={(e) => setAdapterType(e.target.value)}>
-        <option value="mock">Mock</option>
-        <option value="hermes">Hermes Portainer</option>
-        <option value="hermes-ssh">Hermes SSH</option>
-        <option value="hermes-gateway">Hermes HTTP API</option>
-        <option value="codex-app">Codex App Server</option>
-        <option value="webhook">Webhook</option>
-        <option value="openclaw">OpenClaw</option>
-      </select>
-      <select className="input" value={runtimeId} onChange={(e) => setRuntimeId(e.target.value)}><option value="">Runtime required for external adapters</option>{runtimes.filter((runtime) => runtime.adapterType === adapterType && (!companyId || runtime.companyId === companyId)).map((runtime) => <option value={runtime.id} key={runtime.id}>{runtime.name}</option>)}</select>
-      <button className="btn btn-primary" onClick={create} disabled={creating}>{creating ? <Loader2 size={14} className="spin" /> : <Plus size={14} />} New</button>
-    </div>
+    {isAgentSurface && <section className="card section-card" style={{ marginBottom: 16 }}>
+      <div className="panel-title"><div><h2>Agent creation</h2><span className="status-pill">3-step wizard</span></div></div>
+      <p className="auth-note">Create agents from a guided modal so identity, assignment, runtime, and budget are not mixed into one unreadable row.</p>
+      <button className="btn btn-primary" onClick={() => setAgentCreateOpen(true)}><Plus size={15} /> New Agent</button>
+    </section>}
+
+    <AnimatePresence>
+      {agentCreateOpen && (
+        <motion.div className="overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+          <motion.div className="card modal agent-wizard-modal" initial={{ scale: 0.96, y: 12 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 12 }}>
+            <div className="panel-title">
+              <div><h2>Create New Agent</h2><span className="status-pill">Step {agentCreateStep} of 3</span></div>
+              <button className="btn icon-btn" aria-label="Close agent wizard" onClick={() => setAgentCreateOpen(false)}><X size={16} /></button>
+            </div>
+            <div className="wizard-steps" aria-label="Agent creation progress">
+              {[1, 2, 3].map((step) => <span key={step} className={agentCreateStep === step ? 'active' : ''}>{step}</span>)}
+            </div>
+
+            {agentCreateStep === 1 && <div className="page-stack">
+              <div className="form-grid">
+                <label className="field-label">Name<input className="input" value={name} onChange={(event) => setName(event.target.value)} /></label>
+                <label className="field-label">Slug<input className="input" value={slug} onChange={(event) => setSlug(event.target.value)} /></label>
+                <label className="field-label">Title<input className="input" value={agentTitle} onChange={(event) => setAgentTitle(event.target.value)} /></label>
+                <label className="field-label">Identity<select className="input" value={role} onChange={(event) => setRole(event.target.value)}>
+                  <option value="member">member</option>
+                  <option value="worker">worker</option>
+                  <option value="reviewer">reviewer</option>
+                  <option value="manager">manager</option>
+                  <option value="lead">lead</option>
+                </select></label>
+              </div>
+              <label className="field-label">Soul / persona<textarea className="input" rows={4} value={soul} onChange={(event) => setSoul(event.target.value)} /></label>
+              <div className="option-grid">
+                {['Code', 'Research', 'Review', 'Planning', 'Ops', 'Writing'].map((capability) => <label className="check-row" key={capability}>
+                  <input type="checkbox" checked={capabilitySet.has(capability)} onChange={(event) => toggleCapability(capability, event.target.checked)} /> {capability}
+                </label>)}
+              </div>
+            </div>}
+
+            {agentCreateStep === 2 && <div className="page-stack">
+              <div className="form-grid">
+                <label className="field-label">Company<select className="input" value={companyId} onChange={(event) => {
+                  const next = companies.find((company) => company.id === event.target.value);
+                  if (next) selectCompany(next);
+                }}>{companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}</select></label>
+                <label className="field-label">Department<select className="input" value={departmentId} onChange={(event) => setDepartmentId(event.target.value)}><option value="">No department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
+                <label className="field-label">Reports to<select className="input" value={bossId} onChange={(event) => setBossId(event.target.value)}><option value="">Top-level member</option>{visibleAgents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
+                <label className="field-label">Profile<input className="input" value={profile} onChange={(event) => setProfile(event.target.value)} /></label>
+              </div>
+            </div>}
+
+            {agentCreateStep === 3 && <div className="page-stack">
+              <div className="form-grid">
+                <label className="field-label">Adapter<select className="input" value={adapterType} onChange={(event) => setAdapterType(event.target.value)}>
+                  <option value="mock">Mock</option>
+                  <option value="hermes">Hermes Portainer</option>
+                  <option value="hermes-ssh">Hermes SSH</option>
+                  <option value="hermes-gateway">Hermes HTTP API</option>
+                  <option value="codex-app">Codex App Server</option>
+                  <option value="webhook">Webhook</option>
+                  <option value="openclaw">OpenClaw</option>
+                </select></label>
+                <label className="field-label">Runtime<select className="input" value={runtimeId} onChange={(event) => setRuntimeId(event.target.value)}><option value="">Runtime required for external adapters</option>{runtimes.filter((runtime) => runtime.adapterType === adapterType && (!companyId || runtime.companyId === companyId)).map((runtime) => <option value={runtime.id} key={runtime.id}>{runtime.name}</option>)}</select></label>
+                <label className="field-label">Per-task budget USD<input className="input" type="number" min={0} step="0.01" value={agentBudgetPerTask} onChange={(event) => setAgentBudgetPerTask(event.target.value)} /></label>
+                <label className="field-label">Monthly budget USD<input className="input" type="number" min={0} step="0.01" value={agentBudgetMonthly} onChange={(event) => setAgentBudgetMonthly(event.target.value)} /></label>
+              </div>
+            </div>}
+
+            <div className="action-row" style={{ justifyContent: 'flex-end' }}>
+              <button className="btn" onClick={() => agentCreateStep === 1 ? setAgentCreateOpen(false) : setAgentCreateStep(agentCreateStep - 1)}>{agentCreateStep === 1 ? 'Cancel' : 'Back'}</button>
+              {agentCreateStep < 3
+                ? <button className="btn btn-primary" disabled={agentCreateStep === 1 && (!name.trim() || !slug.trim())} onClick={() => setAgentCreateStep(agentCreateStep + 1)}>Next</button>
+                : <button className="btn btn-primary" onClick={create} disabled={creating || !name.trim() || !slug.trim()}>{creating ? <Loader2 size={14} className="spin" /> : <Plus size={14} />} Create</button>}
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
 
     {loading ? <p style={{ textAlign: 'center', opacity: 0.5 }}>Loading...</p> : (
       <div style={{ display: 'grid', gap: 16 }}>

@@ -2,6 +2,20 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.12 - UI IA Split And Workspace Folder Manager
+
+Date: 2026-06-08
+
+Completed in this pass:
+
+- Reworked the app IA into single-purpose primary navigation: Dashboard, Companies, Departments, Agents, Projects, Workspace, Knowledge, Kanban, Direct Chat, Cron, and Logs, with Settings/Admin kept in utility navigation.
+- Made the sidebar fixed and independently scrollable so right-side content scrolling no longer exposes empty space below the left rail.
+- Split company structure across pages: Companies now owns company CRUD and company goals; Departments owns department creation, department goals, and org lanes; Agents owns agent configuration and guided agent creation.
+- Split Projects from Workspace. Projects owns project CRUD, repo/work path policy, runtime services, and project goals. Workspace is now the company folder manager and authority path surface for non-coding project files.
+- Removed the old combined goal-list UI. Prompt context now names the final list as applicable goals derived from company, department, project, and selected card goal rows.
+- Updated Admin and Settings to tabbed pages, converted Admin accounts into a one-row-per-account table, added Kanban company sorting/filtering, and added a Cron page for heartbeat status/history.
+- Added `DELETE /api/companies/:id` with a full company-owned-content guard so only empty companies can be removed safely.
+
 ## Architecture Update v1.11 - Codex App-Server Adapter And Agent Soul
 
 Date: 2026-06-08
@@ -35,7 +49,7 @@ Completed in this pass:
 - Added project-level `workPath` as the authoritative repo/workspace-relative area agents should edit. Null means project root.
 - Clarified that `repoUrl` and `workPath` are project-based settings inherited by Direct Chat sessions and Kanban cards through `projectId`.
 - Kept `workspacePathHint` as an optional runtime-local clone/folder hint only. It is not shared state and must not be treated as a source of truth.
-- Updated prompt injection, API Help, README, architecture notes, and Workspaces UI so operators know to set both repo URL and work path.
+- Updated prompt injection, API Help, README, architecture notes, and Projects UI so operators know to set both repo URL and work path.
 
 ## Architecture Update v1.8 - Live UI, Repo Workspaces, and Work Products
 
@@ -48,9 +62,9 @@ Completed in this pass:
 - Reworked project workspaces into repo-centric project policy. Projects now store provider, repo URL, project work path, default/protected branches, work branch pattern, pull-before-run, push-after-run, completion policy, setup/test commands, runtime service metadata, and an optional runtime-local workspace hint.
 - Prompt injection now tells agents that local clone paths are runtime-owned and not a MegaCorps source of truth. Agents must pull/rebase before repo work, stay inside the project work path unless explicitly required, work on a task branch, validate, then push a branch or PR and report reviewable URLs/commits.
 - Added `work_products` as first-class task deliverables. Webhooks can submit `workProducts`, operators can attach them to cards, and Kanban details now include a Work Products tab for PRs, commits, previews, reports, screenshots, artifacts, and external URLs.
-- Updated API Help, README, Workspaces UI, and prompt documentation for repo project policy and work products.
+- Updated API Help, README, Projects UI, and prompt documentation for repo project policy and work products.
 
-## Architecture Update v1.7 - Project Workspaces, Scoped Goals, and Help Review
+## Architecture Update v1.7 - Project Context, Layered Goals, and Help Review
 
 Date: 2026-06-08
 
@@ -59,8 +73,8 @@ Completed in this pass:
 - Added `needs_review` as a first-class Kanban stage for help/escalation review. `in_review` is now reserved for quality review of completed work.
 - Assignees that cannot complete a task must return attempted methods, blocker/root cause, reviewer questions, and partial output/logs through webhook `status=needs_review` or an equivalent escalation comment. The server queues review when an independent reviewer/manager exists; top-level/no-reviewer escalations move to `blocked`.
 - Reviewer decisions now support three outcomes: finish directly (`done`), return concrete guidance (`todo`), or escalate to the reviewer's manager (`needs_review`). If a reviewer has no manager and cannot resolve the task, the task becomes `blocked`.
-- Added scoped goals: company goals, department goals, and project goals. Kanban task prompts and Direct Chat prompts inject the effective goal stack from the matching company, department, project, and selected card goal.
-- Reworked Workspaces around Projects. `No project` remains a supported bucket for general Direct Chat and Kanban work.
+- Added company goals, department goals, and project goals. Kanban task prompts and Direct Chat prompts inject matching goal context from the company, department, project, and selected card goal.
+- Reworked project context around Projects. `No project` remains a supported bucket for general Direct Chat and Kanban work.
 - Added `chat_sessions.project_id`; Direct Chat can now filter/create sessions by project or no-project context, and chat cost events carry `project_id`.
 - Updated API Help and prompt documentation. See [MegaCorps_PROMPT_INJECTION.md](./MegaCorps_PROMPT_INJECTION.md) for the exact injected prompt format.
 
@@ -266,7 +280,7 @@ The older phase checklist later in this document is kept as historical design no
 - [x] Agent connection test API.
 - [x] Card assignment via task update and auto-assignment.
 - [x] Agents page with company context, department, reporting line, runtime selection, adapter config, edit, pause/resume/reset/fire behavior.
-- [x] Companies page with O-chart/reporting structure and clickable members.
+- [x] Companies page for company CRUD and company goals; Departments/Agents pages own O-chart/reporting structure and clickable members.
 
 #### Phase 4 - Dispatch Engine and Review Loop
 
@@ -303,7 +317,7 @@ The older phase checklist later in this document is kept as historical design no
 - [x] Knowledge docs CRUD and Knowledge page.
 - [x] Bounded Kanban context injection for task dispatch, review, and direct chat.
 - [x] Context includes recent task messages, logs, board snapshot, activity, runs, and matching knowledge docs.
-- [x] Project-focused Workspaces page and scoped project/goal context.
+- [x] Project context pages and company/department/project goal context.
 - [ ] Git worktree/branch/commit/merge automation.
 - [x] Work product/artifact attachment tracking.
 
@@ -387,7 +401,7 @@ The older phase checklist later in this document is kept as historical design no
 - [x] Runtime presets scoped by company.
 - [x] Settings UI for member add/update/disable.
 - [~] System API lifecycle logs remain authenticated system data, not fully company-sliced.
-- [ ] Invite flow.
+- [x] Invite flow with hashed one-time tokens and `/signup?invite=...`.
 - [ ] Service-agent API keys.
 
 #### Phase 15 - Task Runs and Async Queue
@@ -524,7 +538,7 @@ UI:
 
 The Phase 1-10 MVP was usable for controlled local/NAS debugging. v1.2 has since addressed company-scoped RBAC and the first DB-backed task-run queue. Production still needs:
 
-- invite/service-agent key flows and deeper multi-tenant audit slicing,
+- service-agent key flows and deeper multi-tenant audit slicing,
 - encrypted or externalized adapter secrets,
 - dedicated worker sidecar and distributed queue locks for long-running Hermes jobs,
 - runtime health checks and offline routing,

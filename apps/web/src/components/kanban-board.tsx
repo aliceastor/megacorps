@@ -4,7 +4,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Ban, Bot, ExternalLink, GitBranch, GripVertical, ListChecks, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, StopCircle, Trash2, X } from 'lucide-react';
+import { Ban, ExternalLink, GitBranch, GripVertical, ListChecks, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, StopCircle, Trash2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
@@ -47,6 +47,7 @@ type Card = {
   activeHeartbeatRunId?: string | null;
   startedAt?: string | null;
   completedAt?: string | null;
+  createdAt?: string;
   updatedAt?: string;
 };
 type Agent = { id: string; companyId?: string; name: string; role?: string; adapterType?: string; isBusy?: boolean };
@@ -183,7 +184,7 @@ async function fetchKanbanBoard() {
   return { cards, agents, companies, departments, projects, goals };
 }
 
-function Column({ status, cards, onSelect }: { status: string; cards: Card[]; onSelect: (card: Card) => void }) {
+function Column({ status, cards, companies, onSelect }: { status: string; cards: Card[]; companies: Company[]; onSelect: (card: Card) => void }) {
   const { locale } = useLocale();
   const { setNodeRef, isOver } = useDroppable({ id: status });
   return <section className="kanban-column">
@@ -194,13 +195,13 @@ function Column({ status, cards, onSelect }: { status: string; cards: Card[]; on
     </h3>
     <div ref={setNodeRef} className="card kanban-column-dropzone" style={{ outline: isOver ? '2px solid var(--primary)' : 'none', transition: 'outline 150ms' }}>
       <AnimatePresence>
-        {cards.map((card) => <DraggableCard key={card.id} card={card} onSelect={onSelect} />)}
+        {cards.map((card) => <DraggableCard key={card.id} card={card} companyName={companies.find((company) => company.id === card.companyId)?.name} onSelect={onSelect} />)}
       </AnimatePresence>
     </div>
   </section>;
 }
 
-function DraggableCard({ card, onSelect }: { card: Card; onSelect: (card: Card) => void }) {
+function DraggableCard({ card, companyName, onSelect }: { card: Card; companyName?: string; onSelect: (card: Card) => void }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: card.id });
   return <motion.article
     ref={setNodeRef}
@@ -240,6 +241,7 @@ function DraggableCard({ card, onSelect }: { card: Card; onSelect: (card: Card) 
       <span className="kanban-priority">{priorityLabel(card.priority)}</span>
     </div>
     <div className="kanban-card-id">{card.id}</div>
+    {companyName && <div className="kanban-card-company">{companyName}</div>}
     <p className="kanban-card-body">{card.body.slice(0, 100)}{card.body.length > 100 ? '...' : ''}</p>
     <div className="kanban-card-badges">
       {card.requiresApproval && <span className="badge">Review</span>}
@@ -301,9 +303,10 @@ export function KanbanBoard() {
   const [workProductCommitSha, setWorkProductCommitSha] = useState('');
   const [workProductPullRequestUrl, setWorkProductPullRequestUrl] = useState('');
   const [requiresApproval, setRequiresApproval] = useState(false);
-  const [filterStatus, setFilterStatus] = useState('');
+  const [filterCompanies, setFilterCompanies] = useState<string[]>([]);
   const [filterAssignee, setFilterAssignee] = useState('');
   const [filterProject, setFilterProject] = useState('');
+  const [sortMode, setSortMode] = useState<'priority' | 'company' | 'created_desc' | 'created_asc' | 'updated_desc'>('priority');
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -322,6 +325,8 @@ export function KanbanBoard() {
       setProjects(nextProjects);
       setGoals(nextGoals);
       if (!newCompany && nextCompanies[0]) setNewCompany(nextCompanies[0].id);
+      const onlyCompany = nextCompanies.length === 1 ? nextCompanies[0] : undefined;
+      if (filterCompanies.length === 0 && onlyCompany) setFilterCompanies([onlyCompany.id]);
       if (selected) setSelected(nextCards.find((card) => card.id === selected.id) ?? null);
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : 'Failed to load board', type: 'error' });
@@ -459,6 +464,8 @@ export function KanbanBoard() {
     setProjects(boardQuery.data.projects);
     setGoals(boardQuery.data.goals);
     if (!newCompany && boardQuery.data.companies[0]) setNewCompany(boardQuery.data.companies[0].id);
+    const onlyCompany = boardQuery.data.companies.length === 1 ? boardQuery.data.companies[0] : undefined;
+    if (filterCompanies.length === 0 && onlyCompany) setFilterCompanies([onlyCompany.id]);
     if (selected) setSelected(boardQuery.data.cards.find((card) => card.id === selected.id) ?? null);
     setLoading(false);
   }, [boardQuery.data]);
@@ -524,15 +531,58 @@ export function KanbanBoard() {
     return () => window.clearTimeout(timer);
   }, [selected?.id]);
 
+  const companyNameById = useMemo(() => new Map(companies.map((company) => [company.id, company.name])), [companies]);
   const visibleCards = useMemo(() => cards.filter((card) => {
-    if (filterStatus && card.columnStatus !== filterStatus) return false;
+    if (filterCompanies.length > 0 && (!card.companyId || !filterCompanies.includes(card.companyId))) return false;
     if (filterAssignee && card.assigneeId !== filterAssignee) return false;
     if (filterProject === '__none' && card.projectId) return false;
     if (filterProject && filterProject !== '__none' && card.projectId !== filterProject) return false;
     if (query && !`${card.title} ${card.body} ${(card.tags ?? []).join(' ')}`.toLowerCase().includes(query.toLowerCase())) return false;
     return true;
-  }), [cards, filterAssignee, filterProject, filterStatus, query]);
+  }).sort((a, b) => {
+    if (sortMode === 'company') {
+      const companyCompare = (companyNameById.get(a.companyId ?? '') ?? '').localeCompare(companyNameById.get(b.companyId ?? '') ?? '');
+      if (companyCompare !== 0) return companyCompare;
+      return b.priority - a.priority;
+    }
+    if (sortMode === 'created_desc') return Date.parse(b.createdAt ?? '') - Date.parse(a.createdAt ?? '');
+    if (sortMode === 'created_asc') return Date.parse(a.createdAt ?? '') - Date.parse(b.createdAt ?? '');
+    if (sortMode === 'updated_desc') return Date.parse(b.updatedAt ?? '') - Date.parse(a.updatedAt ?? '');
+    return b.priority - a.priority;
+  }), [cards, companyNameById, filterAssignee, filterCompanies, filterProject, query, sortMode]);
   const subtasks = selected ? cards.filter((card) => card.parentCardId === selected.id) : [];
+  const ticketThreadEntries = selected ? [
+    ...comments.map((comment) => {
+      const authorAgent = comment.agentId ? agents.find((agent) => agent.id === comment.agentId) : undefined;
+      return {
+        id: `comment-${comment.id}`,
+        createdAt: comment.createdAt,
+        type: comment.action === 'comment' ? 'user_comment' : comment.action,
+        actor: authorAgent?.name ?? (comment.authorType === 'system' ? 'System' : comment.authorType === 'agent' ? 'Agent' : 'User'),
+        tone: comment.authorType === 'system' ? 'system' : comment.authorType === 'agent' || comment.agentId ? 'agent' : 'user',
+        body: comment.body,
+        meta: comment.createdAt ? new Date(comment.createdAt).toLocaleString() : '',
+      };
+    }),
+    ...logs.map((log) => ({
+      id: `log-${log.id}`,
+      createdAt: log.createdAt,
+      type: log.type === 'stage' ? 'stage_changed' : log.type,
+      actor: 'System',
+      tone: log.status === 'failed' ? 'error' : 'system',
+      body: [log.message, log.output].filter(Boolean).join('\n\n'),
+      meta: [log.createdAt ? new Date(log.createdAt).toLocaleString() : '', log.costUsd ? `$${log.costUsd}` : '', log.durationSeconds !== undefined ? `${log.durationSeconds}s` : ''].filter(Boolean).join(' / '),
+    })),
+    ...workProducts.map((product) => ({
+      id: `product-${product.id}`,
+      createdAt: product.createdAt,
+      type: 'work_product',
+      actor: agents.find((agent) => agent.id === product.agentId)?.name ?? 'System',
+      tone: 'product',
+      body: [product.title, product.summary].filter(Boolean).join('\n\n'),
+      meta: [product.type, product.createdAt ? new Date(product.createdAt).toLocaleString() : '', product.pullRequestUrl || product.url || product.commitSha || ''].filter(Boolean).join(' / '),
+    })),
+  ].sort((a, b) => Date.parse(a.createdAt ?? '') - Date.parse(b.createdAt ?? '')) : [];
 
   async function create() {
     if (!newTitle.trim()) { setToast({ message: 'Title is required', type: 'error' }); return; }
@@ -765,18 +815,24 @@ export function KanbanBoard() {
   return <>
     <div className="kanban-toolbar">
       <div className="input-wrap" style={{ flex: '1 1 260px' }}><Search size={15} /><input placeholder="Search" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
-      <select className="input compact" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
-        <option value="">All status</option>
-        {statuses.map((status) => <option value={status} key={status}>{status}</option>)}
+      <select className="input compact" multiple size={Math.min(Math.max(companies.length, 2), 4)} value={filterCompanies} onChange={(e) => { setFilterCompanies(selectedMultiValues(e.currentTarget)); setFilterProject(''); }}>
+        {companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}
       </select>
       <select className="input compact" value={filterAssignee} onChange={(e) => setFilterAssignee(e.target.value)}>
         <option value="">All agents</option>
-        {agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}
+        {agents.filter((agent) => filterCompanies.length === 0 || (agent.companyId && filterCompanies.includes(agent.companyId))).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}
       </select>
       <select className="input compact" value={filterProject} onChange={(e) => setFilterProject(e.target.value)}>
         <option value="">All projects</option>
         <option value="__none">No project</option>
-        {projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}
+        {projects.filter((project) => filterCompanies.length === 0 || filterCompanies.includes(project.companyId)).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}
+      </select>
+      <select className="input compact" value={sortMode} onChange={(e) => setSortMode(e.target.value as typeof sortMode)}>
+        <option value="priority">Sort: priority</option>
+        <option value="company">Sort: company</option>
+        <option value="created_desc">Sort: newest</option>
+        <option value="created_asc">Sort: oldest</option>
+        <option value="updated_desc">Sort: updated</option>
       </select>
       <button className="btn" onClick={() => void refresh()}><RefreshCw size={15} /></button>
       <button className="btn btn-primary" onClick={() => setModalOpen(true)}><Plus size={15} /> {t('newCard')}</button>
@@ -785,7 +841,7 @@ export function KanbanBoard() {
     {loading ? <p style={{ textAlign: 'center', opacity: 0.55 }}>Loading...</p> : (
       <DndContext onDragEnd={onDragEnd}>
         <div className="kanban-columns">
-          {statuses.map((status) => <Column key={status} status={status} cards={visibleCards.filter((card) => card.columnStatus === status)} onSelect={(card) => { setSelected(card); setTab('details'); }} />)}
+          {statuses.map((status) => <Column key={status} status={status} companies={companies} cards={visibleCards.filter((card) => card.columnStatus === status)} onSelect={(card) => { setSelected(card); setTab('details'); }} />)}
         </div>
       </DndContext>
     )}
@@ -872,7 +928,16 @@ export function KanbanBoard() {
           </div>}
           {tab === 'comments' && <div style={{ display: 'grid', gap: 12 }}>
             <div className="panel-title">
-              <div><h2>Task Message Board</h2><span className="status-pill">{comments.length} messages{tabLoading.comments ? ' / refreshing' : ''}</span></div>
+              <div><h2>Ticket Thread</h2><span className="status-pill">{ticketThreadEntries.length} traced entries{tabLoading.comments ? ' / refreshing' : ''}</span></div>
+            </div>
+            <div className="ticket-thread">
+              {ticketThreadEntries.length === 0 && !tabLoading.comments ? <p style={{ opacity: 0.6 }}>No thread entries yet.</p> : ticketThreadEntries.map((entry) => <article className={`ticket-entry ${entry.tone}`} key={entry.id}>
+                <div className="ticket-entry-rail"><span /></div>
+                <div className="ticket-entry-body">
+                  <div className="ticket-entry-head"><b>{entry.actor}</b><span>{entry.type} / {entry.meta}</span></div>
+                  <p>{entry.body}</p>
+                </div>
+              </article>)}
             </div>
             <div className="form-grid">
               <label className="field-label">Author
@@ -899,22 +964,6 @@ export function KanbanBoard() {
               <textarea className="input" rows={5} value={commentBody} onChange={(event) => setCommentBody(event.target.value)} placeholder="Write the instruction, blocker, correction, or context for this task." />
             </label>
             <button className="btn btn-primary" disabled={busy || !commentBody.trim()} onClick={addComment}><MessageSquare size={15} /> Add Message</button>
-            <div className="task-message-board">
-              {tabLoading.comments && comments.length === 0 ? <p style={{ opacity: 0.6 }}>Loading messages...</p> : comments.length === 0 ? <p style={{ opacity: 0.6 }}>No messages yet.</p> : comments.map((comment) => {
-                const authorAgent = comment.agentId ? agents.find((agent) => agent.id === comment.agentId) : undefined;
-                const isAgent = comment.authorType === 'agent' || Boolean(comment.agentId);
-                return <article className={`task-message ${isAgent ? 'agent' : comment.authorType === 'system' ? 'system' : 'user'}`} key={comment.id}>
-                  <div className="task-message-author">
-                    <span className="chat-avatar">{isAgent ? <Bot size={14} /> : 'U'}</span>
-                    <div>
-                      <b>{authorAgent?.name ?? (isAgent ? 'Agent' : comment.authorType)}</b>
-                      <span>{comment.action} / {comment.createdAt ? new Date(comment.createdAt).toLocaleString() : ''}</span>
-                    </div>
-                  </div>
-                  <p>{comment.body}</p>
-                </article>;
-              })}
-            </div>
           </div>}
           {tab === 'logs' && <div style={{ display: 'grid', gap: 10 }}>
             {(tabLoading.logs || tabLoading.apiLogs) && <p style={{ opacity: 0.6 }}>Refreshing cached logs...</p>}

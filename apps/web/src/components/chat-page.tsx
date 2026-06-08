@@ -68,9 +68,13 @@ function pendingUserMessage(session: ChatSession, body: string): ChatMessage {
 
 function mergeMessages(current: ChatMessage[], nextMessages: ChatMessage[], replaceId?: string): ChatMessage[] {
   const nextIds = new Set(nextMessages.map((message) => message.id));
+  const confirmedKeys = new Set([...current, ...nextMessages]
+    .filter((message) => !message.metadata?.pending)
+    .map((message) => `${message.sessionId}:${message.authorType}:${message.body}`));
+  const isMatchedPending = (message: ChatMessage) => Boolean(message.metadata?.pending && confirmedKeys.has(`${message.sessionId}:${message.authorType}:${message.body}`));
   return [
-    ...current.filter((message) => message.id !== replaceId && !nextIds.has(message.id)),
-    ...nextMessages,
+    ...current.filter((message) => message.id !== replaceId && !nextIds.has(message.id) && !isMatchedPending(message)),
+    ...nextMessages.filter((message) => !isMatchedPending(message)),
   ];
 }
 
@@ -232,6 +236,9 @@ export function ChatPage() {
   }, [companyProjects, projectFilter]);
   useEffect(() => { void loadSessions(); }, [agentId, companyId, projectFilter]);
   useEffect(() => { void loadMessages(); }, [sessionId]);
+  useEffect(() => {
+    if (selectedSession && selectedAgent?.isBusy) setReplyingSessionId(selectedSession.id);
+  }, [selectedAgent?.isBusy, selectedSession?.id]);
   useEffect(() => {
     function onLive(event: Event) {
       const detail = (event as CustomEvent<LiveEvent>).detail;

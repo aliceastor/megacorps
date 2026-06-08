@@ -17,8 +17,9 @@ Latest verified baseline:
 - Phase 1-19 operational MVP flows are implemented.
 - Company registry page, company memberships, company-scoped RBAC, department setup, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, project-scoped direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention/escalation, lifecycle logs, knowledge docs, company/department/project goal context, repo-centric project workspace policy with project-level repo URL and work path, work products, React Query browser cache, WebSocket live events, execution locks, stale-lock retry/block recovery, DB-backed task-run queue, idempotent task-complete webhooks, Codex app-server adapter sessions, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
 - Deployment is user-managed. Local-only Docker was used for QA in this pass; NAS/server deployment remains user-managed.
-- Browser plugin QA verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text.
+- Browser/plugin QA previously verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text. Current UI IA route smoke also covers Departments, Projects, Workspace, Cron, Admin, and Settings.
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
+- June 2026 UI IA refactor is implemented: fixed independent sidebar, refined single-purpose navigation (`Companies`, `Departments`, `Agents`, `Projects`, `Workspace`, `Knowledge`, `Kanban`, `Direct Chat`, `Cron`, `Logs`), pure company CRUD plus context goals, dedicated department/org lanes, guided agent creation, tabbed Admin/Settings, Project CRUD split from Workspace, Workspace folder manager paths, Kanban company/sort filters, Ticket Thread timeline, Direct Chat optimistic dedupe, and longer Agent TEST timeout.
 - API discovery is available at `GET /api/help`, `GET /api/help?format=markdown`, and the Web UI Help page, with response schema examples and rate-limit notes for every endpoint.
 - Sidebar navigation now keeps Help and Settings in the bottom utility area, with the collapse toggle inside the sidebar.
 - Hermes SSH adapter is implemented for direct `ssh -> hermes -z "{prompt}" --profile {profile}` dispatch against the configured Hermes host, with `/proc/1/environ` imported before Hermes so container-level provider keys are visible in SSH sessions. No production SSH host is hardcoded.
@@ -52,7 +53,7 @@ Important Paperclip concepts to mirror in MegaCorps:
 - Persistent agent state: sessions and context should survive heartbeat cycles.
 - Runtime skill injection: agents should receive company/project/task context and relevant workflow instructions.
 - Company portability: import/export complete organizations with secrets scrubbed.
-- Workspaces: agents should work in the correct project directory, branch, or worktree.
+- Projects/Workspace: agents should receive the correct project repo/work path, while non-coding project files should live under the company Workspace authority path.
 - Events/activity: every mutation, heartbeat, cost event, approval, comment, and work product should be durable and auditable.
 - Plugins/adapters: external agents and custom capabilities should attach without forking the core.
 
@@ -152,7 +153,7 @@ Implemented:
 
 Known remaining RBAC work:
 
-- Invite flow is not implemented yet; users must already exist before being added by email.
+- Invite links are implemented through Admin and `POST /api/auth/invites` / `POST /api/auth/accept-invite`; remaining RBAC work is service-agent keys and more granular company permission policies.
 - Service-agent API keys are not implemented yet.
 - System-level API lifecycle logs remain authenticated system data, not fully company-filtered audit slices.
 
@@ -291,7 +292,7 @@ Implemented:
 - Department creation.
 - Agent can belong to a department.
 - Agent can report to another agent through `bossId`.
-- Companies/Agents pages group the O-chart by department and render a real top-down tree with connector lines for reporting lines.
+- Departments/Agents pages group the O-chart by department and render org lanes/tree nodes for reporting lines. Companies is now focused on company CRUD and company goals.
 - Member identity labels are free text; hierarchy is controlled by `bossId` and direct reports.
 - Clicking a member opens editing for identity label, department, reports-to relation, runtime, adapter, and budget.
 - Agent runtime presets are managed in `Settings -> Agent runtimes`.
@@ -532,7 +533,7 @@ Implemented:
 Limits:
 
 - System-level API lifecycle logs are authenticated but not yet fully sliced by company.
-- Invite flow and service-agent keys are not implemented yet.
+- Service-agent keys and finer-grained production permission policies are not implemented yet.
 - Rate limiting is in-memory per API process; production should still use reverse-proxy limits.
 - Runtime health is based on configuration, attached agents, and recent runs; it is not yet an active external heartbeat probe.
 
@@ -583,14 +584,10 @@ Log health notes:
 
 Verified on 2026-06-08:
 
-- `npm run typecheck --workspace=@megacorps/server`
-- `npm run typecheck --workspace=@megacorps/web`
-- `npm run typecheck --workspace=@megacorps/shared`
-- `npm run test --workspace=@megacorps/server`
-- `npm run test --workspace=@megacorps/web`
-- `npm run test --workspace=@megacorps/shared`
-- `npm run build --workspace=@megacorps/server`
-- `npm run build --workspace=@megacorps/web`
+- `npm run typecheck`
+- `npm test`
+- `npm run build`
+- `git diff --check` returned only Windows CRLF normalization warnings, no whitespace/content errors.
 - This pass did not start Docker; deployment remains user-managed.
 - API compile coverage includes:
   - task message board comments with user/agent authors
@@ -608,15 +605,19 @@ Verified on 2026-06-08:
 - Web route smoke:
   - `/dashboard`
   - `/companies`
-  - `/chat`
-  - `/kanban`
+  - `/departments`
   - `/agents`
-  - `/budget`
-  - `/logs`
-  - `/knowledge`
+  - `/projects`
   - `/workspaces`
+  - `/knowledge`
+  - `/kanban`
+  - `/chat`
+  - `/cron`
+  - `/logs`
+  - `/admin`
   - `/settings`
   - `/help`
+  - `/budget`
 
 Known local warning:
 
@@ -650,12 +651,12 @@ Implemented or partially implemented:
 - Work products for PRs, commits, previews, reports, screenshots, artifacts, and external URLs.
 - React Query browser cache and authenticated WebSocket live event invalidation.
 - Knowledge base CRUD and tag-based prompt injection.
-- Project/workspace/goal setup UI.
-- Dashboard, direct chat, logs, budget, settings, knowledge, and workspace pages.
+- Project CRUD, company Workspace authority paths, and company/department/project goal setup UI.
+- Dashboard, companies, departments, agents, projects, workspace, kanban, direct chat, cron, logs, admin, settings, knowledge, and direct budget pages.
 
 Still missing:
 
-- Invite flow, service-agent keys, and more granular company permission policies.
+- Service-agent keys and more granular company permission policies.
 - Dedicated async worker sidecar for long-running Hermes jobs.
 - Distributed queue locks/retries with BullMQ/Redis or equivalent.
 - Active external runtime probes, runtime versions, and adapter-reported capabilities.
@@ -688,7 +689,7 @@ The Phase 1-15 operational MVP is usable for controlled local/NAS debugging, but
    - support external secret references
 
 3. Authorization and tenancy:
-   - add invite flow and membership recovery controls
+   - add service-agent keys and membership recovery controls
    - add service-agent API keys
    - continue tightening system-level audit scoping for multi-tenant deployments
 

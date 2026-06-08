@@ -85,6 +85,7 @@ function formatConfig(config: Record<string, unknown>): string {
 }
 
 export function SettingsPage() {
+  const [tab, setTab] = useState<'runtimes' | 'company' | 'members' | 'advanced'>('runtimes');
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealth[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -265,7 +266,10 @@ export function SettingsPage() {
       <div><h1>Settings</h1><p>Configure companies, departments, agent runtimes, and adapter endpoints.</p></div>
     </div>
     {toast && <p className="status-pill">{toast}</p>}
-    <div className="data-grid">
+    <div className="tab-row page-tabs">
+      {(['runtimes', 'company', 'members', 'advanced'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => setTab(next)}>{next}</button>)}
+    </div>
+    {tab === 'runtimes' && <div className="data-grid">
       <section className="card section-card">
         <div className="panel-title"><h2>Agent runtimes</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeCompanyId(companyId || companies[0]?.id || ''); setRuntimeName(''); setRuntimeAdapter('mock'); setRuntimeLocalWorkspaceRoot(''); setRuntimeLocalScratchRoot(''); setRuntimeConfigState({}); }}>New</button></div>
         <div className="form-grid">
@@ -318,7 +322,9 @@ export function SettingsPage() {
           {runtimeHealth.length === 0 && <p style={{ color: 'var(--muted)' }}>No runtime presets yet.</p>}
         </div>
       </section>
+    </div>}
 
+    {tab === 'company' && <div className="data-grid">
       <section className="card section-card">
         <div className="panel-title"><h2>Company settings</h2><button className="btn btn-primary" onClick={saveCompany}>Save company</button></div>
         <label className="field-label">Company<select className="input" value={companyId} onChange={(event) => { const company = companies.find((item) => item.id === event.target.value); if (company) selectCompany(company); }}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
@@ -332,10 +338,12 @@ export function SettingsPage() {
           <label className="field-label">New department<input className="input" value={deptName} onChange={(event) => setDeptName(event.target.value)} /></label>
           <label className="field-label">Slug<input className="input" value={deptSlug} onChange={(event) => setDeptSlug(event.target.value)} /></label>
         </div>
-        <button className="btn" onClick={addDepartment}>Add department</button>
+        <button className="btn" title={companyId ? 'Add department' : 'Create a company first before adding departments'} disabled={!companyId || !deptName.trim() || !deptSlug.trim()} onClick={addDepartment}>Add department</button>
         <div className="table-list">{selectedCompanyDepartments.map((department) => <div className="list-row" key={department.id}><b>{department.name}</b><p>{department.slug}</p></div>)}</div>
       </section>
+    </div>}
 
+    {tab === 'members' && <div className="data-grid">
       <section className="card section-card">
         <div className="panel-title"><h2>Company members</h2><span className="status-pill">{selectedCompanyMembers.length} active</span></div>
         <div className="form-grid">
@@ -359,6 +367,16 @@ export function SettingsPage() {
           {selectedCompanyMembers.length === 0 && <p style={{ color: 'var(--muted)' }}>No active members.</p>}
         </div>
       </section>
-    </div>
+    </div>}
+
+    {tab === 'advanced' && <section className="card section-card">
+      <div className="panel-title"><h2>Advanced</h2><span className="status-pill">future settings</span></div>
+      <div className="meta-grid">
+        <span>Budget <b>Moved out of primary navigation; ready to host budget controls here.</b></span>
+        <span>Secrets <b>API keys and webhook secrets can be added here without crowding runtime setup.</b></span>
+        <span>Company <b>{companies.length} visible companies</b></span>
+        <span>Runtimes <b>{runtimes.length} configured</b></span>
+      </div>
+    </section>}
   </div>;
 }

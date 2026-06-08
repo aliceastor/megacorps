@@ -17,7 +17,7 @@ MegaCorps uses bounded context budgets, so long fields are clipped rather than o
 - Recent activity and heartbeat runs
 - Relevant knowledge docs
 
-## Goal Stack
+## Goal Context
 
 Goals are scoped in three layers:
 
@@ -25,7 +25,7 @@ Goals are scoped in three layers:
 - Department goal: applies when the task or agent is in that department.
 - Project goal: applies when the task or chat session belongs to that project.
 
-For Kanban task dispatch, MegaCorps injects:
+For Kanban task dispatch, MegaCorps injects the company, matching department, matching project, selected card goal, and a final applicable-goals list for quick reading:
 
 ```text
 Goal context:
@@ -43,7 +43,7 @@ Project goals:
 Selected card goal:
 - <scope> goal: <title>
   <body>
-Effective goal stack:
+Applicable goals:
 - <all company + matching department/project + selected goals>
 ```
 
@@ -131,7 +131,7 @@ Reports to: <manager name | top-level>
 Direct reports: <report list | none>
 
 Goal context:
-<company / department / project / selected / effective goals>
+<company / department / project / selected / applicable goals>
 
 Card: <title>
 Status: <columnStatus>

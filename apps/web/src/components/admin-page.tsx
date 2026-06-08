@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Copy, MailPlus, Save, ShieldCheck, UserCog } from 'lucide-react';
 import { api } from '@/lib/api';
 
@@ -36,6 +36,8 @@ const roles = ['viewer', 'operator', 'admin'];
 const statuses = ['active', 'disabled'];
 
 export function AdminPage() {
+  const [tab, setTab] = useState<'general' | 'accounts' | 'invites'>('general');
+  const [expandedAccountId, setExpandedAccountId] = useState('');
   const [settings, setSettings] = useState<AdminSettings | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -147,7 +149,11 @@ export function AdminPage() {
     {toast && <p className="status-pill">{toast}</p>}
     {error && <p className="form-error">{error}</p>}
 
-    <div className="data-grid">
+    <div className="tab-row page-tabs">
+      {(['general', 'accounts', 'invites'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => setTab(next)}>{next}</button>)}
+    </div>
+
+    {tab === 'general' && <div className="data-grid">
       <section className="card section-card">
         <div className="panel-title"><h2>Signup control</h2><ShieldCheck size={18} /></div>
         <label className="check-row">
@@ -166,9 +172,9 @@ export function AdminPage() {
           <span>Signup <b>{settings?.signupEnabled ? 'enabled' : 'disabled'}</b></span>
         </div>
       </section>
-    </div>
+    </div>}
 
-    <section className="card section-card">
+    {tab === 'invites' && <section className="card section-card">
       <div className="panel-title"><h2>Company Invite</h2><MailPlus size={18} /></div>
       <div className="form-grid">
         <label className="field-label">Company<select className="input" value={inviteCompanyId} onChange={(event) => setInviteCompanyId(event.target.value)}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
@@ -189,32 +195,45 @@ export function AdminPage() {
         <span>Accept URL <b>{lastInvite.acceptUrl}</b></span>
         <span>Raw token <b>{lastInvite.token}</b></span>
       </div>}
-    </section>
+    </section>}
 
-    <section className="card section-card">
+    {tab === 'accounts' && <section className="card section-card">
       <div className="panel-title"><h2>Accounts</h2><span className="status-pill">{accounts.length} users</span></div>
-      <div className="table-list">
-        {accounts.map((account) => <div className="list-row admin-account-row" key={account.id}>
-          <div className="admin-account-main">
-            <div>
-              <b>{account.email}</b>
-              <p>{account.id}</p>
-            </div>
-            <div className="form-grid">
-              <label className="field-label">Name<input className="input" value={account.name} onChange={(event) => patchAccount(account.id, { name: event.target.value })} /></label>
-              <label className="field-label">Global role<select className="input" value={account.role} onChange={(event) => patchAccount(account.id, { role: event.target.value })}>{roles.map((role) => <option key={role} value={role}>{role}</option>)}</select></label>
-              <label className="field-label">Status<select className="input" value={account.status} onChange={(event) => patchAccount(account.id, { status: event.target.value })}>{statuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></label>
-              <label className="field-label">Reset password<input className="input" type="password" minLength={8} value={passwords[account.id] ?? ''} onChange={(event) => setPasswords((current) => ({ ...current, [account.id]: event.target.value }))} placeholder="Leave blank to keep current" /></label>
-            </div>
-            <div className="account-memberships">
-              {account.memberships.map((membership) => <span className="badge" key={membership.id}>{membership.companyName}: {membership.role} / {membership.status}</span>)}
-              {account.memberships.length === 0 && <span className="badge">No company membership</span>}
-            </div>
-          </div>
-          <div className="action-row"><button className="btn btn-primary" disabled={busy} onClick={() => saveAccount(account)}><Save size={15} /> Save account</button></div>
-        </div>)}
+      <div className="table-wrap">
+        <table className="data-table">
+          <thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Status</th><th>Memberships</th><th>Actions</th></tr></thead>
+          <tbody>
+            {accounts.map((account) => (
+              <Fragment key={account.id}>
+                <tr key={account.id}>
+                  <td><b>{account.email}</b><small>{account.id}</small></td>
+                  <td>{account.name}</td>
+                  <td><span className="badge">{account.role}</span></td>
+                  <td><span className="badge">{account.status}</span></td>
+                  <td>{account.memberships.length ? `${account.memberships.length} companies` : 'none'}</td>
+                  <td><button className="btn" onClick={() => setExpandedAccountId(expandedAccountId === account.id ? '' : account.id)}>{expandedAccountId === account.id ? 'Close' : 'Edit'}</button></td>
+                </tr>
+                {expandedAccountId === account.id && <tr key={`${account.id}-edit`} className="expanded-row">
+                  <td colSpan={6}>
+                    <div className="form-grid">
+                      <label className="field-label">Name<input className="input" value={account.name} onChange={(event) => patchAccount(account.id, { name: event.target.value })} /></label>
+                      <label className="field-label">Global role<select className="input" value={account.role} onChange={(event) => patchAccount(account.id, { role: event.target.value })}>{roles.map((role) => <option key={role} value={role}>{role}</option>)}</select></label>
+                      <label className="field-label">Status<select className="input" value={account.status} onChange={(event) => patchAccount(account.id, { status: event.target.value })}>{statuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></label>
+                      <label className="field-label">Reset password<input className="input" type="password" minLength={8} value={passwords[account.id] ?? ''} onChange={(event) => setPasswords((current) => ({ ...current, [account.id]: event.target.value }))} placeholder="Leave blank to keep current" /></label>
+                    </div>
+                    <div className="account-memberships">
+                      {account.memberships.map((membership) => <span className="badge" key={membership.id}>{membership.companyName}: {membership.role} / {membership.status}</span>)}
+                      {account.memberships.length === 0 && <span className="badge">No company membership</span>}
+                    </div>
+                    <div className="action-row"><button className="btn btn-primary" disabled={busy} onClick={() => saveAccount(account)}><Save size={15} /> Save account</button></div>
+                  </td>
+                </tr>}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
         {accounts.length === 0 && <p style={{ color: 'var(--muted)' }}>No accounts yet.</p>}
       </div>
-    </section>
+    </section>}
   </div>;
 }

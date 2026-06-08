@@ -11,16 +11,18 @@ Routes inside the app shell use `apps/web/src/components/shell.tsx`.
 Primary navigation:
 - Dashboard: `/dashboard`
 - Companies: `/companies`
-- Direct Chat: `/chat`
-- Kanban: `/kanban`
+- Departments: `/departments`
 - Agents: `/agents`
-- Budget: `/budget`
-- Logs: `/logs`
+- Projects: `/projects`
+- Workspace: `/workspaces`
 - Knowledge: `/knowledge`
-- Workspaces: `/workspaces`
+- Kanban: `/kanban`
+- Direct Chat: `/chat`
+- Cron: `/cron`
+- Logs: `/logs`
 
 Utility navigation:
-- Help: `/help`
+- Help: `/help`, topbar icon
 - Settings: `/settings`
 - Admin: `/admin`, visible only when `/api/me` returns global role `admin`
 
@@ -31,6 +33,7 @@ Persistent elements:
 - Language selector
 - User menu with logout
 - Heartbeat/status text
+- Fixed independent sidebar scroll; content scrolling does not move or reveal empty space below the left rail.
 - Live event listener provided by the app shell; pages can react to `megacorps-live` events.
 
 ## Public/Auth Flow
@@ -108,47 +111,75 @@ Route:
 - `/companies`
 
 Component:
-- `OrgChart` with `surface="companies"`
+- `CompaniesPage`
 
 Data sources:
-- `GET /api/agents`
 - `GET /api/companies`
 - `GET /api/departments`
-- `GET /api/agent-runtimes`
+- `GET /api/agents`
+- `GET /api/projects`
 - `GET /api/cards`
-- `GET /api/approvals?status=pending`
+- `GET /api/goals`
 - `POST /api/companies`
 - `PUT /api/companies/:id`
-- `POST /api/departments`
-- Agent action endpoints shared with `/agents`
+- `DELETE /api/companies/:id`
+- `POST /api/goals`
 
 Elements:
-- Company registry list
+- Company list
 - New Company button
-- Company settings: company selector, company name, dispatch interval seconds, auto-dispatch toggle, mission textarea, Save Company
-- Department settings: new department name, department slug, Add Department, department list
-- Lifecycle closure summary: top members, middle layer, leaf executors, pending approvals
-- Top-down queue list
-- Bottom-up review list
-- Agent quick-create strip
+- Company editor:
+  - Company name
+  - Slug
+  - Dispatch interval seconds
+  - Auto-dispatch toggle
+  - Mission textarea
+  - Save Company
+  - Delete Company
+- Company Goals panel:
+  - Goal title
+  - Goal body
+  - Add Company Goal
+  - Company goal list
+- Company stats:
+  - Departments
+  - Agents
+  - Projects
+  - Kanban cards
+- Links to Departments and Agents pages
+
+Dialog/confirmation:
+- Delete Company uses `window.confirm` and only succeeds for an empty company. The API returns `company_not_empty.blocking` when company-owned rows still exist.
+
+## Departments
+
+Route:
+- `/departments`
+
+Component:
+- `DepartmentsPage`
+
+Data sources:
+- `GET /api/companies`
+- `GET /api/departments`
+- `GET /api/agents`
+- `GET /api/goals`
+- `POST /api/departments`
+- `POST /api/goals`
+
+Elements:
+- Company selector
+- New department name and slug
+- Add Department button, disabled until a company exists and department fields are filled
+- Department list
+- Department Goals panel:
+  - Goal title
+  - Goal body
+  - Add Department Goal
+  - Department goal list
 - Department org lanes
 - Unassigned department lane
-- Selected agent detail panel with full agent editor and actions
-
-Inline selected-agent panel elements:
-- Effective adapter config summary, including runtime-inherited values and per-agent overrides
-- Name, slug, identity label, title, profile
-- Adapter and runtime preset selectors
-- Department and reports-to selectors
-- Capabilities, per-task budget, monthly budget
-- Soul textarea
-- Adapter override fields, adapter-type aware
-- Direct reports, assigned work, review queue
-- Save, Test, Pause/Resume, Reset Session, Fire
-
-Dialogs:
-- Fire uses direct action; no confirmation dialog currently.
-- Toast notifications appear for create/save/test/pause/resume/reset/delete outcomes.
+- Agent cards grouped by department
 
 ## Agents
 
@@ -163,26 +194,46 @@ Data sources:
 
 Elements:
 - Company context selector
-- Agent quick-create strip:
-  - Agent name
-  - Slug
-  - Profile
-  - Identity label
-  - Title
-  - Soul/work style
-  - Capabilities
-  - Per-task budget USD
-  - Monthly budget USD
-  - Department
-  - Reports to
-  - Adapter
-  - Runtime preset
-  - New button
+- Agent creation panel with New Agent button
 - Department org lanes
 - Unassigned department lane
 - Selected agent detail panel as described above
 
-No separate modal overlay.
+### Agents Modal: New Agent
+
+Overlay:
+- `overlay` + `agent-wizard-modal`
+
+Step 1: Identity
+- Name
+- Slug
+- Title
+- Identity label
+- Soul/persona
+- Capability checkboxes
+
+Step 2: Assignment
+- Company
+- Department
+- Reports to
+- Profile
+
+Step 3: Runtime and budget
+- Adapter
+- Runtime preset
+- Per-task budget USD
+- Monthly budget USD
+
+Selected-agent panel elements:
+- Effective adapter config summary, including runtime-inherited values and per-agent overrides
+- Name, slug, identity label, title, profile
+- Adapter and runtime preset selectors
+- Department and reports-to selectors
+- Capabilities, per-task budget, monthly budget
+- Soul textarea
+- Adapter override fields, adapter-type aware
+- Direct reports, assigned work, review queue
+- Save, Test, Pause/Resume, Reset Session, Fire
 
 ## Direct Chat
 
@@ -237,9 +288,10 @@ Data sources:
 
 Top toolbar elements:
 - Search input
-- Status filter
+- Company multi-select filter
 - Assignee filter
 - Project filter: all projects, no project, specific project
+- Sort selector: priority, company, newest, oldest, updated
 - Refresh button
 - New Card button
 
@@ -301,11 +353,11 @@ Details tab elements:
 - Actions: Save, Revert, Run Now, Review, Split into Sub-tasks, Pause with Comment, Cancel Task, Delete Task
 
 Message board tab elements:
+- Ticket Thread timeline combining comments, task lifecycle logs, and work products
 - Author selector: user or company agent
 - Action selector: comment only, agent note, stop agent and block task, escalate to reviewer, send to agent context, continue run
 - Message textarea
 - Add Message button
-- Cached message list
 
 Logs tab elements:
 - Latest execution output
@@ -345,6 +397,9 @@ Cache/live behavior:
 Route:
 - `/budget`
 
+Navigation:
+- Direct route only in the current IA. Budget is not in the primary sidebar.
+
 Data sources:
 - `GET /api/agents`
 - `GET /api/cards`
@@ -380,6 +435,44 @@ Elements:
 Dialog/confirmation:
 - Delete policy uses `window.confirm`.
 - Toast/status pill appears for save/delete/approval decisions.
+
+## Cron
+
+Route:
+- `/cron`
+
+Data sources:
+- `GET /api/cron/status`
+- `GET /api/cron/runs`
+- `GET /api/companies`
+- `POST /api/cron/run`
+
+Elements:
+- Stat cards:
+  - Loop status
+  - Base interval
+  - Running now
+  - Last status
+- Job List table:
+  - Built-in Kanban Dispatch row with Run Now
+  - Scaffold rows for Daily Report and Health Check
+- Job Detail panel:
+  - Job name
+  - Schedule type
+  - Interval seconds
+  - Cron expression
+  - Enabled checkbox
+  - Save button disabled until backend CRUD exists
+  - Run built-in dispatch
+- Company Heartbeat list:
+  - Company name
+  - Auto-dispatch state
+  - Company interval
+  - Last tick
+- Run History list
+- Selected Run details and JSON payload
+
+No modal overlays.
 
 ## Logs
 
@@ -442,14 +535,13 @@ Elements:
 Dialog/confirmation:
 - Delete uses `window.confirm`.
 
-## Workspaces
+## Projects
 
 Route:
-- `/workspaces`
+- `/projects`
 
 Data sources:
 - `GET /api/companies`
-- `GET /api/departments`
 - `GET /api/projects`
 - `POST /api/projects`
 - `PUT /api/projects/:id`
@@ -479,14 +571,45 @@ Elements:
   - Runtime-local path hint
   - Add project / Save project
 - Repository Protocol summary
-- Goal Scope form:
-  - Scope selector: company, department, project
-  - Department selector when department scope
-  - Selected project display when project scope
+- Project Goals panel:
+  - Selected project display
   - Goal title
   - Goal body
-  - Add goal
-- Effective Goals list
+  - Add Project Goal
+  - Project goal list
+
+No modal overlays.
+
+## Workspace
+
+Route:
+- `/workspaces`
+
+Data sources:
+- `GET /api/companies`
+- `GET /api/projects`
+
+Elements:
+- Workspace company selector
+- Read-only authority root, `/workspaces/{company-slug}/`
+- New folder/file name input
+- New Folder button
+- New File button
+- Upload button, disabled until backend storage is implemented
+- Company/project file tree:
+  - Project group headings
+  - Starter README file
+  - Starter `meeting-notes/` folder
+  - Starter `deliverables/` folder
+  - Locally added folders/files
+- Selected node detail:
+  - Path
+  - Authority owner
+  - Root
+  - Mode
+  - File preview or folder empty state
+  - Edit and Download buttons, disabled until backend storage exists
+  - Delete local node button
 
 No modal overlays.
 
@@ -504,7 +627,12 @@ Data sources:
 - `DELETE /api/company-memberships/:id`
 
 Elements:
-- Agent runtimes editor:
+- Tabs:
+  - Runtimes
+  - Company
+  - Members
+  - Advanced
+- Runtimes tab:
   - Runtime company
   - Runtime name
   - Adapter type
@@ -521,21 +649,23 @@ Elements:
   - Save runtime
   - Runtime list with Edit/Delete
 - Runtime health summary
-- Company settings:
+- Company tab:
   - Company selector
   - Company name
   - Mission
   - Dispatch interval seconds
   - Auto dispatch checkbox
   - Save company
-  - New department fields and Add department
+  - New department fields
+  - Add department button, disabled until a company exists and fields are filled
   - Department list
-- Company members:
+- Members tab:
   - Email/User selector
   - Role selector
-  - Status selector
   - Add/update member
   - Member list with role update and disable action
+- Advanced tab:
+  - Future budget/secrets/company/runtime metadata panel
 
 Dialog/confirmation:
 - Delete runtime uses `window.confirm`.
@@ -585,7 +715,11 @@ Data sources:
 - `POST /api/auth/invites`
 
 Elements:
-- Signup control:
+- Tabs:
+  - General
+  - Accounts
+  - Invites
+- General tab signup control:
   - Signup enabled checkbox
   - Save settings
   - Bootstrap admin note
@@ -593,7 +727,7 @@ Elements:
   - Total accounts
   - Active admins
   - Signup status
-- Company Invite:
+- Invites tab:
   - Company selector
   - Email input
   - Name input
@@ -602,8 +736,15 @@ Elements:
   - Create invite
   - Copy accept URL
   - Last invite metadata: email, role, status, expiry, accept URL, raw token
-- Accounts list:
+- Accounts tab table:
+  - One row per account
   - Email and UUID
+  - Name
+  - Global role badge
+  - Status badge
+  - Membership count
+  - Edit action
+- Expanded account edit row:
   - Name input
   - Global role selector
   - Status selector
@@ -621,11 +762,14 @@ This pass compared UI fields with the shared schemas, API route handlers, and DB
 
 The following backend-supported fields or actions were missing or incomplete in the UI and are now surfaced:
 
-- `agents.capabilities`: added to shared schema, server create/update routes, API help, agent quick-create UI, and selected-agent edit UI.
-- `agents.budget_per_task`: added to agent quick-create UI and selected-agent edit UI.
-- `projects.protected_branches`: added to Workspaces project editor and Repository Protocol summary.
-- `projects.runtime_services`: added to Workspaces project editor as validated JSON.
-- Workspaces No Project reset: now resets `workPath`, protected branches, and runtime services state.
+- `agents.capabilities`: added to shared schema, server create/update routes, API help, guided agent wizard, and selected-agent edit UI.
+- `agents.budget_per_task`: added to guided agent wizard and selected-agent edit UI.
+- `projects.protected_branches`: added to Projects editor and Repository Protocol summary.
+- `projects.runtime_services`: added to Projects editor as validated JSON.
+- Projects No Project reset: now resets `workPath`, protected branches, and runtime services state.
+- `DELETE /api/companies/:id`: added to Companies with a full company-owned-content guard.
+- Kanban toolbar: removed status filter, added company multi-select filtering and sort by company/date/priority.
+- Workspace page: changed from project editor to company folder manager and authority path surface.
 - `budget_policies.warn_at_percent`, `hard_stop`, `is_active`: added to Budget policy form.
 - `PUT/DELETE /api/budget-policies/:id`: added edit/delete controls to Budget.
 - `user_invites`: added Admin Company Invite form with accept URL/token display.
@@ -658,7 +802,7 @@ These DB surfaces are intentionally not presented as primary editable UI fields:
 
 These are not bugs, but they are likely places to simplify the future UI:
 
-- Companies and Agents share `OrgChart`; this is efficient but makes the component large. Split into `CompanyRegistry`, `AgentCreateBar`, `OrgLanes`, and `AgentDetailPanel` before major redesign.
-- Settings and Companies both edit company/departments. Decide whether Settings should remain operational config only, with company structure owned by Companies.
+- Agents still use a large `OrgChart` component. Split it into `AgentWizard`, `OrgLanes`, and `AgentDetailPanel` before the next major agent redesign.
+- Settings and Companies both edit company settings; decide whether Settings should remain operational config only, with company structure owned by Companies/Departments.
 - Admin and Settings both touch membership-related flows. Admin now owns global accounts/invites; Settings owns company membership maintenance.
 - Kanban detail drawer is now feature-complete but dense. A future redesign should split Details into task metadata, execution controls, review/escalation, and evidence/work product sections.
