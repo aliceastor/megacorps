@@ -366,6 +366,52 @@ select option {
   flex-wrap: wrap;
 }
 
+.help-architecture-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: 10px;
+}
+
+.help-surface {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.help-surface-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.help-api-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.help-api-list code {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 7px;
+  background: color-mix(in srgb, var(--card) 72%, var(--foreground) 4%);
+  font-size: 11px;
+}
+
+.help-note-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.help-note-list li + li {
+  margin-top: 6px;
+}
+
 .method-pill {
   min-width: 58px;
   border-radius: 8px;

@@ -7,6 +7,9 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.equal(typeof catalog.rateLimits.enforced, 'boolean');
   assert.match(catalog.rateLimits.summary, /rate limiting/i);
   assert.ok(catalog.adapters.includes('hermes-ssh'));
+  assert.match(catalog.architecture.model, /multi-agent control plane/i);
+  assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Projects' && surface.purpose.includes('Project Authority')));
+  assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/departments' && endpoint.group === 'Departments'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/auth/bootstrap'));
   for (const endpoint of catalog.endpoints) {
     assert.notEqual(endpoint.responseSchema, undefined, `${endpoint.method} ${endpoint.path} missing responseSchema`);
@@ -19,6 +22,8 @@ test('api help includes response examples and rate-limit notes for every endpoin
 test('api help markdown exposes response schema and rate limit sections', () => {
   const markdown = apiHelpMarkdown();
   assert.match(markdown, /## Rate Limits/);
+  assert.match(markdown, /## Current Architecture/);
+  assert.match(markdown, /Projects \(\/projects\)/);
   assert.match(markdown, /Response schema:/);
   assert.match(markdown, /hermes-ssh/);
 });

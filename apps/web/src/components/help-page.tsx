@@ -20,10 +20,24 @@ type ApiEndpoint = {
   notes?: string[];
 };
 
+type ArchitectureSurface = {
+  name: string;
+  route: string;
+  purpose: string;
+  primaryApi: string[];
+};
+
 type ApiHelp = {
   service: string;
   help: { json: string; markdown: string; ui: string };
-  auth: { mode: string; login: string; signup: string };
+  architecture?: {
+    model: string;
+    sourceOfTruth: string[];
+    surfaces: ArchitectureSurface[];
+    multiAgentNotes: string[];
+    remainingGaps?: string[];
+  };
+  auth: { mode: string; login: string; signup: string; bootstrap?: string; admin?: string };
   rateLimits?: { enforced: boolean; summary: string; productionRecommendation: string };
   kanban: { stages: string[]; legacyAliases: Record<string, string>; note: string };
   adapters: string[];
@@ -101,8 +115,36 @@ export function HelpPage() {
       <section className="card stat-card"><span>Endpoints</span><b>{help.endpoints.length}</b></section>
       <section className="card stat-card"><span>Kanban stages</span><b>{help.kanban.stages.length}</b></section>
       <section className="card stat-card"><span>Adapters</span><b>{help.adapters.length}</b></section>
-      <section className="card stat-card"><span>Docs</span><b>JSON + MD</b></section>
+      <section className="card stat-card"><span>Surfaces</span><b>{help.architecture?.surfaces.length ?? 0}</b></section>
     </div>
+
+    {help.architecture && <section className="card section-card">
+      <div className="panel-title">
+        <div><h2>Current Architecture</h2><p style={{ margin: 0, color: 'var(--muted)' }}>{help.architecture.model}</p></div>
+        <BookOpen size={18} />
+      </div>
+      <div className="help-architecture-grid">
+        {help.architecture.surfaces.map((surface) => <article className="list-row help-surface" key={surface.name}>
+          <div className="help-surface-head"><b>{surface.name}</b><code>{surface.route}</code></div>
+          <p>{surface.purpose}</p>
+          <div className="help-api-list">{surface.primaryApi.map((item) => <code key={item}>{item}</code>)}</div>
+        </article>)}
+      </div>
+      <div className="data-grid">
+        <div className="list-row">
+          <b>Source of truth</b>
+          <ul className="help-note-list">{help.architecture.sourceOfTruth.map((item) => <li key={item}>{item}</li>)}</ul>
+        </div>
+        <div className="list-row">
+          <b>Multi-agent notes</b>
+          <ul className="help-note-list">{help.architecture.multiAgentNotes.map((item) => <li key={item}>{item}</li>)}</ul>
+        </div>
+      </div>
+      {help.architecture.remainingGaps?.length ? <div className="list-row">
+        <b>Remaining production gaps</b>
+        <ul className="help-note-list">{help.architecture.remainingGaps.map((item) => <li key={item}>{item}</li>)}</ul>
+      </div> : null}
+    </section>}
 
     <section className="card section-card">
       <div className="panel-title">

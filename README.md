@@ -121,7 +121,7 @@ Hermes suite operational notes:
 - Phase 9: activity log, cost events, budget policies, budget hard stops, pending approvals and approval decisions.
 - Phase 10: direct agent chat sessions, per-session adapter resume ids, cron status/history/manual tick APIs, and chat UI.
 - Phase 11: per-task agent/user message boards and bounded Kanban context injection for every agent invocation.
-- Phase 12: Hermes SSH adapter, API Help response schema/examples, rate-limit disclosure, and browser-host API fallback.
+- Phase 12: Hermes SSH adapter, API Help current-architecture catalog, response schema/examples, rate-limit disclosure, and browser-host API fallback.
 - Phase 13: real O-chart tree canvas, operator RBAC for mutations/manual execution, in-app rate limiting, runtime health summary, webhook shared-secret guard, monthly budget reset cron, and UI error boundary.
 - Phase 14: company memberships, company-scoped read filters, company operator/admin mutation checks, runtime company scoping, and Settings member management.
 - Phase 15: database-backed `task_runs` queue, background task-run worker, queued manual run/review, queued cron dispatch/review, and Logs task-run visibility.
@@ -154,8 +154,8 @@ The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds 
 
 Cron/debug endpoints:
 
-- `GET /api/help`: machine-readable API catalog for agents and integrations, including response schema examples and rate-limit notes.
-- `GET /api/help?format=markdown`: Markdown API catalog with body examples, response examples, and rate-limit notes.
+- `GET /api/help`: machine-readable API catalog for agents and integrations, including current architecture, UI surface responsibilities, response schema examples, and rate-limit notes.
+- `GET /api/help?format=markdown`: Markdown API catalog with current architecture, body examples, response examples, and rate-limit notes.
 - `GET /api/agent-runtimes/health`: runtime status, attached agent counts, last run state, and adapter capabilities.
 - `GET /api/task-runs`: queued/running/completed dispatch and review attempts.
 - `GET /api/cron/status`: in-memory scheduler state plus recent durable cron runs.

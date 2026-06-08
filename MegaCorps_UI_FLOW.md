@@ -692,11 +692,16 @@ Route:
 
 Data sources:
 - `GET /api/help`
-- `GET /api/help.md`
+- `GET /api/help?format=markdown`
 
 Elements:
 - Search input
 - API stat cards
+- Current Architecture panel:
+  - Surface cards for Dashboard, Companies, Departments, Agents, Projects, Workspace, Knowledge, Kanban, Direct Chat, Cron, Logs, Admin, Settings, Help
+  - Source-of-truth notes
+  - Multi-agent operating notes
+  - Remaining production gaps
 - Agent API entrypoint panel
 - Copy/open endpoint affordances
 - Grouped endpoint cards:
