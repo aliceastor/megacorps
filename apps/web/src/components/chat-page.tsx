@@ -45,6 +45,27 @@ type ChatSendResult = {
   systemMessage?: ChatMessage;
 };
 
+function pendingUserMessage(session: ChatSession, body: string): ChatMessage {
+  return {
+    id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    sessionId: session.id,
+    companyId: session.companyId,
+    agentId: session.agentId,
+    authorType: 'user',
+    body,
+    metadata: { pending: true },
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function mergeMessages(current: ChatMessage[], nextMessages: ChatMessage[], replaceId?: string): ChatMessage[] {
+  const nextIds = new Set(nextMessages.map((message) => message.id));
+  return [
+    ...current.filter((message) => message.id !== replaceId && !nextIds.has(message.id)),
+    ...nextMessages,
+  ];
+}
+
 function shortTime(value?: string): string {
   return value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
 }
@@ -67,6 +88,7 @@ export function ChatPage() {
   const [draft, setDraft] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [replyingSessionId, setReplyingSessionId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const messageEndRef = useRef<HTMLDivElement>(null);
 
@@ -117,7 +139,10 @@ export function ChatPage() {
       return;
     }
     const rows = await api<ChatMessage[]>(`/api/chat/sessions/${nextSessionId}/messages`);
-    setMessages(rows);
+    setMessages((current) => {
+      const pending = current.filter((message) => message.sessionId === nextSessionId && message.metadata?.pending);
+      return mergeMessages(rows, pending);
+    });
   }
 
   useEffect(() => { void refreshBase(); }, []);
@@ -131,7 +156,7 @@ export function ChatPage() {
   }, [companyId, companyAgents, agentId]);
   useEffect(() => { void loadSessions(); }, [agentId, companyId]);
   useEffect(() => { void loadMessages(); }, [sessionId]);
-  useEffect(() => { messageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages.length]);
+  useEffect(() => { messageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages.length, replyingSessionId]);
 
   async function createSession(select = true): Promise<ChatSession | null> {
     if (!companyId || !agentId || !selectedAgent) return null;
@@ -154,26 +179,32 @@ export function ChatPage() {
     setSending(true);
     setError('');
     setDraft('');
+    let optimisticId: string | undefined;
     try {
       const target = selectedSession ?? await createSession(false);
       if (!target) throw new Error('No chat session available');
       setSessionId(target.id);
+      const optimistic = pendingUserMessage(target, body);
+      optimisticId = optimistic.id;
+      setMessages((current) => mergeMessages(current, [optimistic]));
+      setReplyingSessionId(target.id);
       const result = await api<ChatSendResult>(`/api/chat/sessions/${target.id}/messages`, {
         method: 'POST',
         body: JSON.stringify({ body }),
       });
       const nextMessages = [result.userMessage, result.agentMessage, result.systemMessage].filter(Boolean) as ChatMessage[];
-      setMessages((current) => [...current, ...nextMessages]);
+      setMessages((current) => mergeMessages(current, nextMessages, optimisticId));
       if (result.session) setSessions((current) => current.map((session) => session.id === result.session?.id ? result.session : session));
       await loadSessions(agentId, companyId);
     } catch (err) {
       const apiError = err instanceof ApiError ? err : null;
       const data = apiError?.data as Partial<ChatSendResult> | undefined;
       const nextMessages = [data?.userMessage, data?.agentMessage, data?.systemMessage].filter(Boolean) as ChatMessage[];
-      if (nextMessages.length) setMessages((current) => [...current, ...nextMessages]);
+      if (nextMessages.length) setMessages((current) => mergeMessages(current, nextMessages, optimisticId));
       setError(err instanceof Error ? err.message : 'Message failed');
     } finally {
       setSending(false);
+      setReplyingSessionId(null);
     }
   }
 
@@ -238,9 +269,15 @@ export function ChatPage() {
         <div className="chat-messages">
           {messages.map((message) => <article className={`chat-bubble ${message.authorType}`} key={message.id}>
             <div>{message.body}</div>
-            <span>{message.authorType} / {shortTime(message.createdAt)}{message.costUsd ? ` / $${message.costUsd}` : ''}</span>
+            <span>{message.authorType} / {message.metadata?.pending ? 'sending' : shortTime(message.createdAt)}{message.costUsd ? ` / $${message.costUsd}` : ''}</span>
           </article>)}
-          {!messages.length && <div className="chat-empty-state">
+          {replyingSessionId === sessionId && <article className="chat-bubble agent typing-bubble" aria-live="polite">
+            <div className="typing-dots" aria-label={`${selectedAgent?.name ?? 'Agent'} is replying`}>
+              <i /><i /><i />
+            </div>
+            <span>{selectedAgent?.name ?? 'Agent'} is replying</span>
+          </article>}
+          {!messages.length && replyingSessionId !== sessionId && <div className="chat-empty-state">
             <MessageSquare size={24} />
             <b>{selectedAgent ? selectedAgent.name : 'Direct chat'}</b>
             <span>{selectedSession ? selectedSession.title : 'New session'}</span>

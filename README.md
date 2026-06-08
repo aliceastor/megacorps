@@ -54,7 +54,7 @@ Adapter egress blocks localhost/link-local metadata targets by default. Set `ADA
 Production onboarding:
 
 1. Open `/signup` and create the first account. If no active admin exists, that signup becomes global admin and default-company admin.
-2. If signup is disabled or a deployment has no active admin, set `BOOTSTRAP_TOKEN` temporarily and call `POST /api/auth/bootstrap` with the token, email, name, and password. Bootstrap only works while no active admin exists.
+2. If signup is disabled or a deployment has no active admin, set `BOOTSTRAP_TOKEN` temporarily and call `POST /api/auth/bootstrap` with the token, email, name, and password. Bootstrap only works while no active admin exists. `/api/auth/signup` also accepts `bootstrapToken`, `token`, or `X-MegaCorps-Bootstrap-Token` for the same no-active-admin recovery case.
 3. Open `Admin` to manage all accounts, roles, account status, password resets, and the DB-backed signup switch.
 4. Later users can self-signup while signup is enabled, or accept `/signup?invite=...` invite links from an admin.
 5. Existing users receiving invites get the new membership but must log in with their existing password.
@@ -134,7 +134,8 @@ The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds 
 - auto-assign unassigned tasks to an active idle agent, preferring department and tag/capability matches,
 - enqueue dispatch task-run attempts,
 - enqueue review task-run attempts when a reviewer is configured,
-- let the task-run worker claim queued work, move assigned work into `in_progress`, run the configured adapter, and move completed work to `in_review` or `done`,
+- let the task-run worker claim queued work up to `TASK_RUN_WORKER_BATCH_SIZE`, move assigned work into `in_progress`, run the configured adapter, and move completed work to `in_review` or `done`,
+- hold review task-runs while their card is still `in_progress`, so long-running dispatches do not block unrelated queued work but reviewers do not judge unfinished output,
 - cascade parent tasks when all sub-tasks are complete.
 
 Cron/debug endpoints:
@@ -156,7 +157,7 @@ Open `Direct Chat` in the sidebar:
 3. Select an existing session or create a new session.
 4. Send a message.
 
-Every chat session stores its own `agentSessionId`, so a user can keep several separate conversations with the same agent. Chat messages are stored in `chat_messages`, sessions in `chat_sessions`, and every agent reply is also recorded through `heartbeat_runs`, `activity_log`, and `cost_events`.
+Every chat session stores its own `agentSessionId`, so a user can keep several separate conversations with the same agent. Chat messages are stored in `chat_messages`, sessions in `chat_sessions`, and every agent reply is also recorded through `heartbeat_runs`, `activity_log`, and `cost_events`. The UI shows the user's outgoing message optimistically and displays an agent typing indicator while the adapter run is still pending.
 
 ## Task message board and intervention
 
@@ -212,7 +213,7 @@ MegaCorps stores two complementary log streams:
 Phase 8/9 safety behavior:
 
 - A task must acquire an execution lock before an adapter run starts.
-- Expired locks are recovered by the dispatch loop and returned to `todo`.
+- Expired locks are recovered by the dispatch loop, increment `retry_count`, schedule the next run with backoff, and move the card to `blocked` after `max_retries`.
 - Adapter `success:false` now goes through retry/block handling instead of silently marking work done.
 - Budget policies can hard-stop an agent when monthly or per-task limits are reached.
 - Tasks requiring approval create pending approval records and can be approved/rejected from the Budget page.
@@ -221,10 +222,10 @@ Phase 8/9 safety behavior:
 - Work completed by a subordinate moves to `in_review` for the reporting manager by default, creating a bottom-up review path back toward the top-level member.
 - In-app IP rate limiting is enabled by default. Tune `RATE_LIMIT_*` env vars or set `RATE_LIMIT_ENABLED=false` for local stress tests.
 - Mutation/manual execution routes require operator/admin roles. Viewer role can read authenticated UI data.
-- Task completion webhooks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret` with at least 16 characters and must send either `X-MegaCorps-Webhook-Secret` or `Authorization: Bearer`.
+- Task completion webhooks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret` with at least 16 characters and must send either `X-MegaCorps-Webhook-Secret` or `Authorization: Bearer`. A webhook `status=done` updates the card stage, clears active execution locks, and is protected from being overwritten by a late dispatch/review return.
 - Monthly agent spend resets on `BUDGET_RESET_DAY` UTC, default day 1, and the reset is marked in `cron_runs`.
 - Company membership rows scope visible companies and company-owned entities. Company operators/admins can mutate company data; company admins can manage memberships.
-- Manual Run/Review and cron dispatch now enqueue `task_runs`; the in-process worker claims the queue and records linked `heartbeat_runs`.
+- Manual Run/Review and cron dispatch enqueue `task_runs`; the in-process worker claims queue capacity without waiting for every active adapter call to finish and records linked `heartbeat_runs`.
 
 No pnpm. No Redis.
 

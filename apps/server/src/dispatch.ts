@@ -27,7 +27,8 @@ const TASK_RUN_WORKER_BATCH_SIZE = Number(process.env.TASK_RUN_WORKER_BATCH_SIZE
 const TASK_RUN_WORKER_ID = process.env.TASK_RUN_WORKER_ID ?? `server-${Math.random().toString(36).slice(2, 10)}`;
 const TASK_RUN_STALE_MS = Number(process.env.TASK_RUN_STALE_MS ?? 10 * 60 * 1000);
 let loopRunning = false;
-let taskRunWorkerRunning = false;
+let taskRunWorkerClaiming = false;
+const activeTaskRunIds = new Set<string>();
 const companyLastTick = new Map<string, number>();
 const cronState = {
   enabled: process.env.DISPATCH_LOOP_ENABLED !== 'false',
@@ -42,6 +43,14 @@ const cronState = {
 function nextBackoff(retryCount: number): Date {
   const seconds = Math.min(300, 10 * 2 ** Math.max(0, retryCount));
   return new Date(Date.now() + seconds * 1000);
+}
+
+function isTerminalCardStatus(status: string | null | undefined): boolean {
+  return status === 'done' || status === 'blocked';
+}
+
+function reviewCanRun(status: string | null | undefined): boolean {
+  return status !== 'in_progress';
 }
 
 async function addTaskLog(input: {
@@ -178,17 +187,23 @@ export async function enqueueTaskRun(cardId: string, kind: TaskRunKind = 'dispat
 }
 
 async function claimNextTaskRun(): Promise<TaskRunRow | null> {
-  const [queued] = await db.select().from(taskRuns).where(eq(taskRuns.status, 'queued')).orderBy(desc(taskRuns.priority), taskRuns.createdAt).limit(1);
-  if (!queued) return null;
+  const candidates = await db.select().from(taskRuns).where(eq(taskRuns.status, 'queued')).orderBy(desc(taskRuns.priority), taskRuns.createdAt).limit(25);
   const now = new Date();
-  const [claimed] = await db.update(taskRuns).set({
-    status: 'running',
-    lockedBy: TASK_RUN_WORKER_ID,
-    lockedAt: now,
-    startedAt: now,
-    updatedAt: now,
-  }).where(and(eq(taskRuns.id, queued.id), eq(taskRuns.status, 'queued'))).returning();
-  return claimed ?? null;
+  for (const queued of candidates) {
+    if (queued.kind === 'review') {
+      const [card] = await db.select({ columnStatus: kanbanCards.columnStatus }).from(kanbanCards).where(and(eq(kanbanCards.id, queued.cardId), isNull(kanbanCards.deletedAt))).limit(1);
+      if (!reviewCanRun(card?.columnStatus)) continue;
+    }
+    const [claimed] = await db.update(taskRuns).set({
+      status: 'running',
+      lockedBy: TASK_RUN_WORKER_ID,
+      lockedAt: now,
+      startedAt: now,
+      updatedAt: now,
+    }).where(and(eq(taskRuns.id, queued.id), eq(taskRuns.status, 'queued'))).returning();
+    if (claimed) return claimed;
+  }
+  return null;
 }
 
 async function recoverStaleTaskRuns(app: FastifyInstance): Promise<number> {
@@ -234,26 +249,28 @@ async function finishWorkerTaskRun(run: TaskRunRow, work: () => Promise<CardRow>
 }
 
 export async function processTaskRunQueue(app: FastifyInstance): Promise<{ claimed: number; completed: number; failed: number }> {
-  if (taskRunWorkerRunning) return { claimed: 0, completed: 0, failed: 0 };
-  taskRunWorkerRunning = true;
+  if (taskRunWorkerClaiming) return { claimed: 0, completed: 0, failed: 0 };
+  taskRunWorkerClaiming = true;
   const result = { claimed: 0, completed: 0, failed: 0 };
   try {
     await recoverStaleTaskRuns(app);
-    for (let index = 0; index < Math.max(1, TASK_RUN_WORKER_BATCH_SIZE); index += 1) {
+    const capacity = Math.max(0, Math.max(1, TASK_RUN_WORKER_BATCH_SIZE) - activeTaskRunIds.size);
+    for (let index = 0; index < capacity; index += 1) {
       const run = await claimNextTaskRun();
       if (!run) break;
       result.claimed += 1;
-      const before = await db.select({ status: taskRuns.status }).from(taskRuns).where(eq(taskRuns.id, run.id)).limit(1);
-      if (run.kind === 'review') await finishWorkerTaskRun(run, () => reviewCard(run.cardId, { taskRunId: run.id }));
-      else await finishWorkerTaskRun(run, () => dispatchCard(run.cardId, run.source === 'manual' ? 'manual' : 'loop', { taskRunId: run.id }));
-      const [after] = await db.select({ status: taskRuns.status }).from(taskRuns).where(eq(taskRuns.id, run.id)).limit(1);
-      if (after?.status === 'failed') result.failed += 1;
-      else if (before.length > 0) result.completed += 1;
+      activeTaskRunIds.add(run.id);
+      const work = run.kind === 'review'
+        ? () => reviewCard(run.cardId, { taskRunId: run.id })
+        : () => dispatchCard(run.cardId, run.source === 'manual' ? 'manual' : 'loop', { taskRunId: run.id });
+      void finishWorkerTaskRun(run, work)
+        .catch((error) => app.log.error({ error, taskRunId: run.id }, 'task run worker failed unexpectedly'))
+        .finally(() => activeTaskRunIds.delete(run.id));
     }
   } catch (error) {
     app.log.error({ error }, 'task run queue processing failed');
   } finally {
-    taskRunWorkerRunning = false;
+    taskRunWorkerClaiming = false;
   }
   return result;
 }
@@ -501,6 +518,25 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
 }
 
 async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unknown, runId?: string | null, taskRunId?: string | null): Promise<CardRow> {
+  const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
+  if (latest && isTerminalCardStatus(latest.columnStatus) && !latest.executionLockId && latest.activeHeartbeatRunId !== runId) {
+    await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
+    await releaseExecutionLock(card.id, runId ?? null, latest.columnStatus === 'blocked' ? 'failed' : 'success');
+    await completeTaskRun(taskRunId, {
+      status: latest.columnStatus === 'blocked' ? 'failed' : 'success',
+      output: `Card was already ${latest.columnStatus} before dispatch returned.`,
+    });
+    await addTaskLog({
+      cardId: card.id,
+      agentId: agent.id,
+      type: 'dispatch',
+      status: latest.columnStatus === 'blocked' ? 'failed' : 'success',
+      message: `Dispatch result ignored because card was already ${latest.columnStatus}.`,
+      output: error instanceof Error ? error.message : 'dispatch_finished_after_external_status',
+    });
+    return latest;
+  }
+
   const retryCount = (card.retryCount ?? 0) + 1;
   const maxRetries = card.maxRetries ?? 3;
   const message = error instanceof Error ? error.message : 'dispatch_failed';
@@ -575,6 +611,26 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await buildExecutionAgent(agent),
       { id: card.id, title: card.title, body: await buildTaskPrompt(card), timeoutSeconds: 300 },
     );
+    const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
+    if (latest && isTerminalCardStatus(latest.columnStatus) && !latest.executionLockId && latest.activeHeartbeatRunId !== run.id) {
+      await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
+      await releaseExecutionLock(card.id, run.id, latest.columnStatus === 'blocked' ? 'failed' : 'success');
+      await completeTaskRun(options.taskRunId, {
+        status: latest.columnStatus === 'blocked' ? 'failed' : 'success',
+        output: `Card was already ${latest.columnStatus} before dispatch returned.`,
+        durationSeconds: result.durationSeconds,
+      });
+      await addTaskLog({
+        cardId: card.id,
+        agentId: agent.id,
+        type: 'dispatch',
+        status: latest.columnStatus === 'blocked' ? 'failed' : 'success',
+        message: `Dispatch output received after card was already ${latest.columnStatus}; keeping the current stage.`,
+        output: result.output,
+        durationSeconds: result.durationSeconds,
+      });
+      return latest;
+    }
     if (!result.success) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       throw new Error(result.output || 'adapter_reported_failure');
@@ -626,9 +682,15 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
 export async function reviewCard(cardId: string, options: { taskRunId?: string | null } = {}): Promise<CardRow> {
   const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
+  if (card.columnStatus === 'done') {
+    await addTaskLog({ cardId: card.id, agentId: card.reviewerId, type: 'review', status: 'success', message: 'Review skipped; card is already done.' });
+    await completeTaskRun(options.taskRunId, { status: 'success', output: 'Card is already done.' });
+    return card;
+  }
+  if (card.columnStatus !== 'in_review') throw new Error(`card_not_ready_for_review:${card.columnStatus ?? 'todo'}`);
   if (!card.reviewerId) {
     const [updated] = await db.update(kanbanCards).set({ columnStatus: 'done', completedAt: new Date(), updatedAt: new Date() }).where(eq(kanbanCards.id, card.id)).returning();
-    if (card.columnStatus !== 'done') await addStageLog(card.id, null, card.columnStatus, 'done', 'review');
+    await addStageLog(card.id, null, card.columnStatus, 'done', 'review');
     await addTaskLog({ cardId: card.id, type: 'review', status: 'success', message: 'No reviewer configured; card approved automatically.' });
     await resolvePendingApproval(card, 'approved', 'No reviewer configured; approved automatically.');
     await completeTaskRun(options.taskRunId, { status: 'success', output: 'No reviewer configured; approved automatically.' });
@@ -651,6 +713,26 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       await buildExecutionAgent(reviewer),
       { id: card.id, title: `Review: ${card.title}`, body: await buildReviewPrompt(card), timeoutSeconds: 180 },
     );
+    const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
+    if (latest && isTerminalCardStatus(latest.columnStatus) && latest.columnStatus !== card.columnStatus && latest.activeHeartbeatRunId !== run.id) {
+      await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
+      await db.update(heartbeatRuns).set({ status: latest.columnStatus === 'blocked' ? 'failed' : 'success', completedAt: new Date(), durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
+      await completeTaskRun(options.taskRunId, {
+        status: latest.columnStatus === 'blocked' ? 'failed' : 'success',
+        output: `Card was already ${latest.columnStatus} before review returned.`,
+        durationSeconds: result.durationSeconds,
+      });
+      await addTaskLog({
+        cardId: card.id,
+        agentId: reviewer.id,
+        type: 'review',
+        status: latest.columnStatus === 'blocked' ? 'failed' : 'success',
+        message: `Review output received after card was already ${latest.columnStatus}; keeping the current stage.`,
+        output: result.output,
+        durationSeconds: result.durationSeconds,
+      });
+      return latest;
+    }
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     if (!result.success) throw new Error(result.output || 'review_adapter_reported_failure');
     const rejected = /\b(reject|rejected|fail|failed|blocked)\b/i.test(result.output);
@@ -734,22 +816,44 @@ async function recoverStaleExecutionLocks(app: FastifyInstance) {
   const stale = await db.select().from(kanbanCards).where(drizzleSql`${kanbanCards.executionLockExpiresAt} IS NOT NULL AND ${kanbanCards.executionLockExpiresAt} < now()`);
   for (const card of stale) {
     const agentId = card.executionLockedByAgentId;
+    const shouldRetry = card.columnStatus === 'in_progress';
+    const retryCount = shouldRetry ? (card.retryCount ?? 0) + 1 : card.retryCount ?? 0;
+    const maxRetries = card.maxRetries ?? 3;
+    const blocked = shouldRetry && retryCount >= maxRetries;
+    const nextStatus = shouldRetry ? (blocked ? 'blocked' : 'todo') : card.columnStatus ?? 'todo';
+    const message = blocked
+      ? `Execution lock expired; retry limit ${retryCount}/${maxRetries} reached and card was blocked.`
+      : shouldRetry
+        ? `Execution lock expired; retry ${retryCount}/${maxRetries} scheduled.`
+        : 'Stale execution lock recovered.';
     await db.update(kanbanCards).set({
-      columnStatus: card.columnStatus === 'in_progress' ? 'todo' : card.columnStatus,
+      columnStatus: nextStatus,
+      retryCount,
+      nextRunAt: shouldRetry && !blocked ? nextBackoff(retryCount) : card.nextRunAt,
       executionLockId: null,
       executionLockedByAgentId: null,
       executionLockedAt: null,
       executionLockExpiresAt: null,
       activeHeartbeatRunId: null,
-      lastError: 'Recovered stale execution lock.',
+      lastError: message,
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, card.id));
     if (agentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agentId));
     if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'failed', error: 'stale_execution_lock_recovered', completedAt: new Date() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
     if (card.activeHeartbeatRunId) await db.update(taskRuns).set({ status: 'failed', error: 'stale_execution_lock_recovered', completedAt: new Date(), updatedAt: new Date() }).where(eq(taskRuns.heartbeatRunId, card.activeHeartbeatRunId));
-    await addTaskLog({ cardId: card.id, agentId, type: 'recovery', status: 'failed', message: 'Stale execution lock recovered; task returned to todo.' });
-    await addStageLog(card.id, agentId ?? null, card.columnStatus, card.columnStatus === 'in_progress' ? 'todo' : card.columnStatus ?? 'todo', 'stale-lock-recovery');
-    await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'recovery', agentId, action: 'execution.stale_lock_recovered', entityType: 'card', entityId: card.id, details: { runId: card.activeHeartbeatRunId } });
+    await addTaskLog({ cardId: card.id, agentId, type: shouldRetry ? 'retry' : 'recovery', status: 'failed', message });
+    if (nextStatus !== (card.columnStatus ?? 'todo')) await addStageLog(card.id, agentId ?? null, card.columnStatus, nextStatus, 'stale-lock-recovery');
+    if (shouldRetry) await addCardMessage({ cardId: card.id, agentId, action: blocked ? 'agent_blocked' : 'agent_error', body: message });
+    await addActivity({
+      companyId: card.companyId,
+      actorType: 'system',
+      actorId: 'recovery',
+      agentId,
+      action: shouldRetry ? (blocked ? 'dispatch.blocked' : 'dispatch.retry_scheduled') : 'execution.stale_lock_recovered',
+      entityType: 'card',
+      entityId: card.id,
+      details: { runId: card.activeHeartbeatRunId, retryCount, maxRetries },
+    });
     app.log.warn({ cardId: card.id, agentId }, 'stale execution lock recovered');
   }
 }

@@ -32,6 +32,10 @@ const SIGNUP_ENABLED_SETTING = 'auth.signup_enabled';
 const bootstrapSchema = signupSchema.extend({
   token: z.string().optional(),
 });
+const signupRequestSchema = signupSchema.extend({
+  bootstrapToken: z.string().optional(),
+  token: z.string().optional(),
+});
 
 function truthy(value: string | undefined): boolean {
   return value === '1' || value === 'true' || value === 'yes' || value === 'on';
@@ -266,14 +270,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/auth/signup', async (request, reply) => {
     await assertSessionSecretReady();
-    if (!await signupEnabled()) return reply.code(403).send({ error: 'signup_disabled' });
-    const input = signupSchema.parse(request.body);
+    const input = signupRequestSchema.parse(request.body);
+    const expectedToken = bootstrapToken();
+    const headerToken = request.headers['x-megacorps-bootstrap-token'];
+    const providedToken = input.bootstrapToken ?? input.token ?? (Array.isArray(headerToken) ? headerToken[0] : headerToken);
+    const bootstrapAllowed = Boolean(expectedToken && expectedToken.length >= 16 && safeSecretEqual(providedToken, expectedToken));
+    const signupIsEnabled = await signupEnabled();
+    if (!signupIsEnabled && !bootstrapAllowed) return reply.code(403).send({ error: 'signup_disabled' });
     const passwordHash = await bcrypt.hash(input.password, 12);
     const result = await db.transaction(async (tx) => {
       await tx.execute(drizzleSql`SELECT pg_advisory_xact_lock(7042024060601)`);
       const [countRow] = await tx.select({ count: drizzleSql<number>`count(*)::int` }).from(users);
       const firstAccount = Number(countRow?.count ?? 0) === 0;
       const [adminRow] = await tx.select({ id: users.id }).from(users).where(and(eq(users.role, 'admin'), eq(users.status, 'active'))).limit(1);
+      if (!signupIsEnabled && bootstrapAllowed && adminRow) return { blocked: true as const, firstAccount, nextSignupAdmin: false as const };
       const nextSignupAdmin = !adminRow;
       const role = nextSignupAdmin ? 'admin' : 'viewer';
       const companyRole = nextSignupAdmin ? 'admin' : 'viewer';
@@ -283,13 +293,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (!created) throw new Error('signup_failed');
       const [membership] = await tx.insert(companyMemberships).values({ companyId: company.id, userId: created.id, role: companyRole, status: 'active' }).onConflictDoNothing().returning();
       await tx.insert(activityLog).values({ companyId: company.id, actorType: 'user', actorId: created.id, userId: created.id, action: nextSignupAdmin ? 'auth.first_admin_signup' : 'auth.signup', entityType: 'user', entityId: created.id, details: { email: created.email, role, companyRole, firstAccount } });
-      return { user: created, membership, firstAccount, nextSignupAdmin };
+      return { blocked: false as const, user: created, membership, firstAccount, nextSignupAdmin };
     });
+    if (result.blocked) return reply.code(409).send({ error: 'bootstrap_already_has_admin', firstAccount: result.firstAccount, nextSignupWillBeAdmin: result.nextSignupAdmin });
     const user = result.user;
     if (!user) return reply.code(500).send({ error: 'signup_failed' });
     const token = await signSession({ id: user.id, email: user.email, role: user.role ?? (result.nextSignupAdmin ? 'admin' : 'viewer') });
     setSessionCookie(reply, token);
-    return { user: { id: user.id, email: user.email, name: user.name, role: user.role }, firstAccount: result.firstAccount, membership: result.membership };
+    return { user: { id: user.id, email: user.email, name: user.name, role: user.role }, firstAccount: result.firstAccount, nextSignupWillBeAdmin: result.nextSignupAdmin, membership: result.membership };
   });
 
   app.post('/api/auth/login', async (request, reply) => {
