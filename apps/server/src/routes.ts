@@ -197,7 +197,7 @@ async function ensureVisibleCard(request: Parameters<typeof requireVisibleCompan
   return user ? card : null;
 }
 
-async function ensureCompanyReferences(companyId: string, input: {
+type CompanyReferenceInput = {
   departmentId?: string | null;
   projectId?: string | null;
   goalId?: string | null;
@@ -208,7 +208,9 @@ async function ensureCompanyReferences(companyId: string, input: {
   dependencyCardIds?: string[];
   runtimeId?: string | null;
   adapterType?: string | null;
-}) {
+};
+
+async function ensureCompanyReferences(companyId: string, input: CompanyReferenceInput) {
   if (input.departmentId) {
     const [row] = await db.select({ id: departments.id }).from(departments).where(and(eq(departments.id, input.departmentId), eq(departments.companyId, companyId))).limit(1);
     if (!row) throw new Error('department_company_mismatch');
@@ -1271,9 +1273,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [existing] = await db.select().from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
     if (!existing) return reply.code(404).send({ error: 'agent_not_found' });
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
-    const nextAdapterType = input.adapterType ?? existing.adapterType;
-    const nextRuntimeId = input.runtimeId === undefined ? existing.runtimeId : input.runtimeId;
-    try { await ensureCompanyReferences(existing.companyId, { departmentId: input.departmentId, bossId: input.bossId, runtimeId: nextRuntimeId, adapterType: nextAdapterType }); }
+    const referenceInput: CompanyReferenceInput = { departmentId: input.departmentId, bossId: input.bossId };
+    if (input.adapterType !== undefined || input.runtimeId !== undefined) {
+      referenceInput.adapterType = input.adapterType ?? existing.adapterType;
+      referenceInput.runtimeId = input.runtimeId === undefined ? existing.runtimeId : input.runtimeId;
+    }
+    try { await ensureCompanyReferences(existing.companyId, referenceInput); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
     const nextAdapterConfig = input.adapterConfig === undefined ? undefined : preserveRedactedSecrets(input.adapterConfig, existing.adapterConfig);
     const [agent] = await db.update(agents).set({

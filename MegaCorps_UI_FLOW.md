@@ -241,7 +241,6 @@ Selected-agent panel elements:
 - Soul textarea
 - Adapter override fields, adapter-type aware
 - Direct reports, assigned work, review queue
-- Project Authority workbench for top-level agents, allowing project create/edit, repo URL, project work path, branch policy, runtime commands, runtime services JSON, and project goals
 - Save, Test, Pause/Resume, Reset Session, Fire
 
 ## Direct Chat
@@ -793,8 +792,8 @@ The following backend-supported fields or actions were missing or incomplete in 
 - `task_runs.adapter_session_id`, `adapter_turn_id`: added to Logs task run cards.
 - `POST /api/agents` help body: updated with `capabilities`.
 - Browser API transport: added same-origin `/api/proxy` first, with direct browser-host and baked URL as fallbacks.
-- Departments: added direct agent department assignment, no-department assignment, and reports-to editing from the page and org canvas.
-- Projects: replaced the three-card layout with a unified Project Authority workbench and reused it for top-level agents.
+- Departments: added direct agent department assignment, no-department assignment, reports-to editing, and clickable org-canvas agent editing.
+- Projects: replaced the three-card layout with a unified Project Authority workbench and kept repo/path/project goals on the Projects page.
 - Cron: replaced scaffold-only rows with runnable `dispatch-heartbeat`, `daily-report`, and `health-check` jobs, each with company/runner metadata.
 - Kanban company filter: changed from multi-select list to a normal dropdown while preserving sort by company.
 - I18N: rebuilt corrupted zh-TW/en/ja locale dictionaries and wired sidebar/topbar labels to locale keys.

@@ -9,7 +9,7 @@ Date: 2026-06-09
 Completed in this pass:
 
 - Added a same-origin Next.js API proxy at `/api/proxy/...` and made the web API client prefer it before direct browser-host or baked API URLs. Docker Compose now sets `SERVER_API_URL=http://server:4000` for the web container.
-- Reworked Projects into a reusable Project Authority workbench. The Projects page and top-level Agent detail panel now share the same create/edit flow for repo URL, project work path, branch policy, setup/test commands, runtime services, workspace hint, and project goals.
+- Reworked Projects into the dedicated Project Authority workbench. The Projects page owns the create/edit flow for repo URL, project work path, branch policy, setup/test commands, runtime services, workspace hint, and project goals.
 - Removed the Agents-page `New company` placeholder from the Company selector. Agents can only select existing companies; company creation remains on Companies.
 - Rebuilt Departments into an operational org-management surface: direct agent department assignment, `No department`, reports-to editing, an interactive org canvas, selected department/no-department cards, and department goals.
 - Extended cron manual runs with job/company/runner scope. `dispatch-heartbeat` can run against a selected company, while `daily-report` and `health-check` now record completed manual cron runs instead of disabled scaffold rows.

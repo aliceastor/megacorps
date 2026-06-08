@@ -80,7 +80,7 @@ Projects carry the shared repo/workspace policy. This is designed for multi-syst
 - `workPath`: the repo/workspace-relative area the agent should edit, for example `apps/server`, `reports/final`, or `docs/contracts`. Null means project root.
 - `workspacePathHint`: optional runtime-local hint only. It is never the shared source of truth.
 
-Operators can maintain these project authority fields from the Projects page or from a top-level agent's Project Authority panel. Both surfaces write the same project records, so prompt injection receives the same stored repo/work-path policy regardless of where the setting was edited.
+Operators maintain these project authority fields from the Projects page. Prompt injection receives the stored repo/work-path policy from the project record rather than any runtime-local folder hint.
 
 Runtime presets add machine-local roots:
 

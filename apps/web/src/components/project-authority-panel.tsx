@@ -266,7 +266,7 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
 
         <section className="project-section">
           <h3>Identity</h3>
-          <div className="form-grid">
+          <div className="project-form-grid">
             <label className="field-label">Project name<input className="input" value={projectName} onChange={(event) => setProjectName(event.target.value)} /></label>
             <label className="field-label">Runtime-local path hint<input className="input" value={workspacePathHint} onChange={(event) => setWorkspacePathHint(event.target.value)} placeholder="Optional runtime-local clone/folder hint only" /></label>
           </div>
@@ -275,7 +275,7 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
 
         <section className="project-section">
           <h3><GitBranch size={16} /> Repository Authority</h3>
-          <div className="form-grid">
+          <div className="project-form-grid">
             <label className="field-label">Repo provider<select className="input" value={repoProvider} onChange={(event) => setRepoProvider(event.target.value as typeof repoProvider)}>
               <option value="github">GitHub</option>
               <option value="gitlab">GitLab</option>
@@ -283,12 +283,12 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
               <option value="generic">Generic Git</option>
             </select></label>
             <label className="field-label">Default branch<input className="input" value={defaultBranch} onChange={(event) => setDefaultBranch(event.target.value)} /></label>
-            <label className="field-label">Repository URL<input className="input" value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="https://github.com/org/repo" /></label>
-            <label className="field-label">Project work path<input className="input" value={workPath} onChange={(event) => setWorkPath(event.target.value)} placeholder="Repo/workspace-relative path, e.g. apps/server or reports/final" /></label>
+            <label className="field-label field-wide">Repository URL<input className="input" value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="https://github.com/org/repo" /></label>
+            <label className="field-label field-wide">Project work path<input className="input" value={workPath} onChange={(event) => setWorkPath(event.target.value)} placeholder="Repo/workspace-relative path, e.g. apps/server or reports/final" /></label>
             <label className="field-label">Protected branches<input className="input" value={protectedBranches} onChange={(event) => setProtectedBranches(event.target.value)} placeholder="main, master, production" /></label>
-            <label className="field-label">Work branch pattern<input className="input" value={workBranchPattern} onChange={(event) => setWorkBranchPattern(event.target.value)} /></label>
+            <label className="field-label field-wide">Work branch pattern<input className="input" value={workBranchPattern} onChange={(event) => setWorkBranchPattern(event.target.value)} /></label>
           </div>
-          <div className="form-grid">
+          <div className="project-toggle-grid">
             <label className="check-row"><input type="checkbox" checked={pullBeforeRun} onChange={(event) => setPullBeforeRun(event.target.checked)} /> Pull before every run</label>
             <label className="check-row"><input type="checkbox" checked={pushAfterRun} onChange={(event) => setPushAfterRun(event.target.checked)} /> Push after completion</label>
           </div>
@@ -302,7 +302,7 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
 
         <section className="project-section">
           <h3>Runtime Commands</h3>
-          <div className="form-grid">
+          <div className="project-form-grid">
             <label className="field-label">Setup command<textarea className="input" rows={2} value={setupCommand} onChange={(event) => setSetupCommand(event.target.value)} /></label>
             <label className="field-label">Test command<textarea className="input" rows={2} value={testCommand} onChange={(event) => setTestCommand(event.target.value)} /></label>
           </div>
@@ -311,7 +311,7 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
 
         <section className="project-section">
           <h3><Target size={16} /> Project Goals</h3>
-          <div className="form-grid">
+          <div className="project-form-grid">
             <label className="field-label">Goal title<input className="input" value={goalTitle} onChange={(event) => setGoalTitle(event.target.value)} disabled={!selectedProject} /></label>
             <label className="field-label">Goal body<textarea className="input" rows={3} value={goalBody} onChange={(event) => setGoalBody(event.target.value)} disabled={!selectedProject} /></label>
           </div>

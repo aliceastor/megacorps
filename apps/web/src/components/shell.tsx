@@ -27,6 +27,13 @@ const utilityNav = [
 
 const adminNav = { href: '/admin', labelKey: 'nav.admin', fallback: 'Admin', icon: ShieldCheck };
 type NavItem = (typeof nav)[number] | (typeof utilityNav)[number] | typeof adminNav;
+const USER_EMAIL_STORAGE_KEY = 'megacorps.userEmail';
+const USER_ROLE_STORAGE_KEY = 'megacorps.userRole';
+
+function readBrowserStorage(key: string): string {
+  if (typeof window === 'undefined') return '';
+  return window.localStorage.getItem(key) ?? '';
+}
 
 function Dropdown({ open, onClose, children, style }: { open: boolean; onClose: () => void; children: React.ReactNode; style?: React.CSSProperties }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -68,8 +75,8 @@ export function AppShell({ title, children }: { title: string; children: React.R
   const [userOpen, setUserOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const [isDark, setIsDark] = useState(true);
-  const [userEmail, setUserEmail] = useState('');
-  const [userRole, setUserRole] = useState('');
+  const [userEmail, setUserEmail] = useState(() => readBrowserStorage(USER_EMAIL_STORAGE_KEY));
+  const [userRole, setUserRole] = useState(() => readBrowserStorage(USER_ROLE_STORAGE_KEY));
   const pathname = usePathname();
   const { locale, setLocale, t } = useLocale();
   const translatedTitle = t(titleKey(title));
@@ -78,7 +85,13 @@ export function AppShell({ title, children }: { title: string; children: React.R
   useEffect(() => { setIsDark(document.documentElement.dataset.theme === 'dark'); }, []);
   useEffect(() => {
     api<{ user: { email: string; role?: string } }>('/api/me')
-      .then((result) => { setUserEmail(result.user.email); setUserRole(result.user.role ?? ''); })
+      .then((result) => {
+        const nextRole = result.user.role ?? '';
+        setUserEmail(result.user.email);
+        setUserRole(nextRole);
+        window.localStorage.setItem(USER_EMAIL_STORAGE_KEY, result.user.email);
+        window.localStorage.setItem(USER_ROLE_STORAGE_KEY, nextRole);
+      })
       .catch(() => undefined);
   }, []);
 
@@ -91,6 +104,8 @@ export function AppShell({ title, children }: { title: string; children: React.R
 
   async function handleLogout() {
     try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
+    localStorage.removeItem(USER_EMAIL_STORAGE_KEY);
+    localStorage.removeItem(USER_ROLE_STORAGE_KEY);
     window.location.href = '/login';
   }
 

@@ -94,8 +94,8 @@ Hermes suite operational notes:
 
 - `Dashboard`: operating overview, stage counts, recent task logs, recent API lifecycle events.
 - `Companies`: pure company CRUD plus company goals.
-- `Departments`: department management, direct agent membership assignment, reporting-line editing, interactive org canvas, and department goals.
-- `Agents`: member hierarchy, guided agent creation, pause/resume/fire/reset, runtime and adapter configuration, plus top-level agent project authority controls.
+- `Departments`: department management, direct agent membership assignment, reporting-line editing, clickable org canvas agent editing, and department goals.
+- `Agents`: member hierarchy, guided agent creation, pause/resume/fire/reset, runtime and adapter configuration.
 - `Projects`: unified project authority workbench for project CRUD, repo settings, branch policy, runtime services, work path, and project goals.
 - `Workspace`: company folder manager and authoritative workspace paths for non-coding project files.
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.

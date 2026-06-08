@@ -25,7 +25,7 @@ Latest verified baseline:
 - Hermes SSH adapter is implemented for direct `ssh -> hermes -z "{prompt}" --profile {profile}` dispatch against the configured Hermes host, with `/proc/1/environ` imported before Hermes so container-level provider keys are visible in SSH sessions. No production SSH host is hardcoded.
 - Codex app-server adapter is implemented for stdio `codex app-server` and authenticated WebSocket endpoints. MegaCorps injects agent `soul`, starts/resumes Codex threads, runs one turn per chat/card attempt, streams agent message deltas, and stores adapter thread/turn ids in `adapter_sessions` / `task_runs`.
 - Browser API calls now prefer the same-origin Next.js proxy at `/api/proxy/...`, which forwards from the web container to `SERVER_API_URL`. Direct browser-host `:4000` and baked `NEXT_PUBLIC_API_URL` are retained as fallbacks only, avoiding NAS deployments accidentally calling unreachable `localhost` or stale IPs.
-- The latest UI repair pass added top-level Agent project authority controls, Departments direct agent assignment and reporting-line editing, Cron job/company/runner scoped manual runs, repaired zh-TW/en/ja locale dictionaries, and stable workbench/card layout overrides.
+- The latest UI repair pass keeps Project Authority on the Projects page, adds clickable Departments canvas agent editing, fixes department/reporting-line updates so runtime adapter checks do not block org-only edits, keeps Admin visible during shell transitions, and adds stable workbench/card layout overrides.
 - In-app rate limiting is enabled by default, and API Help now includes required roles for endpoints.
 - Company-owned read APIs now scope results to the current user's company memberships.
 - Company-owned mutation/manual execution APIs now require company operator/admin membership checks.
@@ -293,10 +293,10 @@ Implemented:
 - Department creation.
 - Agent can belong to a department.
 - Agent can report to another agent through `bossId`.
-- Departments directly manages agent department membership, `No department` assignment, reports-to relationships, an interactive org canvas, and department goals. Agents renders org lanes/tree nodes for reporting lines and owns agent configuration. Companies is focused on company CRUD and company goals.
+- Departments directly manages agent department membership, `No department` assignment, reports-to relationships, clickable org-canvas agent editing, and department goals. Agents renders org lanes/tree nodes for reporting lines and owns agent configuration. Companies is focused on company CRUD and company goals.
 - Member identity labels are free text; hierarchy is controlled by `bossId` and direct reports.
 - Clicking a member opens editing for identity label, department, reports-to relation, runtime, adapter, and budget.
-- Top-level agents also get a Project Authority workbench in their detail panel so they can create projects and maintain repo URL, project work path, branch policy, runtime commands, runtime services, workspace hint, and project goals for their company.
+- Projects is the only Project Authority surface for creating projects and maintaining repo URL, project work path, branch policy, runtime commands, runtime services, workspace hint, and project goals for a company.
 - Agent runtime presets are managed in `Settings -> Agent runtimes`.
 - Each agent can select a runtime preset in `Agents`.
 - Each agent can override adapter-specific fields without changing the shared runtime preset.
