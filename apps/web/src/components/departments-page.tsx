@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
-import { Network, Plus, Target } from 'lucide-react';
+import { Network, Plus, Target, UserCheck, Users } from 'lucide-react';
 import { api } from '@/lib/api';
 
 type Company = { id: string; name: string; slug: string };
@@ -25,11 +25,14 @@ export function DepartmentsPage() {
   const [goalBody, setGoalBody] = useState('');
   const [toast, setToast] = useState('');
   const [error, setError] = useState('');
+  const [busyAgentId, setBusyAgentId] = useState('');
   const [busy, setBusy] = useState(false);
 
   const companyDepartments = useMemo(() => departments.filter((department) => department.companyId === companyId), [departments, companyId]);
   const companyAgents = useMemo(() => agents.filter((agent) => agent.companyId === companyId), [agents, companyId]);
-  const selectedDepartment = companyDepartments.find((department) => department.id === departmentId) ?? companyDepartments[0] ?? null;
+  const selectedDepartment = departmentId === '__unassigned' ? null : companyDepartments.find((department) => department.id === departmentId) ?? companyDepartments[0] ?? null;
+  const selectedDepartmentAgents = selectedDepartment ? companyAgents.filter((agent) => agent.departmentId === selectedDepartment.id) : [];
+  const unassignedAgents = companyAgents.filter((agent) => !agent.departmentId);
   const departmentGoals = useMemo(() => goals.filter((goal) => goal.departmentId === selectedDepartment?.id), [goals, selectedDepartment?.id]);
 
   async function refresh(nextCompanyId = companyId, nextDepartmentId = departmentId) {
@@ -91,42 +94,120 @@ export function DepartmentsPage() {
     }
   }
 
+  async function updateAgentOrg(agent: Agent, patch: Pick<Agent, 'departmentId' | 'bossId'>) {
+    setBusyAgentId(agent.id);
+    setError('');
+    try {
+      const updated = await api<Agent>(`/api/agents/${agent.id}`, { method: 'PUT', body: JSON.stringify(patch) });
+      setAgents((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setToast(`${updated.name} updated`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Agent update failed');
+    } finally {
+      setBusyAgentId('');
+    }
+  }
+
   const addDepartmentDisabled = !companyId || busy || !deptName.trim() || !deptSlug.trim();
 
-  return <div className="page-stack">
+  return <div className="page-stack departments-page">
     <div className="page-head">
-      <div><h1>Departments</h1><p>Manage department lanes, browse org structure, and set department goals.</p></div>
+      <div><h1>Departments</h1><p>Manage department membership, reporting lines, org chart, and department goals.</p></div>
     </div>
     {toast && <p className="status-pill">{toast}</p>}
     {error && <p className="form-error">{error}</p>}
 
-    <section className="card section-card">
+    <section className="card section-card department-command">
       <div className="panel-title"><div><h2>Department Management</h2><span className="status-pill">{companyDepartments.length} departments</span></div><Network size={18} /></div>
-      <label className="field-label">Company<select className="input compact" value={companyId} onChange={(event) => { setCompanyId(event.target.value); setDepartmentId(''); void refresh(event.target.value, ''); }}>
-        {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
-      </select></label>
       <div className="form-grid">
+        <label className="field-label">Company<select className="input compact" value={companyId} onChange={(event) => { setCompanyId(event.target.value); setDepartmentId(''); void refresh(event.target.value, ''); }}>
+          {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+        </select></label>
         <label className="field-label">New department<input className="input" value={deptName} onChange={(event) => setDeptName(event.target.value)} disabled={!companyId} /></label>
         <label className="field-label">Slug<input className="input" value={deptSlug} onChange={(event) => setDeptSlug(slugify(event.target.value))} disabled={!companyId} /></label>
       </div>
       <button className="btn" title={companyId ? 'Add department' : 'Create a company first before adding departments'} disabled={addDepartmentDisabled} onClick={addDepartment}><Plus size={14} /> Add Department</button>
     </section>
 
-    <div className="split-layout">
-      <aside className="card section-card">
+    <div className="department-workbench">
+      <aside className="card section-card department-rail">
         <div className="panel-title"><h2>Departments</h2><span className="status-pill">{companyDepartments.length}</span></div>
         <div className="table-list">
-          {companyDepartments.map((department) => <button className="list-row selectable-row" style={{ borderColor: department.id === selectedDepartment?.id ? 'var(--primary)' : 'var(--border)' }} key={department.id} onClick={() => setDepartmentId(department.id)}>
+          {companyDepartments.map((department) => <button className={`list-row selectable-row ${department.id === selectedDepartment?.id ? 'active' : ''}`} key={department.id} onClick={() => setDepartmentId(department.id)}>
             <b>{department.name}</b>
             <p>{department.slug} / {companyAgents.filter((agent) => agent.departmentId === department.id).length} agents</p>
           </button>)}
+          <button className={`list-row selectable-row ${departmentId === '__unassigned' ? 'active' : ''}`} onClick={() => setDepartmentId('__unassigned')}>
+            <b>No department</b>
+            <p>{unassignedAgents.length} agents</p>
+          </button>
           {companyDepartments.length === 0 && <p className="chat-empty">No departments yet.</p>}
         </div>
       </aside>
 
       <main className="page-stack">
         <section className="card section-card">
-          <div className="panel-title"><div><h2>Department Goals</h2><span className="status-pill">{selectedDepartment?.name ?? 'No department'}</span></div><Target size={18} /></div>
+          <div className="panel-title"><div><h2><Users size={18} /> Member Assignment</h2><span className="status-pill">{companyAgents.length} company agents</span></div></div>
+          <div className="table-wrap">
+            <table className="data-table org-assignment-table">
+              <thead><tr><th>Agent</th><th>Department</th><th>Reports to</th><th>Status</th></tr></thead>
+              <tbody>
+                {companyAgents.map((agent) => <tr key={agent.id}>
+                  <td><b>{agent.name}</b><small>{agent.title || agent.role} / {agent.adapterType ?? 'mock'}</small></td>
+                  <td><select className="input compact" disabled={busyAgentId === agent.id} value={agent.departmentId ?? ''} onChange={(event) => void updateAgentOrg(agent, { departmentId: event.target.value || null })}>
+                    <option value="">No department</option>
+                    {companyDepartments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
+                  </select></td>
+                  <td><select className="input compact" disabled={busyAgentId === agent.id} value={agent.bossId ?? ''} onChange={(event) => void updateAgentOrg(agent, { bossId: event.target.value || null })}>
+                    <option value="">Top-level agent</option>
+                    {companyAgents.filter((candidate) => candidate.id !== agent.id).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
+                  </select></td>
+                  <td><span className="badge">{agent.isBusy ? 'busy' : agent.isActive === false ? 'offline' : 'ready'}</span></td>
+                </tr>)}
+              </tbody>
+            </table>
+          </div>
+          {companyAgents.length === 0 && <p className="chat-empty">No agents in this company yet.</p>}
+        </section>
+
+        <section className="card section-card">
+          <div className="panel-title"><div><h2><UserCheck size={18} /> Interactive Org Canvas</h2><span className="status-pill">{selectedDepartment ? selectedDepartment.name : 'Full company'}</span></div></div>
+          <div className="org-canvas">
+            {companyAgents.map((agent) => {
+              const department = companyDepartments.find((item) => item.id === agent.departmentId);
+              const manager = companyAgents.find((item) => item.id === agent.bossId);
+              return <article className="org-canvas-node" key={agent.id}>
+                <div className="org-agent-head"><span className={`org-agent-dot ${agent.isBusy ? 'busy' : agent.isActive === false ? 'offline' : 'active'}`} /><b>{agent.name}</b></div>
+                <div className="org-agent-meta"><span>{agent.title || agent.role}</span><span>{department?.name ?? 'No department'} / reports to {manager?.name ?? 'top-level'}</span></div>
+                <div className="org-canvas-controls">
+                  <select className="input compact" disabled={busyAgentId === agent.id} value={agent.departmentId ?? ''} onChange={(event) => void updateAgentOrg(agent, { departmentId: event.target.value || null })}>
+                    <option value="">No department</option>
+                    {companyDepartments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                  </select>
+                  <select className="input compact" disabled={busyAgentId === agent.id} value={agent.bossId ?? ''} onChange={(event) => void updateAgentOrg(agent, { bossId: event.target.value || null })}>
+                    <option value="">Top-level</option>
+                    {companyAgents.filter((candidate) => candidate.id !== agent.id).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
+                  </select>
+                </div>
+              </article>;
+            })}
+            {companyAgents.length === 0 && <p className="chat-empty">No agents to render.</p>}
+          </div>
+        </section>
+
+        <section className="card section-card">
+          <div className="panel-title"><div><h2>Selected Department</h2><span className="status-pill">{selectedDepartment?.name ?? 'No department'}</span></div></div>
+          <div className="org-node-list">
+            {(departmentId === '__unassigned' ? unassignedAgents : selectedDepartmentAgents).map((agent) => <article className="agent-node-card org-agent-node" key={agent.id}>
+              <div className="org-agent-head"><span className={`org-agent-dot ${agent.isBusy ? 'busy' : agent.isActive === false ? 'offline' : 'active'}`} /><b>{agent.name}</b></div>
+              <div className="org-agent-meta"><span>{agent.title || agent.role}</span><span>reports to {companyAgents.find((item) => item.id === agent.bossId)?.name ?? 'top-level'}</span></div>
+            </article>)}
+            {(departmentId === '__unassigned' ? unassignedAgents : selectedDepartmentAgents).length === 0 && <p className="chat-empty">No agents in this view.</p>}
+          </div>
+        </section>
+
+        <section className="card section-card">
+          <div className="panel-title"><div><h2><Target size={18} /> Department Goals</h2><span className="status-pill">{selectedDepartment?.name ?? 'No department selected'}</span></div></div>
           <label className="field-label">Goal title<input className="input" value={goalTitle} onChange={(event) => setGoalTitle(event.target.value)} disabled={!selectedDepartment} /></label>
           <label className="field-label">Goal body<textarea className="input" rows={3} value={goalBody} onChange={(event) => setGoalBody(event.target.value)} disabled={!selectedDepartment} /></label>
           <button className="btn btn-primary" disabled={busy || !selectedDepartment || !goalTitle.trim()} onClick={addDepartmentGoal}><Plus size={15} /> Add Department Goal</button>
@@ -135,31 +216,6 @@ export function DepartmentsPage() {
             {selectedDepartment && departmentGoals.length === 0 && <p className="chat-empty">No department goals yet.</p>}
           </div>
         </section>
-
-        <div className="page-stack">
-          {companyDepartments.map((department) => {
-            const laneAgents = companyAgents.filter((agent) => agent.departmentId === department.id);
-            return <section className="card org-chart-lane" key={department.id}>
-              <div className="panel-title"><h3>{department.name}</h3><span className="status-pill">{laneAgents.length} members</span></div>
-              <div className="org-node-list">
-                {laneAgents.map((agent) => <article className="agent-node-card org-agent-node" key={agent.id}>
-                  <div className="org-agent-head"><span className={`org-agent-dot ${agent.isBusy ? 'busy' : agent.isActive === false ? 'offline' : 'active'}`} /><b>{agent.name}</b></div>
-                  <div className="org-agent-meta"><span>{agent.title || agent.role}</span><span>{agent.adapterType ?? 'mock'}</span></div>
-                </article>)}
-                {laneAgents.length === 0 && <p className="chat-empty">No agents in this department.</p>}
-              </div>
-            </section>;
-          })}
-          <section className="card org-chart-lane">
-            <div className="panel-title"><h3>Unassigned department</h3><span className="status-pill">{companyAgents.filter((agent) => !agent.departmentId).length} members</span></div>
-            <div className="org-node-list">
-              {companyAgents.filter((agent) => !agent.departmentId).map((agent) => <article className="agent-node-card org-agent-node" key={agent.id}>
-                <div className="org-agent-head"><span className={`org-agent-dot ${agent.isBusy ? 'busy' : agent.isActive === false ? 'offline' : 'active'}`} /><b>{agent.name}</b></div>
-                <div className="org-agent-meta"><span>{agent.title || agent.role}</span><span>{agent.adapterType ?? 'mock'}</span></div>
-              </article>)}
-            </div>
-          </section>
-        </div>
       </main>
     </div>
   </div>;

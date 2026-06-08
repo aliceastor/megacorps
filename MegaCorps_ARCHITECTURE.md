@@ -2,6 +2,21 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.13 - Scoped UI Repairs And Same-Origin API Proxy
+
+Date: 2026-06-09
+
+Completed in this pass:
+
+- Added a same-origin Next.js API proxy at `/api/proxy/...` and made the web API client prefer it before direct browser-host or baked API URLs. Docker Compose now sets `SERVER_API_URL=http://server:4000` for the web container.
+- Reworked Projects into a reusable Project Authority workbench. The Projects page and top-level Agent detail panel now share the same create/edit flow for repo URL, project work path, branch policy, setup/test commands, runtime services, workspace hint, and project goals.
+- Removed the Agents-page `New company` placeholder from the Company selector. Agents can only select existing companies; company creation remains on Companies.
+- Rebuilt Departments into an operational org-management surface: direct agent department assignment, `No department`, reports-to editing, an interactive org canvas, selected department/no-department cards, and department goals.
+- Extended cron manual runs with job/company/runner scope. `dispatch-heartbeat` can run against a selected company, while `daily-report` and `health-check` now record completed manual cron runs instead of disabled scaffold rows.
+- Changed Kanban company filtering from a multi-select list to a normal dropdown and preserved sort-by-company behavior.
+- Repaired corrupted i18n dictionaries and wired shell navigation/topbar strings to zh-TW/en/ja locale keys.
+- Tightened layout behavior with a fixed independent sidebar scroll area, stable workbench grids, and consistent org/agent card sizing.
+
 ## Architecture Update v1.12 - UI IA Split And Workspace Folder Manager
 
 Date: 2026-06-08

@@ -1,6 +1,6 @@
 # MegaCorps UI Flow
 
-Generated: 2026-06-08
+Generated: 2026-06-09
 
 This document is a textual inventory of every current web UI surface, including route pages, shell controls, drawers, modal overlays, confirmation dialogs, tabs, and major page elements. It also records the DB/API alignment audit performed during this pass.
 
@@ -166,20 +166,28 @@ Data sources:
 - `GET /api/goals`
 - `POST /api/departments`
 - `POST /api/goals`
+- `PUT /api/agents/:id`
 
 Elements:
 - Company selector
 - New department name and slug
 - Add Department button, disabled until a company exists and department fields are filled
-- Department list
+- Department list, including `No department`
+- Member Assignment table:
+  - Agent
+  - Department selector
+  - Reports-to selector
+  - Status
+- Interactive Org Canvas:
+  - All company agents
+  - Inline Department selector
+  - Inline Reports-to selector
 - Department Goals panel:
   - Goal title
   - Goal body
   - Add Department Goal
   - Department goal list
-- Department org lanes
-- Unassigned department lane
-- Agent cards grouped by department
+- Selected department/no-department agent cards
 
 ## Agents
 
@@ -193,7 +201,7 @@ Data sources:
 - Same agent/company/runtime/card/approval sources as `/companies`
 
 Elements:
-- Company context selector
+- Company context selector with existing companies only; no New Company placeholder on the Agents page
 - Agent creation panel with New Agent button
 - Department org lanes
 - Unassigned department lane
@@ -233,6 +241,7 @@ Selected-agent panel elements:
 - Soul textarea
 - Adapter override fields, adapter-type aware
 - Direct reports, assigned work, review queue
+- Project Authority workbench for top-level agents, allowing project create/edit, repo URL, project work path, branch policy, runtime commands, runtime services JSON, and project goals
 - Save, Test, Pause/Resume, Reset Session, Fire
 
 ## Direct Chat
@@ -288,7 +297,7 @@ Data sources:
 
 Top toolbar elements:
 - Search input
-- Company multi-select filter
+- Company dropdown filter
 - Assignee filter
 - Project filter: all projects, no project, specific project
 - Sort selector: priority, company, newest, oldest, updated
@@ -445,7 +454,9 @@ Data sources:
 - `GET /api/cron/status`
 - `GET /api/cron/runs`
 - `GET /api/companies`
+- `GET /api/agents`
 - `POST /api/cron/run`
+- `PUT /api/companies/:id`
 
 Elements:
 - Stat cards:
@@ -453,17 +464,21 @@ Elements:
   - Base interval
   - Running now
   - Last status
-- Job List table:
-  - Built-in Kanban Dispatch row with Run Now
-  - Scaffold rows for Daily Report and Health Check
+- Job selector:
+  - Dispatch Heartbeat
+  - Daily Report
+  - Health Check
 - Job Detail panel:
-  - Job name
+  - Company scope selector
+  - Runner selector
   - Schedule type
   - Interval seconds
   - Cron expression
-  - Enabled checkbox
-  - Save button disabled until backend CRUD exists
-  - Run built-in dispatch
+- Company dispatch interval editor
+  - Company interval seconds
+  - Auto-dispatch toggle
+  - Save company interval
+  - Run now
 - Company Heartbeat list:
   - Company name
   - Auto-dispatch state
@@ -550,12 +565,14 @@ Data sources:
 
 Elements:
 - Company selector
-- Project list:
-  - No project row
+- Unified Project Authority workbench:
+  - New project row
   - Project rows
-- Project editor:
+  - Save/Add action in the editor header
+- Project identity section:
   - Project name
   - Description
+- Repository Authority section:
   - Repo provider
   - Default branch
   - Repository URL
@@ -565,14 +582,12 @@ Elements:
   - Pull before every run checkbox
   - Push after completion checkbox
   - Completion policy
+- Runtime Commands section:
   - Setup command
   - Test command
   - Runtime services JSON
   - Runtime-local path hint
-  - Add project / Save project
-- Repository Protocol summary
-- Project Goals panel:
-  - Selected project display
+- Project Goals section:
   - Goal title
   - Goal body
   - Add Project Goal
@@ -777,6 +792,12 @@ The following backend-supported fields or actions were missing or incomplete in 
 - `POST /api/cards/:id/work-products`: added Work Products form in Kanban detail drawer.
 - `task_runs.adapter_session_id`, `adapter_turn_id`: added to Logs task run cards.
 - `POST /api/agents` help body: updated with `capabilities`.
+- Browser API transport: added same-origin `/api/proxy` first, with direct browser-host and baked URL as fallbacks.
+- Departments: added direct agent department assignment, no-department assignment, and reports-to editing from the page and org canvas.
+- Projects: replaced the three-card layout with a unified Project Authority workbench and reused it for top-level agents.
+- Cron: replaced scaffold-only rows with runnable `dispatch-heartbeat`, `daily-report`, and `health-check` jobs, each with company/runner metadata.
+- Kanban company filter: changed from multi-select list to a normal dropdown while preserving sort by company.
+- I18N: rebuilt corrupted zh-TW/en/ja locale dictionaries and wired sidebar/topbar labels to locale keys.
 
 ### No unsupported UI writes found
 

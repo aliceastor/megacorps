@@ -25,9 +25,10 @@ function getApiCandidates(): string[] {
   const { hostname } = window.location;
   const isLocalBrowser = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
   const browserApiUrl = getBrowserApiUrl();
+  const sameOriginProxy = '/api/proxy';
 
-  if (isLocalBrowser && BAKED_API_URL && !isLocalApiUrl(BAKED_API_URL)) return uniqueUrls([fallback, browserApiUrl ?? '']);
-  return uniqueUrls([browserApiUrl ?? '', fallback]);
+  if (isLocalBrowser && BAKED_API_URL && !isLocalApiUrl(BAKED_API_URL)) return uniqueUrls([sameOriginProxy, fallback, browserApiUrl ?? '']);
+  return uniqueUrls([sameOriginProxy, browserApiUrl ?? '', fallback]);
 }
 
 function getApiUrl(): string {

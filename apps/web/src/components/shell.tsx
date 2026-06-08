@@ -8,24 +8,25 @@ import { useLocale, localeList, localeNames } from '@/lib/locale-context';
 import { api } from '@/lib/api';
 
 const nav = [
-  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/companies', label: 'Companies', icon: Building2 },
-  { href: '/departments', label: 'Departments', icon: Network },
-  { href: '/agents', label: 'Agents', icon: Network },
-  { href: '/projects', label: 'Projects', icon: FolderGit2 },
-  { href: '/workspaces', label: 'Workspace', icon: FolderOpen },
-  { href: '/knowledge', label: 'Knowledge', icon: BookOpen },
-  { href: '/kanban', label: 'Kanban', icon: Kanban },
-  { href: '/chat', label: 'Direct Chat', icon: MessageSquare },
-  { href: '/cron', label: 'Cron', icon: Clock3 },
-  { href: '/logs', label: 'Logs', icon: FileClock },
+  { href: '/dashboard', labelKey: 'nav.dashboard', fallback: 'Dashboard', icon: LayoutDashboard },
+  { href: '/companies', labelKey: 'nav.companies', fallback: 'Companies', icon: Building2 },
+  { href: '/departments', labelKey: 'nav.departments', fallback: 'Departments', icon: Network },
+  { href: '/agents', labelKey: 'nav.agents', fallback: 'Agents', icon: Network },
+  { href: '/projects', labelKey: 'nav.projects', fallback: 'Projects', icon: FolderGit2 },
+  { href: '/workspaces', labelKey: 'nav.workspaces', fallback: 'Workspace', icon: FolderOpen },
+  { href: '/knowledge', labelKey: 'nav.knowledge', fallback: 'Knowledge', icon: BookOpen },
+  { href: '/kanban', labelKey: 'nav.kanban', fallback: 'Kanban', icon: Kanban },
+  { href: '/chat', labelKey: 'nav.chat', fallback: 'Direct Chat', icon: MessageSquare },
+  { href: '/cron', labelKey: 'nav.cron', fallback: 'Cron', icon: Clock3 },
+  { href: '/logs', labelKey: 'nav.logs', fallback: 'Logs', icon: FileClock },
 ];
 
 const utilityNav = [
-  { href: '/settings', label: 'Settings', icon: Settings },
+  { href: '/settings', labelKey: 'nav.settings', fallback: 'Settings', icon: Settings },
 ];
 
-const adminNav = { href: '/admin', label: 'Admin', icon: ShieldCheck };
+const adminNav = { href: '/admin', labelKey: 'nav.admin', fallback: 'Admin', icon: ShieldCheck };
+type NavItem = (typeof nav)[number] | (typeof utilityNav)[number] | typeof adminNav;
 
 function Dropdown({ open, onClose, children, style }: { open: boolean; onClose: () => void; children: React.ReactNode; style?: React.CSSProperties }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -50,12 +51,16 @@ function DropdownItem({ onClick, children, active }: { onClick: () => void; chil
   </button>;
 }
 
-function SidebarLink({ item, open, pathname }: { item: { href: string; label: string; icon: React.ElementType }; open: boolean; pathname: string }) {
+function SidebarLink({ item, label, open, pathname }: { item: NavItem; label: string; open: boolean; pathname: string }) {
   const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-  return <Link className={`nav-link ${active ? 'active' : ''}`} href={item.href} title={item.label} aria-label={item.label}>
+  return <Link className={`nav-link ${active ? 'active' : ''}`} href={item.href} title={label} aria-label={label}>
     <item.icon size={18} />
-    {open && <span>{item.label}</span>}
+    {open && <span>{label}</span>}
   </Link>;
+}
+
+function titleKey(title: string): string {
+  return `title.${title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
 }
 
 export function AppShell({ title, children }: { title: string; children: React.ReactNode }) {
@@ -67,6 +72,8 @@ export function AppShell({ title, children }: { title: string; children: React.R
   const [userRole, setUserRole] = useState('');
   const pathname = usePathname();
   const { locale, setLocale, t } = useLocale();
+  const translatedTitle = t(titleKey(title));
+  const displayTitle = translatedTitle === titleKey(title) ? title : translatedTitle;
 
   useEffect(() => { setIsDark(document.documentElement.dataset.theme === 'dark'); }, []);
   useEffect(() => {
@@ -98,28 +105,28 @@ export function AppShell({ title, children }: { title: string; children: React.R
       </div>
       <div className="sidebar-body">
         <nav className="nav-list" aria-label="Primary">
-          {nav.map((item) => <SidebarLink item={item} open={open} pathname={pathname} key={item.href} />)}
+          {nav.map((item) => <SidebarLink item={item} label={t(item.labelKey) === item.labelKey ? item.fallback : t(item.labelKey)} open={open} pathname={pathname} key={item.href} />)}
         </nav>
       </div>
       <div className="sidebar-footer">
         <nav className="nav-list nav-list-utility" aria-label="Utility">
-          {utilityNav.map((item) => <SidebarLink item={item} open={open} pathname={pathname} key={item.href} />)}
-          {userRole === 'admin' && <SidebarLink item={adminNav} open={open} pathname={pathname} />}
+          {utilityNav.map((item) => <SidebarLink item={item} label={t(item.labelKey) === item.labelKey ? item.fallback : t(item.labelKey)} open={open} pathname={pathname} key={item.href} />)}
+          {userRole === 'admin' && <SidebarLink item={adminNav} label={t(adminNav.labelKey) === adminNav.labelKey ? adminNav.fallback : t(adminNav.labelKey)} open={open} pathname={pathname} />}
         </nav>
         {open && <div className="sidebar-status">
-          <span>Heartbeat</span>
-          <b>10s / company override</b>
+          <span>{t('common.heartbeat')}</span>
+          <b>{t('common.companyOverride')}</b>
         </div>}
       </div>
     </aside>
     <main>
       <header className="topbar">
         <div>
-          <p className="eyebrow">Workspace</p>
-          <strong>{title}</strong>
+          <p className="eyebrow">{t('common.workspace')}</p>
+          <strong>{displayTitle}</strong>
         </div>
         <span style={{ flex: 1 }} />
-        <Link className="btn icon-btn" href="/help" aria-label="Help" title="Help"><CircleHelp size={16} /></Link>
+        <Link className="btn icon-btn" href="/help" aria-label={t('common.help')} title={t('common.help')}><CircleHelp size={16} /></Link>
         <button className="btn icon-btn" aria-label="Toggle theme" onClick={toggleTheme}>{isDark ? <Moon size={16} /> : <Sun size={16} />}</button>
 
         {/* Language Dropdown */}
@@ -132,7 +139,7 @@ export function AppShell({ title, children }: { title: string; children: React.R
 
         {/* User Dropdown */}
         <div style={{ position: 'relative' }}>
-          <button className="btn user-btn" onClick={() => { setUserOpen(!userOpen); setLangOpen(false); }}><User size={16} /><span>{userEmail || 'Account'}</span></button>
+          <button className="btn user-btn" onClick={() => { setUserOpen(!userOpen); setLangOpen(false); }}><User size={16} /><span>{userEmail || t('common.account')}</span></button>
           <Dropdown open={userOpen} onClose={() => setUserOpen(false)}>
             <DropdownItem onClick={handleLogout}><LogOut size={14} /> {t('logout')}</DropdownItem>
           </Dropdown>

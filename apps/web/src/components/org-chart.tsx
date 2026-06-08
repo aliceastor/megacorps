@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useState } from 'react';
 import { Ban, CheckCircle2, Loader2, Pause, Plus, RotateCcw, Save, Trash2, Wifi, X } from 'lucide-react';
 import { api } from '@/lib/api';
+import { ProjectAuthorityPanel } from './project-authority-panel';
 
 type Agent = {
   id: string;
@@ -430,17 +431,18 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
 
     <section className="card" style={{ padding: 16, display: 'grid', gap: 12, marginBottom: 16 }}>
       <div className="panel-title">
-        <div><h2>{isCompanySurface ? 'Company Settings' : 'Company Context'}</h2><span className="status-pill">{companyId ? `auto-dispatch every ${companyInterval}s` : 'new company'}</span></div>
+        <div><h2>{isCompanySurface ? 'Company Settings' : 'Company Context'}</h2><span className="status-pill">{companyId ? `auto-dispatch every ${companyInterval}s` : isCompanySurface ? 'new company' : 'select company'}</span></div>
         {isCompanySurface && <button className="btn btn-primary" onClick={saveCompany}>Save Company</button>}
       </div>
       <div className="form-grid">
         <label className="field-label">Company
-          <select className="input" value={companyId} onChange={(event) => {
+          <select className="input" value={companyId} disabled={isAgentSurface && companies.length === 0} onChange={(event) => {
             const next = companies.find((company) => company.id === event.target.value);
             if (next) selectCompany(next);
-            else startNewCompany();
+            else if (isCompanySurface) startNewCompany();
           }}>
-            <option value="">New company</option>
+            {isCompanySurface && <option value="">New company</option>}
+            {isAgentSurface && companies.length === 0 && <option value="">No companies</option>}
             {companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}
           </select>
         </label>
@@ -454,7 +456,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
         <label className="field-label">New department<input className="input" value={deptName} onChange={(event) => setDeptName(event.target.value)} /></label>
         <label className="field-label">Department slug<input className="input" value={deptSlug} onChange={(event) => setDeptSlug(event.target.value)} /></label>
       </div>}
-      {isCompanySurface && <button className="btn" onClick={createDepartment}><Plus size={14} /> Add Department</button>}
+      {isCompanySurface && <button className="btn" disabled={!companyId || !deptName.trim() || !deptSlug.trim()} title={companyId ? 'Add department' : 'Save the company before adding departments'} onClick={createDepartment}><Plus size={14} /> Add Department</button>}
       {isCompanySurface && <div className="table-list">{companyDepartments.map((department) => <div className="list-row" key={department.id}><b>{department.name}</b><p>{department.slug}</p></div>)}</div>}
     </section>
 
@@ -649,6 +651,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
                 <div className="table-list">{selectedReviewCards.slice(0, 6).map((card) => <div className="list-row" key={card.id}><b>{card.title}</b><p>{card.columnStatus}</p></div>)}</div>
               </section>
             </div>
+            {!selected.bossId && <ProjectAuthorityPanel lockedCompanyId={selected.companyId} heading="Project Authority" description={`${selected.name} can create projects, set repositories, set authority paths, and maintain project goals.`} compact />}
             <div className="action-row">
               <button className="btn btn-primary" disabled={testing === selected.id} onClick={saveAgent}><Save size={14} /> Save</button>
               <button className="btn" disabled={testing === selected.id} onClick={() => agentAction(selected.id, `/api/agents/${selected.id}/test-connection`, 'Connection successful')}><Wifi size={14} /> Test</button>

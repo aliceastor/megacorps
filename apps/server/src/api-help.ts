@@ -116,7 +116,7 @@ const endpoints: ApiEndpoint[] = [
 
   { method: 'GET', path: '/api/cron/status', group: 'Cron', auth: 'session', requiredRole: 'operator', summary: 'Read dispatch loop status.' },
   { method: 'GET', path: '/api/cron/runs', group: 'Cron', auth: 'session', requiredRole: 'operator', summary: 'Read cron/heartbeat loop runs.', query: { limit: '1-200, default 50.' } },
-  { method: 'POST', path: '/api/cron/run', group: 'Cron', auth: 'session', summary: 'Run one dispatch/review heartbeat tick now.' },
+  { method: 'POST', path: '/api/cron/run', group: 'Cron', auth: 'session', summary: 'Run one cron job now. dispatch-heartbeat can be scoped to a company; daily-report and health-check record completed manual runs with company/runner metadata.', body: { job: 'dispatch-heartbeat | daily-report | health-check', companyId: 'uuid optional/null', runnerAgentId: 'uuid optional/null', schedule: { type: 'every | cron | at', intervalSeconds: 10, expression: '*/10 * * * *' } } },
 ];
 
 function entityFromEndpoint(endpoint: ApiEndpoint): string {

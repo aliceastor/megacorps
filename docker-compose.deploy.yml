@@ -77,6 +77,7 @@ services:
       - server
     environment:
       NODE_ENV: production
+      SERVER_API_URL: ${SERVER_API_URL:-http://server:4000}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?Set NEXT_PUBLIC_API_URL}
     ports:
       - "3000:3000"

@@ -303,7 +303,7 @@ export function KanbanBoard() {
   const [workProductCommitSha, setWorkProductCommitSha] = useState('');
   const [workProductPullRequestUrl, setWorkProductPullRequestUrl] = useState('');
   const [requiresApproval, setRequiresApproval] = useState(false);
-  const [filterCompanies, setFilterCompanies] = useState<string[]>([]);
+  const [filterCompany, setFilterCompany] = useState('');
   const [filterAssignee, setFilterAssignee] = useState('');
   const [filterProject, setFilterProject] = useState('');
   const [sortMode, setSortMode] = useState<'priority' | 'company' | 'created_desc' | 'created_asc' | 'updated_desc'>('priority');
@@ -326,7 +326,7 @@ export function KanbanBoard() {
       setGoals(nextGoals);
       if (!newCompany && nextCompanies[0]) setNewCompany(nextCompanies[0].id);
       const onlyCompany = nextCompanies.length === 1 ? nextCompanies[0] : undefined;
-      if (filterCompanies.length === 0 && onlyCompany) setFilterCompanies([onlyCompany.id]);
+      if (!filterCompany && onlyCompany) setFilterCompany(onlyCompany.id);
       if (selected) setSelected(nextCards.find((card) => card.id === selected.id) ?? null);
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : 'Failed to load board', type: 'error' });
@@ -465,7 +465,7 @@ export function KanbanBoard() {
     setGoals(boardQuery.data.goals);
     if (!newCompany && boardQuery.data.companies[0]) setNewCompany(boardQuery.data.companies[0].id);
     const onlyCompany = boardQuery.data.companies.length === 1 ? boardQuery.data.companies[0] : undefined;
-    if (filterCompanies.length === 0 && onlyCompany) setFilterCompanies([onlyCompany.id]);
+    if (!filterCompany && onlyCompany) setFilterCompany(onlyCompany.id);
     if (selected) setSelected(boardQuery.data.cards.find((card) => card.id === selected.id) ?? null);
     setLoading(false);
   }, [boardQuery.data]);
@@ -533,7 +533,7 @@ export function KanbanBoard() {
 
   const companyNameById = useMemo(() => new Map(companies.map((company) => [company.id, company.name])), [companies]);
   const visibleCards = useMemo(() => cards.filter((card) => {
-    if (filterCompanies.length > 0 && (!card.companyId || !filterCompanies.includes(card.companyId))) return false;
+    if (filterCompany && card.companyId !== filterCompany) return false;
     if (filterAssignee && card.assigneeId !== filterAssignee) return false;
     if (filterProject === '__none' && card.projectId) return false;
     if (filterProject && filterProject !== '__none' && card.projectId !== filterProject) return false;
@@ -549,7 +549,7 @@ export function KanbanBoard() {
     if (sortMode === 'created_asc') return Date.parse(a.createdAt ?? '') - Date.parse(b.createdAt ?? '');
     if (sortMode === 'updated_desc') return Date.parse(b.updatedAt ?? '') - Date.parse(a.updatedAt ?? '');
     return b.priority - a.priority;
-  }), [cards, companyNameById, filterAssignee, filterCompanies, filterProject, query, sortMode]);
+  }), [cards, companyNameById, filterAssignee, filterCompany, filterProject, query, sortMode]);
   const subtasks = selected ? cards.filter((card) => card.parentCardId === selected.id) : [];
   const ticketThreadEntries = selected ? [
     ...comments.map((comment) => {
@@ -815,17 +815,18 @@ export function KanbanBoard() {
   return <>
     <div className="kanban-toolbar">
       <div className="input-wrap" style={{ flex: '1 1 260px' }}><Search size={15} /><input placeholder="Search" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
-      <select className="input compact" multiple size={Math.min(Math.max(companies.length, 2), 4)} value={filterCompanies} onChange={(e) => { setFilterCompanies(selectedMultiValues(e.currentTarget)); setFilterProject(''); }}>
+      <select className="input compact" value={filterCompany} onChange={(e) => { setFilterCompany(e.target.value); setFilterProject(''); setFilterAssignee(''); }}>
+        <option value="">All companies</option>
         {companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}
       </select>
       <select className="input compact" value={filterAssignee} onChange={(e) => setFilterAssignee(e.target.value)}>
         <option value="">All agents</option>
-        {agents.filter((agent) => filterCompanies.length === 0 || (agent.companyId && filterCompanies.includes(agent.companyId))).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}
+        {agents.filter((agent) => !filterCompany || agent.companyId === filterCompany).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}
       </select>
       <select className="input compact" value={filterProject} onChange={(e) => setFilterProject(e.target.value)}>
         <option value="">All projects</option>
         <option value="__none">No project</option>
-        {projects.filter((project) => filterCompanies.length === 0 || filterCompanies.includes(project.companyId)).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}
+        {projects.filter((project) => !filterCompany || project.companyId === filterCompany).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}
       </select>
       <select className="input compact" value={sortMode} onChange={(e) => setSortMode(e.target.value as typeof sortMode)}>
         <option value="priority">Sort: priority</option>

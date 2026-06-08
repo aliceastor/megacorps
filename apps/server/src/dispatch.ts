@@ -1117,6 +1117,8 @@ export type DispatchCronResult = {
   name: string;
   source: 'loop' | 'manual' | 'startup';
   status: 'success' | 'failed' | 'skipped';
+  companyId?: string | null;
+  runnerAgentId?: string | null;
   activeCompanies: number;
   cardsScanned: number;
   dispatched: number;
@@ -1127,6 +1129,7 @@ export type DispatchCronResult = {
   durationSeconds: number;
   error?: string | null;
 };
+export type DispatchCronOptions = { companyId?: string | null; runnerAgentId?: string | null; jobName?: string };
 
 export function getDispatchCronStatus(): DispatchCronStatus {
   return {
@@ -1176,14 +1179,17 @@ async function resetMonthlyBudgetsIfDue(app: FastifyInstance, now: Date): Promis
   return resetRows.length;
 }
 
-export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' | 'manual' | 'startup' = 'manual'): Promise<DispatchCronResult> {
+export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' | 'manual' | 'startup' = 'manual', options: DispatchCronOptions = {}): Promise<DispatchCronResult> {
   const started = Date.now();
   const startedAt = new Date(started);
+  const jobName = options.jobName ?? 'dispatch-heartbeat';
   if (loopRunning) {
     return {
-      name: 'dispatch-heartbeat',
+      name: jobName,
       source,
       status: 'skipped',
+      companyId: options.companyId ?? null,
+      runnerAgentId: options.runnerAgentId ?? null,
       activeCompanies: 0,
       cardsScanned: 0,
       dispatched: 0,
@@ -1203,11 +1209,11 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
   cronState.lastError = null;
 
   const [run] = await db.insert(cronRuns).values({
-    name: 'dispatch-heartbeat',
+    name: jobName,
     source,
     status: 'running',
     startedAt,
-    details: {},
+    details: { companyId: options.companyId ?? null, runnerAgentId: options.runnerAgentId ?? null },
   }).returning();
   if (!run) {
     loopRunning = false;
@@ -1218,9 +1224,11 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
   }
 
   const result: DispatchCronResult = {
-    name: 'dispatch-heartbeat',
+    name: jobName,
     source,
     status: 'success',
+    companyId: options.companyId ?? null,
+    runnerAgentId: options.runnerAgentId ?? null,
     activeCompanies: 0,
     cardsScanned: 0,
     dispatched: 0,
@@ -1237,8 +1245,9 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
     result.budgetResetAgents = await resetMonthlyBudgetsIfDue(app, now);
     await recoverStaleExecutionLocks(app);
     const companyRows = await db.select().from(companies);
+    const scopedCompanyRows = options.companyId ? companyRows.filter((company) => company.id === options.companyId) : companyRows;
     const nowMs = Date.now();
-    const activeCompanyIds = companyRows.filter((company) => {
+    const activeCompanyIds = scopedCompanyRows.filter((company) => {
       if (company.autoDispatchEnabled === false) return false;
       const intervalMs = Math.max(5, company.dispatchIntervalSeconds ?? 10) * 1000;
       const last = companyLastTick.get(company.id) ?? 0;
@@ -1294,6 +1303,8 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
       durationSeconds: result.durationSeconds,
       error: result.error ?? null,
       details: {
+        companyId: result.companyId ?? null,
+        runnerAgentId: result.runnerAgentId ?? null,
         activeCompanies: result.activeCompanies,
         cardsScanned: result.cardsScanned,
         dispatched: result.dispatched,

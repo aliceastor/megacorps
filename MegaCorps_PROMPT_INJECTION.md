@@ -1,6 +1,6 @@
 # MegaCorps Prompt Injection Format
 
-Last updated: 2026-06-08
+Last updated: 2026-06-09
 
 This document describes the prompt content MegaCorps injects for Direct Chat and Kanban task runs.
 
@@ -79,6 +79,8 @@ Projects carry the shared repo/workspace policy. This is designed for multi-syst
 - `repoUrl`: the shared Git remote for coding/text-controlled work.
 - `workPath`: the repo/workspace-relative area the agent should edit, for example `apps/server`, `reports/final`, or `docs/contracts`. Null means project root.
 - `workspacePathHint`: optional runtime-local hint only. It is never the shared source of truth.
+
+Operators can maintain these project authority fields from the Projects page or from a top-level agent's Project Authority panel. Both surfaces write the same project records, so prompt injection receives the same stored repo/work-path policy regardless of where the setting was edited.
 
 Runtime presets add machine-local roots:
 

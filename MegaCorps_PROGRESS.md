@@ -1,6 +1,6 @@
 # MegaCorps Progress and Research Notes
 
-Last updated: 2026-06-08
+Last updated: 2026-06-09
 
 ## Executive Summary
 
@@ -19,12 +19,13 @@ Latest verified baseline:
 - Deployment is user-managed. Local-only Docker was used for QA in this pass; NAS/server deployment remains user-managed.
 - Browser/plugin QA previously verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text. Current UI IA route smoke also covers Departments, Projects, Workspace, Cron, Admin, and Settings.
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
-- June 2026 UI IA refactor is implemented: fixed independent sidebar, refined single-purpose navigation (`Companies`, `Departments`, `Agents`, `Projects`, `Workspace`, `Knowledge`, `Kanban`, `Direct Chat`, `Cron`, `Logs`), pure company CRUD plus context goals, dedicated department/org lanes, guided agent creation, tabbed Admin/Settings, Project CRUD split from Workspace, Workspace folder manager paths, Kanban company/sort filters, Ticket Thread timeline, Direct Chat optimistic dedupe, and longer Agent TEST timeout.
+- June 2026 UI IA refactor is implemented: fixed independent sidebar, refined single-purpose navigation (`Companies`, `Departments`, `Agents`, `Projects`, `Workspace`, `Knowledge`, `Kanban`, `Direct Chat`, `Cron`, `Logs`), pure company CRUD plus context goals, dedicated department/org management, guided agent creation, tabbed Admin/Settings, unified Project Authority workbench split from Workspace, Workspace folder manager paths, Kanban company dropdown and sort filters, Ticket Thread timeline, Direct Chat optimistic dedupe, and longer Agent TEST timeout.
 - API discovery is available at `GET /api/help`, `GET /api/help?format=markdown`, and the Web UI Help page, with response schema examples and rate-limit notes for every endpoint.
 - Sidebar navigation now keeps Help and Settings in the bottom utility area, with the collapse toggle inside the sidebar.
 - Hermes SSH adapter is implemented for direct `ssh -> hermes -z "{prompt}" --profile {profile}` dispatch against the configured Hermes host, with `/proc/1/environ` imported before Hermes so container-level provider keys are visible in SSH sessions. No production SSH host is hardcoded.
 - Codex app-server adapter is implemented for stdio `codex app-server` and authenticated WebSocket endpoints. MegaCorps injects agent `soul`, starts/resumes Codex threads, runs one turn per chat/card attempt, streams agent message deltas, and stores adapter thread/turn ids in `adapter_sessions` / `task_runs`.
-- Browser API fallback now tries the current browser hostname on port `4000` before falling back to baked `NEXT_PUBLIC_API_URL`, which avoids NAS deployments accidentally calling unreachable `localhost` or stale IPs.
+- Browser API calls now prefer the same-origin Next.js proxy at `/api/proxy/...`, which forwards from the web container to `SERVER_API_URL`. Direct browser-host `:4000` and baked `NEXT_PUBLIC_API_URL` are retained as fallbacks only, avoiding NAS deployments accidentally calling unreachable `localhost` or stale IPs.
+- The latest UI repair pass added top-level Agent project authority controls, Departments direct agent assignment and reporting-line editing, Cron job/company/runner scoped manual runs, repaired zh-TW/en/ja locale dictionaries, and stable workbench/card layout overrides.
 - In-app rate limiting is enabled by default, and API Help now includes required roles for endpoints.
 - Company-owned read APIs now scope results to the current user's company memberships.
 - Company-owned mutation/manual execution APIs now require company operator/admin membership checks.
@@ -292,9 +293,10 @@ Implemented:
 - Department creation.
 - Agent can belong to a department.
 - Agent can report to another agent through `bossId`.
-- Departments/Agents pages group the O-chart by department and render org lanes/tree nodes for reporting lines. Companies is now focused on company CRUD and company goals.
+- Departments directly manages agent department membership, `No department` assignment, reports-to relationships, an interactive org canvas, and department goals. Agents renders org lanes/tree nodes for reporting lines and owns agent configuration. Companies is focused on company CRUD and company goals.
 - Member identity labels are free text; hierarchy is controlled by `bossId` and direct reports.
 - Clicking a member opens editing for identity label, department, reports-to relation, runtime, adapter, and budget.
+- Top-level agents also get a Project Authority workbench in their detail panel so they can create projects and maintain repo URL, project work path, branch policy, runtime commands, runtime services, workspace hint, and project goals for their company.
 - Agent runtime presets are managed in `Settings -> Agent runtimes`.
 - Each agent can select a runtime preset in `Agents`.
 - Each agent can override adapter-specific fields without changing the shared runtime preset.
@@ -401,6 +403,8 @@ Implemented:
   - reviewed cards
   - skipped cards
   - errors
+- Manual `/api/cron/run` now accepts `job`, optional `companyId`, optional `runnerAgentId`, and schedule metadata.
+- `dispatch-heartbeat` manual runs can be scoped to one company. `daily-report` and `health-check` are runnable manual jobs that write completed `cron_runs` rows with company and runner metadata.
 - The monthly budget reset cron also writes a `budget-monthly-reset` row to `cron_runs` and `budget.monthly_reset` activity events.
 - API endpoints:
   - `GET /api/cron/status`
@@ -582,13 +586,13 @@ Log health notes:
 
 ## Current Local Verification
 
-Verified on 2026-06-08:
+Verified on 2026-06-09:
 
 - `npm run typecheck`
 - `npm test`
 - `npm run build`
 - `git diff --check` returned only Windows CRLF normalization warnings, no whitespace/content errors.
-- This pass did not start Docker; deployment remains user-managed.
+- This pass used the already-running Docker server/postgres stack for API reachability and started a temporary local Next production server on port `3021` for route smoke. The temporary server was stopped after verification.
 - API compile coverage includes:
   - task message board comments with user/agent authors
   - bounded Kanban context builder
@@ -603,21 +607,12 @@ Verified on 2026-06-08:
   - runtime health endpoint type coverage
   - monthly budget reset cron compile coverage
 - Web route smoke:
-  - `/dashboard`
-  - `/companies`
   - `/departments`
   - `/agents`
   - `/projects`
-  - `/workspaces`
-  - `/knowledge`
   - `/kanban`
-  - `/chat`
   - `/cron`
-  - `/logs`
-  - `/admin`
-  - `/settings`
-  - `/help`
-  - `/budget`
+  - `/api/proxy/health`
 
 Known local warning:
 

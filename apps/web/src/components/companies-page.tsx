@@ -153,7 +153,7 @@ export function CompaniesPage() {
     }
   }
 
-  return <div className="page-stack">
+  return <div className="page-stack companies-page">
     <div className="page-head">
       <div><h1>Companies</h1><p>Create, edit, and delete company records. Departments, agents, and org chart live on their own pages.</p></div>
       <button className="btn" onClick={() => startNewCompany()}><Plus size={15} /> New Company</button>
@@ -161,7 +161,7 @@ export function CompaniesPage() {
     {toast && <p className="status-pill">{toast}</p>}
     {error && <p className="form-error">{error}</p>}
 
-    <div className="split-layout">
+    <div className="split-layout company-workbench">
       <aside className="card section-card">
         <div className="panel-title"><h2>Company List</h2><span className="status-pill">{companies.length}</span></div>
         <div className="table-list">

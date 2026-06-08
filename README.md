@@ -24,8 +24,9 @@ Default local URLs:
 
 Remote Docker note:
 
-- The web client auto-detects the browser host first. If the UI is opened at `http://megacorps.example.internal:3000`, API calls use `http://megacorps.example.internal:4000` before trying the baked `NEXT_PUBLIC_API_URL`.
-- Set `NEXT_PUBLIC_API_URL` only when the API is on a different host/domain. A baked `localhost` default will not override the browser-host fallback on remote Docker.
+- The web client now tries the same-origin Next proxy first: `/api/proxy/...`. The web server forwards to `SERVER_API_URL`, which Docker Compose defaults to `http://server:4000`.
+- Direct browser-host `:4000` and baked `NEXT_PUBLIC_API_URL` are retained only as fallbacks. This avoids browser-side failures where `localhost:4000` or a stale LAN IP is unreachable from the user's browser.
+- Set `SERVER_API_URL` for the web container when the API is not reachable at `http://server:4000`. Set `NEXT_PUBLIC_API_URL` only when you intentionally want a direct browser fallback.
 - `docker-compose.deploy.yml` connects `megacorps-server` to the external `hermes_default` Docker network so the `hermes-ssh` runtime can use Docker DNS names such as `hermes-suite`. Ensure that external network exists before deploying that compose file.
 
 ## Scripts
@@ -93,14 +94,14 @@ Hermes suite operational notes:
 
 - `Dashboard`: operating overview, stage counts, recent task logs, recent API lifecycle events.
 - `Companies`: pure company CRUD plus company goals.
-- `Departments`: department management, department goals, and org lanes.
-- `Agents`: member hierarchy, guided agent creation, pause/resume/fire/reset, runtime and adapter configuration.
-- `Projects`: project CRUD, repo settings, branch policy, runtime services, and project goals.
+- `Departments`: department management, direct agent membership assignment, reporting-line editing, interactive org canvas, and department goals.
+- `Agents`: member hierarchy, guided agent creation, pause/resume/fire/reset, runtime and adapter configuration, plus top-level agent project authority controls.
+- `Projects`: unified project authority workbench for project CRUD, repo settings, branch policy, runtime services, work path, and project goals.
 - `Workspace`: company folder manager and authoritative workspace paths for non-coding project files.
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
-- `Kanban`: task UUIDs, stage columns, company/project/assignee filters, ticket thread, work products, sub-tasks, logs, run/review/decompose/delete.
+- `Kanban`: task UUIDs, stage columns, company dropdown/project/assignee filters, sort by company/date/priority, ticket thread, work products, sub-tasks, logs, run/review/decompose/delete.
 - `Direct Chat`: company -> project/no-project -> agent -> session direct messaging with resumable adapter sessions.
-- `Cron`: dispatch heartbeat status, company ticks, run history, and manual run.
+- `Cron`: dispatch heartbeat status, company intervals, job/company/runner-scoped manual runs, daily-report/health-check run records, and run history.
 - `Logs`: cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
 - `Admin`: tabbed global account management, signup switch, invites, roles, account status, and password resets.
 - `Settings`: tabbed runtime presets, company settings, departments, company members, and advanced configuration.
@@ -159,7 +160,7 @@ Cron/debug endpoints:
 - `GET /api/task-runs`: queued/running/completed dispatch and review attempts.
 - `GET /api/cron/status`: in-memory scheduler state plus recent durable cron runs.
 - `GET /api/cron/runs`: cron run history.
-- `POST /api/cron/run`: manually run one dispatch heartbeat and enqueue eligible task runs.
+- `POST /api/cron/run`: manually run one cron job. `dispatch-heartbeat` can be scoped to a company and runner metadata; `daily-report` and `health-check` record completed manual runs with company/runner details.
 - `POST /api/cards/:id/cancel`: cancel active or queued work without archiving the task history.
 
 ## Direct agent chat
@@ -277,5 +278,6 @@ No pnpm. No Redis.
 - `npm run typecheck`
 - `npm test`
 - `npm run build`
-- Authenticated API smoke: runtime, department, agent, project, goal, knowledge doc, task, comment, manual run, dashboard, logs.
-- Web route smoke: `/dashboard`, `/companies`, `/departments`, `/agents`, `/projects`, `/workspaces`, `/knowledge`, `/kanban`, `/chat`, `/cron`, `/logs`, `/admin`, `/settings`, `/help`, plus the direct `/budget` governance route.
+- Temporary Next production route smoke on `http://localhost:3021`: `/projects`, `/agents`, `/departments`, `/cron`, `/kanban`, and `/api/proxy/health`; temporary server stopped afterward.
+- Previous authenticated API smoke baseline: runtime, department, agent, project, goal, knowledge doc, task, comment, manual run, dashboard, logs.
+- Previous full web route smoke baseline: `/dashboard`, `/companies`, `/departments`, `/agents`, `/projects`, `/workspaces`, `/knowledge`, `/kanban`, `/chat`, `/cron`, `/logs`, `/admin`, `/settings`, `/help`, plus the direct `/budget` governance route.
