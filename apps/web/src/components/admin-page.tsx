@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
-import { Save, ShieldCheck, UserCog } from 'lucide-react';
+import { Copy, MailPlus, Save, ShieldCheck, UserCog } from 'lucide-react';
 import { api } from '@/lib/api';
 
 type Membership = {
@@ -25,6 +25,12 @@ type Account = {
 type AdminSettings = {
   signupEnabled: boolean;
 };
+type Company = { id: string; name: string };
+type InviteResponse = {
+  token: string;
+  acceptUrl: string;
+  invite: { id: string; email: string; name?: string | null; role: string; status: string; expiresAt?: string | null };
+};
 
 const roles = ['viewer', 'operator', 'admin'];
 const statuses = ['active', 'disabled'];
@@ -32,19 +38,29 @@ const statuses = ['active', 'disabled'];
 export function AdminPage() {
   const [settings, setSettings] = useState<AdminSettings | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [passwords, setPasswords] = useState<Record<string, string>>({});
+  const [inviteCompanyId, setInviteCompanyId] = useState('');
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteName, setInviteName] = useState('');
+  const [inviteRole, setInviteRole] = useState('viewer');
+  const [inviteExpiresDays, setInviteExpiresDays] = useState('7');
+  const [lastInvite, setLastInvite] = useState<InviteResponse | null>(null);
   const [toast, setToast] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
   async function refresh() {
     setError('');
-    const [nextSettings, nextAccounts] = await Promise.all([
+    const [nextSettings, nextAccounts, nextCompanies] = await Promise.all([
       api<AdminSettings>('/api/admin/settings'),
       api<Account[]>('/api/admin/users'),
+      api<Company[]>('/api/companies'),
     ]);
     setSettings(nextSettings);
     setAccounts(nextAccounts);
+    setCompanies(nextCompanies);
+    if (!inviteCompanyId && nextCompanies[0]) setInviteCompanyId(nextCompanies[0].id);
   }
 
   useEffect(() => { void refresh().catch((err) => setError(err instanceof Error ? err.message : 'Unable to load admin data')); }, []);
@@ -94,6 +110,36 @@ export function AdminPage() {
     }
   }
 
+  async function createInvite() {
+    if (!inviteCompanyId || !inviteEmail.trim()) return;
+    setBusy(true);
+    setError('');
+    try {
+      const response = await api<InviteResponse>('/api/auth/invites', {
+        method: 'POST',
+        body: JSON.stringify({
+          companyId: inviteCompanyId,
+          email: inviteEmail.trim(),
+          name: inviteName.trim() || undefined,
+          role: inviteRole,
+          expiresInDays: Number(inviteExpiresDays || 7),
+        }),
+      });
+      setLastInvite(response);
+      setToast('Invite created');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Invite creation failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyInviteUrl() {
+    if (!lastInvite?.acceptUrl) return;
+    await navigator.clipboard.writeText(lastInvite.acceptUrl);
+    setToast('Invite URL copied');
+  }
+
   return <div style={{ display: 'grid', gap: 16 }}>
     <div className="page-head">
       <div><h1>Admin</h1><p>Manage global accounts, signup access, roles, and account status.</p></div>
@@ -121,6 +167,29 @@ export function AdminPage() {
         </div>
       </section>
     </div>
+
+    <section className="card section-card">
+      <div className="panel-title"><h2>Company Invite</h2><MailPlus size={18} /></div>
+      <div className="form-grid">
+        <label className="field-label">Company<select className="input" value={inviteCompanyId} onChange={(event) => setInviteCompanyId(event.target.value)}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
+        <label className="field-label">Email<input className="input" type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} /></label>
+        <label className="field-label">Name<input className="input" value={inviteName} onChange={(event) => setInviteName(event.target.value)} /></label>
+        <label className="field-label">Company role<select className="input" value={inviteRole} onChange={(event) => setInviteRole(event.target.value)}>{roles.map((role) => <option key={role} value={role}>{role}</option>)}</select></label>
+        <label className="field-label">Expires in days<input className="input" type="number" min={1} max={30} value={inviteExpiresDays} onChange={(event) => setInviteExpiresDays(event.target.value)} /></label>
+      </div>
+      <div className="action-row">
+        <button className="btn btn-primary" onClick={createInvite} disabled={busy || !inviteCompanyId || !inviteEmail.trim()}><MailPlus size={15} /> Create invite</button>
+        {lastInvite && <button className="btn" onClick={copyInviteUrl}><Copy size={15} /> Copy accept URL</button>}
+      </div>
+      {lastInvite && <div className="meta-grid">
+        <span>Email <b>{lastInvite.invite.email}</b></span>
+        <span>Role <b>{lastInvite.invite.role}</b></span>
+        <span>Status <b>{lastInvite.invite.status}</b></span>
+        <span>Expires <b>{lastInvite.invite.expiresAt ? new Date(lastInvite.invite.expiresAt).toLocaleString() : 'none'}</b></span>
+        <span>Accept URL <b>{lastInvite.acceptUrl}</b></span>
+        <span>Raw token <b>{lastInvite.token}</b></span>
+      </div>}
+    </section>
 
     <section className="card section-card">
       <div className="panel-title"><h2>Accounts</h2><span className="status-pill">{accounts.length} users</span></div>

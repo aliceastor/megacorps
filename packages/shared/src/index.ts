@@ -79,6 +79,7 @@ export const createAgentSchema = z.object({
   runtimeId: z.string().uuid().nullable().optional(),
   hermesProfile: z.string().trim().min(1).max(80).optional(),
   bossId: z.string().uuid().nullable().optional(),
+  capabilities: z.array(z.string().trim().min(1).max(80)).default([]).optional(),
   departmentId: z.string().uuid().nullable().optional(),
   budgetPerTask: z.number().nonnegative().optional(),
   budgetMonthly: z.number().nonnegative().optional(),

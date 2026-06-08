@@ -9,6 +9,8 @@ import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
 const statuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'done', 'blocked', 'cancelled'] as const;
+const priorities = ['urgent', 'high', 'normal', 'low'] as const;
+const workProductTypes = ['report', 'file', 'preview_url', 'pull_request', 'commit', 'screenshot', 'artifact', 'external'] as const;
 const statusLabels: Record<string, Record<string, string>> = {
   todo: { 'zh-TW': '待辦', en: 'Todo', ja: '未着手' },
   in_progress: { 'zh-TW': '執行中', en: 'In Progress', ja: '進行中' },
@@ -57,6 +59,7 @@ type TaskRun = { id: string; cardId: string; kind: string; status: string };
 type ApiEvent = { id: string; method: string; path: string; statusCode?: number; requestBody?: unknown; responseBody?: unknown; error?: string | null; durationMs?: number; createdAt?: string };
 type CardComment = { id: string; body: string; action: string; authorType: string; agentId?: string | null; authorId?: string | null; createdAt?: string };
 type WorkProduct = { id: string; cardId?: string | null; projectId?: string | null; agentId?: string | null; type: string; title: string; summary?: string | null; url?: string | null; repoProvider?: string | null; repoUrl?: string | null; branch?: string | null; commitSha?: string | null; pullRequestUrl?: string | null; createdAt?: string };
+type CardUpdatePayload = Omit<Partial<Card>, 'priority'> & { priority?: (typeof priorities)[number] };
 type LiveEvent = { type: string; cardId?: string | null; entityId?: string; projectId?: string | null };
 type CachedRows<T> = { rows: T[]; cachedAt: number };
 type CardTabCache = {
@@ -143,6 +146,29 @@ function priorityLabel(priority: number) {
   if (priority >= 2) return 'High';
   if (priority <= -1) return 'Low';
   return 'Normal';
+}
+
+function priorityValue(priority: number): (typeof priorities)[number] {
+  if (priority >= 3) return 'urgent';
+  if (priority >= 2) return 'high';
+  if (priority <= -1) return 'low';
+  return 'normal';
+}
+
+function priorityNumber(priority: string | number | undefined): number {
+  if (typeof priority === 'number') return priority;
+  if (priority === 'urgent') return 3;
+  if (priority === 'high') return 2;
+  if (priority === 'low') return -1;
+  return 0;
+}
+
+function parseCsv(value: string): string[] {
+  return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function selectedMultiValues(select: HTMLSelectElement): string[] {
+  return Array.from(select.selectedOptions).map((option) => option.value).filter(Boolean);
 }
 
 async function fetchKanbanBoard() {
@@ -262,6 +288,18 @@ export function KanbanBoard() {
   const [newDepartment, setNewDepartment] = useState('');
   const [newProject, setNewProject] = useState('');
   const [newGoal, setNewGoal] = useState('');
+  const [newPriority, setNewPriority] = useState<(typeof priorities)[number]>('normal');
+  const [newTags, setNewTags] = useState('');
+  const [newDependencies, setNewDependencies] = useState<string[]>([]);
+  const [workProductType, setWorkProductType] = useState<(typeof workProductTypes)[number]>('external');
+  const [workProductTitle, setWorkProductTitle] = useState('');
+  const [workProductSummary, setWorkProductSummary] = useState('');
+  const [workProductUrl, setWorkProductUrl] = useState('');
+  const [workProductRepoProvider, setWorkProductRepoProvider] = useState('');
+  const [workProductRepoUrl, setWorkProductRepoUrl] = useState('');
+  const [workProductBranch, setWorkProductBranch] = useState('');
+  const [workProductCommitSha, setWorkProductCommitSha] = useState('');
+  const [workProductPullRequestUrl, setWorkProductPullRequestUrl] = useState('');
   const [requiresApproval, setRequiresApproval] = useState(false);
   const [filterStatus, setFilterStatus] = useState('');
   const [filterAssignee, setFilterAssignee] = useState('');
@@ -466,6 +504,9 @@ export function KanbanBoard() {
       departmentId: selected.departmentId ?? null,
       projectId: selected.projectId ?? null,
       goalId: selected.goalId ?? null,
+      priority: selected.priority,
+      tags: selected.tags ?? [],
+      dependencyCardIds: selected.dependencyCardIds ?? [],
       requiresApproval: selected.requiresApproval ?? false,
       maxRetries: selected.maxRetries ?? 3,
     });
@@ -502,14 +543,15 @@ export function KanbanBoard() {
         body: JSON.stringify({
           title: newTitle.trim(),
           body: newBody.trim() || newTitle.trim(),
-          tags: [],
-          priority: 'normal',
+          tags: parseCsv(newTags),
+          priority: newPriority,
           companyId: newCompany || undefined,
           departmentId: newDepartment || null,
           projectId: newProject || null,
           goalId: newGoal || null,
           assigneeId: newAssignee || null,
           reviewerId: newReviewer || null,
+          dependencyCardIds: newDependencies,
           requiresApproval,
         }),
       });
@@ -521,6 +563,9 @@ export function KanbanBoard() {
       setNewDepartment('');
       setNewProject('');
       setNewGoal('');
+      setNewPriority('normal');
+      setNewTags('');
+      setNewDependencies([]);
       setRequiresApproval(false);
       setModalOpen(false);
       void queryClient.invalidateQueries({ queryKey: ['kanbanBoard'] });
@@ -532,7 +577,7 @@ export function KanbanBoard() {
     }
   }
 
-  async function updateCard(card: Card, patch: Partial<Card>) {
+  async function updateCard(card: Card, patch: CardUpdatePayload) {
     const updated = await api<Card>(`/api/cards/${card.id}`, { method: 'PUT', body: JSON.stringify({ ...patch, updatedAt: card.updatedAt }) });
     setCards(cards.map((item) => (item.id === updated.id ? updated : item)));
     setSelected(updated);
@@ -545,6 +590,9 @@ export function KanbanBoard() {
       departmentId: updated.departmentId ?? null,
       projectId: updated.projectId ?? null,
       goalId: updated.goalId ?? null,
+      priority: updated.priority,
+      tags: updated.tags ?? [],
+      dependencyCardIds: updated.dependencyCardIds ?? [],
       requiresApproval: updated.requiresApproval ?? false,
       maxRetries: updated.maxRetries ?? 3,
     });
@@ -567,6 +615,9 @@ export function KanbanBoard() {
         departmentId: draft.departmentId ?? null,
         projectId: draft.projectId ?? null,
         goalId: draft.goalId ?? null,
+        priority: priorityValue(priorityNumber(draft.priority ?? selected.priority)),
+        tags: draft.tags ?? [],
+        dependencyCardIds: draft.dependencyCardIds ?? [],
         requiresApproval: Boolean(draft.requiresApproval),
         maxRetries: Number(draft.maxRetries ?? selected.maxRetries ?? 3),
       });
@@ -589,6 +640,9 @@ export function KanbanBoard() {
       departmentId: selected.departmentId ?? null,
       projectId: selected.projectId ?? null,
       goalId: selected.goalId ?? null,
+      priority: selected.priority,
+      tags: selected.tags ?? [],
+      dependencyCardIds: selected.dependencyCardIds ?? [],
       requiresApproval: selected.requiresApproval ?? false,
       maxRetries: selected.maxRetries ?? 3,
     });
@@ -670,6 +724,44 @@ export function KanbanBoard() {
     }
   }
 
+  async function addWorkProduct() {
+    if (!selected || !workProductTitle.trim()) return;
+    setBusy(true);
+    try {
+      const product = await api<WorkProduct>(`/api/cards/${selected.id}/work-products`, {
+        method: 'POST',
+        body: JSON.stringify({
+          type: workProductType,
+          title: workProductTitle.trim(),
+          summary: workProductSummary || null,
+          url: workProductUrl || null,
+          repoProvider: workProductRepoProvider || null,
+          repoUrl: workProductRepoUrl || null,
+          branch: workProductBranch || null,
+          commitSha: workProductCommitSha || null,
+          pullRequestUrl: workProductPullRequestUrl || null,
+        }),
+      });
+      const nextProducts = [product, ...workProducts];
+      setWorkProducts(nextProducts);
+      saveCardTabCache(selected.id, { workProducts: { rows: nextProducts, cachedAt: Date.now() } });
+      void queryClient.invalidateQueries({ queryKey: ['cardWorkProducts', selected.id] });
+      setWorkProductTitle('');
+      setWorkProductSummary('');
+      setWorkProductUrl('');
+      setWorkProductRepoProvider('');
+      setWorkProductRepoUrl('');
+      setWorkProductBranch('');
+      setWorkProductCommitSha('');
+      setWorkProductPullRequestUrl('');
+      setToast({ message: 'Work product added', type: 'success' });
+    } catch (err) {
+      setToast({ message: err instanceof Error ? err.message : 'Failed to add work product', type: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return <>
     <div className="kanban-toolbar">
       <div className="input-wrap" style={{ flex: '1 1 260px' }}><Search size={15} /><input placeholder="Search" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
@@ -706,13 +798,16 @@ export function KanbanBoard() {
             <input className="input" placeholder="Title" value={newTitle} onChange={(e) => setNewTitle(e.target.value)} />
             <textarea className="input" placeholder="Description" value={newBody} onChange={(e) => setNewBody(e.target.value)} rows={5} />
             <div className="form-grid">
-              <select className="input" value={newCompany} onChange={(e) => { setNewCompany(e.target.value); setNewDepartment(''); setNewProject(''); setNewGoal(''); }}><option value="">Company</option>{companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}</select>
+              <select className="input" value={newCompany} onChange={(e) => { setNewCompany(e.target.value); setNewDepartment(''); setNewProject(''); setNewGoal(''); setNewAssignee(''); setNewReviewer(''); setNewDependencies([]); }}><option value="">Company</option>{companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}</select>
               <select className="input" value={newDepartment} onChange={(e) => { setNewDepartment(e.target.value); setNewGoal(''); }}><option value="">Department</option>{departments.filter((department) => !newCompany || department.companyId === newCompany).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select>
               <select className="input" value={newProject} onChange={(e) => { setNewProject(e.target.value); setNewGoal(''); }}><option value="">Project</option>{projects.filter((project) => !newCompany || project.companyId === newCompany).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>
               <select className="input" value={newGoal} onChange={(e) => setNewGoal(e.target.value)}><option value="">Goal</option>{scopedGoalOptions(goals, { companyId: newCompany, departmentId: newDepartment, projectId: newProject }).map((goal) => <option value={goal.id} key={goal.id}>{goalScope(goal)} / {goal.title}</option>)}</select>
-              <select className="input" value={newAssignee} onChange={(e) => setNewAssignee(e.target.value)}><option value="">Assignee</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
-              <select className="input" value={newReviewer} onChange={(e) => setNewReviewer(e.target.value)}><option value="">Reviewer</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
+              <select className="input" value={newAssignee} onChange={(e) => setNewAssignee(e.target.value)}><option value="">Assignee</option>{agents.filter((agent) => !newCompany || agent.companyId === newCompany).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
+              <select className="input" value={newReviewer} onChange={(e) => setNewReviewer(e.target.value)}><option value="">Reviewer</option>{agents.filter((agent) => !newCompany || agent.companyId === newCompany).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
+              <select className="input" value={newPriority} onChange={(e) => setNewPriority(e.target.value as (typeof priorities)[number])}>{priorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select>
             </div>
+            <label className="field-label">Tags<input className="input" value={newTags} onChange={(e) => setNewTags(e.target.value)} placeholder="bug, release, research" /></label>
+            <label className="field-label">Dependencies<select className="input" multiple size={4} value={newDependencies} onChange={(e) => setNewDependencies(selectedMultiValues(e.currentTarget))}>{cards.filter((card) => !newCompany || card.companyId === newCompany).map((card) => <option key={card.id} value={card.id}>{card.title}</option>)}</select></label>
             <label className="check-row"><input type="checkbox" checked={requiresApproval} onChange={(e) => setRequiresApproval(e.target.checked)} /> Requires approval</label>
             <button className="btn btn-primary" disabled={busy} onClick={create}><Plus size={15} /> Create</button>
           </motion.div>
@@ -745,7 +840,10 @@ export function KanbanBoard() {
               <label className="field-label">Department<select className="input" value={draft?.departmentId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), departmentId: e.target.value || null, goalId: null })}><option value="">Department</option>{departments.filter((department) => !selected.companyId || department.companyId === selected.companyId).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
               <label className="field-label">Project<select className="input" value={draft?.projectId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), projectId: e.target.value || null, goalId: null })}><option value="">Project</option>{projects.filter((project) => !selected.companyId || project.companyId === selected.companyId).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label>
               <label className="field-label">Goal<select className="input" value={draft?.goalId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), goalId: e.target.value || null })}><option value="">Goal</option>{scopedGoalOptions(goals, { companyId: selected.companyId, departmentId: draft?.departmentId ?? selected.departmentId, projectId: draft?.projectId ?? selected.projectId }).map((goal) => <option value={goal.id} key={goal.id}>{goalScope(goal)} / {goal.title}</option>)}</select></label>
+              <label className="field-label">Priority<select className="input" value={priorityValue(priorityNumber(draft?.priority ?? selected.priority))} onChange={(e) => setDraft({ ...(draft ?? {}), priority: priorityNumber(e.target.value) })}>{priorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
             </div>
+            <label className="field-label">Tags<input className="input" value={(draft?.tags ?? []).join(', ')} onChange={(e) => setDraft({ ...(draft ?? {}), tags: parseCsv(e.target.value) })} /></label>
+            <label className="field-label">Dependencies<select className="input" multiple size={4} value={draft?.dependencyCardIds ?? []} onChange={(e) => setDraft({ ...(draft ?? {}), dependencyCardIds: selectedMultiValues(e.currentTarget) })}>{cards.filter((card) => card.id !== selected.id && (!selected.companyId || card.companyId === selected.companyId)).map((card) => <option key={card.id} value={card.id}>{card.title}</option>)}</select></label>
             <div className="form-grid">
               <label className="field-label">Max retries<input className="input" type="number" min={1} max={10} value={Number(draft?.maxRetries ?? 3)} onChange={(e) => setDraft({ ...(draft ?? {}), maxRetries: Number(e.target.value) })} /></label>
               <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={Boolean(draft?.requiresApproval)} onChange={(e) => setDraft({ ...(draft ?? {}), requiresApproval: e.target.checked })} /> Requires approval</label>
@@ -850,6 +948,20 @@ export function KanbanBoard() {
             <div className="panel-title">
               <div><h2>Work Products</h2><span className="status-pill">{workProducts.length} products{tabLoading.workProducts ? ' / refreshing' : ''}</span></div>
             </div>
+            <section className="section-card" style={{ padding: 0 }}>
+              <div className="form-grid">
+                <label className="field-label">Type<select className="input" value={workProductType} onChange={(event) => setWorkProductType(event.target.value as (typeof workProductTypes)[number])}>{workProductTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
+                <label className="field-label">Title<input className="input" value={workProductTitle} onChange={(event) => setWorkProductTitle(event.target.value)} /></label>
+                <label className="field-label">URL<input className="input" value={workProductUrl} onChange={(event) => setWorkProductUrl(event.target.value)} placeholder="https://..." /></label>
+                <label className="field-label">Pull request URL<input className="input" value={workProductPullRequestUrl} onChange={(event) => setWorkProductPullRequestUrl(event.target.value)} placeholder="https://github.com/org/repo/pull/1" /></label>
+                <label className="field-label">Repo provider<input className="input" value={workProductRepoProvider} onChange={(event) => setWorkProductRepoProvider(event.target.value)} placeholder="github" /></label>
+                <label className="field-label">Repo URL<input className="input" value={workProductRepoUrl} onChange={(event) => setWorkProductRepoUrl(event.target.value)} /></label>
+                <label className="field-label">Branch<input className="input" value={workProductBranch} onChange={(event) => setWorkProductBranch(event.target.value)} /></label>
+                <label className="field-label">Commit SHA<input className="input" value={workProductCommitSha} onChange={(event) => setWorkProductCommitSha(event.target.value)} /></label>
+              </div>
+              <label className="field-label">Summary<textarea className="input" rows={3} value={workProductSummary} onChange={(event) => setWorkProductSummary(event.target.value)} /></label>
+              <button className="btn btn-primary" disabled={busy || !workProductTitle.trim()} onClick={addWorkProduct}><Plus size={15} /> Add work product</button>
+            </section>
             {tabLoading.workProducts && workProducts.length === 0 ? <p style={{ opacity: 0.6 }}>Loading work products...</p> : workProducts.length === 0 ? <p style={{ opacity: 0.6 }}>No work products yet.</p> : workProducts.map((product) => {
               const primaryUrl = product.pullRequestUrl || product.url || (product.repoUrl && product.commitSha ? `${product.repoUrl.replace(/\/$/, '')}/commit/${product.commitSha}` : '');
               return <article className="log-item" key={product.id}>

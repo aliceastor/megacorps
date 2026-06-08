@@ -21,6 +21,7 @@ type Project = {
   completionPolicy?: 'push_branch' | 'pull_request' | 'push_or_pr' | 'manual' | null;
   setupCommand?: string | null;
   testCommand?: string | null;
+  runtimeServices?: Record<string, unknown> | null;
   workspacePathHint?: string | null;
   createdAt?: string;
 };
@@ -45,12 +46,14 @@ export function WorkspacesPage() {
   const [repoUrl, setRepoUrl] = useState('');
   const [workPath, setWorkPath] = useState('');
   const [defaultBranch, setDefaultBranch] = useState('main');
+  const [protectedBranches, setProtectedBranches] = useState('main, master');
   const [workBranchPattern, setWorkBranchPattern] = useState('megacorps/card-{cardId}-{agentSlug}');
   const [pullBeforeRun, setPullBeforeRun] = useState(true);
   const [pushAfterRun, setPushAfterRun] = useState(true);
   const [completionPolicy, setCompletionPolicy] = useState<'push_branch' | 'pull_request' | 'push_or_pr' | 'manual'>('push_or_pr');
   const [setupCommand, setSetupCommand] = useState('');
   const [testCommand, setTestCommand] = useState('');
+  const [runtimeServicesJson, setRuntimeServicesJson] = useState('{}');
   const [workspacePathHint, setWorkspacePathHint] = useState('');
   const [goalScopeValue, setGoalScopeValue] = useState<'company' | 'department' | 'project'>('project');
   const [goalDepartmentId, setGoalDepartmentId] = useState('');
@@ -74,14 +77,56 @@ export function WorkspacesPage() {
     setRepoUrl(selectedProject.repoUrl ?? '');
     setWorkPath(selectedProject.workPath ?? '');
     setDefaultBranch(selectedProject.defaultBranch ?? 'main');
+    setProtectedBranches((selectedProject.protectedBranches?.length ? selectedProject.protectedBranches : ['main', 'master']).join(', '));
     setWorkBranchPattern(selectedProject.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}');
     setPullBeforeRun(selectedProject.pullBeforeRun !== false);
     setPushAfterRun(selectedProject.pushAfterRun !== false);
     setCompletionPolicy(selectedProject.completionPolicy ?? 'push_or_pr');
     setSetupCommand(selectedProject.setupCommand ?? '');
     setTestCommand(selectedProject.testCommand ?? '');
+    setRuntimeServicesJson(JSON.stringify(selectedProject.runtimeServices ?? {}, null, 2));
     setWorkspacePathHint(selectedProject.workspacePathHint ?? '');
   }, [selectedProject?.id]);
+
+  function parseList(value: string): string[] {
+    return value.split(',').map((item) => item.trim()).filter(Boolean);
+  }
+
+  function parseRuntimeServices(): Record<string, unknown> | null {
+    try {
+      const parsed = JSON.parse(runtimeServicesJson.trim() || '{}') as unknown;
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+        setError('Runtime services must be a JSON object.');
+        return null;
+      }
+      return parsed as Record<string, unknown>;
+    } catch {
+      setError('Runtime services must be valid JSON.');
+      return null;
+    }
+  }
+
+  function projectPayload() {
+    const runtimeServices = parseRuntimeServices();
+    if (!runtimeServices) return null;
+    return {
+      name: projectName.trim(),
+      description: projectDescription,
+      repoProvider,
+      repoUrl: repoUrl || null,
+      workPath: workPath || null,
+      defaultBranch,
+      protectedBranches: parseList(protectedBranches).length ? parseList(protectedBranches) : ['main', 'master'],
+      workBranchPattern,
+      pullBeforeRun,
+      pushAfterRun,
+      completionPolicy,
+      setupCommand: setupCommand || null,
+      testCommand: testCommand || null,
+      runtimeServices,
+      workspacePathHint: workspacePathHint || null,
+    };
+  }
 
   async function refresh(nextCompanyId = companyId) {
     setError('');
@@ -111,26 +156,15 @@ export function WorkspacesPage() {
     if (!companyId || !projectName.trim()) return;
     setError('');
     try {
-      const project = await api<Project>('/api/projects', { method: 'POST', body: JSON.stringify({
-        companyId,
-        name: projectName.trim(),
-        description: projectDescription,
-        repoProvider,
-        repoUrl: repoUrl || null,
-        workPath: workPath || null,
-        defaultBranch,
-        workBranchPattern,
-        pullBeforeRun,
-        pushAfterRun,
-        completionPolicy,
-        setupCommand: setupCommand || null,
-        testCommand: testCommand || null,
-        workspacePathHint: workspacePathHint || null,
-      }) });
+      const payload = projectPayload();
+      if (!payload) return;
+      const project = await api<Project>('/api/projects', { method: 'POST', body: JSON.stringify({ companyId, ...payload }) });
       setProjectName('');
       setProjectDescription('');
       setRepoUrl('');
       setWorkPath('');
+      setProtectedBranches('main, master');
+      setRuntimeServicesJson('{}');
       setSelectedProjectId(project.id);
       await refresh(companyId);
     } catch (err) {
@@ -142,21 +176,9 @@ export function WorkspacesPage() {
     if (!selectedProject || !projectName.trim()) return;
     setError('');
     try {
-      await api<Project>(`/api/projects/${selectedProject.id}`, { method: 'PUT', body: JSON.stringify({
-        name: projectName.trim(),
-        description: projectDescription,
-        repoProvider,
-        repoUrl: repoUrl || null,
-        workPath: workPath || null,
-        defaultBranch,
-        workBranchPattern,
-        pullBeforeRun,
-        pushAfterRun,
-        completionPolicy,
-        setupCommand: setupCommand || null,
-        testCommand: testCommand || null,
-        workspacePathHint: workspacePathHint || null,
-      }) });
+      const payload = projectPayload();
+      if (!payload) return;
+      await api<Project>(`/api/projects/${selectedProject.id}`, { method: 'PUT', body: JSON.stringify(payload) });
       await refresh(companyId);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save project');
@@ -193,13 +215,16 @@ export function WorkspacesPage() {
           setProjectDescription('');
           setRepoProvider('github');
           setRepoUrl('');
+          setWorkPath('');
           setDefaultBranch('main');
+          setProtectedBranches('main, master');
           setWorkBranchPattern('megacorps/card-{cardId}-{agentSlug}');
           setPullBeforeRun(true);
           setPushAfterRun(true);
           setCompletionPolicy('push_or_pr');
           setSetupCommand('');
           setTestCommand('');
+          setRuntimeServicesJson('{}');
           setWorkspacePathHint('');
         }} style={{ textAlign: 'left' }}>
           <b>No project</b>
@@ -222,6 +247,7 @@ export function WorkspacesPage() {
           </div>
           <label className="field-label">Repository URL<input className="input" value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="https://github.com/org/repo" /></label>
           <label className="field-label">Project work path<input className="input" value={workPath} onChange={(event) => setWorkPath(event.target.value)} placeholder="Repo/workspace-relative path, e.g. apps/server or reports/final" /></label>
+          <label className="field-label">Protected branches<input className="input" value={protectedBranches} onChange={(event) => setProtectedBranches(event.target.value)} placeholder="main, master, production" /></label>
           <label className="field-label">Work branch pattern<input className="input" value={workBranchPattern} onChange={(event) => setWorkBranchPattern(event.target.value)} /></label>
           <div className="form-grid">
             <label className="check-row"><input type="checkbox" checked={pullBeforeRun} onChange={(event) => setPullBeforeRun(event.target.checked)} /> Pull before every run</label>
@@ -235,6 +261,7 @@ export function WorkspacesPage() {
           </select></label>
           <label className="field-label">Setup command<textarea className="input" rows={2} value={setupCommand} onChange={(event) => setSetupCommand(event.target.value)} /></label>
           <label className="field-label">Test command<textarea className="input" rows={2} value={testCommand} onChange={(event) => setTestCommand(event.target.value)} /></label>
+          <label className="field-label">Runtime services JSON<textarea className="input" rows={4} value={runtimeServicesJson} onChange={(event) => setRuntimeServicesJson(event.target.value)} placeholder='{"postgres":"postgres://...","web":"http://localhost:3000"}' /></label>
           <label className="field-label">Runtime-local path hint<input className="input" value={workspacePathHint} onChange={(event) => setWorkspacePathHint(event.target.value)} placeholder="Optional runtime-local clone/folder hint only" /></label>
           {selectedProject
             ? <button className="btn btn-primary" disabled={!projectName.trim()} onClick={saveProject}><Save size={15} /> Save project</button>
@@ -247,6 +274,7 @@ export function WorkspacesPage() {
         <div className="meta-grid">
           <span>Provider <b>{selectedProject?.repoProvider ?? repoProvider}</b></span>
           <span>Default branch <b>{selectedProject?.defaultBranch ?? defaultBranch}</b></span>
+          <span>Protected branches <b>{(selectedProject?.protectedBranches?.length ? selectedProject.protectedBranches : parseList(protectedBranches)).join(', ') || 'none'}</b></span>
           <span>Work path <b>{selectedProject?.workPath || workPath || 'project root'}</b></span>
           <span>Pull before run <b>{(selectedProject?.pullBeforeRun ?? pullBeforeRun) ? 'yes' : 'no'}</b></span>
           <span>Push after run <b>{(selectedProject?.pushAfterRun ?? pushAfterRun) ? 'yes' : 'no'}</b></span>

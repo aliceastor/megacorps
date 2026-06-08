@@ -1140,7 +1140,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     try { await ensureCompanyReferences(companyId, { departmentId: input.departmentId, bossId: input.bossId, runtimeId: input.runtimeId, adapterType: input.adapterType }); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
-    const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
+    const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, capabilities: input.capabilities ?? [], budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
     if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
     return reply.code(201).send(agent ? redactAgent(agent) : agent);
   });
@@ -1216,6 +1216,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       runtimeId: input.runtimeId,
       hermesProfile: input.hermesProfile,
       bossId: input.bossId,
+      capabilities: input.capabilities,
       budgetPerTask: input.budgetPerTask?.toString(),
       budgetMonthly: input.budgetMonthly?.toString(),
     }).where(eq(agents.id, id)).returning();

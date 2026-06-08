@@ -18,8 +18,10 @@ type Agent = {
   adapterConfig?: Record<string, unknown>;
   runtimeId?: string | null;
   bossId?: string | null;
+  capabilities?: string[] | null;
   isBusy?: boolean;
   isActive?: boolean;
+  budgetPerTask?: string;
   budgetMonthly?: string;
   spentThisMonth?: string;
   currentSessionId?: string | null;
@@ -104,6 +106,10 @@ function displayConfigValue(value: unknown): string {
   return typeof value === 'object' ? JSON.stringify(value) : String(value);
 }
 
+function parseCsv(value: string): string[] {
+  return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
 function Toast({ message, type, onClose }: { message: string; type: 'success' | 'error'; onClose: () => void }) {
   useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, [onClose]);
   return <motion.div initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 40 }}
@@ -133,7 +139,11 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const [slug, setSlug] = useState('');
   const [profile, setProfile] = useState('local-debug');
   const [role, setRole] = useState('member');
+  const [agentTitle, setAgentTitle] = useState('');
   const [soul, setSoul] = useState('');
+  const [agentCapabilities, setAgentCapabilities] = useState('');
+  const [agentBudgetPerTask, setAgentBudgetPerTask] = useState('');
+  const [agentBudgetMonthly, setAgentBudgetMonthly] = useState('');
   const [bossId, setBossId] = useState('');
   const [departmentId, setDepartmentId] = useState('');
   const [runtimeId, setRuntimeId] = useState('');
@@ -183,6 +193,8 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       adapterConfig: selected.adapterConfig ?? {},
       runtimeId: selected.runtimeId ?? '',
       bossId: selected.bossId ?? '',
+      capabilities: selected.capabilities ?? [],
+      budgetPerTask: selected.budgetPerTask ?? '',
       departmentId: selected.departmentId ?? '',
       budgetMonthly: selected.budgetMonthly ?? '',
     });
@@ -200,7 +212,22 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
     try {
       const agent = await api<Agent>('/api/agents', {
         method: 'POST',
-        body: JSON.stringify({ companyId: companyId || undefined, departmentId: departmentId || null, runtimeId: runtimeId || null, name: name.trim(), slug: slug.trim(), role: role.trim() || 'member', title: '', soul: soul.trim() || null, adapterType, hermesProfile: profile, bossId: bossId || null }),
+        body: JSON.stringify({
+          companyId: companyId || undefined,
+          departmentId: departmentId || null,
+          runtimeId: runtimeId || null,
+          name: name.trim(),
+          slug: slug.trim(),
+          role: role.trim() || 'member',
+          title: agentTitle.trim(),
+          soul: soul.trim() || null,
+          capabilities: parseCsv(agentCapabilities),
+          adapterType,
+          hermesProfile: profile,
+          bossId: bossId || null,
+          budgetPerTask: agentBudgetPerTask ? Number(agentBudgetPerTask) : undefined,
+          budgetMonthly: agentBudgetMonthly ? Number(agentBudgetMonthly) : undefined,
+        }),
       });
       setAgents([...agents, agent]);
       setName('');
@@ -209,7 +236,11 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       setDepartmentId('');
       setRuntimeId('');
       setRole('member');
+      setAgentTitle('');
       setSoul('');
+      setAgentCapabilities('');
+      setAgentBudgetPerTask('');
+      setAgentBudgetMonthly('');
       setToast({ message: `Agent "${agent.name}" created`, type: 'success' });
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : 'Failed to create agent', type: 'error' });
@@ -331,6 +362,8 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
         hermesProfile: agentDraft.hermesProfile ? String(agentDraft.hermesProfile) : undefined,
         bossId: agentDraft.bossId || null,
         departmentId: agentDraft.departmentId || null,
+        capabilities: agentDraft.capabilities ?? [],
+        budgetPerTask: agentDraft.budgetPerTask ? Number(agentDraft.budgetPerTask) : undefined,
         budgetMonthly: agentDraft.budgetMonthly ? Number(agentDraft.budgetMonthly) : undefined,
       };
       const updated = await api<Agent>(`/api/agents/${selected.id}`, { method: 'PUT', body: JSON.stringify(payload) });
@@ -436,7 +469,11 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       <input className="input" placeholder="Slug" value={slug} onChange={(e) => setSlug(e.target.value)} />
       <input className="input" placeholder="Profile" value={profile} onChange={(e) => setProfile(e.target.value)} />
       <input className="input" placeholder="Identity label" value={role} onChange={(e) => setRole(e.target.value)} />
+      <input className="input" placeholder="Title" value={agentTitle} onChange={(e) => setAgentTitle(e.target.value)} />
       <input className="input" placeholder="Soul / work style" value={soul} onChange={(e) => setSoul(e.target.value)} />
+      <input className="input" placeholder="Capabilities, comma-separated" value={agentCapabilities} onChange={(e) => setAgentCapabilities(e.target.value)} />
+      <input className="input" type="number" min={0} step="0.01" placeholder="Per-task budget USD" value={agentBudgetPerTask} onChange={(e) => setAgentBudgetPerTask(e.target.value)} />
+      <input className="input" type="number" min={0} step="0.01" placeholder="Monthly budget USD" value={agentBudgetMonthly} onChange={(e) => setAgentBudgetMonthly(e.target.value)} />
       <select className="input" value={departmentId} onChange={(e) => setDepartmentId(e.target.value)}><option value="">Department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select>
       <select className="input" value={bossId} onChange={(e) => setBossId(e.target.value)}><option value="">Reports to</option>{visibleAgents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
       <select className="input" value={adapterType} onChange={(e) => setAdapterType(e.target.value)}>
@@ -485,7 +522,8 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
               <span>Adapter <b>{selected.adapterType ?? 'hermes'}</b></span>
               <span>Profile <b>{selected.hermesProfile ?? 'none'}</b></span>
               <span>Session <b>{selected.currentSessionId ?? 'none'}</b></span>
-              <span>Budget <b>${selected.spentThisMonth ?? '0'} / ${selected.budgetMonthly ?? 'none'}</b></span>
+              <span>Budget <b>${selected.spentThisMonth ?? '0'} / monthly ${selected.budgetMonthly ?? 'none'} / task ${selected.budgetPerTask ?? 'none'}</b></span>
+              <span>Capabilities <b>{selected.capabilities?.join(', ') || 'none'}</b></span>
             </div>
             {selectedAdapterFields.length > 0 && <section className="config-summary">
               <div className="panel-title"><h3>Effective adapter config</h3><span className="status-pill">{selectedRuntime ? `runtime: ${selectedRuntime.name}` : 'no runtime preset'}</span></div>
@@ -511,6 +549,8 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
                <label className="field-label">Runtime preset<select className="input" value={String(agentDraft?.runtimeId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), runtimeId: e.target.value || null })}><option value="">No runtime (mock/dev only)</option>{runtimes.filter((runtime) => runtime.adapterType === String(agentDraft?.adapterType ?? selected.adapterType ?? 'mock') && runtime.companyId === selected.companyId).map((runtime) => <option value={runtime.id} key={runtime.id}>{runtime.name}</option>)}</select></label>
               <label className="field-label">Department<select className="input" value={String(agentDraft?.departmentId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), departmentId: e.target.value || null })}><option value="">No department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
               <label className="field-label">Reports to<select className="input" value={String(agentDraft?.bossId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), bossId: e.target.value || null })}><option value="">Top-level member</option>{visibleAgents.filter((agent) => agent.id !== selected.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
+              <label className="field-label">Capabilities<input className="input" value={(agentDraft?.capabilities ?? []).join(', ')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), capabilities: parseCsv(e.target.value) })} /></label>
+              <label className="field-label">Per-task budget<input className="input" type="number" min={0} step="0.01" value={String(agentDraft?.budgetPerTask ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), budgetPerTask: e.target.value })} /></label>
               <label className="field-label">Monthly budget<input className="input" type="number" min={0} step="0.01" value={String(agentDraft?.budgetMonthly ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), budgetMonthly: e.target.value })} /></label>
               <label className="field-label">Soul
                 <span className="field-hint">Platform-owned identity/personality/work style for adapters without native profiles, especially Codex App Server.</span>

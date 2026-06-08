@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 type ApiEvent = { id: string; method: string; path: string; statusCode?: number; error?: string | null; durationMs?: number; requestBody?: unknown; responseBody?: unknown; createdAt?: string };
 type ActivityEvent = { id: string; action: string; entityType: string; entityId: string; actorType: string; actorId: string; details?: unknown; createdAt?: string };
 type HeartbeatRun = { id: string; cardId?: string | null; agentId?: string | null; source: string; status: string; error?: string | null; costUsd?: string | null; durationSeconds?: number | null; createdAt?: string };
-type TaskRun = { id: string; cardId: string; agentId?: string | null; heartbeatRunId?: string | null; kind: string; source: string; status: string; attemptNumber?: number | null; error?: string | null; costUsd?: string | null; durationSeconds?: number | null; createdAt?: string };
+type TaskRun = { id: string; cardId: string; agentId?: string | null; heartbeatRunId?: string | null; adapterSessionId?: string | null; adapterTurnId?: string | null; kind: string; source: string; status: string; attemptNumber?: number | null; error?: string | null; costUsd?: string | null; durationSeconds?: number | null; createdAt?: string };
 type CronRun = { id: string; name: string; source: string; status: string; error?: string | null; durationSeconds?: number | null; details?: unknown; createdAt?: string };
 type CronStatus = { enabled: boolean; intervalMs: number; running: boolean; lastStatus: string; lastStartedAt?: string | null; lastCompletedAt?: string | null; lastError?: string | null; recentRuns: CronRun[] };
 
@@ -102,6 +102,7 @@ export function LogsPage() {
             <b>{run.kind} / {run.status}</b>
             <p>{run.cardId} / {run.agentId ?? 'no agent'} / attempt {run.attemptNumber ?? 1} / {run.durationSeconds ?? 0}s / ${run.costUsd ?? '0'}</p>
             <p>heartbeat {run.heartbeatRunId ?? 'pending'} / {run.createdAt ? new Date(run.createdAt).toLocaleString() : ''}</p>
+            <p>adapter session {run.adapterSessionId ?? 'none'} / turn {run.adapterTurnId ?? 'none'}</p>
             {run.error && <p className="form-error">{run.error}</p>}
           </article>)}
         </div>
