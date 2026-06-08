@@ -66,6 +66,7 @@ export const projects = pgTable('projects', {
   description: text('description'),
   repoProvider: text('repo_provider').default('github'),
   repoUrl: text('repo_url'),
+  workPath: text('work_path'),
   defaultBranch: text('default_branch').default('main'),
   protectedBranches: text('protected_branches').array().default(['main', 'master']),
   workBranchPattern: text('work_branch_pattern').default('megacorps/card-{cardId}-{agentSlug}'),

@@ -30,6 +30,7 @@ function projectRepoContext(project: ProjectRow | null | undefined): string {
   return [
     `Project repository provider: ${project.repoProvider ?? 'github'}`,
     `Project repository URL: ${project.repoUrl ?? 'not configured'}`,
+    `Project work path: ${project.workPath ?? 'project root'}`,
     `Default branch: ${project.defaultBranch ?? 'main'}`,
     `Task branch pattern: ${project.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}'}`,
     `Pull before run: ${project.pullBeforeRun === false ? 'no' : 'yes'}`,
@@ -38,7 +39,7 @@ function projectRepoContext(project: ProjectRow | null | undefined): string {
     project.setupCommand ? `Setup command: ${project.setupCommand}` : '',
     project.testCommand ? `Test command: ${project.testCommand}` : '',
     project.repoUrl
-      ? 'Repository rule: use your runtime-owned local clone, pull/rebase before code changes, commit and push/PR completed work, and report PR/commit/preview links rather than local-only paths.'
+      ? 'Repository rule: use your runtime-owned local clone, stay inside the project work path unless explicitly required, pull/rebase before code changes, commit and push/PR completed work, and report PR/commit/preview links rather than local-only paths.'
       : 'Repository rule: no repo is configured, so do not invent local workspace paths.',
   ].filter(Boolean).join('\n');
 }

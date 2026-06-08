@@ -97,6 +97,7 @@ function projectRepoLines(project: ProjectRow | null | undefined): string[] {
   return [
     `Project repository provider: ${project.repoProvider ?? 'github'}`,
     `Project repository URL: ${project.repoUrl ?? 'not configured'}`,
+    `Project work path: ${project.workPath ?? 'project root'}`,
     `Default branch: ${project.defaultBranch ?? 'main'}`,
     `Protected branches: ${(project.protectedBranches ?? ['main', 'master']).join(', ') || 'none'}`,
     `Task branch pattern: ${project.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}'}`,
@@ -105,7 +106,7 @@ function projectRepoLines(project: ProjectRow | null | undefined): string[] {
     `Completion policy: ${project.completionPolicy ?? 'push_or_pr'}`,
     project.setupCommand ? `Setup command: ${project.setupCommand}` : '',
     project.testCommand ? `Test command: ${project.testCommand}` : '',
-    project.workspacePathHint ? `MegaCorps workspace path hint: ${project.workspacePathHint}` : '',
+    project.workspacePathHint ? `Runtime-local workspace hint: ${project.workspacePathHint}` : '',
     `Runtime services: ${clipText(JSON.stringify(project.runtimeServices ?? {}), 1200)}`,
   ].filter(Boolean);
 }
@@ -120,12 +121,13 @@ function projectGitProtocol(project: ProjectRow | null | undefined, card: CardRo
   return [
     'Repository workflow:',
     `1. Use repo ${project.repoUrl}. Your local clone path is runtime-owned; MegaCorps does not assume a shared folder path.`,
-    project.pullBeforeRun === false ? '2. Pull-before-run is disabled for this project.' : `2. Before editing, fetch the latest ${project.defaultBranch ?? 'main'} and pull/rebase so your local workspace is current.`,
-    `3. Work on branch ${branch}; do not push directly to protected branches (${(project.protectedBranches ?? ['main', 'master']).join(', ') || 'none'}).`,
-    project.setupCommand ? `4. Run setup when needed: ${project.setupCommand}` : '4. Run project setup only when needed and report any failure.',
-    project.testCommand ? `5. Validate with: ${project.testCommand}` : '5. Run the most relevant tests/checks available in the repo.',
-    project.pushAfterRun === false ? '6. Push-after-run is disabled; report the local result and blocker clearly.' : `6. Commit and push your branch when work is complete. Prefer a pull request when policy is ${project.completionPolicy ?? 'push_or_pr'}.`,
-    '7. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, or external metadata as applicable.',
+    `2. Treat project work path as ${project.workPath ?? 'project root'}. Stay inside that path unless the task explicitly requires a broader change.`,
+    project.pullBeforeRun === false ? '3. Pull-before-run is disabled for this project.' : `3. Before editing, fetch the latest ${project.defaultBranch ?? 'main'} and pull/rebase so your local workspace is current.`,
+    `4. Work on branch ${branch}; do not push directly to protected branches (${(project.protectedBranches ?? ['main', 'master']).join(', ') || 'none'}).`,
+    project.setupCommand ? `5. Run setup when needed: ${project.setupCommand}` : '5. Run project setup only when needed and report any failure.',
+    project.testCommand ? `6. Validate with: ${project.testCommand}` : '6. Run the most relevant tests/checks available in the repo/work path.',
+    project.pushAfterRun === false ? '7. Push-after-run is disabled; report the local result and blocker clearly.' : `7. Commit and push your branch when work is complete. Prefer a pull request when policy is ${project.completionPolicy ?? 'push_or_pr'}.`,
+    '8. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, or external metadata as applicable.',
   ].join('\n');
 }
 

@@ -12,6 +12,7 @@ type Project = {
   description?: string | null;
   repoProvider?: 'github' | 'gitlab' | 'gitea' | 'generic' | null;
   repoUrl?: string | null;
+  workPath?: string | null;
   defaultBranch?: string | null;
   protectedBranches?: string[] | null;
   workBranchPattern?: string | null;
@@ -42,6 +43,7 @@ export function WorkspacesPage() {
   const [projectDescription, setProjectDescription] = useState('');
   const [repoProvider, setRepoProvider] = useState<'github' | 'gitlab' | 'gitea' | 'generic'>('github');
   const [repoUrl, setRepoUrl] = useState('');
+  const [workPath, setWorkPath] = useState('');
   const [defaultBranch, setDefaultBranch] = useState('main');
   const [workBranchPattern, setWorkBranchPattern] = useState('megacorps/card-{cardId}-{agentSlug}');
   const [pullBeforeRun, setPullBeforeRun] = useState(true);
@@ -70,6 +72,7 @@ export function WorkspacesPage() {
     setProjectDescription(selectedProject.description ?? '');
     setRepoProvider(selectedProject.repoProvider ?? 'github');
     setRepoUrl(selectedProject.repoUrl ?? '');
+    setWorkPath(selectedProject.workPath ?? '');
     setDefaultBranch(selectedProject.defaultBranch ?? 'main');
     setWorkBranchPattern(selectedProject.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}');
     setPullBeforeRun(selectedProject.pullBeforeRun !== false);
@@ -114,6 +117,7 @@ export function WorkspacesPage() {
         description: projectDescription,
         repoProvider,
         repoUrl: repoUrl || null,
+        workPath: workPath || null,
         defaultBranch,
         workBranchPattern,
         pullBeforeRun,
@@ -125,6 +129,8 @@ export function WorkspacesPage() {
       }) });
       setProjectName('');
       setProjectDescription('');
+      setRepoUrl('');
+      setWorkPath('');
       setSelectedProjectId(project.id);
       await refresh(companyId);
     } catch (err) {
@@ -141,6 +147,7 @@ export function WorkspacesPage() {
         description: projectDescription,
         repoProvider,
         repoUrl: repoUrl || null,
+        workPath: workPath || null,
         defaultBranch,
         workBranchPattern,
         pullBeforeRun,
@@ -214,6 +221,7 @@ export function WorkspacesPage() {
             <label className="field-label">Default branch<input className="input" value={defaultBranch} onChange={(event) => setDefaultBranch(event.target.value)} /></label>
           </div>
           <label className="field-label">Repository URL<input className="input" value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="https://github.com/org/repo" /></label>
+          <label className="field-label">Project work path<input className="input" value={workPath} onChange={(event) => setWorkPath(event.target.value)} placeholder="Repo/workspace-relative path, e.g. apps/server or reports/final" /></label>
           <label className="field-label">Work branch pattern<input className="input" value={workBranchPattern} onChange={(event) => setWorkBranchPattern(event.target.value)} /></label>
           <div className="form-grid">
             <label className="check-row"><input type="checkbox" checked={pullBeforeRun} onChange={(event) => setPullBeforeRun(event.target.checked)} /> Pull before every run</label>
@@ -227,7 +235,7 @@ export function WorkspacesPage() {
           </select></label>
           <label className="field-label">Setup command<textarea className="input" rows={2} value={setupCommand} onChange={(event) => setSetupCommand(event.target.value)} /></label>
           <label className="field-label">Test command<textarea className="input" rows={2} value={testCommand} onChange={(event) => setTestCommand(event.target.value)} /></label>
-          <label className="field-label">Workspace path hint<input className="input" value={workspacePathHint} onChange={(event) => setWorkspacePathHint(event.target.value)} placeholder="Optional local hint only" /></label>
+          <label className="field-label">Runtime-local path hint<input className="input" value={workspacePathHint} onChange={(event) => setWorkspacePathHint(event.target.value)} placeholder="Optional runtime-local clone/folder hint only" /></label>
           {selectedProject
             ? <button className="btn btn-primary" disabled={!projectName.trim()} onClick={saveProject}><Save size={15} /> Save project</button>
             : <button className="btn btn-primary" disabled={!projectName.trim()} onClick={addProject}><Plus size={15} /> Add project</button>}
@@ -239,10 +247,11 @@ export function WorkspacesPage() {
         <div className="meta-grid">
           <span>Provider <b>{selectedProject?.repoProvider ?? repoProvider}</b></span>
           <span>Default branch <b>{selectedProject?.defaultBranch ?? defaultBranch}</b></span>
+          <span>Work path <b>{selectedProject?.workPath || workPath || 'project root'}</b></span>
           <span>Pull before run <b>{(selectedProject?.pullBeforeRun ?? pullBeforeRun) ? 'yes' : 'no'}</b></span>
           <span>Push after run <b>{(selectedProject?.pushAfterRun ?? pushAfterRun) ? 'yes' : 'no'}</b></span>
         </div>
-        <p className="chat-empty" style={{ textAlign: 'left' }}>Agents use their own runtime-local clone. MegaCorps injects the repo URL, branch rules, setup/test commands, and requires PR/commit/preview work products instead of local-only file paths.</p>
+        <p className="chat-empty" style={{ textAlign: 'left' }}>Agents use their own runtime-local clone. MegaCorps injects the repo URL, project work path, branch rules, setup/test commands, and requires PR/commit/preview work products instead of local-only file paths.</p>
       </section>
 
       <section className="card section-card">

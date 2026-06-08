@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canTransitionCard, cardStatusSchema, cardStatuses, createAgentSchema, createCardSchema, signupSchema } from './index.ts';
+import { canTransitionCard, cardStatusSchema, cardStatuses, createAgentSchema, createCardSchema, createProjectSchema, signupSchema } from './index.ts';
 
 test('allows the canonical card status path and blocks invalid skips', () => {
   assert.deepEqual([...cardStatuses], ['todo', 'in_progress', 'in_review', 'needs_review', 'done', 'blocked', 'cancelled']);
@@ -19,6 +19,14 @@ test('maps legacy backlog input to todo', () => {
 test('rejects empty card bodies at schema level', () => {
   const parsed = createCardSchema.safeParse({ title: 'x', body: '' });
   assert.equal(parsed.success, false);
+});
+
+test('project workPath must stay relative to the project workspace', () => {
+  assert.equal(createProjectSchema.safeParse({ name: 'App', workPath: 'apps/server' }).success, true);
+  assert.equal(createProjectSchema.safeParse({ name: 'Root', workPath: null }).success, true);
+  assert.equal(createProjectSchema.safeParse({ name: 'Absolute', workPath: '/etc' }).success, false);
+  assert.equal(createProjectSchema.safeParse({ name: 'Windows absolute', workPath: 'C:\\temp' }).success, false);
+  assert.equal(createProjectSchema.safeParse({ name: 'Traversal', workPath: '../outside' }).success, false);
 });
 
 test('accepts MVP agent adapter options', () => {

@@ -97,8 +97,8 @@ const endpoints: ApiEndpoint[] = [
   { method: 'POST', path: '/api/chat/sessions/:id/messages', group: 'Chat', auth: 'session', summary: 'Send a message to an agent and store the response.', params: { id: 'Chat session UUID.' }, body: { body: 'Message for the agent' } },
 
   { method: 'GET', path: '/api/projects', group: 'Context', auth: 'session', summary: 'List visible projects.', query: { companyId: 'Optional company UUID.' } },
-  { method: 'POST', path: '/api/projects', group: 'Context', auth: 'session', summary: 'Create a project with optional repo binding. The repo is the shared truth; each remote agent uses its own runtime-local clone.', body: { companyId: 'uuid optional', name: 'Project name', description: 'Optional description', repoProvider: 'github', repoUrl: 'https://github.com/org/repo', defaultBranch: 'main', workBranchPattern: 'megacorps/card-{cardId}-{agentSlug}', pullBeforeRun: true, pushAfterRun: true, completionPolicy: 'push_or_pr', setupCommand: 'npm install', testCommand: 'npm test', workspacePathHint: 'optional local hint only' } },
-  { method: 'PUT', path: '/api/projects/:id', group: 'Context', auth: 'session', summary: 'Update a project repo binding, branch policy, setup/test commands, or description.', params: { id: 'Project UUID.' } },
+  { method: 'POST', path: '/api/projects', group: 'Context', auth: 'session', summary: 'Create a project with optional repo binding and project-level work path. repoUrl is the shared Git truth; workPath is the repo/workspace-relative area agents should edit; each remote agent still uses its own runtime-local clone.', body: { companyId: 'uuid optional', name: 'Project name', description: 'Optional description', repoProvider: 'github', repoUrl: 'https://github.com/org/repo', workPath: 'apps/server or reports/final, null means project root', defaultBranch: 'main', workBranchPattern: 'megacorps/card-{cardId}-{agentSlug}', pullBeforeRun: true, pushAfterRun: true, completionPolicy: 'push_or_pr', setupCommand: 'npm install', testCommand: 'npm test', workspacePathHint: 'optional runtime-local clone/folder hint only' } },
+  { method: 'PUT', path: '/api/projects/:id', group: 'Context', auth: 'session', summary: 'Update a project repo binding, project work path, branch policy, setup/test commands, or description.', params: { id: 'Project UUID.' } },
   { method: 'GET', path: '/api/goals', group: 'Context', auth: 'session', summary: 'List visible goals. Goals are scoped to exactly one of company, department, or project.', query: { companyId: 'Optional company UUID.', scope: 'company | department | project', departmentId: 'Optional department UUID.', projectId: 'Optional project UUID.' } },
   { method: 'POST', path: '/api/goals', group: 'Context', auth: 'session', summary: 'Create a company, department, or project goal. Do not send both departmentId and projectId.', body: { companyId: 'uuid optional', departmentId: null, projectId: null, title: 'Goal title', body: 'Goal detail' } },
   { method: 'GET', path: '/api/knowledge-docs', group: 'Context', auth: 'session', summary: 'List visible knowledge documents.', query: { companyId: 'Optional company UUID.' } },
@@ -203,6 +203,12 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
 
   if (endpoint.path.endsWith('/test-connection')) {
     return { responseSchema: { success: 'boolean', output: 'string', sessionId: 'string', tokensUsed: 'number', costUsd: 'number', durationSeconds: 'number' }, responseExample: { success: true, output: 'OK', sessionId: '20260606_120000_alice', tokensUsed: 24, costUsd: 0.000072, durationSeconds: 3 }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path.includes('/projects')) {
+    const project = { id: 'project-uuid', companyId: 'company-uuid', name: 'Project name', repoProvider: 'github', repoUrl: 'https://github.com/org/repo', workPath: 'apps/server', defaultBranch: 'main', workBranchPattern: 'megacorps/card-{cardId}-{agentSlug}', workspacePathHint: 'optional runtime-local hint only' };
+    if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: project }, responseExample: [project], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: project, responseExample: project, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/cards/:id/logs')) {

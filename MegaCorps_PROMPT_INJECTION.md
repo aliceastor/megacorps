@@ -49,15 +49,22 @@ Effective goal stack:
 
 For Direct Chat, the session `projectId` controls the project goal layer. A null `projectId` is treated as no-project/general chat.
 
-## Project Repository Protocol
+## Project Repository And Work Path Protocol
 
-Projects can carry a repo binding instead of a shared server-side workspace path. This is designed for multi-system agents: every agent runtime owns its own local folder or clone cache, while MegaCorps injects the shared Git repository and the required operating protocol.
+Projects carry the shared repo/workspace policy. This is designed for multi-system agents: every agent runtime owns its own local folder or clone cache, while MegaCorps injects the shared Git repository, project-level work path, and required operating protocol.
+
+`repoUrl` and `workPath` are project-level settings:
+
+- `repoUrl`: the shared Git remote for coding/text-controlled work.
+- `workPath`: the repo/workspace-relative area the agent should edit, for example `apps/server`, `reports/final`, or `docs/contracts`. Null means project root.
+- `workspacePathHint`: optional runtime-local hint only. It is never the shared source of truth.
 
 Injected fields:
 
 ```text
 Project repository provider: <github | gitlab | gitea | generic>
 Project repository URL: <repo url | not configured>
+Project work path: <relative path | project root>
 Default branch: <branch>
 Protected branches: <branch list>
 Task branch pattern: megacorps/card-{cardId}-{agentSlug}
@@ -66,10 +73,11 @@ Push after run: yes | no
 Completion policy: push_or_pr | pull_request | push_branch | manual
 Setup command: <optional>
 Test command: <optional>
+Runtime-local workspace hint: <optional local hint only>
 Runtime services: <json metadata>
 ```
 
-When a repo is configured, the prompt instructs the agent to use its own runtime-local clone, fetch/pull or rebase before editing, work on the task branch, avoid direct pushes to protected branches, run relevant setup/tests, then push a branch or create a PR according to the project policy.
+When a repo is configured, the prompt instructs the agent to use its own runtime-local clone, stay inside the project work path unless the task explicitly requires broader edits, fetch/pull or rebase before editing, work on the task branch, avoid direct pushes to protected branches, run relevant setup/tests, then push a branch or create a PR according to the project policy.
 
 ## Kanban Dispatch Prompt
 
@@ -159,7 +167,8 @@ Project: <project name | No project / general chat>
 Project description: <description, if any>
 Project repository provider: <provider>
 Project repository URL: <repo URL | not configured>
-Repository rule: use runtime-local clone, pull before repo work, push/PR finished changes, and report URLs rather than local-only paths.
+Project work path: <relative path | project root>
+Repository rule: use runtime-local clone, stay inside the project work path unless explicitly required, pull before repo work, push/PR finished changes, and report URLs rather than local-only paths.
 Department: <agent department | none>
 Company goals:
 <company goals>

@@ -120,7 +120,7 @@ Hermes suite operational notes:
 - Phase 15: database-backed `task_runs` queue, background task-run worker, queued manual run/review, queued cron dispatch/review, and Logs task-run visibility.
 - Phase 16: help/escalation review via `needs_review`, scoped company/department/project goals, project-scoped Direct Chat, and project-focused Workspaces.
 - Phase 17: React Query browser cache plus authenticated WebSocket live events for chat, Kanban card updates, task logs, comments, projects, goals, and work products.
-- Phase 18: repo-centric project workspace policy, pull-before-run/push-after-run prompt protocol, and first-class task work products for PRs, commits, previews, reports, screenshots, and artifacts.
+- Phase 18: repo-centric project workspace policy with project-level `repoUrl` and `workPath`, pull-before-run/push-after-run prompt protocol, and first-class task work products for PRs, commits, previews, reports, screenshots, and artifacts.
 
 Reference-informed next phases:
 
@@ -184,7 +184,9 @@ Kanban task detail tabs use React Query plus a short-lived browser session cache
 
 ## Project repo workspaces and work products
 
-Projects are repo-centric. MegaCorps stores the shared Git repository and policy, while each remote agent runtime uses its own local clone/folder. A project can define `repoProvider`, `repoUrl`, `defaultBranch`, protected branches, `workBranchPattern`, pull-before-run, push-after-run, completion policy, setup command, test command, runtime service metadata, and an optional local workspace hint. Prompt injection tells agents to pull/rebase before editing, work on a task branch, avoid protected branches, validate, then push or open a PR according to the project policy.
+Projects are repo/workspace-centric. MegaCorps stores the shared Git repository and project work area, while each remote agent runtime uses its own local clone/folder. A project can define `repoProvider`, `repoUrl`, project-level `workPath`, `defaultBranch`, protected branches, `workBranchPattern`, pull-before-run, push-after-run, completion policy, setup command, test command, runtime service metadata, and an optional runtime-local workspace hint.
+
+`repoUrl` is the shared Git remote. `workPath` is the repo/workspace-relative path agents should focus on, such as `apps/server`, `reports/final`, or `docs/contracts`; null means project root. `workspacePathHint` is only a local clone/folder hint for a runtime and is not the source of truth. Prompt injection tells agents to pull/rebase before editing, stay inside the project work path unless the task explicitly requires broader edits, work on a task branch, avoid protected branches, validate, then push or open a PR according to the project policy.
 
 Task outputs are no longer limited to comments/logs. `work_products` records reviewable deliverables such as PRs, commits, preview URLs, reports, screenshots, files, artifacts, and external links. The task-complete webhook accepts a `workProducts` array, and Kanban task details include a Work Products tab so reviewers can inspect the actual deliverable instead of reading logs only.
 
@@ -202,7 +204,7 @@ Every task dispatch, review, and direct chat invocation receives a bounded Kanba
 - focus agent open work and review queue,
 - latest task message board entries,
 - latest task lifecycle logs,
-- project repository policy and Git workflow instructions,
+- project repository policy, project work path, and Git workflow instructions,
 - recent company activity,
 - recent heartbeat runs.
 

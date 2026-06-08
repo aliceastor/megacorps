@@ -19,9 +19,10 @@ CREATE TABLE IF NOT EXISTS user_invites (id UUID PRIMARY KEY DEFAULT gen_random_
 CREATE INDEX IF NOT EXISTS user_invites_company_status_idx ON user_invites(company_id, status);
 CREATE INDEX IF NOT EXISTS user_invites_email_status_idx ON user_invites(email, status);
 CREATE TABLE IF NOT EXISTS departments (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, slug TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT now());
-CREATE TABLE IF NOT EXISTS projects (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, description TEXT, repo_provider TEXT DEFAULT 'github', repo_url TEXT, default_branch TEXT DEFAULT 'main', protected_branches TEXT[] DEFAULT '{main,master}', work_branch_pattern TEXT DEFAULT 'megacorps/card-{cardId}-{agentSlug}', pull_before_run BOOLEAN DEFAULT true, push_after_run BOOLEAN DEFAULT true, completion_policy TEXT DEFAULT 'push_or_pr', setup_command TEXT, test_command TEXT, runtime_services JSONB DEFAULT '{}', workspace_path_hint TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE IF NOT EXISTS projects (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, description TEXT, repo_provider TEXT DEFAULT 'github', repo_url TEXT, work_path TEXT, default_branch TEXT DEFAULT 'main', protected_branches TEXT[] DEFAULT '{main,master}', work_branch_pattern TEXT DEFAULT 'megacorps/card-{cardId}-{agentSlug}', pull_before_run BOOLEAN DEFAULT true, push_after_run BOOLEAN DEFAULT true, completion_policy TEXT DEFAULT 'push_or_pr', setup_command TEXT, test_command TEXT, runtime_services JSONB DEFAULT '{}', workspace_path_hint TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS repo_provider TEXT DEFAULT 'github';
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS repo_url TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS work_path TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS default_branch TEXT DEFAULT 'main';
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS protected_branches TEXT[] DEFAULT '{main,master}';
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS work_branch_pattern TEXT DEFAULT 'megacorps/card-{cardId}-{agentSlug}';

@@ -131,12 +131,19 @@ export const createKnowledgeDocSchema = z.object({
   body: z.string().trim().min(1).max(20000),
 });
 
+const projectWorkPathSchema = z.string().trim().max(1000).refine((value) => {
+  if (!value) return true;
+  if (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value)) return false;
+  return !value.split(/[\\/]+/).includes('..');
+}, 'workPath must be a repo/workspace-relative path');
+
 export const createProjectSchema = z.object({
   companyId: z.string().uuid().optional(),
   name: z.string().trim().min(1).max(160),
   description: z.string().trim().max(4000).optional(),
   repoProvider: z.enum(['github', 'gitlab', 'gitea', 'generic']).default('github'),
   repoUrl: z.string().trim().max(1000).nullable().optional(),
+  workPath: projectWorkPathSchema.nullable().optional(),
   defaultBranch: z.string().trim().min(1).max(120).default('main'),
   protectedBranches: z.array(z.string().trim().min(1).max(120)).default(['main', 'master']),
   workBranchPattern: z.string().trim().min(1).max(200).default('megacorps/card-{cardId}-{agentSlug}'),

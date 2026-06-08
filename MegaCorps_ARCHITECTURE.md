@@ -2,6 +2,17 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.9 - Project Work Path Injection
+
+Date: 2026-06-08
+
+Completed in this pass:
+
+- Added project-level `workPath` as the authoritative repo/workspace-relative area agents should edit. Null means project root.
+- Clarified that `repoUrl` and `workPath` are project-based settings inherited by Direct Chat sessions and Kanban cards through `projectId`.
+- Kept `workspacePathHint` as an optional runtime-local clone/folder hint only. It is not shared state and must not be treated as a source of truth.
+- Updated prompt injection, API Help, README, architecture notes, and Workspaces UI so operators know to set both repo URL and work path.
+
 ## Architecture Update v1.8 - Live UI, Repo Workspaces, and Work Products
 
 Date: 2026-06-08
@@ -10,8 +21,8 @@ Completed in this pass:
 
 - Added authenticated WebSocket live events at `GET /api/live`, filtered by company membership. The web app now uses React Query as the browser cache layer and live events invalidate chat sessions/messages, Kanban cards, card comments/logs, projects, goals, and work products.
 - Direct Chat now publishes live events as soon as the server stores the user message, when the agent run starts, and when the reply or failure is stored. The UI keeps optimistic outgoing messages and the typing indicator, while server events keep other tabs current.
-- Reworked project workspaces into repo-centric project policy. Projects now store provider, repo URL, default/protected branches, work branch pattern, pull-before-run, push-after-run, completion policy, setup/test commands, runtime service metadata, and an optional local workspace hint.
-- Prompt injection now tells agents that local clone paths are runtime-owned and not a MegaCorps source of truth. Agents must pull/rebase before repo work, work on a task branch, validate, then push a branch or PR and report reviewable URLs/commits.
+- Reworked project workspaces into repo-centric project policy. Projects now store provider, repo URL, project work path, default/protected branches, work branch pattern, pull-before-run, push-after-run, completion policy, setup/test commands, runtime service metadata, and an optional runtime-local workspace hint.
+- Prompt injection now tells agents that local clone paths are runtime-owned and not a MegaCorps source of truth. Agents must pull/rebase before repo work, stay inside the project work path unless explicitly required, work on a task branch, validate, then push a branch or PR and report reviewable URLs/commits.
 - Added `work_products` as first-class task deliverables. Webhooks can submit `workProducts`, operators can attach them to cards, and Kanban details now include a Work Products tab for PRs, commits, previews, reports, screenshots, artifacts, and external URLs.
 - Updated API Help, README, Workspaces UI, and prompt documentation for repo project policy and work products.
 
@@ -1709,12 +1720,22 @@ CREATE TABLE projects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     company_id UUID NOT NULL REFERENCES companies(id),
     name TEXT NOT NULL,
-    slug TEXT NOT NULL,
     description TEXT,
-    workspace_path TEXT,
-    status TEXT DEFAULT 'active',
+    repo_provider TEXT DEFAULT 'github',
+    repo_url TEXT,
+    work_path TEXT,
+    default_branch TEXT DEFAULT 'main',
+    protected_branches TEXT[] DEFAULT '{main,master}',
+    work_branch_pattern TEXT DEFAULT 'megacorps/card-{cardId}-{agentSlug}',
+    pull_before_run BOOLEAN DEFAULT true,
+    push_after_run BOOLEAN DEFAULT true,
+    completion_policy TEXT DEFAULT 'push_or_pr',
+    setup_command TEXT,
+    test_command TEXT,
+    runtime_services JSONB DEFAULT '{}',
+    workspace_path_hint TEXT,
     created_at TIMESTAMPTZ DEFAULT now(),
-    UNIQUE(company_id, slug)
+    updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- Goals
