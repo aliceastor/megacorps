@@ -458,6 +458,7 @@ Configuration model:
 
 - Global defaults can still come from `.env`.
 - Runtime presets live in `agent_runtimes`.
+- Runtime presets now include `localWorkspaceRoot` and `localScratchRoot`, the machine-local folders used by attached agents for repo clone/cache and temporary task files.
 - Agent-specific overrides live in `agents.adapter_config`.
 - Effective adapter config is `env fallback -> runtime preset -> agent override`.
 - Runtime health summaries are available in `Settings` and `GET /api/agent-runtimes/health`.
@@ -470,6 +471,7 @@ Where to configure:
 
 Runtime fields:
 
+- Common runtime-local fields: `localWorkspaceRoot`, `localScratchRoot`.
 - `mock`: no endpoint required.
 - `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`.
 - `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`.
@@ -683,7 +685,7 @@ The Phase 1-15 operational MVP is usable for controlled local/NAS debugging, but
 4. Workspaces:
    - repo provider credentials and secret refs
    - automated branch/PR lifecycle
-   - optional runtime-local workspace hints without making local folders the source of truth
+   - richer runtime-local workspace cleanup/retention policies without making local folders the source of truth
 
 5. Async execution:
    - move the current in-process DB queue worker into a dedicated sidecar

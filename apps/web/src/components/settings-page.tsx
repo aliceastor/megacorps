@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Save, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
 
-type Runtime = { id: string; companyId?: string | null; name: string; adapterType: string; config: Record<string, unknown>; isActive?: boolean };
+type Runtime = { id: string; companyId?: string | null; name: string; adapterType: string; localWorkspaceRoot?: string | null; localScratchRoot?: string | null; config: Record<string, unknown>; isActive?: boolean };
 type RuntimeHealth = { runtimeId: string; name: string; adapterType: string; status: string; isActive: boolean; agents: number; activeAgents: number; busyAgents: number; lastRunAt?: string | null; lastRunStatus?: string | null; lastError?: string | null; capabilities?: string[] };
 type Company = { id: string; name: string; slug: string; mission?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean };
 type Department = { id: string; companyId: string; name: string; slug: string };
@@ -83,6 +83,8 @@ export function SettingsPage() {
   const [runtimeCompanyId, setRuntimeCompanyId] = useState('');
   const [runtimeName, setRuntimeName] = useState('Local Mock Runtime');
   const [runtimeAdapter, setRuntimeAdapter] = useState('mock');
+  const [runtimeLocalWorkspaceRoot, setRuntimeLocalWorkspaceRoot] = useState('');
+  const [runtimeLocalScratchRoot, setRuntimeLocalScratchRoot] = useState('');
   const [runtimeActive, setRuntimeActive] = useState(true);
   const [runtimeConfig, setRuntimeConfig] = useState<Record<string, unknown>>({});
   const [runtimeConfigJson, setRuntimeConfigJson] = useState(formatConfig({}));
@@ -166,6 +168,8 @@ export function SettingsPage() {
     setRuntimeCompanyId(runtime.companyId ?? companies[0]?.id ?? '');
     setRuntimeName(runtime.name);
     setRuntimeAdapter(runtime.adapterType);
+    setRuntimeLocalWorkspaceRoot(runtime.localWorkspaceRoot ?? '');
+    setRuntimeLocalScratchRoot(runtime.localScratchRoot ?? '');
     setRuntimeActive(runtime.isActive !== false);
     setRuntimeConfigState(runtime.config ?? {});
   }
@@ -183,7 +187,15 @@ export function SettingsPage() {
       setToast(`Runtime config JSON error: ${runtimeConfigJsonError}`);
       return;
     }
-    const payload = { companyId: runtimeCompanyId || companyId || companies[0]?.id, name: runtimeName, adapterType: runtimeAdapter, isActive: runtimeActive, config: runtimeConfig };
+    const payload = {
+      companyId: runtimeCompanyId || companyId || companies[0]?.id,
+      name: runtimeName,
+      adapterType: runtimeAdapter,
+      localWorkspaceRoot: runtimeLocalWorkspaceRoot.trim() || null,
+      localScratchRoot: runtimeLocalScratchRoot.trim() || null,
+      isActive: runtimeActive,
+      config: runtimeConfig,
+    };
     const saved = runtimeId ? await api<Runtime>(`/api/agent-runtimes/${runtimeId}`, { method: 'PUT', body: JSON.stringify(payload) }) : await api<Runtime>('/api/agent-runtimes', { method: 'POST', body: JSON.stringify(payload) });
     setRuntimeId(saved.id);
     setToast('Runtime saved');
@@ -244,11 +256,19 @@ export function SettingsPage() {
     {toast && <p className="status-pill">{toast}</p>}
     <div className="data-grid">
       <section className="card section-card">
-        <div className="panel-title"><h2>Agent runtimes</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeCompanyId(companyId || companies[0]?.id || ''); setRuntimeName(''); setRuntimeAdapter('mock'); setRuntimeConfigState({}); }}>New</button></div>
+        <div className="panel-title"><h2>Agent runtimes</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeCompanyId(companyId || companies[0]?.id || ''); setRuntimeName(''); setRuntimeAdapter('mock'); setRuntimeLocalWorkspaceRoot(''); setRuntimeLocalScratchRoot(''); setRuntimeConfigState({}); }}>New</button></div>
         <div className="form-grid">
           <label className="field-label">Company<select className="input" value={runtimeCompanyId} onChange={(event) => setRuntimeCompanyId(event.target.value)}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
           <label className="field-label">Name<input className="input" value={runtimeName} onChange={(event) => setRuntimeName(event.target.value)} /></label>
           <label className="field-label">Adapter<select className="input" value={runtimeAdapter} onChange={(event) => setRuntimeAdapter(event.target.value)}>{adapterTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
+          <label className="field-label">Local workspace root
+            <span className="field-hint">Runtime-owned clone/cache root, for example /home/alice/workspaces or C:\Agents\Alice\workspaces.</span>
+            <input className="input" value={runtimeLocalWorkspaceRoot} onChange={(event) => setRuntimeLocalWorkspaceRoot(event.target.value)} />
+          </label>
+          <label className="field-label">Local scratch root
+            <span className="field-hint">Runtime-owned temporary task folder root. Final artifacts should still be reported as URLs, commits, PRs, or work products.</span>
+            <input className="input" value={runtimeLocalScratchRoot} onChange={(event) => setRuntimeLocalScratchRoot(event.target.value)} />
+          </label>
         </div>
         <label className="check-row"><input type="checkbox" checked={runtimeActive} onChange={(event) => setRuntimeActive(event.target.checked)} /> Runtime active</label>
         <div className="form-grid">
@@ -265,6 +285,7 @@ export function SettingsPage() {
         <div className="table-list">
           {runtimes.map((runtime) => <div className="list-row" key={runtime.id}>
             <b>{runtime.name}</b><p>{companies.find((company) => company.id === runtime.companyId)?.name ?? 'company'} / {runtime.adapterType} / {runtime.isActive === false ? 'inactive' : 'active'}</p>
+            <p className="field-hint">{runtime.localWorkspaceRoot ? `Workspace: ${runtime.localWorkspaceRoot}` : 'Workspace root not configured'}{runtime.localScratchRoot ? ` / Scratch: ${runtime.localScratchRoot}` : ''}</p>
             <div className="action-row"><button className="btn" onClick={() => selectRuntime(runtime)}>Edit</button><button className="btn" style={{ color: 'var(--danger)' }} onClick={() => deleteRuntime(runtime)}><Trash2 size={14} /> Delete</button></div>
           </div>)}
         </div>

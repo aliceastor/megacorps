@@ -5,7 +5,7 @@ import { requireAuth } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole } from './access.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { db } from './db/client.ts';
-import { activityLog, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, projects } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, projects } from './db/schema.ts';
 import { budgetOk, buildCompanyKanbanContext, buildExecutionAgent, getBudgetGuard } from './dispatch.ts';
 import { publishLiveEvent } from './live.ts';
 
@@ -14,6 +14,7 @@ type AgentRow = typeof agents.$inferSelect;
 type CompanyRow = typeof companies.$inferSelect;
 type GoalRow = typeof goals.$inferSelect;
 type ProjectRow = typeof projects.$inferSelect;
+type RuntimeRow = typeof agentRuntimes.$inferSelect;
 
 function titleFromMessage(body: string, agentName: string): string {
   const firstLine = body.replace(/\s+/g, ' ').trim().slice(0, 72);
@@ -25,12 +26,24 @@ function formatGoal(goal: GoalRow): string {
   return `- ${scope}: ${goal.title}${goal.body ? `\n  ${goal.body.slice(0, 1200)}` : ''}`;
 }
 
-function projectRepoContext(project: ProjectRow | null | undefined): string {
-  if (!project) return 'Project repository: none';
+function runtimeLocalContext(runtime: RuntimeRow | null | undefined): string {
+  return [
+    `Runtime-local workspace root: ${runtime?.localWorkspaceRoot ?? 'not configured'}`,
+    `Runtime-local scratch root: ${runtime?.localScratchRoot ?? 'not configured'}`,
+  ].join('\n');
+}
+
+function projectRepoContext(project: ProjectRow | null | undefined, runtime?: RuntimeRow | null): string {
+  if (!project) return [
+    'Project repository: none',
+    runtimeLocalContext(runtime),
+    'Repository rule: no repo is configured, so do not invent shared local workspace paths. Runtime-local scratch is only for temporary work.',
+  ].join('\n');
   return [
     `Project repository provider: ${project.repoProvider ?? 'github'}`,
     `Project repository URL: ${project.repoUrl ?? 'not configured'}`,
     `Project work path: ${project.workPath ?? 'project root'}`,
+    runtimeLocalContext(runtime),
     `Default branch: ${project.defaultBranch ?? 'main'}`,
     `Task branch pattern: ${project.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}'}`,
     `Pull before run: ${project.pullBeforeRun === false ? 'no' : 'yes'}`,
@@ -39,19 +52,20 @@ function projectRepoContext(project: ProjectRow | null | undefined): string {
     project.setupCommand ? `Setup command: ${project.setupCommand}` : '',
     project.testCommand ? `Test command: ${project.testCommand}` : '',
     project.repoUrl
-      ? 'Repository rule: use your runtime-owned local clone, stay inside the project work path unless explicitly required, pull/rebase before code changes, commit and push/PR completed work, and report PR/commit/preview links rather than local-only paths.'
-      : 'Repository rule: no repo is configured, so do not invent local workspace paths.',
+      ? 'Repository rule: use your runtime-owned local clone under the runtime-local workspace root when configured, stay inside the project work path unless explicitly required, pull/rebase before code changes, commit and push/PR completed work, and report PR/commit/preview links rather than local-only paths.'
+      : 'Repository rule: no repo is configured, so do not invent shared local workspace paths. Runtime-local scratch is only for temporary work.',
   ].filter(Boolean).join('\n');
 }
 
 async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, projectId: string | null): Promise<string> {
   const [project] = projectId ? await db.select().from(projects).where(eq(projects.id, projectId)).limit(1) : [];
+  const [runtime] = agent.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, agent.runtimeId)).limit(1) : [];
   const [department] = agent.departmentId ? await db.select().from(departments).where(eq(departments.id, agent.departmentId)).limit(1) : [];
   const companyGoals = await db.select().from(goals).where(eq(goals.companyId, companyId)).orderBy(desc(goals.createdAt));
   return [
     `Project: ${project?.name ?? 'No project / general chat'}`,
     project?.description ? `Project description: ${project.description}` : '',
-    projectRepoContext(project),
+    projectRepoContext(project, runtime),
     `Department: ${department?.name ?? 'none'}`,
     `Company goals:\n${companyGoals.filter((goal) => !goal.departmentId && !goal.projectId).map(formatGoal).join('\n') || 'none'}`,
     `Department goals:\n${agent.departmentId ? companyGoals.filter((goal) => goal.departmentId === agent.departmentId).map(formatGoal).join('\n') || 'none' : 'none'}`,

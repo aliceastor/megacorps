@@ -2,6 +2,17 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.10 - Runtime Local Workspace Roots
+
+Date: 2026-06-08
+
+Completed in this pass:
+
+- Added `agent_runtimes.local_workspace_root` and `agent_runtimes.local_scratch_root` as first-class schema fields.
+- Kept `projects.repoUrl` and `projects.workPath` project-based, while runtime presets own machine-local clone/cache and scratch paths.
+- Injected runtime-local workspace/scratch roots into Kanban task prompts, Kanban context snapshots, Direct Chat context, and effective adapter config.
+- Updated Settings UI, API Help, README, prompt documentation, and progress notes so operators know where to set project repo/workPath versus runtime local folders.
+
 ## Architecture Update v1.9 - Project Work Path Injection
 
 Date: 2026-06-08
@@ -159,7 +170,7 @@ Completed in this pass:
 - The server container now includes `openssh-client`.
 - Hermes SSH dispatch connects to the configured SSH host, imports `/proc/1/environ`, and runs `hermes -z "{prompt}" --profile {profile}`. No production SSH host is hardcoded.
 - SSH stdout/stderr, exit code, duration, estimated tokens, cost, and session id are recorded through the normal adapter result path.
-- `Settings -> Agent runtimes` and `Agents -> select agent` now expose Hermes SSH fields: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, and `megacorpsApiUrl`.
+- `Settings -> Agent runtimes` and `Agents -> select agent` now expose common runtime-local roots plus Hermes SSH fields: `localWorkspaceRoot`, `localScratchRoot`, `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, and `megacorpsApiUrl`.
 - Docker compose and `.env.example` include Hermes SSH environment fallbacks.
 - The web API client now tries the current browser host on port `4000` before falling back to the baked `NEXT_PUBLIC_API_URL`, which fixes NAS/browser deployments where a baked IP or `localhost` is unreachable from the current browser.
 - `GET /api/help` and `GET /api/help?format=markdown` now include response schemas, response examples, and explicit rate-limit notes for every endpoint.
@@ -2399,6 +2410,8 @@ CREATE TABLE agent_runtimes (
     type TEXT NOT NULL,
     name TEXT NOT NULL,
     host TEXT NOT NULL,
+    local_workspace_root TEXT,
+    local_scratch_root TEXT,
     port INTEGER,
     status TEXT DEFAULT 'offline',
     last_heartbeat TIMESTAMPTZ,

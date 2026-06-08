@@ -59,12 +59,20 @@ Projects carry the shared repo/workspace policy. This is designed for multi-syst
 - `workPath`: the repo/workspace-relative area the agent should edit, for example `apps/server`, `reports/final`, or `docs/contracts`. Null means project root.
 - `workspacePathHint`: optional runtime-local hint only. It is never the shared source of truth.
 
+Runtime presets add machine-local roots:
+
+- `localWorkspaceRoot`: persistent clone/cache root on that specific runtime machine/container.
+- `localScratchRoot`: temporary task scratch root on that specific runtime machine/container.
+- These paths are injected for the selected agent runtime. They are not project state and may differ for every agent/runtime.
+
 Injected fields:
 
 ```text
 Project repository provider: <github | gitlab | gitea | generic>
 Project repository URL: <repo url | not configured>
 Project work path: <relative path | project root>
+Runtime-local workspace root: <local path | not configured>
+Runtime-local scratch root: <local path | not configured>
 Default branch: <branch>
 Protected branches: <branch list>
 Task branch pattern: megacorps/card-{cardId}-{agentSlug}
@@ -77,7 +85,7 @@ Runtime-local workspace hint: <optional local hint only>
 Runtime services: <json metadata>
 ```
 
-When a repo is configured, the prompt instructs the agent to use its own runtime-local clone, stay inside the project work path unless the task explicitly requires broader edits, fetch/pull or rebase before editing, work on the task branch, avoid direct pushes to protected branches, run relevant setup/tests, then push a branch or create a PR according to the project policy.
+When a repo is configured, the prompt instructs the agent to clone/cache under `localWorkspaceRoot` when configured, stay inside the project work path unless the task explicitly requires broader edits, fetch/pull or rebase before editing, work on the task branch, avoid direct pushes to protected branches, run relevant setup/tests, then push a branch or create a PR according to the project policy. `localScratchRoot` is for temporary work only; final outputs should be submitted as work products, URLs, commits, PRs, or artifacts.
 
 ## Kanban Dispatch Prompt
 

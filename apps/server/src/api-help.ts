@@ -87,8 +87,8 @@ const endpoints: ApiEndpoint[] = [
   { method: 'POST', path: '/api/agents/:id/test-connection', group: 'Agents', auth: 'session', summary: 'Test the selected adapter/runtime connection.', params: { id: 'Agent UUID.' } },
   { method: 'GET', path: '/api/agent-runtimes', group: 'Agents', auth: 'session', summary: 'List company-scoped runtime presets.', query: { companyId: 'Optional company UUID.' } },
   { method: 'GET', path: '/api/agent-runtimes/health', group: 'Agents', auth: 'session', summary: 'Read runtime health summaries, attached agent counts, last run status, and adapter capabilities.' },
-  { method: 'POST', path: '/api/agent-runtimes', group: 'Agents', auth: 'session', summary: 'Create a runtime preset.', body: { name: 'Hermes SSH', adapterType: 'hermes-ssh', isActive: true, config: { sshHost: 'hermes.example.internal', sshUser: 'root', sshPort: 22, sshKeyPath: '/home/megacorps/.ssh/id_ed25519', hermesCommand: 'hermes', megacorpsApiUrl: 'https://megacorps.example.com' } } },
-  { method: 'PUT', path: '/api/agent-runtimes/:id', group: 'Agents', auth: 'session', summary: 'Update a runtime preset.', params: { id: 'Runtime UUID.' } },
+  { method: 'POST', path: '/api/agent-runtimes', group: 'Agents', auth: 'session', summary: 'Create a runtime preset. localWorkspaceRoot/localScratchRoot are runtime-owned local paths for that machine; project repo/workPath remain the shared project policy.', body: { name: 'Hermes SSH', adapterType: 'hermes-ssh', localWorkspaceRoot: '/home/alice/workspaces', localScratchRoot: '/tmp/megacorps', isActive: true, config: { sshHost: 'hermes.example.internal', sshUser: 'root', sshPort: 22, sshKeyPath: '/home/megacorps/.ssh/id_ed25519', hermesCommand: 'hermes', megacorpsApiUrl: 'https://megacorps.example.com' } } },
+  { method: 'PUT', path: '/api/agent-runtimes/:id', group: 'Agents', auth: 'session', summary: 'Update a runtime preset, including adapter config and runtime-local workspace/scratch roots.', params: { id: 'Runtime UUID.' } },
   { method: 'DELETE', path: '/api/agent-runtimes/:id', group: 'Agents', auth: 'session', summary: 'Delete a runtime preset.', params: { id: 'Runtime UUID.' } },
 
   { method: 'GET', path: '/api/chat/sessions', group: 'Chat', auth: 'session', summary: 'List direct-chat sessions.', query: { companyId: 'Optional company UUID.', agentId: 'Optional agent UUID.', projectId: 'Optional project UUID, or none for no-project chat.', limit: '1-200, default 100.' } },
@@ -209,6 +209,17 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
     const project = { id: 'project-uuid', companyId: 'company-uuid', name: 'Project name', repoProvider: 'github', repoUrl: 'https://github.com/org/repo', workPath: 'apps/server', defaultBranch: 'main', workBranchPattern: 'megacorps/card-{cardId}-{agentSlug}', workspacePathHint: 'optional runtime-local hint only' };
     if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: project }, responseExample: [project], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
     return { responseSchema: project, responseExample: project, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path === '/api/agent-runtimes/health') {
+    const health = { runtimeId: 'runtime-uuid', name: 'Hermes SSH', adapterType: 'hermes-ssh', status: 'ready', isActive: true, agents: 1, activeAgents: 1, busyAgents: 0, lastRunAt: null, lastRunStatus: null, lastError: null, capabilities: ['ssh', 'hermes-cli', 'stdout-capture'] };
+    return { responseSchema: { type: 'array', items: health }, responseExample: [health], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path.includes('/agent-runtimes')) {
+    const runtime = { id: 'runtime-uuid', companyId: 'company-uuid', name: 'Hermes SSH', adapterType: 'hermes-ssh', localWorkspaceRoot: '/home/alice/workspaces', localScratchRoot: '/tmp/megacorps', config: { sshHost: 'hermes.example.internal', megacorpsApiUrl: 'https://megacorps.example.com' }, isActive: true };
+    if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: runtime }, responseExample: [runtime], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: runtime, responseExample: runtime, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/cards/:id/logs')) {

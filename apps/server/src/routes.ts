@@ -139,6 +139,13 @@ async function hasOtherActiveGlobalAdmin(userId: string): Promise<boolean> {
   return Boolean(row);
 }
 
+function optionalText(value: string | null | undefined): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 function redactSecrets(value: unknown, depth = 0): unknown {
   if (depth > 8 || value === null || value === undefined) return value;
   if (Array.isArray(value)) return value.map((item) => redactSecrets(item, depth + 1));
@@ -1264,7 +1271,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = createAgentRuntimeSchema.parse(request.body);
     const companyId = input.companyId ?? await defaultCompanyId();
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
-    const [row] = await db.insert(agentRuntimes).values({ ...input, companyId }).returning();
+    const [row] = await db.insert(agentRuntimes).values({
+      ...input,
+      companyId,
+      localWorkspaceRoot: optionalText(input.localWorkspaceRoot) ?? null,
+      localScratchRoot: optionalText(input.localScratchRoot) ?? null,
+    }).returning();
     return reply.code(201).send(row ? redactRuntime(row) : row);
   });
   app.put('/api/agent-runtimes/:id', async (request, reply) => {
@@ -1278,6 +1290,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [row] = await db.update(agentRuntimes).set({
       name: input.name,
       adapterType: input.adapterType,
+      localWorkspaceRoot: optionalText(input.localWorkspaceRoot),
+      localScratchRoot: optionalText(input.localScratchRoot),
       config: nextConfig,
       isActive: input.isActive,
       updatedAt: new Date(),

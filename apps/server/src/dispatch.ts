@@ -11,6 +11,7 @@ type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
 type GoalRow = typeof goals.$inferSelect;
 type ProjectRow = typeof projects.$inferSelect;
+type RuntimeRow = typeof agentRuntimes.$inferSelect;
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
 type LogStatus = 'queued' | 'running' | 'success' | 'warning' | 'failed';
@@ -92,12 +93,21 @@ function formatGoal(goal: GoalRow): string {
   return `- ${goalScopeLabel(goal)}: ${goal.title}${goal.body ? `\n  ${clipText(goal.body, 1200)}` : ''}`;
 }
 
-function projectRepoLines(project: ProjectRow | null | undefined): string[] {
-  if (!project) return ['Project repository: none'];
+function runtimeLocalLines(runtime: RuntimeRow | null | undefined): string[] {
+  if (!runtime) return ['Runtime-local workspace root: not configured', 'Runtime-local scratch root: not configured'];
+  return [
+    `Runtime-local workspace root: ${runtime.localWorkspaceRoot ?? 'not configured'}`,
+    `Runtime-local scratch root: ${runtime.localScratchRoot ?? 'not configured'}`,
+  ];
+}
+
+function projectRepoLines(project: ProjectRow | null | undefined, runtime?: RuntimeRow | null): string[] {
+  if (!project) return ['Project repository: none', ...runtimeLocalLines(runtime)];
   return [
     `Project repository provider: ${project.repoProvider ?? 'github'}`,
     `Project repository URL: ${project.repoUrl ?? 'not configured'}`,
     `Project work path: ${project.workPath ?? 'project root'}`,
+    ...runtimeLocalLines(runtime),
     `Default branch: ${project.defaultBranch ?? 'main'}`,
     `Protected branches: ${(project.protectedBranches ?? ['main', 'master']).join(', ') || 'none'}`,
     `Task branch pattern: ${project.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}'}`,
@@ -111,8 +121,12 @@ function projectRepoLines(project: ProjectRow | null | undefined): string[] {
   ].filter(Boolean);
 }
 
-function projectGitProtocol(project: ProjectRow | null | undefined, card: CardRow, agent: AgentRow | null | undefined): string {
-  if (!project?.repoUrl) return 'No repository is configured for this project. Do not invent local file paths; report external work products by URL when available.';
+function projectGitProtocol(project: ProjectRow | null | undefined, card: CardRow, agent: AgentRow | null | undefined, runtime?: RuntimeRow | null): string {
+  const localRoots = runtimeLocalLines(runtime).join('\n');
+  if (!project?.repoUrl) return [
+    'No repository is configured for this project. Do not invent shared local file paths; use runtime-local scratch only for temporary work and report external work products by URL when available.',
+    localRoots,
+  ].join('\n');
   const branchPattern = project.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}';
   const branch = branchPattern
     .replaceAll('{cardId}', card.id.slice(0, 8))
@@ -121,13 +135,15 @@ function projectGitProtocol(project: ProjectRow | null | undefined, card: CardRo
   return [
     'Repository workflow:',
     `1. Use repo ${project.repoUrl}. Your local clone path is runtime-owned; MegaCorps does not assume a shared folder path.`,
-    `2. Treat project work path as ${project.workPath ?? 'project root'}. Stay inside that path unless the task explicitly requires a broader change.`,
-    project.pullBeforeRun === false ? '3. Pull-before-run is disabled for this project.' : `3. Before editing, fetch the latest ${project.defaultBranch ?? 'main'} and pull/rebase so your local workspace is current.`,
-    `4. Work on branch ${branch}; do not push directly to protected branches (${(project.protectedBranches ?? ['main', 'master']).join(', ') || 'none'}).`,
-    project.setupCommand ? `5. Run setup when needed: ${project.setupCommand}` : '5. Run project setup only when needed and report any failure.',
-    project.testCommand ? `6. Validate with: ${project.testCommand}` : '6. Run the most relevant tests/checks available in the repo/work path.',
-    project.pushAfterRun === false ? '7. Push-after-run is disabled; report the local result and blocker clearly.' : `7. Commit and push your branch when work is complete. Prefer a pull request when policy is ${project.completionPolicy ?? 'push_or_pr'}.`,
-    '8. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, or external metadata as applicable.',
+    localRoots,
+    `2. Clone/cache the repo under the runtime-local workspace root when configured; otherwise choose a safe local folder owned by your runtime.`,
+    `3. Treat project work path as ${project.workPath ?? 'project root'}. Stay inside that path unless the task explicitly requires a broader change.`,
+    project.pullBeforeRun === false ? '4. Pull-before-run is disabled for this project.' : `4. Before editing, fetch the latest ${project.defaultBranch ?? 'main'} and pull/rebase so your local workspace is current.`,
+    `5. Work on branch ${branch}; do not push directly to protected branches (${(project.protectedBranches ?? ['main', 'master']).join(', ') || 'none'}).`,
+    project.setupCommand ? `6. Run setup when needed: ${project.setupCommand}` : '6. Run project setup only when needed and report any failure.',
+    project.testCommand ? `7. Validate with: ${project.testCommand}` : '7. Run the most relevant tests/checks available in the repo/work path.',
+    project.pushAfterRun === false ? '8. Push-after-run is disabled; report the local result and blocker clearly.' : `8. Commit and push your branch when work is complete. Prefer a pull request when policy is ${project.completionPolicy ?? 'push_or_pr'}.`,
+    '9. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, or external metadata as applicable. Never use runtime-local file paths as the final artifact reference unless the user explicitly asked for local-only work.',
   ].join('\n');
 }
 
@@ -419,7 +435,12 @@ export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: st
     if (!runtime) throw new Error('agent_runtime_not_found');
     if (runtime && runtime.isActive === false) throw new Error('agent_runtime_inactive');
     if (runtime.adapterType !== adapterType) throw new Error('agent_runtime_adapter_mismatch');
-    runtimeConfig = (runtime?.config as Record<string, unknown> | null) ?? {};
+    const rawRuntimeConfig = (runtime.config as Record<string, unknown> | null) ?? {};
+    runtimeConfig = configuredAdapterOverrides({
+      ...rawRuntimeConfig,
+      localWorkspaceRoot: runtime.localWorkspaceRoot ?? rawRuntimeConfig.localWorkspaceRoot,
+      localScratchRoot: runtime.localScratchRoot ?? rawRuntimeConfig.localScratchRoot,
+    });
   }
   const webhookSharedSecret = await configuredWebhookSharedSecret();
   return {
@@ -1302,16 +1323,18 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
   const budget = Math.max(8000, options.budgetChars ?? CONTEXT_CHAR_BUDGET);
   const state = { remaining: budget, sections: [] as string[], truncated: false };
   const [company] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
-  const [companyAgents, companyDepartments, companyProjects, companyGoals, companyCards, recentActivity, recentRuns] = await Promise.all([
+  const [companyAgents, companyDepartments, companyProjects, companyGoals, companyCards, companyRuntimes, recentActivity, recentRuns] = await Promise.all([
     db.select().from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.deletedAt))),
     db.select().from(departments).where(eq(departments.companyId, companyId)),
     db.select().from(projects).where(eq(projects.companyId, companyId)),
     db.select().from(goals).where(eq(goals.companyId, companyId)),
     db.select().from(kanbanCards).where(and(eq(kanbanCards.companyId, companyId), isNull(kanbanCards.deletedAt))).orderBy(desc(kanbanCards.updatedAt)),
+    db.select().from(agentRuntimes).where(eq(agentRuntimes.companyId, companyId)),
     db.select().from(activityLog).where(eq(activityLog.companyId, companyId)).orderBy(desc(activityLog.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
     db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)).orderBy(desc(heartbeatRuns.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
   ]);
   const agentById = new Map(companyAgents.map((agent) => [agent.id, agent]));
+  const runtimeById = new Map(companyRuntimes.map((runtime) => [runtime.id, runtime]));
   const departmentById = new Map(companyDepartments.map((department) => [department.id, department]));
   const projectById = new Map(companyProjects.map((project) => [project.id, project]));
   const goalById = new Map(companyGoals.map((goal) => [goal.id, goal]));
@@ -1343,12 +1366,15 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
 
   if (focusAgent) {
     const manager = focusAgent.bossId ? agentById.get(focusAgent.bossId) : undefined;
+    const runtime = focusAgent.runtimeId ? runtimeById.get(focusAgent.runtimeId) : undefined;
     const reports = companyAgents.filter((agent) => agent.bossId === focusAgent.id);
     const assigned = companyCards.filter((card) => card.assigneeId === focusAgent.id && !['done', 'blocked', 'cancelled'].includes(card.columnStatus ?? 'todo')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
     const reviews = companyCards.filter((card) => card.reviewerId === focusAgent.id || reports.some((report) => report.id === card.assigneeId && ['in_review', 'needs_review'].includes(card.columnStatus ?? 'todo'))).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
     addContextSection(state, 'Invocation Agent Work Context', [
       `Agent: ${focusAgent.name}`,
       `Identity label: ${focusAgent.role}`,
+      `Runtime: ${runtime?.name ?? focusAgent.runtimeId ?? 'none'}`,
+      ...runtimeLocalLines(runtime),
       `Reports to: ${manager?.name ?? 'top-level'}`,
       `Direct reports: ${reports.map((report) => `${report.name} (${report.role})`).join(', ') || 'none'}`,
       `Assigned open work:\n${assigned.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
@@ -1362,6 +1388,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
     const deps = (focusCard.dependencyCardIds ?? []).map((id) => companyCards.find((card) => card.id === id)).filter((card): card is CardRow => Boolean(card));
     const focusAssignee = focusCard.assigneeId ? agentById.get(focusCard.assigneeId) : undefined;
     const focusReviewer = focusCard.reviewerId ? agentById.get(focusCard.reviewerId) : undefined;
+    const focusAssigneeRuntime = focusAssignee?.runtimeId ? runtimeById.get(focusAssignee.runtimeId) : undefined;
     addContextSection(state, 'Focus Task Full Context', [
       `ID: ${focusCard.id}`,
       `Title: ${focusCard.title}`,
@@ -1369,7 +1396,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
       `Priority: ${focusCard.priority ?? 0}`,
       `Department: ${focusCard.departmentId ? departmentById.get(focusCard.departmentId)?.name ?? focusCard.departmentId : 'none'}`,
       `Project: ${focusCard.projectId ? projectById.get(focusCard.projectId)?.name ?? focusCard.projectId : 'none'}`,
-      `Project repo:\n${projectRepoLines(focusCard.projectId ? projectById.get(focusCard.projectId) : null).join('\n')}`,
+      `Project repo:\n${projectRepoLines(focusCard.projectId ? projectById.get(focusCard.projectId) : null, focusAssigneeRuntime).join('\n')}`,
       `Goal: ${focusCard.goalId ? goalById.get(focusCard.goalId)?.title ?? focusCard.goalId : 'none'}`,
       `Scoped goals:\n${scopedGoals(companyGoals, { departmentId: focusCard.departmentId, projectId: focusCard.projectId, selectedGoalId: focusCard.goalId }).map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
       `Assignee: ${focusAssignee?.name ?? focusCard.assigneeId ?? 'unassigned'}`,
@@ -1420,6 +1447,7 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
   const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
   const [goal] = card.goalId ? await db.select().from(goals).where(eq(goals.id, card.goalId)).limit(1) : [];
   const [assignee] = card.assigneeId ? await db.select().from(agents).where(and(eq(agents.id, card.assigneeId), isNull(agents.deletedAt))).limit(1) : [];
+  const [runtime] = assignee?.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, assignee.runtimeId)).limit(1) : [];
   const [manager] = assignee?.bossId ? await db.select().from(agents).where(and(eq(agents.id, assignee.bossId), isNull(agents.deletedAt))).limit(1) : [];
   const reports = assignee ? await db.select().from(agents).where(eq(agents.bossId, assignee.id)) : [];
   const companyGoals = await db.select().from(goals).where(eq(goals.companyId, card.companyId)).orderBy(desc(goals.createdAt));
@@ -1432,7 +1460,7 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
   }).slice(0, 5);
   return [
     company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
-    project ? `Project: ${project.name}\n${project.description ?? ''}\n${projectRepoLines(project).join('\n')}` : '',
+    project ? `Project: ${project.name}\n${project.description ?? ''}\n${projectRepoLines(project, runtime).join('\n')}` : '',
     goal ? `Goal: ${goal.title}\n${goal.body ?? ''}` : '',
     assignee ? [
       `Assigned member: ${assignee.name}`,
@@ -1456,7 +1484,7 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
     card.reviewFeedback ? `Previous review feedback:\n${card.reviewFeedback}` : '',
     kanbanContext ? `Kanban context snapshot:\n${kanbanContext}` : '',
     matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
-    `Repository protocol:\n${projectGitProtocol(project, card, assignee)}`,
+    `Repository protocol:\n${projectGitProtocol(project, card, assignee, runtime)}`,
     'Task body:',
     clipText(card.body, TASK_BODY_CHAR_LIMIT),
     'Completion protocol:',

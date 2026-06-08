@@ -47,6 +47,7 @@ MegaCorps now has two configuration layers:
 1. Open `Settings -> Agent runtimes` and create a reusable runtime preset.
 2. Open `Agents`, select an agent, then choose a runtime preset or fill the adapter override fields on that agent.
 
+Runtime presets can also define `localWorkspaceRoot` and `localScratchRoot`, the local folders used by agents attached to that runtime for repo clones/caches and temporary task files.
 Agent overrides win over runtime presets. When `.env` adapter fallback is enabled, runtime presets win over `.env` defaults.
 In production, external adapters (`hermes`, `hermes-ssh`, `hermes-gateway`, `webhook`, `openclaw`) require a company-scoped runtime preset by default. `.env` adapter fallback is disabled unless `ADAPTER_ENV_FALLBACK_ENABLED=true`, which should be reserved for local development/debugging.
 Signup is stored in DB setting `auth.signup_enabled` and defaults to enabled. Admins can turn it on/off in the Web UI `Admin` page.
@@ -184,9 +185,9 @@ Kanban task detail tabs use React Query plus a short-lived browser session cache
 
 ## Project repo workspaces and work products
 
-Projects are repo/workspace-centric. MegaCorps stores the shared Git repository and project work area, while each remote agent runtime uses its own local clone/folder. A project can define `repoProvider`, `repoUrl`, project-level `workPath`, `defaultBranch`, protected branches, `workBranchPattern`, pull-before-run, push-after-run, completion policy, setup command, test command, runtime service metadata, and an optional runtime-local workspace hint.
+Projects are repo/workspace-centric. MegaCorps stores the shared Git repository and project work area, while each remote agent runtime uses its own local clone/folder. A project can define `repoProvider`, `repoUrl`, project-level `workPath`, `defaultBranch`, protected branches, `workBranchPattern`, pull-before-run, push-after-run, completion policy, setup command, test command, runtime service metadata, and an optional runtime-local workspace hint. Runtime presets define the machine-local `localWorkspaceRoot` and `localScratchRoot` used by agents attached to that runtime.
 
-`repoUrl` is the shared Git remote. `workPath` is the repo/workspace-relative path agents should focus on, such as `apps/server`, `reports/final`, or `docs/contracts`; null means project root. `workspacePathHint` is only a local clone/folder hint for a runtime and is not the source of truth. Prompt injection tells agents to pull/rebase before editing, stay inside the project work path unless the task explicitly requires broader edits, work on a task branch, avoid protected branches, validate, then push or open a PR according to the project policy.
+`repoUrl` is the shared Git remote. `workPath` is the repo/workspace-relative path agents should focus on, such as `apps/server`, `reports/final`, or `docs/contracts`; null means project root. `workspacePathHint` is only a local clone/folder hint for a runtime and is not the source of truth. `localWorkspaceRoot` is the runtime's persistent clone/cache root; `localScratchRoot` is for temporary task files. Prompt injection tells agents to pull/rebase before editing, stay inside the project work path unless the task explicitly requires broader edits, work on a task branch, avoid protected branches, validate, then push or open a PR according to the project policy. Final deliverables should be reported as work products, URLs, PRs, commits, or artifacts rather than runtime-local file paths.
 
 Task outputs are no longer limited to comments/logs. `work_products` records reviewable deliverables such as PRs, commits, preview URLs, reports, screenshots, files, artifacts, and external links. The task-complete webhook accepts a `workProducts` array, and Kanban task details include a Work Products tab so reviewers can inspect the actual deliverable instead of reading logs only.
 

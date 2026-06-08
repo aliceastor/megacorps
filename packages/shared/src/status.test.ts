@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canTransitionCard, cardStatusSchema, cardStatuses, createAgentSchema, createCardSchema, createProjectSchema, signupSchema } from './index.ts';
+import { canTransitionCard, cardStatusSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createCardSchema, createProjectSchema, signupSchema } from './index.ts';
 
 test('allows the canonical card status path and blocks invalid skips', () => {
   assert.deepEqual([...cardStatuses], ['todo', 'in_progress', 'in_review', 'needs_review', 'done', 'blocked', 'cancelled']);
@@ -27,6 +27,11 @@ test('project workPath must stay relative to the project workspace', () => {
   assert.equal(createProjectSchema.safeParse({ name: 'Absolute', workPath: '/etc' }).success, false);
   assert.equal(createProjectSchema.safeParse({ name: 'Windows absolute', workPath: 'C:\\temp' }).success, false);
   assert.equal(createProjectSchema.safeParse({ name: 'Traversal', workPath: '../outside' }).success, false);
+});
+
+test('agent runtime local roots are runtime-owned paths', () => {
+  assert.equal(createAgentRuntimeSchema.safeParse({ name: 'SSH', adapterType: 'hermes-ssh', localWorkspaceRoot: '/home/alice/workspaces', localScratchRoot: '/tmp/megacorps' }).success, true);
+  assert.equal(createAgentRuntimeSchema.safeParse({ name: 'Windows', adapterType: 'mock', localWorkspaceRoot: 'C:\\Agents\\Alice\\workspaces', localScratchRoot: null }).success, true);
 });
 
 test('accepts MVP agent adapter options', () => {

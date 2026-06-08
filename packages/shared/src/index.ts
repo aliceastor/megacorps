@@ -87,6 +87,8 @@ export const createAgentRuntimeSchema = z.object({
   companyId: z.string().uuid().optional(),
   name: z.string().trim().min(1).max(120),
   adapterType: z.enum(agentAdapterTypes),
+  localWorkspaceRoot: z.string().trim().max(1000).nullable().optional(),
+  localScratchRoot: z.string().trim().max(1000).nullable().optional(),
   config: z.record(z.string(), z.unknown()).default({}),
   isActive: z.boolean().default(true),
 });

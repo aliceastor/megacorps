@@ -111,6 +111,8 @@ export const agentRuntimes = pgTable('agent_runtimes', {
   companyId: uuid('company_id').references(() => companies.id),
   name: text('name').notNull(),
   adapterType: text('adapter_type').notNull(),
+  localWorkspaceRoot: text('local_workspace_root'),
+  localScratchRoot: text('local_scratch_root'),
   config: jsonb('config').default({}),
   isActive: boolean('is_active').default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
