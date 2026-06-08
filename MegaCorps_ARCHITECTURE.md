@@ -2,6 +2,18 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.5 - Hermes SSH Env, Webhook Secret, and Bootstrap Recovery
+
+Date: 2026-06-08
+
+Completed in this pass:
+
+- Hermes CLI adapters use one-shot prompt mode only: `hermes -z "{prompt}" --profile {profile}`. They do not pass `hermes chat`, `-q`, `--reasoning-effort`, `--max-turns`, or bare prompt arguments.
+- Hermes SSH dispatch imports `/proc/1/environ` before executing Hermes so provider API keys configured on the Hermes container, such as `MINIMAX_API_KEY`, remain visible to SSH-launched Hermes processes.
+- Task-complete webhooks accept the shared secret from `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret`; dispatched agent prompts include `X-MegaCorps-Webhook-Secret` when a secret is configured.
+- `POST /api/auth/bootstrap` restores the optional `BOOTSTRAP_TOKEN` recovery path, but only while no active global admin exists. The primary onboarding path remains `/signup`, where the next signup becomes admin when no active admin exists.
+- Docker compose and `.env.example` pass through `BOOTSTRAP_TOKEN`; it should be temporary and removed after recovery.
+
 ## Architecture Update v1.4 - DB-Backed Signup and Admin Accounts
 
 Date: 2026-06-06
@@ -1744,6 +1756,8 @@ CREATE TABLE cost_events (
 ---
 
 ## 16. 開發路線圖 (Development Roadmap)
+
+> Historical snapshot: the phase checklist below is preserved from the original architecture plan and is not the source of truth for current completion status. Use the Architecture Update sections above and [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md) for the current implementation state.
 
 ```
 Phase 1 ──▶ Phase 2 ──▶ Phase 3 ──▶ Phase 4 ──▶ Phase 5
