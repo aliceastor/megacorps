@@ -90,6 +90,7 @@ export const agents = pgTable('agents', {
   name: text('name').notNull(),
   role: text('role').notNull(),
   title: text('title'),
+  soul: text('soul'),
   adapterType: text('adapter_type').notNull().default('hermes'),
   adapterConfig: jsonb('adapter_config').default({}),
   runtimeId: uuid('runtime_id'),
@@ -189,6 +190,8 @@ export const taskRuns = pgTable('task_runs', {
   requestedByUserId: uuid('requested_by_user_id').references(() => users.id),
   lockedBy: text('locked_by'),
   lockedAt: timestamp('locked_at', { withTimezone: true }),
+  adapterSessionId: uuid('adapter_session_id'),
+  adapterTurnId: text('adapter_turn_id'),
   startedAt: timestamp('started_at', { withTimezone: true }),
   completedAt: timestamp('completed_at', { withTimezone: true }),
   durationSeconds: integer('duration_seconds'),
@@ -198,6 +201,25 @@ export const taskRuns = pgTable('task_runs', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
+
+export const adapterSessions = pgTable('adapter_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  agentId: uuid('agent_id').notNull().references(() => agents.id),
+  runtimeId: uuid('runtime_id').references(() => agentRuntimes.id),
+  adapterType: text('adapter_type').notNull(),
+  scopeType: text('scope_type').notNull(),
+  scopeId: uuid('scope_id').notNull(),
+  kind: text('kind').notNull(),
+  adapterSessionId: text('adapter_session_id').notNull(),
+  lastTurnId: text('last_turn_id'),
+  status: text('status').notNull().default('active'),
+  metadata: jsonb('metadata').default({}),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+}, (table) => ({
+  adapterSessionScopeUnique: unique().on(table.companyId, table.agentId, table.scopeType, table.scopeId, table.kind),
+}));
 
 export const taskLogs = pgTable('task_logs', {
   id: uuid('id').primaryKey().defaultRandom(),

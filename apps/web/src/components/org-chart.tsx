@@ -12,6 +12,7 @@ type Agent = {
   slug: string;
   role: string;
   title?: string;
+  soul?: string | null;
   hermesProfile?: string;
   adapterType?: string;
   adapterConfig?: Record<string, unknown>;
@@ -55,6 +56,17 @@ function adapterFields(adapterType?: string): ConfigField[] {
     { key: 'hermesGatewayUrl', label: 'Hermes HTTP API URL' },
     { key: 'hermesDashboardToken', label: 'Hermes token', type: 'password' },
     { key: 'megacorpsApiUrl', label: 'MegaCorps callback URL', description: megacorpsApiDescription },
+  ];
+  if (adapterType === 'codex-app') return [
+    { key: 'codexTransport', label: 'Codex transport', description: 'stdio or websocket. Prefer stdio for local/container runtimes; use websocket only with bearer token auth.' },
+    { key: 'codexCommand', label: 'Codex command' },
+    { key: 'codexArgs', label: 'Codex app-server args' },
+    { key: 'codexAppServerUrl', label: 'Codex app-server WS URL' },
+    { key: 'codexWsToken', label: 'Codex WS bearer token', type: 'password' },
+    { key: 'codexModel', label: 'Codex model' },
+    { key: 'codexCwd', label: 'Codex cwd override' },
+    { key: 'codexSandbox', label: 'Codex sandbox policy' },
+    { key: 'codexExperimentalApi', label: 'Experimental API flag' },
   ];
   if (adapterType === 'webhook') return [{ key: 'webhookUrl', label: 'Webhook URL' }];
   if (adapterType === 'openclaw') return [{ key: 'openclawUrl', label: 'OpenClaw URL' }];
@@ -121,6 +133,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const [slug, setSlug] = useState('');
   const [profile, setProfile] = useState('local-debug');
   const [role, setRole] = useState('member');
+  const [soul, setSoul] = useState('');
   const [bossId, setBossId] = useState('');
   const [departmentId, setDepartmentId] = useState('');
   const [runtimeId, setRuntimeId] = useState('');
@@ -164,6 +177,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       slug: selected.slug,
       role: selected.role,
       title: selected.title ?? '',
+      soul: selected.soul ?? '',
       hermesProfile: selected.hermesProfile ?? '',
       adapterType: selected.adapterType ?? 'mock',
       adapterConfig: selected.adapterConfig ?? {},
@@ -186,7 +200,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
     try {
       const agent = await api<Agent>('/api/agents', {
         method: 'POST',
-        body: JSON.stringify({ companyId: companyId || undefined, departmentId: departmentId || null, runtimeId: runtimeId || null, name: name.trim(), slug: slug.trim(), role: role.trim() || 'member', title: '', adapterType, hermesProfile: profile, bossId: bossId || null }),
+        body: JSON.stringify({ companyId: companyId || undefined, departmentId: departmentId || null, runtimeId: runtimeId || null, name: name.trim(), slug: slug.trim(), role: role.trim() || 'member', title: '', soul: soul.trim() || null, adapterType, hermesProfile: profile, bossId: bossId || null }),
       });
       setAgents([...agents, agent]);
       setName('');
@@ -195,6 +209,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       setDepartmentId('');
       setRuntimeId('');
       setRole('member');
+      setSoul('');
       setToast({ message: `Agent "${agent.name}" created`, type: 'success' });
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : 'Failed to create agent', type: 'error' });
@@ -309,6 +324,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
         slug: String(agentDraft.slug ?? selected.slug),
         role: String(agentDraft.role ?? selected.role).trim() || 'member',
         title: String(agentDraft.title ?? ''),
+        soul: agentDraft.soul ? String(agentDraft.soul) : null,
         adapterType: String(agentDraft.adapterType ?? selected.adapterType ?? 'mock'),
         adapterConfig: agentDraft.adapterConfig ?? {},
         runtimeId: agentDraft.runtimeId || null,
@@ -420,6 +436,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       <input className="input" placeholder="Slug" value={slug} onChange={(e) => setSlug(e.target.value)} />
       <input className="input" placeholder="Profile" value={profile} onChange={(e) => setProfile(e.target.value)} />
       <input className="input" placeholder="Identity label" value={role} onChange={(e) => setRole(e.target.value)} />
+      <input className="input" placeholder="Soul / work style" value={soul} onChange={(e) => setSoul(e.target.value)} />
       <select className="input" value={departmentId} onChange={(e) => setDepartmentId(e.target.value)}><option value="">Department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select>
       <select className="input" value={bossId} onChange={(e) => setBossId(e.target.value)}><option value="">Reports to</option>{visibleAgents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
       <select className="input" value={adapterType} onChange={(e) => setAdapterType(e.target.value)}>
@@ -427,6 +444,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
         <option value="hermes">Hermes Portainer</option>
         <option value="hermes-ssh">Hermes SSH</option>
         <option value="hermes-gateway">Hermes HTTP API</option>
+        <option value="codex-app">Codex App Server</option>
         <option value="webhook">Webhook</option>
         <option value="openclaw">OpenClaw</option>
       </select>
@@ -486,6 +504,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
                 <option value="hermes">Hermes Portainer</option>
                 <option value="hermes-ssh">Hermes SSH</option>
                 <option value="hermes-gateway">Hermes HTTP API</option>
+                <option value="codex-app">Codex App Server</option>
                 <option value="webhook">Webhook</option>
                 <option value="openclaw">OpenClaw</option>
               </select></label>
@@ -493,6 +512,10 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
               <label className="field-label">Department<select className="input" value={String(agentDraft?.departmentId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), departmentId: e.target.value || null })}><option value="">No department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
               <label className="field-label">Reports to<select className="input" value={String(agentDraft?.bossId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), bossId: e.target.value || null })}><option value="">Top-level member</option>{visibleAgents.filter((agent) => agent.id !== selected.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
               <label className="field-label">Monthly budget<input className="input" type="number" min={0} step="0.01" value={String(agentDraft?.budgetMonthly ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), budgetMonthly: e.target.value })} /></label>
+              <label className="field-label">Soul
+                <span className="field-hint">Platform-owned identity/personality/work style for adapters without native profiles, especially Codex App Server.</span>
+                <textarea className="input" rows={4} value={String(agentDraft?.soul ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), soul: e.target.value })} />
+              </label>
               {selectedAdapterFields.map((field) => {
                 const overrideValue = configValue(overrideAdapterConfig, field.key);
                 const inheritedValue = configValue(inheritedAdapterConfig, field.key);

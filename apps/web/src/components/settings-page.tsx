@@ -9,7 +9,7 @@ type Company = { id: string; name: string; slug: string; mission?: string | null
 type Department = { id: string; companyId: string; name: string; slug: string };
 type Membership = { id: string; companyId: string; userId: string; role: string; status: string; userEmail?: string; userName?: string };
 
-const adapterTypes = ['mock', 'hermes', 'hermes-ssh', 'hermes-gateway', 'webhook', 'openclaw'];
+const adapterTypes = ['mock', 'hermes', 'hermes-ssh', 'hermes-gateway', 'codex-app', 'webhook', 'openclaw'];
 
 type ConfigField = { key: string; label: string; description?: string; type?: 'text' | 'number' | 'password' };
 
@@ -37,6 +37,17 @@ function configFields(adapterType: string): ConfigField[] {
     { key: 'sshOptions', label: 'SSH extra options' },
     { key: 'hermesCommand', label: 'Hermes command' },
     { key: 'megacorpsApiUrl', label: 'MegaCorps callback URL', description: megacorpsApiDescription },
+  ];
+  if (adapterType === 'codex-app') return [
+    { key: 'codexTransport', label: 'Codex transport', description: 'stdio or websocket. Prefer stdio for local/container runtimes; use websocket only with bearer token auth.' },
+    { key: 'codexCommand', label: 'Codex command', description: 'Defaults to codex.' },
+    { key: 'codexArgs', label: 'Codex app-server args', description: 'Defaults to app-server.' },
+    { key: 'codexAppServerUrl', label: 'Codex app-server WS URL', description: 'Required for websocket transport, for example ws://runner.example:4500.' },
+    { key: 'codexWsToken', label: 'Codex WS bearer token', type: 'password' },
+    { key: 'codexModel', label: 'Codex model' },
+    { key: 'codexCwd', label: 'Codex cwd override', description: 'Optional. Defaults to runtime local workspace/scratch root.' },
+    { key: 'codexSandbox', label: 'Codex sandbox policy' },
+    { key: 'codexExperimentalApi', label: 'Experimental API flag' },
   ];
   if (adapterType === 'webhook') return [{ key: 'webhookUrl', label: 'Webhook URL' }];
   if (adapterType === 'openclaw') return [{ key: 'openclawUrl', label: 'OpenClaw URL' }];

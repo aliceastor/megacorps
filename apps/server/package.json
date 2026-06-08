@@ -21,10 +21,12 @@
     "fastify": "latest",
     "jose": "latest",
     "postgres": "latest",
+    "ws": "^8.21.0",
     "zod": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",
+    "@types/ws": "^8.18.1",
     "tsx": "latest",
     "typescript": "latest"
   }

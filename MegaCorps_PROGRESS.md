@@ -14,14 +14,15 @@ The current local stack runs with Docker:
 
 Latest verified baseline:
 
-- Phase 1-18 operational MVP flows are implemented.
-- Company registry page, company memberships, company-scoped RBAC, department setup, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, project-scoped direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention/escalation, lifecycle logs, knowledge docs, company/department/project goal context, repo-centric project workspace policy with project-level repo URL and work path, work products, React Query browser cache, WebSocket live events, execution locks, stale-lock retry/block recovery, DB-backed task-run queue, idempotent task-complete webhooks, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
+- Phase 1-19 operational MVP flows are implemented.
+- Company registry page, company memberships, company-scoped RBAC, department setup, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, project-scoped direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention/escalation, lifecycle logs, knowledge docs, company/department/project goal context, repo-centric project workspace policy with project-level repo URL and work path, work products, React Query browser cache, WebSocket live events, execution locks, stale-lock retry/block recovery, DB-backed task-run queue, idempotent task-complete webhooks, Codex app-server adapter sessions, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
 - Deployment is user-managed. Local-only Docker was used for QA in this pass; NAS/server deployment remains user-managed.
 - Browser plugin QA verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text.
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
 - API discovery is available at `GET /api/help`, `GET /api/help?format=markdown`, and the Web UI Help page, with response schema examples and rate-limit notes for every endpoint.
 - Sidebar navigation now keeps Help and Settings in the bottom utility area, with the collapse toggle inside the sidebar.
 - Hermes SSH adapter is implemented for direct `ssh -> hermes -z "{prompt}" --profile {profile}` dispatch against the configured Hermes host, with `/proc/1/environ` imported before Hermes so container-level provider keys are visible in SSH sessions. No production SSH host is hardcoded.
+- Codex app-server adapter is implemented for stdio `codex app-server` and authenticated WebSocket endpoints. MegaCorps injects agent `soul`, starts/resumes Codex threads, runs one turn per chat/card attempt, streams agent message deltas, and stores adapter thread/turn ids in `adapter_sessions` / `task_runs`.
 - Browser API fallback now tries the current browser hostname on port `4000` before falling back to baked `NEXT_PUBLIC_API_URL`, which avoids NAS deployments accidentally calling unreachable `localhost` or stale IPs.
 - In-app rate limiting is enabled by default, and API Help now includes required roles for endpoints.
 - Company-owned read APIs now scope results to the current user's company memberships.
@@ -29,6 +30,7 @@ Latest verified baseline:
 - Production auth onboarding now uses DB-backed `auth.signup_enabled` and `auth.jwt_secret`; signup defaults to enabled, signup becomes admin when no active admin exists, `POST /api/auth/bootstrap` can recover an admin when `BOOTSTRAP_TOKEN` is configured and no active admin exists, and the Admin page manages all accounts.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
 - Round 3/4 Kanban reliability fixes are implemented: expired execution locks write `lock_expired/warning`, self-review is skipped unless a distinct reviewer/manager exists, task-complete webhooks dedupe by `taskRunId`, progress webhooks no longer release locks, `POST /api/cards/:id/cancel` preserves task history while cancelling active work, and `needs_review` separates help/escalation review from ordinary quality review.
+- Round 5 adapter expansion is implemented: `codex-app` agents use MegaCorps `soul` identity, runtime-owned local roots/cwd/sandbox settings, and task-scoped Codex app-server threads instead of project-global sessions.
 
 ## Paperclip Research Summary
 
@@ -113,8 +115,8 @@ Recommended next phases:
 1. Phase 16: Dependency/blocker graph with ready-state derivation and reclaim policy.
 2. Phase 17: Chain-of-command delegation context and manager review/escalation loop.
 3. Phase 18: Repo-centric project workspace policy and first-class work products. Completed.
-4. Phase 19: Secret references plus company template import/export.
-5. Phase 20: Worker sidecar, distributed queue locks, and deeper runtime liveness/recovery.
+4. Phase 20: Secret references plus company template import/export.
+5. Phase 21: Worker sidecar, distributed queue locks, and deeper runtime liveness/recovery.
 
 ## Current MegaCorps Implementation
 
@@ -451,6 +453,7 @@ Implemented adapters:
 - `hermes`
 - `hermes-ssh`
 - `hermes-gateway`
+- `codex-app`
 - `webhook`
 - `openclaw`
 
@@ -476,6 +479,7 @@ Runtime fields:
 - `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`.
 - `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`.
 - `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `megacorpsApiUrl`.
+- `codex-app`: `codexTransport`, `codexCommand`, `codexArgs`, `codexAppServerUrl`, `codexWsToken`, `codexModel`, `codexCwd`, `codexSandbox`, `codexExperimentalApi`.
 - `webhook`: `webhookUrl`.
 - `openclaw`: `openclawUrl`.
 
@@ -490,6 +494,7 @@ Current behavior:
 - Hermes Portainer executes `hermes -z "{prompt}" --profile {profile}` through Portainer exec using runtime/agent configuration.
 - Hermes SSH executes `hermes -z "{prompt}" --profile {profile}` through OpenSSH and captures stdout/stderr as the adapter result.
 - Hermes HTTP API calls the configured gateway URL.
+- Codex app-server starts/resumes a Codex thread through JSON-RPC, sends the MegaCorps prompt as a turn, streams agent-message deltas, and records thread/turn ids.
 - Webhook and OpenClaw adapters post to their configured URLs.
 - Hermes adapter stores session id, cost, duration, and output.
 - Review loop can reject or approve based on reviewer output.
@@ -559,6 +564,7 @@ Implemented:
 - `cost_events` for budget and cost rollups.
 - `cron_runs` for dispatch scheduler status and tick summaries.
 - `chat_sessions` / `chat_messages` for direct agent conversations and adapter-session continuity.
+- `adapter_sessions` for adapter-native thread/session continuity by scope; currently used by Codex app-server direct chat and card dispatch/review runs.
 
 Sensitive keys are redacted when they match:
 
@@ -575,13 +581,16 @@ Log health notes:
 
 ## Current Local Verification
 
-Verified on 2026-06-06:
+Verified on 2026-06-08:
 
 - `npm run typecheck --workspace=@megacorps/server`
 - `npm run typecheck --workspace=@megacorps/web`
+- `npm run typecheck --workspace=@megacorps/shared`
 - `npm run test --workspace=@megacorps/server`
 - `npm run test --workspace=@megacorps/web`
 - `npm run test --workspace=@megacorps/shared`
+- `npm run build --workspace=@megacorps/server`
+- `npm run build --workspace=@megacorps/web`
 - This pass did not start Docker; deployment remains user-managed.
 - API compile coverage includes:
   - task message board comments with user/agent authors
@@ -591,6 +600,7 @@ Verified on 2026-06-06:
   - dispatch cron service
   - task dispatch/review/decomposition
   - adapter registry including `hermes-ssh`
+  - Codex app-server adapter prompt/session parameter coverage
   - API Help response schema/example and rate-limit coverage
   - RBAC role helper and rate-limit policy classification
   - runtime health endpoint type coverage
@@ -628,7 +638,7 @@ Implemented or partially implemented:
 - Kanban/ticket board.
 - Heartbeat dispatch.
 - DB-backed task-run queue and in-process task-run worker.
-- Bring-your-own-agent adapter shape.
+- Bring-your-own-agent adapter shape, including Codex app-server.
 - Runtime registry, adapter endpoint configuration, and runtime health summaries.
 - Basic budgets on agents.
 - Pause/resume/fire governance.

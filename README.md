@@ -49,7 +49,7 @@ MegaCorps now has two configuration layers:
 
 Runtime presets can also define `localWorkspaceRoot` and `localScratchRoot`, the local folders used by agents attached to that runtime for repo clones/caches and temporary task files.
 Agent overrides win over runtime presets. When `.env` adapter fallback is enabled, runtime presets win over `.env` defaults.
-In production, external adapters (`hermes`, `hermes-ssh`, `hermes-gateway`, `webhook`, `openclaw`) require a company-scoped runtime preset by default. `.env` adapter fallback is disabled unless `ADAPTER_ENV_FALLBACK_ENABLED=true`, which should be reserved for local development/debugging.
+In production, external adapters (`hermes`, `hermes-ssh`, `hermes-gateway`, `codex-app`, `webhook`, `openclaw`) require a company-scoped runtime preset by default. `.env` adapter fallback is disabled unless `ADAPTER_ENV_FALLBACK_ENABLED=true`, which should be reserved for local development/debugging.
 Signup is stored in DB setting `auth.signup_enabled` and defaults to enabled. Admins can turn it on/off in the Web UI `Admin` page.
 Adapter egress blocks localhost/link-local metadata targets by default. Set `ADAPTER_TARGET_ALLOWLIST` to comma-separated hostnames or wildcard domains such as `hermes.example.internal,*.agents.example.com` when production should restrict agent runtimes to known hosts.
 
@@ -72,6 +72,7 @@ Supported runtime fields:
 - `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`.
 - `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`.
 - `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `megacorpsApiUrl`.
+- `codex-app`: `codexTransport`, `codexCommand`, `codexArgs`, `codexAppServerUrl`, `codexWsToken`, `codexModel`, `codexCwd`, `codexSandbox`, `codexExperimentalApi`.
 - `webhook`: `webhookUrl`.
 - `openclaw`: `openclawUrl`.
 
@@ -79,6 +80,7 @@ Supported runtime fields:
 Hermes CLI adapters invoke one-shot prompts as `hermes -z "<prompt>" --profile <profile>`. They intentionally do not pass `--reasoning-effort`, `--max-turns`, or a bare prompt argument; Hermes v0.15.2 rejects unsupported flags and treats bare prompt text as unrecognized arguments. Configure provider/model reasoning behavior inside the Hermes profile/config instead.
 For Hermes Portainer, the agent still needs a `hermesProfile`; the runtime tells MegaCorps where to execute it.
 For Hermes SSH, create a runtime preset with `adapterType=hermes-ssh`, set `sshHost` to your Hermes host, set the SSH user/key path reachable inside the server container, and set each agent's `hermesProfile` to the Hermes profile name such as `alice`. The SSH user defaults to `root` and can be overridden. The deploy compose mounts persistent SSH keys at `/home/megacorps/.ssh`, with `/home/megacorps/.ssh/id_ed25519` as the default key path. SSH dispatch imports `/proc/1/environ` before running Hermes so container-level provider API keys remain visible to the SSH session.
+For Codex App Server, create a runtime preset with `adapterType=codex-app`. Stdio mode launches `codex app-server` by default; WebSocket mode uses `codexAppServerUrl` and should use a bearer/capability token. Codex agents should set `soul`, because MegaCorps owns the agent identity/personality/work style instead of relying on a Hermes profile. Direct Chat keeps one Codex thread per chat session. Kanban keeps one Codex thread per card, agent, and dispatch/review kind; every retry or continuation is a new turn in that thread.
 For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or the agent override panel.
 Task-complete webhooks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret` with at least 16 characters. MegaCorps injects the configured secret into dispatched agent prompts as `X-MegaCorps-Webhook-Secret`.
 
@@ -122,12 +124,13 @@ Hermes suite operational notes:
 - Phase 16: help/escalation review via `needs_review`, scoped company/department/project goals, project-scoped Direct Chat, and project-focused Workspaces.
 - Phase 17: React Query browser cache plus authenticated WebSocket live events for chat, Kanban card updates, task logs, comments, projects, goals, and work products.
 - Phase 18: repo-centric project workspace policy with project-level `repoUrl` and `workPath`, pull-before-run/push-after-run prompt protocol, and first-class task work products for PRs, commits, previews, reports, screenshots, and artifacts.
+- Phase 19: Codex app-server adapter, platform-owned agent `soul`, and durable adapter session records for direct chat and task-scoped Codex threads.
 
 Reference-informed next phases:
 
-- Phase 19: dependency/blocker graph with derived ready state and richer handoff records.
-- Phase 20: company template import/export with secret references.
-- Phase 21: worker sidecar, distributed queue locks, and richer runtime liveness probes.
+- Phase 20: dependency/blocker graph with derived ready state and richer handoff records.
+- Phase 21: company template import/export with secret references.
+- Phase 22: worker sidecar, distributed queue locks, and richer runtime liveness probes.
 
 ## Paperclip-inspired loop
 
@@ -166,7 +169,7 @@ Open `Direct Chat` in the sidebar:
 4. Select an existing session or create a new session.
 5. Send a message.
 
-Every chat session stores its own `agentSessionId` and optional `projectId`, so a user can keep several separate conversations with the same agent by project or no-project context. Chat messages are stored in `chat_messages`, sessions in `chat_sessions`, and every agent reply is also recorded through `heartbeat_runs`, `activity_log`, and `cost_events`. The UI shows the user's outgoing message optimistically and displays an agent typing indicator while the adapter run is still pending.
+Every chat session stores its own `agentSessionId` and optional `projectId`, so a user can keep several separate conversations with the same agent by project or no-project context. Adapters that need richer turn identity, such as Codex app-server, also write durable rows to `adapter_sessions`. Chat messages are stored in `chat_messages`, sessions in `chat_sessions`, and every agent reply is also recorded through `heartbeat_runs`, `activity_log`, and `cost_events`. The UI shows the user's outgoing message optimistically and displays an agent typing indicator while the adapter run is still pending.
 The web app uses React Query plus an authenticated `/api/live` WebSocket to invalidate chat session/message caches as soon as the server stores user, agent, or system messages. This makes outgoing messages appear immediately and keeps other open browser tabs in sync without manual refresh.
 
 ## Task message board and intervention
@@ -203,6 +206,7 @@ Every task dispatch, review, and direct chat invocation receives a bounded Kanba
 - focus task details,
 - parent/child/dependency task context,
 - focus agent open work and review queue,
+- focus agent soul/personality/work style when configured,
 - latest task message board entries,
 - latest task lifecycle logs,
 - project repository policy, project work path, and Git workflow instructions,
@@ -230,6 +234,7 @@ MegaCorps stores two complementary log streams:
 - `cost_events`: immutable cost records by company, agent, task, project, goal, provider, and model.
 - `cron_runs`: every dispatch heartbeat tick with source, status, counts, duration, and errors.
 - `chat_sessions` / `chat_messages`: direct agent conversation lifecycle and agent reply metadata.
+- `adapter_sessions`: adapter-native session/thread continuity by scope, currently used for Codex app-server direct chat and card-scoped dispatch/review threads.
 - `card_comments`: per-task message board entries from users, agents, system/webhook completions, and intervention actions.
 - `work_products`: reviewable deliverables by card/project/agent/task-run, including repo URLs, branches, commits, PRs, previews, reports, screenshots, artifacts, and external URLs.
 

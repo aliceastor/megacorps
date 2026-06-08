@@ -1,3 +1,4 @@
+import { dispatchToCodexApp } from './codex-app.ts';
 import { dispatchToHermes } from './hermes.ts';
 import { dispatchToHermesGateway } from './hermes-gateway.ts';
 import { dispatchToHermesSsh } from './hermes-ssh.ts';
@@ -9,6 +10,7 @@ const registry = new Map<string, AgentAdapter>();
 registry.set('hermes', { dispatch: dispatchToHermes });
 registry.set('hermes-gateway', { dispatch: dispatchToHermesGateway });
 registry.set('hermes-ssh', { dispatch: dispatchToHermesSsh });
+registry.set('codex-app', { dispatch: dispatchToCodexApp });
 registry.set('mock', { dispatch: dispatchToMock });
 registry.set('webhook', { dispatch: dispatchToWebhook });
 registry.set('openclaw', { dispatch: dispatchToOpenClaw });

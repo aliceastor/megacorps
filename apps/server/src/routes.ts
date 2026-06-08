@@ -7,7 +7,7 @@ import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, a
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatSessions, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { buildExecutionAgent, cascadeParentStatus, decomposeCard, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
@@ -16,6 +16,7 @@ import { registerCronRoutes } from './cron-routes.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
+import { resetAdapterSessionsForAgent } from './adapter-sessions.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
@@ -1139,7 +1140,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     try { await ensureCompanyReferences(companyId, { departmentId: input.departmentId, bossId: input.bossId, runtimeId: input.runtimeId, adapterType: input.adapterType }); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
-    const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
+    const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
     if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
     return reply.code(201).send(agent ? redactAgent(agent) : agent);
   });
@@ -1187,6 +1188,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     const [agent] = await db.update(agents).set({ currentSessionId: null, isBusy: false }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    await resetAdapterSessionsForAgent(id);
+    await db.update(chatSessions).set({ agentSessionId: null, updatedAt: new Date() }).where(eq(chatSessions.agentId, id));
     await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.session_reset', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
     return agent;
   });
@@ -1206,6 +1209,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       slug: input.slug,
       role: input.role,
       title: input.title,
+      soul: input.soul,
       departmentId: input.departmentId,
       adapterType: input.adapterType,
       adapterConfig: nextAdapterConfig,
@@ -1261,9 +1265,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             ? ['portainer-exec', 'hermes-cli']
             : runtime.adapterType === 'hermes-gateway'
               ? ['http-dispatch', 'polling']
-              : runtime.adapterType === 'mock'
-                ? ['local-debug']
-                : ['webhook'],
+              : runtime.adapterType === 'codex-app'
+                ? ['codex-app-server', 'json-rpc', 'thread-turn-session']
+                : runtime.adapterType === 'mock'
+                  ? ['local-debug']
+                  : ['webhook'],
       };
     });
   });

@@ -8,6 +8,7 @@ import { db } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, projects } from './db/schema.ts';
 import { budgetOk, buildCompanyKanbanContext, buildExecutionAgent, getBudgetGuard } from './dispatch.ts';
 import { publishLiveEvent } from './live.ts';
+import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -81,6 +82,7 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
       `Agent name: ${agent.name}`,
       `Identity label: ${agent.role}`,
       `Title: ${agent.title ?? 'none'}`,
+      agent.soul ? `Soul:\n${agent.soul.slice(0, 1200)}` : '',
       `Adapter: ${agent.adapterType}`,
     ].join('\n'),
     `Kanban context snapshot:\n${kanbanContext}`,
@@ -271,10 +273,35 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       const goalContext = await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
       const prompt = buildChatPrompt(company, agent, recent.reverse(), kanbanContext, goalContext);
       const adapter = getAdapter(agent.adapterType ?? 'hermes');
+      const adapterSession = agent.adapterType === 'codex-app'
+        ? await findAdapterSession({
+          companyId: session.companyId,
+          agentId: agent.id,
+          runtimeId: agent.runtimeId,
+          adapterType: agent.adapterType,
+          scopeType: 'chat',
+          scopeId: session.id,
+          kind: 'chat',
+        })
+        : null;
       const result = await adapter.dispatch(
-        await buildExecutionAgent(agent, session.agentSessionId ?? null),
+        await buildExecutionAgent(agent, adapterSession?.adapterSessionId ?? session.agentSessionId ?? null),
         { id: `chat-${session.id}`, title: session.title, body: prompt, timeoutSeconds: 300, kind: 'chat' },
       );
+      if (agent.adapterType === 'codex-app') {
+        await rememberAdapterSession({
+          companyId: session.companyId,
+          agentId: agent.id,
+          runtimeId: agent.runtimeId,
+          adapterType: agent.adapterType,
+          scopeType: 'chat',
+          scopeId: session.id,
+          kind: 'chat',
+          adapterSessionId: result.sessionId,
+          lastTurnId: result.turnId ?? null,
+          metadata: { heartbeatRunId: run.id },
+        });
+      }
       if (!result.success) throw new Error(result.output || 'agent_chat_failed');
 
       const guard = await getBudgetGuard(agent);

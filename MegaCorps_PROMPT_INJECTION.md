@@ -11,7 +11,7 @@ MegaCorps uses bounded context budgets, so long fields are clipped rather than o
 - Company name, mission, dispatch settings
 - Company goals, department goals, project goals
 - Project repo binding and Git completion policy, when a project has a repository
-- Agent identity, title, reporting manager, direct reports
+- Agent identity, title, soul/work style, reporting manager, direct reports
 - Same-company Kanban snapshot with compact card lines
 - Focus-agent assigned work and review queue
 - Recent activity and heartbeat runs
@@ -48,6 +48,27 @@ Effective goal stack:
 ```
 
 For Direct Chat, the session `projectId` controls the project goal layer. A null `projectId` is treated as no-project/general chat.
+
+## Agent Soul And Codex App-Server Wrapper
+
+`soul` is MegaCorps' platform-owned identity/personality/work-style prompt for an agent. Hermes agents can still use a native `hermesProfile`, but adapters without native profiles, especially `codex-app`, should use `soul` as the primary identity definition.
+
+When `adapterType=codex-app`, MegaCorps wraps the normal Direct Chat or Kanban prompt with:
+
+```text
+You are running through Codex app-server as a MegaCorps agent. MegaCorps is the source of truth for your identity, task scope, goals, and completion protocol.
+
+=== Agent Soul ===
+<agent.soul, or fallback name/role/title>
+
+=== Adapter Session ===
+Codex thread: <existing thread id | new>
+Session policy: Direct Chat uses one thread per chat session. Kanban uses one thread per card, agent, and dispatch/review kind. Every retry or continuation is a new turn in that thread.
+
+<normal MegaCorps Direct Chat or Kanban task prompt>
+```
+
+This deliberately uses task-scoped sessions rather than project-scoped sessions. Project context comes from `projectId`, repo policy, goals, and work products; the Codex conversation thread is scoped to the actual chat or card work item so unrelated project tasks do not contaminate each other.
 
 ## Project Repository And Work Path Protocol
 
@@ -104,6 +125,8 @@ Goal: <selected goal title>
 
 Assigned member: <agent name>
 Identity label: <agent role>
+Soul:
+<agent.soul, if configured>
 Reports to: <manager name | top-level>
 Direct reports: <report list | none>
 
@@ -189,6 +212,8 @@ Agent name: <agent name>
 Identity label: <agent role>
 Title: <agent title | none>
 Adapter: <adapter type>
+Soul:
+<agent.soul, if configured>
 
 Kanban context snapshot:
 <bounded same-company board and focus-agent work context>

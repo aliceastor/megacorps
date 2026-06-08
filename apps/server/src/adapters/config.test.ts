@@ -23,6 +23,7 @@ test('production requires runtime for external adapters and ignores adapter env 
   withEnv({ NODE_ENV: 'production', ADAPTER_ENV_FALLBACK_ENABLED: undefined, HERMES_SSH_HOST: 'env-host' }, () => {
     assert.equal(adapterEnvFallbackEnabled(), false);
     assert.equal(adapterRequiresRuntime('hermes-ssh'), true);
+    assert.equal(adapterRequiresRuntime('codex-app'), true);
     assert.equal(adapterRequiresRuntime('mock'), false);
     assert.throws(
       () => getAdapterStringConfig({ hermesProfile: 'alice', currentSessionId: null, adapterConfig: {} }, 'sshHost', 'HERMES_SSH_HOST'),

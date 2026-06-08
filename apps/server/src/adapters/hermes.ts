@@ -2,8 +2,19 @@ import { getAdapterStringConfig } from './config.ts';
 
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
 export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat'; taskRunId?: string | null };
-export type TaskResult = { success: boolean; output: string; sessionId: string; tokensUsed: number; costUsd: number; durationSeconds: number };
-export type AgentLike = { hermesProfile: string | null; currentSessionId: string | null; adapterConfig?: Record<string, unknown> | null };
+export type TaskResult = { success: boolean; output: string; sessionId: string; turnId?: string | null; tokensUsed: number; costUsd: number; durationSeconds: number };
+export type AgentLike = {
+  id?: string;
+  name?: string;
+  role?: string;
+  title?: string | null;
+  soul?: string | null;
+  adapterType?: string | null;
+  runtimeId?: string | null;
+  hermesProfile: string | null;
+  currentSessionId: string | null;
+  adapterConfig?: Record<string, unknown> | null;
+};
 
 async function portainerFetch(agent: AgentLike | null, path: string, init: RequestInit = {}, token?: string): Promise<Response> {
   const base = getAdapterStringConfig(agent ?? { hermesProfile: null, currentSessionId: null }, 'portainerUrl', 'PORTAINER_URL');

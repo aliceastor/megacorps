@@ -37,6 +37,7 @@ test('agent runtime local roots are runtime-owned paths', () => {
 test('accepts MVP agent adapter options', () => {
   assert.equal(createAgentSchema.safeParse({ name: 'Alice', slug: 'alice', role: 'worker', adapterType: 'hermes-gateway', hermesProfile: 'alice' }).success, true);
   assert.equal(createAgentSchema.safeParse({ name: 'SSH Alice', slug: 'ssh-alice', role: 'worker', adapterType: 'hermes-ssh', hermesProfile: 'alice' }).success, true);
+  assert.equal(createAgentSchema.safeParse({ name: 'Codex Alice', slug: 'codex-alice', role: 'worker', adapterType: 'codex-app', soul: 'Careful code reviewer with a concise working style.' }).success, true);
   assert.equal(createAgentSchema.safeParse({ name: 'Local', slug: 'local', role: 'worker', adapterType: 'mock', hermesProfile: 'local-debug' }).success, true);
 });
 

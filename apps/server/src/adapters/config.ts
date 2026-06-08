@@ -1,6 +1,6 @@
 import type { AgentLike } from './hermes.ts';
 
-const externalAdapterTypes = new Set(['hermes', 'hermes-ssh', 'hermes-gateway', 'webhook', 'openclaw']);
+const externalAdapterTypes = new Set(['hermes', 'hermes-ssh', 'hermes-gateway', 'codex-app', 'webhook', 'openclaw']);
 const blockedAdapterHosts = new Set(['localhost', 'localhost.', '0.0.0.0', '127.0.0.1', '::1', '[::1]', '0:0:0:0:0:0:0:1', '169.254.169.254']);
 
 function truthy(value: string | undefined): boolean {

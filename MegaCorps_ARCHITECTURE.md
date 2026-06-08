@@ -2,6 +2,19 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.11 - Codex App-Server Adapter And Agent Soul
+
+Date: 2026-06-08
+
+Completed in this pass:
+
+- Added `codex-app` as a first-class adapter type backed by Codex app-server's JSON-RPC thread/turn protocol.
+- Added `agents.soul` so MegaCorps can define platform-owned identity/personality/work style for adapters without native profile files.
+- Added `adapter_sessions` and `task_runs.adapter_session_id` / `task_runs.adapter_turn_id` to persist adapter-native session/thread continuity separately from `heartbeat_runs`.
+- Implemented Codex app-server stdio transport through `codex app-server` and authenticated WebSocket transport for remote/forwarded app-server endpoints.
+- Chose a task-scoped session policy: Direct Chat keeps one Codex thread per chat session; Kanban keeps one Codex thread per card, agent, and dispatch/review kind, with retries/continuations as new turns.
+- Exposed Codex runtime fields and agent soul in Settings/Agents UI, API Help, README, and prompt injection docs.
+
 ## Architecture Update v1.10 - Runtime Local Workspace Roots
 
 Date: 2026-06-08
@@ -139,7 +152,8 @@ Reference-informed next phases:
 - [ ] Phase 16: Dependency/blocker graph with derived ready state, reclaim policy, and structured handoff records.
 - [ ] Phase 17: Chain-of-command context, manager review, escalation, and delegation loop.
 - [x] Phase 18: Repo-centric project workspace policy and first-class work products.
-- [ ] Phase 19: Company template import/export and secret references.
+- [x] Phase 19: Codex app-server adapter, agent soul, and durable adapter sessions.
+- [ ] Phase 20: Company template import/export and secret references.
 
 ## Architecture Update v1.0 - Production Hardening and Real O-chart
 
@@ -243,10 +257,11 @@ The older phase checklist later in this document is kept as historical design no
 - [x] `agents` and `agent_runtimes` tables.
 - [x] Agent CRUD API.
 - [x] Runtime preset CRUD API.
-- [x] Adapter registry for `mock`, Hermes Portainer, Hermes SSH, Hermes HTTP API, Webhook, and OpenClaw.
+- [x] Adapter registry for `mock`, Hermes Portainer, Hermes SSH, Hermes HTTP API, Codex app-server, Webhook, and OpenClaw.
 - [x] Hermes Portainer adapter.
 - [x] Hermes SSH adapter.
 - [x] Hermes HTTP API adapter.
+- [x] Codex app-server adapter.
 - [x] Webhook/OpenClaw adapter.
 - [x] Agent connection test API.
 - [x] Card assignment via task update and auto-assignment.
@@ -547,6 +562,7 @@ Supported adapter fields:
 - `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`.
 - `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`.
 - `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `megacorpsApiUrl`.
+- `codex-app`: `codexTransport`, `codexCommand`, `codexArgs`, `codexAppServerUrl`, `codexWsToken`, `codexModel`, `codexCwd`, `codexSandbox`, `codexExperimentalApi`.
 - `webhook`: `webhookUrl`.
 - `openclaw`: `openclawUrl`.
 
@@ -557,7 +573,7 @@ Implemented:
 - Authentication, signup/login/logout, cookie session, validation error formatting.
 - Kanban task CRUD with UUID, one stage per task, detail drawer, logs, comments, sub-tasks, delete, run, review.
 - Agent CRUD, department membership, O-chart reporting line, pause/resume/fire/reset session.
-- Runtime registry for mock, Hermes Portainer, Hermes SSH, Hermes HTTP API, Webhook, and OpenClaw.
+- Runtime registry for mock, Hermes Portainer, Hermes SSH, Hermes HTTP API, Codex app-server, Webhook, and OpenClaw.
 - Dispatch heartbeat with global interval and company-specific interval/enable switch.
 - Automatic assignment for `todo` tasks, with department/tag/capability scoring. Legacy `backlog` inputs are normalized to `todo`.
 - Prompt context injection for company mission, project, goal, comments, and matching knowledge docs.

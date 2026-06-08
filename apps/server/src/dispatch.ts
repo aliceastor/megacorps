@@ -6,6 +6,7 @@ import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
+import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -444,6 +445,13 @@ export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: st
   }
   const webhookSharedSecret = await configuredWebhookSharedSecret();
   return {
+    id: agent.id,
+    name: agent.name,
+    role: agent.role,
+    title: agent.title,
+    soul: agent.soul,
+    adapterType,
+    runtimeId: agent.runtimeId,
     hermesProfile: agent.hermesProfile,
     currentSessionId: currentSessionId === undefined ? agent.currentSessionId : currentSessionId,
     adapterConfig: {
@@ -452,6 +460,36 @@ export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: st
       ...(webhookSharedSecret ? { webhookSharedSecret } : {}),
     },
   };
+}
+
+async function scopedAdapterSessionId(card: CardRow, agent: AgentRow, kind: TaskRunKind): Promise<string | null> {
+  if (agent.adapterType !== 'codex-app') return null;
+  const session = await findAdapterSession({
+    companyId: card.companyId,
+    agentId: agent.id,
+    runtimeId: agent.runtimeId,
+    adapterType: agent.adapterType,
+    scopeType: 'card',
+    scopeId: card.id,
+    kind,
+  });
+  return session?.adapterSessionId ?? null;
+}
+
+async function rememberTaskAdapterSession(card: CardRow, agent: AgentRow, kind: TaskRunKind, result: { sessionId: string; turnId?: string | null }, taskRunId?: string | null): Promise<void> {
+  if (agent.adapterType !== 'codex-app') return;
+  await rememberAdapterSession({
+    companyId: card.companyId,
+    agentId: agent.id,
+    runtimeId: agent.runtimeId,
+    adapterType: agent.adapterType,
+    scopeType: 'card',
+    scopeId: card.id,
+    kind,
+    adapterSessionId: result.sessionId,
+    lastTurnId: result.turnId ?? null,
+    taskRunId,
+  });
 }
 
 function matchScore(card: CardRow, agent: AgentRow): number {
@@ -724,10 +762,12 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
 
   try {
     const adapter = getAdapter(agent.adapterType ?? 'hermes');
+    const adapterSessionId = await scopedAdapterSessionId(card, agent, 'dispatch');
     const result = await adapter.dispatch(
-      await buildExecutionAgent(agent),
+      await buildExecutionAgent(agent, agent.adapterType === 'codex-app' ? adapterSessionId : undefined),
       { id: card.id, title: card.title, body: await buildTaskPrompt(card), timeoutSeconds: 300, taskRunId: options.taskRunId },
     );
+    await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && !latest.executionLockId && latest.activeHeartbeatRunId !== run.id) {
       const status = terminalRunStatus(latest.columnStatus);
@@ -868,10 +908,12 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
   try {
     const adapter = getAdapter(reviewer.adapterType ?? 'hermes');
     const promptCard = reviewerId === card.reviewerId ? card : { ...card, reviewerId };
+    const adapterSessionId = await scopedAdapterSessionId(card, reviewer, 'review');
     const result = await adapter.dispatch(
-      await buildExecutionAgent(reviewer),
+      await buildExecutionAgent(reviewer, reviewer.adapterType === 'codex-app' ? adapterSessionId : undefined),
       { id: card.id, title: `Review: ${card.title}`, body: await buildReviewPrompt(promptCard), timeoutSeconds: 180, taskRunId: options.taskRunId },
     );
+    await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && latest.columnStatus !== card.columnStatus && latest.activeHeartbeatRunId !== run.id) {
       const status = terminalRunStatus(latest.columnStatus);
@@ -1373,6 +1415,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
     addContextSection(state, 'Invocation Agent Work Context', [
       `Agent: ${focusAgent.name}`,
       `Identity label: ${focusAgent.role}`,
+      focusAgent.soul ? `Soul:\n${clipText(focusAgent.soul, 1200)}` : '',
       `Runtime: ${runtime?.name ?? focusAgent.runtimeId ?? 'none'}`,
       ...runtimeLocalLines(runtime),
       `Reports to: ${manager?.name ?? 'top-level'}`,
@@ -1465,6 +1508,7 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
     assignee ? [
       `Assigned member: ${assignee.name}`,
       `Identity label: ${assignee.role}`,
+      assignee.soul ? `Soul:\n${clipText(assignee.soul, 1200)}` : '',
       `Reports to: ${manager?.name ?? 'top-level'}`,
       `Direct reports: ${reports.length ? reports.map((report) => `${report.name} (${report.role})`).join(', ') : 'none'}`,
     ].join('\n') : '',
