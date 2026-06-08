@@ -170,6 +170,7 @@ Open a task and use the Message Board tab:
 - `Continue run with comment`: reactivate the assignee and move the task back to `todo`.
 
 Dispatch/review/webhook completions now also create agent-authored messages on the task board, so task discussion is not hidden only in logs.
+Kanban task detail tabs use a short-lived browser session cache for message board, task logs, and filtered API lifecycle rows. Selecting a task renders details immediately, then prefetches cached tab data in the background; mutating the task or adding comments refreshes the affected cache entries.
 
 `Split into Sub-tasks` decomposes a larger task into child Kanban tasks. It uses the task body lines when available, otherwise it creates Plan / Execute / Review sub-tasks.
 
