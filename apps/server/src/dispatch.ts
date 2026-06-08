@@ -289,6 +289,14 @@ export async function budgetOk(agent: AgentRow): Promise<boolean> {
   return Number(agent.spentThisMonth ?? 0) < guard.monthlyLimit;
 }
 
+function configuredAdapterOverrides(config: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(config ?? {}).filter(([, value]) => (
+    value !== null
+    && value !== undefined
+    && !(typeof value === 'string' && value.trim() === '')
+  )));
+}
+
 export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: string | null) {
   const adapterType = agent.adapterType ?? 'hermes';
   let runtimeConfig: Record<string, unknown> = {};
@@ -305,7 +313,7 @@ export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: st
     currentSessionId: currentSessionId === undefined ? agent.currentSessionId : currentSessionId,
     adapterConfig: {
       ...runtimeConfig,
-      ...((agent.adapterConfig as Record<string, unknown> | null) ?? {}),
+      ...configuredAdapterOverrides(agent.adapterConfig as Record<string, unknown> | null),
     },
   };
 }

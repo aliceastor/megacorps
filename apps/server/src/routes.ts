@@ -24,7 +24,7 @@ function priorityToNumber(priority: string | undefined): number { return priorit
 function actorLabel(user: { email?: string; id?: string } | null): string { return user?.email ?? user?.id ?? 'system'; }
 
 const REDACTED = '[redacted]';
-const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|keyPath|privateKey)/i;
+const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
 const SIGNUP_ENABLED_SETTING = 'auth.signup_enabled';
 
 function truthy(value: string | undefined): boolean {

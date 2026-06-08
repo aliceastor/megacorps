@@ -87,6 +87,20 @@ export function extractSessionId(stdout: string): string {
 export function estimateTokens(text: string): number { return Math.ceil(text.length / 4); }
 export function estimateCost(tokens: number): number { return Number(((tokens / 1_000_000) * 3).toFixed(6)); }
 
+function configuredString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function megacorpsApiUrl(agent: AgentLike): string {
+  return configuredString(agent.adapterConfig?.megacorpsApiUrl)
+    ?? configuredString(agent.adapterConfig?.callbackUrl)
+    ?? configuredString(agent.adapterConfig?.webhookBaseUrl)
+    ?? configuredString(agent.adapterConfig?.publicApiUrl)
+    ?? configuredString(process.env.MEGACORPS_API_URL)
+    ?? configuredString(process.env.MEGACORPS_PUBLIC_URL)
+    ?? 'http://localhost:4000';
+}
+
 export function buildAgentPrompt(agent: AgentLike, task: TaskContext): string {
   if (task.kind === 'chat') {
     return `You are in a direct MegaCorps chat session.
@@ -101,7 +115,7 @@ ${task.body}
 Respond to the user directly. Do not report task completion or call the Kanban webhook unless the user explicitly asks you to create or update MegaCorps work items.`;
   }
 
-  const apiUrl = (typeof agent.adapterConfig?.publicApiUrl === 'string' && agent.adapterConfig.publicApiUrl) || process.env.MEGACORPS_PUBLIC_URL || 'http://localhost:4000';
+  const apiUrl = megacorpsApiUrl(agent);
   return `You are now working under PLATFORM MegaCorps at ${apiUrl}.
 
 === Common API Endpoints ===
@@ -131,12 +145,16 @@ For full API documentation, fetch: GET ${apiUrl}/api/help
 `;
 }
 
-export async function dispatchToHermes(agent: AgentLike, task: TaskContext): Promise<TaskResult> {
+export function buildHermesCliCommand(agent: AgentLike, task: TaskContext): string[] {
   if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
   const prompt = buildAgentPrompt(agent, task);
   const maxTurns = typeof agent.adapterConfig?.maxTurns === 'number' ? agent.adapterConfig.maxTurns : 60;
-  const reasoningEffort = typeof agent.adapterConfig?.reasoningEffort === 'string' ? agent.adapterConfig.reasoningEffort : 'medium';
-  const cmd = ['hermes', 'chat', '-q', `--profile=${agent.hermesProfile}`, ...(agent.currentSessionId ? ['--resume', agent.currentSessionId] : []), `--max-turns=${maxTurns}`, `--reasoning-effort=${reasoningEffort}`, prompt];
+  return ['hermes', 'chat', '-q', `--profile=${agent.hermesProfile}`, ...(agent.currentSessionId ? ['--resume', agent.currentSessionId] : []), `--max-turns=${maxTurns}`, prompt];
+}
+
+export async function dispatchToHermes(agent: AgentLike, task: TaskContext): Promise<TaskResult> {
+  if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
+  const cmd = buildHermesCliCommand(agent, task);
   const result = await portainerExec(agent, cmd, task.timeoutSeconds ?? 300);
   const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
   const tokensUsed = estimateTokens(output);

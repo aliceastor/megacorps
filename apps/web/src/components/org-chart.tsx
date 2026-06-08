@@ -29,13 +29,69 @@ type Runtime = { id: string; companyId?: string | null; name: string; adapterTyp
 type Card = { id: string; companyId?: string; title: string; columnStatus?: string; assigneeId?: string | null; reviewerId?: string | null; parentCardId?: string | null };
 type Approval = { id: string; companyId: string; cardId?: string | null; status: string; type: string };
 
-function adapterFields(adapterType?: string): Array<[string, string]> {
-  if (adapterType === 'hermes') return [['portainerUrl', 'Portainer URL'], ['portainerUser', 'Portainer user'], ['portainerPass', 'Portainer password'], ['portainerEndpointId', 'Endpoint ID'], ['hermesContainer', 'Hermes container'], ['publicApiUrl', 'MegaCorps public API URL']];
-  if (adapterType === 'hermes-ssh') return [['sshHost', 'SSH host'], ['sshUser', 'SSH user'], ['sshPort', 'SSH port'], ['sshKeyPath', 'SSH key path'], ['sshOptions', 'SSH extra options'], ['hermesCommand', 'Hermes command'], ['publicApiUrl', 'MegaCorps public API URL'], ['reasoningEffort', 'Reasoning effort'], ['maxTurns', 'Max turns']];
-  if (adapterType === 'hermes-gateway') return [['hermesGatewayUrl', 'Hermes HTTP API URL'], ['hermesDashboardToken', 'Hermes token'], ['publicApiUrl', 'MegaCorps public API URL']];
-  if (adapterType === 'webhook') return [['webhookUrl', 'Webhook URL']];
-  if (adapterType === 'openclaw') return [['openclawUrl', 'OpenClaw URL']];
+type ConfigField = { key: string; label: string; description?: string; type?: 'text' | 'number' | 'password' };
+
+const megacorpsApiDescription = 'MegaCorps API base URL that agents use for task-complete callbacks.';
+
+function adapterFields(adapterType?: string): ConfigField[] {
+  if (adapterType === 'hermes') return [
+    { key: 'portainerUrl', label: 'Portainer URL' },
+    { key: 'portainerUser', label: 'Portainer user' },
+    { key: 'portainerPass', label: 'Portainer password', type: 'password' },
+    { key: 'portainerEndpointId', label: 'Endpoint ID' },
+    { key: 'hermesContainer', label: 'Hermes container' },
+    { key: 'megacorpsApiUrl', label: 'MegaCorps callback URL', description: megacorpsApiDescription },
+    { key: 'maxTurns', label: 'Max turns', type: 'number' },
+  ];
+  if (adapterType === 'hermes-ssh') return [
+    { key: 'sshHost', label: 'SSH host' },
+    { key: 'sshUser', label: 'SSH user' },
+    { key: 'sshPort', label: 'SSH port', type: 'number' },
+    { key: 'sshKeyPath', label: 'SSH key path' },
+    { key: 'sshOptions', label: 'SSH extra options' },
+    { key: 'hermesCommand', label: 'Hermes command' },
+    { key: 'megacorpsApiUrl', label: 'MegaCorps callback URL', description: megacorpsApiDescription },
+    { key: 'maxTurns', label: 'Max turns', type: 'number' },
+  ];
+  if (adapterType === 'hermes-gateway') return [
+    { key: 'hermesGatewayUrl', label: 'Hermes HTTP API URL' },
+    { key: 'hermesDashboardToken', label: 'Hermes token', type: 'password' },
+    { key: 'megacorpsApiUrl', label: 'MegaCorps callback URL', description: megacorpsApiDescription },
+  ];
+  if (adapterType === 'webhook') return [{ key: 'webhookUrl', label: 'Webhook URL' }];
+  if (adapterType === 'openclaw') return [{ key: 'openclawUrl', label: 'OpenClaw URL' }];
   return [];
+}
+
+function isSensitiveConfigKey(key: string): boolean {
+  return /(password|pass|token|secret|jwt|apiKey|privateKey)/i.test(key);
+}
+
+function fieldForStoredKey(key: string): ConfigField {
+  if (key === 'publicApiUrl') return { key, label: 'Legacy publicApiUrl', description: megacorpsApiDescription };
+  return { key, label: `Stored config: ${key}`, type: isSensitiveConfigKey(key) ? 'password' : key === 'maxTurns' || key === 'sshPort' ? 'number' : 'text' };
+}
+
+function visibleAdapterFields(adapterType: string, runtimeConfig: Record<string, unknown>, agentConfig: Record<string, unknown>): ConfigField[] {
+  const fields = adapterFields(adapterType);
+  const known = new Set(fields.map((field) => field.key));
+  if (known.has('megacorpsApiUrl')) {
+    known.add('publicApiUrl');
+    known.add('callbackUrl');
+    known.add('webhookBaseUrl');
+  }
+  const extraKeys = new Set([...Object.keys(runtimeConfig), ...Object.keys(agentConfig)].filter((key) => !known.has(key)));
+  return [...fields, ...Array.from(extraKeys).map(fieldForStoredKey)];
+}
+
+function configValue(config: Record<string, unknown>, key: string): unknown {
+  if (key === 'megacorpsApiUrl') return config.megacorpsApiUrl ?? config.callbackUrl ?? config.webhookBaseUrl ?? config.publicApiUrl;
+  return config[key];
+}
+
+function displayConfigValue(value: unknown): string {
+  if (value === undefined || value === null || value === '') return 'not set';
+  return typeof value === 'object' ? JSON.stringify(value) : String(value);
 }
 
 function Toast({ message, type, onClose }: { message: string; type: 'success' | 'error'; onClose: () => void }) {
@@ -200,6 +256,27 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
     }
   }
 
+  function updateAgentConfigField(field: ConfigField, rawValue: string) {
+    const nextConfig = { ...((agentDraft?.adapterConfig as Record<string, unknown> | undefined) ?? {}) };
+    if (rawValue.trim() === '') {
+      delete nextConfig[field.key];
+      if (field.key === 'megacorpsApiUrl') {
+        delete nextConfig.publicApiUrl;
+        delete nextConfig.callbackUrl;
+        delete nextConfig.webhookBaseUrl;
+      }
+      setAgentDraft({ ...(agentDraft ?? {}), adapterConfig: nextConfig });
+      return;
+    }
+    if (field.key === 'megacorpsApiUrl') {
+      delete nextConfig.publicApiUrl;
+      delete nextConfig.callbackUrl;
+      delete nextConfig.webhookBaseUrl;
+    }
+    nextConfig[field.key] = field.type === 'number' ? Number(rawValue) : rawValue;
+    setAgentDraft({ ...(agentDraft ?? {}), adapterConfig: nextConfig });
+  }
+
   async function agentAction(agentId: string, path: string, message: string) {
     setTesting(agentId);
     try {
@@ -266,6 +343,14 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const selectedReports = selected ? visibleAgents.filter((agent) => agent.bossId === selected.id) : [];
   const selectedAssignedCards = selected ? companyCards.filter((card) => card.assigneeId === selected.id) : [];
   const selectedReviewCards = selected ? companyCards.filter((card) => card.reviewerId === selected.id || selectedReports.some((report) => report.id === card.assigneeId && card.columnStatus === 'in_review')) : [];
+  const selectedAdapterType = String(agentDraft?.adapterType ?? selected?.adapterType ?? 'mock');
+  const selectedRuntimeId = String(agentDraft?.runtimeId ?? selected?.runtimeId ?? '');
+  const selectedRuntime = selectedRuntimeId ? runtimes.find((runtime) => runtime.id === selectedRuntimeId) : undefined;
+  const inheritedAdapterConfig = (selectedRuntime?.config as Record<string, unknown> | undefined) ?? {};
+  const overrideAdapterConfig = (agentDraft?.adapterConfig as Record<string, unknown> | undefined) ?? {};
+  const configuredOverrideAdapterConfig = Object.fromEntries(Object.entries(overrideAdapterConfig).filter(([, value]) => value !== null && value !== undefined && !(typeof value === 'string' && value.trim() === '')));
+  const effectiveAdapterConfig = { ...inheritedAdapterConfig, ...configuredOverrideAdapterConfig };
+  const selectedAdapterFields = visibleAdapterFields(selectedAdapterType, inheritedAdapterConfig, overrideAdapterConfig);
 
   return <>
     <div className="page-head">
@@ -386,6 +471,12 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
               <span>Session <b>{selected.currentSessionId ?? 'none'}</b></span>
               <span>Budget <b>${selected.spentThisMonth ?? '0'} / ${selected.budgetMonthly ?? 'none'}</b></span>
             </div>
+            {selectedAdapterFields.length > 0 && <section className="config-summary">
+              <div className="panel-title"><h3>Effective adapter config</h3><span className="status-pill">{selectedRuntime ? `runtime: ${selectedRuntime.name}` : 'no runtime preset'}</span></div>
+              <div className="meta-grid">
+                {selectedAdapterFields.map((field) => <span key={field.key}>{field.label}<b>{displayConfigValue(configValue(effectiveAdapterConfig, field.key))}</b></span>)}
+              </div>
+            </section>}
             <div className="form-grid">
               <label className="field-label">Name<input className="input" value={String(agentDraft?.name ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), name: e.target.value })} /></label>
               <label className="field-label">Slug<input className="input" value={String(agentDraft?.slug ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), slug: e.target.value })} /></label>
@@ -404,7 +495,16 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
               <label className="field-label">Department<select className="input" value={String(agentDraft?.departmentId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), departmentId: e.target.value || null })}><option value="">No department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
               <label className="field-label">Reports to<select className="input" value={String(agentDraft?.bossId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), bossId: e.target.value || null })}><option value="">Top-level member</option>{visibleAgents.filter((agent) => agent.id !== selected.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
               <label className="field-label">Monthly budget<input className="input" type="number" min={0} step="0.01" value={String(agentDraft?.budgetMonthly ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), budgetMonthly: e.target.value })} /></label>
-              {adapterFields(String(agentDraft?.adapterType ?? selected.adapterType ?? 'mock')).map(([key, label]) => <label className="field-label" key={key}>Override {label}<input className="input" type={key.toLowerCase().includes('pass') || key.toLowerCase().includes('token') ? 'password' : 'text'} value={String((agentDraft?.adapterConfig as Record<string, unknown> | undefined)?.[key] ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), adapterConfig: { ...((agentDraft?.adapterConfig as Record<string, unknown> | undefined) ?? {}), [key]: e.target.value } })} /></label>)}
+              {selectedAdapterFields.map((field) => {
+                const overrideValue = configValue(overrideAdapterConfig, field.key);
+                const inheritedValue = configValue(inheritedAdapterConfig, field.key);
+                const inheritedLabel = displayConfigValue(inheritedValue);
+                return <label className="field-label" key={field.key}>Override {field.label}
+                  {field.description && <span className="field-hint">{field.description}</span>}
+                  <span className="field-hint">{inheritedValue === undefined || inheritedValue === null || inheritedValue === '' ? 'No runtime value; leave blank to keep unset.' : `Inherited from runtime: ${inheritedLabel}`}</span>
+                  <input className="input" type={field.type ?? (isSensitiveConfigKey(field.key) ? 'password' : 'text')} placeholder={inheritedValue === undefined || inheritedValue === null || inheritedValue === '' ? 'Optional override' : `Inherited: ${inheritedLabel}`} value={String(overrideValue ?? '')} onChange={(e) => updateAgentConfigField(field, e.target.value)} />
+                </label>;
+              })}
             </div>
             <div className="data-grid">
               <section className="section-card" style={{ padding: 0 }}>

@@ -96,7 +96,7 @@ Completed in this pass:
 - The server container now includes `openssh-client`.
 - Hermes SSH dispatch connects to the configured SSH host and runs `hermes chat --profile {profile} "{prompt}"`. No production SSH host is hardcoded.
 - SSH stdout/stderr, exit code, duration, estimated tokens, cost, and session id are recorded through the normal adapter result path.
-- `Settings -> Agent runtimes` and `Agents -> select agent` now expose Hermes SSH fields: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `publicApiUrl`, `reasoningEffort`, and `maxTurns`.
+- `Settings -> Agent runtimes` and `Agents -> select agent` now expose Hermes SSH fields: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`, and `maxTurns`.
 - Docker compose and `.env.example` include Hermes SSH environment fallbacks.
 - The web API client now tries the current browser host on port `4000` before falling back to the baked `NEXT_PUBLIC_API_URL`, which fixes NAS/browser deployments where a baked IP or `localhost` is unreachable from the current browser.
 - `GET /api/help` and `GET /api/help?format=markdown` now include response schemas, response examples, and explicit rate-limit notes for every endpoint.
@@ -470,9 +470,9 @@ UI entry points:
 Supported adapter fields:
 
 - `mock`: no endpoint required.
-- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
-- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
-- `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `publicApiUrl`.
+- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`, `maxTurns`.
+- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`, `maxTurns`.
+- `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `megacorpsApiUrl`.
 - `webhook`: `webhookUrl`.
 - `openclaw`: `openclawUrl`.
 
@@ -659,14 +659,14 @@ Current implementation note, 2026-06-06:
 - `hermes` remains the Portainer-backed adapter.
 - `hermes-ssh` is now the direct SSH-backed Hermes CLI adapter.
 - `hermes-ssh` requires a configured SSH host. The SSH user defaults to `root` when no user is configured.
-- The remote command shape is `hermes chat --profile {profile} "{prompt}"`, with optional `--resume`, `--max-turns`, and `--reasoning-effort`.
+- The remote command shape is `hermes chat --profile {profile} "{prompt}"`, with optional `--resume` and `--max-turns`.
+- MegaCorps does not pass `--reasoning-effort` to Hermes CLI because Hermes v0.15.2 rejects that flag. Configure reasoning behavior in the Hermes profile/config instead.
 - Use `Settings -> Agent runtimes` to configure SSH host/user/port/key path, then attach that runtime to agents in `Agents`.
 
 ```bash
 hermes chat -q \
   --profile=<agent_name> \
   --resume <session_id> \
-  --reasoning-effort medium \
   --max-turns 60 \
   "<task_prompt>"
 ```
@@ -676,7 +676,6 @@ hermes chat -q \
 | `-q` | Single-query mode：執行完退出 |
 | `--profile` | Agent profile（`/opt/data/profiles/<name>/`）|
 | `--resume` | Session ID，跨任務續接記憶 |
-| `--reasoning-effort` | low / medium / high |
 | `--max-turns` | 最大 tool call 次數（防失控 loop）|
 
 ### 2.3 Session 管理（Agent 記憶連續性）

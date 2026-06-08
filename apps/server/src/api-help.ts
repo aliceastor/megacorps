@@ -82,7 +82,7 @@ const endpoints: ApiEndpoint[] = [
   { method: 'POST', path: '/api/agents/:id/test-connection', group: 'Agents', auth: 'session', summary: 'Test the selected adapter/runtime connection.', params: { id: 'Agent UUID.' } },
   { method: 'GET', path: '/api/agent-runtimes', group: 'Agents', auth: 'session', summary: 'List company-scoped runtime presets.', query: { companyId: 'Optional company UUID.' } },
   { method: 'GET', path: '/api/agent-runtimes/health', group: 'Agents', auth: 'session', summary: 'Read runtime health summaries, attached agent counts, last run status, and adapter capabilities.' },
-  { method: 'POST', path: '/api/agent-runtimes', group: 'Agents', auth: 'session', summary: 'Create a runtime preset.', body: { name: 'Hermes SSH', adapterType: 'hermes-ssh', isActive: true, config: { sshHost: 'hermes.example.internal', sshUser: 'root', sshPort: 22, sshKeyPath: '/app/data/keys/hermes_id_ed25519', hermesCommand: 'hermes', publicApiUrl: 'https://megacorps.example.com' } } },
+  { method: 'POST', path: '/api/agent-runtimes', group: 'Agents', auth: 'session', summary: 'Create a runtime preset.', body: { name: 'Hermes SSH', adapterType: 'hermes-ssh', isActive: true, config: { sshHost: 'hermes.example.internal', sshUser: 'root', sshPort: 22, sshKeyPath: '/home/megacorps/.ssh/id_ed25519', hermesCommand: 'hermes', megacorpsApiUrl: 'https://megacorps.example.com' } } },
   { method: 'PUT', path: '/api/agent-runtimes/:id', group: 'Agents', auth: 'session', summary: 'Update a runtime preset.', params: { id: 'Runtime UUID.' } },
   { method: 'DELETE', path: '/api/agent-runtimes/:id', group: 'Agents', auth: 'session', summary: 'Delete a runtime preset.', params: { id: 'Runtime UUID.' } },
 

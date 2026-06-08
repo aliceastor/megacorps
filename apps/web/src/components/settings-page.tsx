@@ -11,36 +11,68 @@ type Membership = { id: string; companyId: string; userId: string; role: string;
 
 const adapterTypes = ['mock', 'hermes', 'hermes-ssh', 'hermes-gateway', 'webhook', 'openclaw'];
 
-function configFields(adapterType: string): Array<[string, string]> {
+type ConfigField = { key: string; label: string; description?: string; type?: 'text' | 'number' | 'password' };
+
+const megacorpsApiDescription = 'MegaCorps API base URL that agents use for task-complete callbacks.';
+
+function configFields(adapterType: string): ConfigField[] {
   if (adapterType === 'hermes') return [
-    ['portainerUrl', 'Portainer URL'],
-    ['portainerUser', 'Portainer user'],
-    ['portainerPass', 'Portainer password'],
-    ['portainerEndpointId', 'Endpoint ID'],
-    ['hermesContainer', 'Hermes container'],
-    ['publicApiUrl', 'MegaCorps public API URL'],
-    ['reasoningEffort', 'Reasoning effort'],
-    ['maxTurns', 'Max turns'],
+    { key: 'portainerUrl', label: 'Portainer URL' },
+    { key: 'portainerUser', label: 'Portainer user' },
+    { key: 'portainerPass', label: 'Portainer password', type: 'password' },
+    { key: 'portainerEndpointId', label: 'Endpoint ID' },
+    { key: 'hermesContainer', label: 'Hermes container' },
+    { key: 'megacorpsApiUrl', label: 'MegaCorps callback URL', description: megacorpsApiDescription },
+    { key: 'maxTurns', label: 'Max turns', type: 'number' },
   ];
   if (adapterType === 'hermes-gateway') return [
-    ['hermesGatewayUrl', 'Hermes HTTP API URL'],
-    ['hermesDashboardToken', 'Hermes dashboard token'],
-    ['publicApiUrl', 'MegaCorps public API URL'],
+    { key: 'hermesGatewayUrl', label: 'Hermes HTTP API URL' },
+    { key: 'hermesDashboardToken', label: 'Hermes dashboard token', type: 'password' },
+    { key: 'megacorpsApiUrl', label: 'MegaCorps callback URL', description: megacorpsApiDescription },
   ];
   if (adapterType === 'hermes-ssh') return [
-    ['sshHost', 'SSH host'],
-    ['sshUser', 'SSH user'],
-    ['sshPort', 'SSH port'],
-    ['sshKeyPath', 'SSH key path'],
-    ['sshOptions', 'SSH extra options'],
-    ['hermesCommand', 'Hermes command'],
-    ['publicApiUrl', 'MegaCorps public API URL'],
-    ['reasoningEffort', 'Reasoning effort'],
-    ['maxTurns', 'Max turns'],
+    { key: 'sshHost', label: 'SSH host' },
+    { key: 'sshUser', label: 'SSH user' },
+    { key: 'sshPort', label: 'SSH port', type: 'number' },
+    { key: 'sshKeyPath', label: 'SSH key path' },
+    { key: 'sshOptions', label: 'SSH extra options' },
+    { key: 'hermesCommand', label: 'Hermes command' },
+    { key: 'megacorpsApiUrl', label: 'MegaCorps callback URL', description: megacorpsApiDescription },
+    { key: 'maxTurns', label: 'Max turns', type: 'number' },
   ];
-  if (adapterType === 'webhook') return [['webhookUrl', 'Webhook URL']];
-  if (adapterType === 'openclaw') return [['openclawUrl', 'OpenClaw URL']];
-  return [['publicApiUrl', 'MegaCorps public API URL']];
+  if (adapterType === 'webhook') return [{ key: 'webhookUrl', label: 'Webhook URL' }];
+  if (adapterType === 'openclaw') return [{ key: 'openclawUrl', label: 'OpenClaw URL' }];
+  return [];
+}
+
+function isSensitiveConfigKey(key: string): boolean {
+  return /(password|pass|token|secret|jwt|apiKey|privateKey)/i.test(key);
+}
+
+function fieldForStoredKey(key: string): ConfigField {
+  if (key === 'publicApiUrl') return { key, label: 'Legacy publicApiUrl', description: megacorpsApiDescription };
+  return { key, label: `Stored config: ${key}`, type: isSensitiveConfigKey(key) ? 'password' : key === 'maxTurns' || key === 'sshPort' ? 'number' : 'text' };
+}
+
+function visibleConfigFields(adapterType: string, config: Record<string, unknown>): ConfigField[] {
+  const fields = configFields(adapterType);
+  const known = new Set(fields.map((field) => field.key));
+  if (known.has('megacorpsApiUrl')) {
+    known.add('publicApiUrl');
+    known.add('callbackUrl');
+    known.add('webhookBaseUrl');
+  }
+  const extraFields = Object.keys(config).filter((key) => !known.has(key)).map(fieldForStoredKey);
+  return [...fields, ...extraFields];
+}
+
+function configValue(config: Record<string, unknown>, key: string): unknown {
+  if (key === 'megacorpsApiUrl') return config.megacorpsApiUrl ?? config.callbackUrl ?? config.webhookBaseUrl ?? config.publicApiUrl;
+  return config[key];
+}
+
+function formatConfig(config: Record<string, unknown>): string {
+  return JSON.stringify(config, null, 2);
 }
 
 export function SettingsPage() {
@@ -55,6 +87,8 @@ export function SettingsPage() {
   const [runtimeAdapter, setRuntimeAdapter] = useState('mock');
   const [runtimeActive, setRuntimeActive] = useState(true);
   const [runtimeConfig, setRuntimeConfig] = useState<Record<string, unknown>>({});
+  const [runtimeConfigJson, setRuntimeConfigJson] = useState(formatConfig({}));
+  const [runtimeConfigJsonError, setRuntimeConfigJsonError] = useState('');
   const [companyId, setCompanyId] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [companyMission, setCompanyMission] = useState('');
@@ -90,13 +124,52 @@ export function SettingsPage() {
   const selectedCompanyDepartments = useMemo(() => departments.filter((department) => department.companyId === companyId), [companyId, departments]);
   const selectedCompanyMembers = useMemo(() => memberships.filter((membership) => membership.companyId === companyId && membership.status !== 'disabled'), [companyId, memberships]);
 
+  function setRuntimeConfigState(config: Record<string, unknown>) {
+    setRuntimeConfig(config);
+    setRuntimeConfigJson(formatConfig(config));
+    setRuntimeConfigJsonError('');
+  }
+
+  function updateRuntimeConfigField(field: ConfigField, rawValue: string) {
+    const next = { ...runtimeConfig };
+    if (rawValue.trim() === '') {
+      delete next[field.key];
+      if (field.key === 'megacorpsApiUrl') {
+        delete next.publicApiUrl;
+        delete next.callbackUrl;
+        delete next.webhookBaseUrl;
+      }
+      setRuntimeConfigState(next);
+      return;
+    }
+    if (field.key === 'megacorpsApiUrl') {
+      delete next.publicApiUrl;
+      delete next.callbackUrl;
+      delete next.webhookBaseUrl;
+    }
+    next[field.key] = field.type === 'number' ? Number(rawValue) : rawValue;
+    setRuntimeConfigState(next);
+  }
+
+  function updateRuntimeConfigJson(value: string) {
+    setRuntimeConfigJson(value);
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Runtime config must be a JSON object.');
+      setRuntimeConfig(parsed as Record<string, unknown>);
+      setRuntimeConfigJsonError('');
+    } catch (error) {
+      setRuntimeConfigJsonError(error instanceof Error ? error.message : 'Invalid JSON');
+    }
+  }
+
   function selectRuntime(runtime: Runtime) {
     setRuntimeId(runtime.id);
     setRuntimeCompanyId(runtime.companyId ?? companies[0]?.id ?? '');
     setRuntimeName(runtime.name);
     setRuntimeAdapter(runtime.adapterType);
     setRuntimeActive(runtime.isActive !== false);
-    setRuntimeConfig(runtime.config ?? {});
+    setRuntimeConfigState(runtime.config ?? {});
   }
 
   function selectCompany(company: Company) {
@@ -108,6 +181,10 @@ export function SettingsPage() {
   }
 
   async function saveRuntime() {
+    if (runtimeConfigJsonError) {
+      setToast(`Runtime config JSON error: ${runtimeConfigJsonError}`);
+      return;
+    }
     const payload = { companyId: runtimeCompanyId || companyId || companies[0]?.id, name: runtimeName, adapterType: runtimeAdapter, isActive: runtimeActive, config: runtimeConfig };
     const saved = runtimeId ? await api<Runtime>(`/api/agent-runtimes/${runtimeId}`, { method: 'PUT', body: JSON.stringify(payload) }) : await api<Runtime>('/api/agent-runtimes', { method: 'POST', body: JSON.stringify(payload) });
     setRuntimeId(saved.id);
@@ -169,7 +246,7 @@ export function SettingsPage() {
     {toast && <p className="status-pill">{toast}</p>}
     <div className="data-grid">
       <section className="card section-card">
-        <div className="panel-title"><h2>Agent runtimes</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeCompanyId(companyId || companies[0]?.id || ''); setRuntimeName(''); setRuntimeAdapter('mock'); setRuntimeConfig({}); }}>New</button></div>
+        <div className="panel-title"><h2>Agent runtimes</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeCompanyId(companyId || companies[0]?.id || ''); setRuntimeName(''); setRuntimeAdapter('mock'); setRuntimeConfigState({}); }}>New</button></div>
         <div className="form-grid">
           <label className="field-label">Company<select className="input" value={runtimeCompanyId} onChange={(event) => setRuntimeCompanyId(event.target.value)}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
           <label className="field-label">Name<input className="input" value={runtimeName} onChange={(event) => setRuntimeName(event.target.value)} /></label>
@@ -177,10 +254,15 @@ export function SettingsPage() {
         </div>
         <label className="check-row"><input type="checkbox" checked={runtimeActive} onChange={(event) => setRuntimeActive(event.target.checked)} /> Runtime active</label>
         <div className="form-grid">
-          {configFields(runtimeAdapter).map(([key, label]) => <label className="field-label" key={key}>{label}
-            <input className="input" type={key.toLowerCase().includes('pass') || key.toLowerCase().includes('token') ? 'password' : key === 'maxTurns' || key === 'sshPort' ? 'number' : 'text'} value={String(runtimeConfig[key] ?? '')} onChange={(event) => setRuntimeConfig({ ...runtimeConfig, [key]: key === 'maxTurns' || key === 'sshPort' ? Number(event.target.value) : event.target.value })} />
+          {visibleConfigFields(runtimeAdapter, runtimeConfig).map((field) => <label className="field-label" key={field.key}>{field.label}
+            {field.description && <span className="field-hint">{field.description}</span>}
+            <input className="input" type={field.type ?? (isSensitiveConfigKey(field.key) ? 'password' : 'text')} value={String(configValue(runtimeConfig, field.key) ?? '')} onChange={(event) => updateRuntimeConfigField(field, event.target.value)} />
           </label>)}
         </div>
+        <label className="field-label">Advanced runtime config JSON
+          <textarea className="input config-json-editor" rows={8} spellCheck={false} value={runtimeConfigJson} onChange={(event) => updateRuntimeConfigJson(event.target.value)} />
+          <span className={runtimeConfigJsonError ? 'field-hint danger' : 'field-hint'}>{runtimeConfigJsonError || 'Adapter-specific keys stored in config are preserved here, including legacy publicApiUrl.'}</span>
+        </label>
         <button className="btn btn-primary" onClick={saveRuntime}><Save size={15} /> Save runtime</button>
         <div className="table-list">
           {runtimes.map((runtime) => <div className="list-row" key={runtime.id}>

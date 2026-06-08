@@ -19,12 +19,11 @@ function splitExtraOptions(value: string | undefined): string[] {
   return value.split(/\s+/).map((item) => item.trim()).filter(Boolean);
 }
 
-function buildRemoteCommand(agent: AgentLike, task: TaskContext): string {
+export function buildHermesSshRemoteCommand(agent: AgentLike, task: TaskContext): string {
   if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
   const prompt = buildAgentPrompt(agent, task);
   const hermesCommand = getAdapterStringConfig(agent, 'hermesCommand', 'HERMES_SSH_COMMAND', 'hermes');
   const maxTurns = getAdapterNumberConfig(agent, 'maxTurns', 'HERMES_MAX_TURNS', 60);
-  const reasoningEffort = getAdapterOptionalStringConfig(agent, 'reasoningEffort', 'HERMES_REASONING_EFFORT') ?? 'medium';
   const command = [
     hermesCommand,
     'chat',
@@ -33,8 +32,6 @@ function buildRemoteCommand(agent: AgentLike, task: TaskContext): string {
     ...(agent.currentSessionId ? ['--resume', agent.currentSessionId] : []),
     '--max-turns',
     String(maxTurns),
-    '--reasoning-effort',
-    reasoningEffort,
     prompt,
   ];
   return command.map(shellQuote).join(' ');
@@ -95,7 +92,7 @@ async function runSsh(agent: AgentLike, remoteCommand: string, timeoutSec: numbe
 }
 
 export async function dispatchToHermesSsh(agent: AgentLike, task: TaskContext): Promise<TaskResult> {
-  const remoteCommand = buildRemoteCommand(agent, task);
+  const remoteCommand = buildHermesSshRemoteCommand(agent, task);
   const result = await runSsh(agent, remoteCommand, task.timeoutSeconds ?? 300);
   const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
   const tokensUsed = estimateTokens(output);

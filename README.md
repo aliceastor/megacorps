@@ -25,6 +25,7 @@ Remote Docker note:
 
 - The web client auto-detects the browser host first. If the UI is opened at `http://megacorps.example.internal:3000`, API calls use `http://megacorps.example.internal:4000` before trying the baked `NEXT_PUBLIC_API_URL`.
 - Set `NEXT_PUBLIC_API_URL` only when the API is on a different host/domain. A baked `localhost` default will not override the browser-host fallback on remote Docker.
+- `docker-compose.deploy.yml` connects `megacorps-server` to the external `hermes_default` Docker network so the `hermes-ssh` runtime can use Docker DNS names such as `hermes-suite`. Ensure that external network exists before deploying that compose file.
 
 ## Scripts
 
@@ -65,15 +66,22 @@ Common login/onboarding errors:
 Supported runtime fields:
 
 - `mock`: no endpoint needed.
-- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
-- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
-- `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `publicApiUrl`.
+- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`, `maxTurns`.
+- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`, `maxTurns`.
+- `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `megacorpsApiUrl`.
 - `webhook`: `webhookUrl`.
 - `openclaw`: `openclawUrl`.
 
+`megacorpsApiUrl` is the MegaCorps API base URL agents use for task-complete callbacks. Legacy `publicApiUrl`, `callbackUrl`, and `webhookBaseUrl` config keys are still accepted for existing runtimes, but new presets should use `megacorpsApiUrl`.
+Hermes CLI adapters intentionally do not pass `--reasoning-effort`; Hermes v0.15.2 rejects that flag. Configure provider/model reasoning behavior inside the Hermes profile/config instead.
 For Hermes Portainer, the agent still needs a `hermesProfile`; the runtime tells MegaCorps where to execute it.
-For Hermes SSH, create a runtime preset with `adapterType=hermes-ssh`, set `sshHost` to your Hermes host, set the SSH user/key path reachable inside the server container, and set each agent's `hermesProfile` to the Hermes profile name such as `alice`. The SSH user defaults to `root` and can be overridden.
+For Hermes SSH, create a runtime preset with `adapterType=hermes-ssh`, set `sshHost` to your Hermes host, set the SSH user/key path reachable inside the server container, and set each agent's `hermesProfile` to the Hermes profile name such as `alice`. The SSH user defaults to `root` and can be overridden. The deploy compose mounts persistent SSH keys at `/home/megacorps/.ssh`, with `/home/megacorps/.ssh/id_ed25519` as the default key path.
 For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or the agent override panel.
+
+Hermes suite operational notes:
+
+- Prefer a Hermes suite image with `openssh-server` preinstalled for production. Installing it in the Hermes entrypoint works for debugging, but it slows every restart and is external to this MegaCorps image.
+- Verify the Hermes profile used by each MegaCorps agent has provider/model/API-key state available inside hermes-suite. For example: `hermes --profile alice config get provider`, `hermes --profile alice config get model`, and `cat /root/.hermes/profiles/alice/.env`.
 
 ## Web UI pages
 

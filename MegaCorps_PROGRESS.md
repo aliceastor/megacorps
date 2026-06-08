@@ -459,11 +459,16 @@ Where to configure:
 Runtime fields:
 
 - `mock`: no endpoint required.
-- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
-- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `publicApiUrl`, `reasoningEffort`, `maxTurns`.
-- `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `publicApiUrl`.
+- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`, `maxTurns`.
+- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`, `maxTurns`.
+- `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `megacorpsApiUrl`.
 - `webhook`: `webhookUrl`.
 - `openclaw`: `openclawUrl`.
+
+Compatibility notes:
+
+- `megacorpsApiUrl` is the MegaCorps callback/API base URL injected into task prompts. Existing `publicApiUrl`, `callbackUrl`, and `webhookBaseUrl` keys are still read for legacy runtime presets.
+- Hermes CLI adapters do not pass `--reasoning-effort`; Hermes v0.15.2 rejects that flag. Reasoning behavior belongs in the Hermes profile/config, not the MegaCorps command line.
 
 Current behavior:
 
@@ -480,7 +485,8 @@ Gaps:
 - In-process DB-backed task-run queue is implemented.
 - Dedicated long-running worker sidecar and distributed queue locks are still future work.
 - Secrets are stored as JSON config in the local MVP database; production should encrypt or externalize them.
-- The server image includes `openssh-client`, but production deployments must mount/provide an SSH key readable by the `megacorps` container user when `hermes-ssh` uses key auth.
+- The server image includes `openssh-client`, creates `/home/megacorps/.ssh`, and deploy compose mounts persistent SSH keys there. Production deployments must provide an SSH key readable by the `megacorps` container user when `hermes-ssh` uses key auth.
+- `docker-compose.deploy.yml` connects `megacorps-server` to the external `hermes_default` Docker network for stable DNS access to `hermes-suite` across Portainer redeployments.
 
 ### Production Controls Added
 
