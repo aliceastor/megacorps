@@ -83,3 +83,16 @@ test('agent prompts include webhook shared secret header when configured', () =>
 
   assert.match(prompt, /Header: X-MegaCorps-Webhook-Secret: super-secret-shared-token/);
 });
+
+test('agent prompts include taskRunId for idempotent webhooks', () => {
+  const prompt = buildAgentPrompt({
+    hermesProfile: 'alice',
+    currentSessionId: null,
+    adapterConfig: {
+      megacorpsApiUrl: 'http://megacorps.example:4000',
+    },
+  }, { id: 'card-1', taskRunId: 'run-1', title: 'Smoke', body: 'Return OK.' });
+
+  assert.match(prompt, /Task Run ID: run-1/);
+  assert.match(prompt, /"taskRunId": "run-1"/);
+});

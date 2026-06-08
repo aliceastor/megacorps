@@ -3,9 +3,11 @@ import test from 'node:test';
 import { canTransitionCard, cardStatusSchema, cardStatuses, createAgentSchema, createCardSchema, signupSchema } from './index.ts';
 
 test('allows the canonical card status path and blocks invalid skips', () => {
-  assert.deepEqual([...cardStatuses], ['todo', 'in_progress', 'in_review', 'done', 'blocked']);
+  assert.deepEqual([...cardStatuses], ['todo', 'in_progress', 'in_review', 'done', 'blocked', 'cancelled']);
   assert.equal(canTransitionCard('todo', 'in_progress'), true);
-  assert.equal(canTransitionCard('in_progress', 'done'), false);
+  assert.equal(canTransitionCard('in_progress', 'done'), true);
+  assert.equal(canTransitionCard('todo', 'done'), false);
+  assert.equal(canTransitionCard('in_progress', 'cancelled'), true);
 });
 
 test('maps legacy backlog input to todo', () => {

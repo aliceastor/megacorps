@@ -64,6 +64,7 @@ const endpoints: ApiEndpoint[] = [
   { method: 'GET', path: '/api/cards', group: 'Kanban', auth: 'session', summary: 'List Kanban tasks visible to the current user.', query: { companyId: 'Optional company UUID.', status: `Optional. One of ${cardStatuses.join(', ')}. Legacy backlog maps to todo.`, assigneeId: 'Optional agent UUID.', tag: 'Optional tag.', priority: 'urgent | high | normal | low.', limit: 'Default 100.', offset: 'Default 0.' } },
   { method: 'POST', path: '/api/cards', group: 'Kanban', auth: 'session', summary: 'Create a Kanban task. New tasks default to todo.', body: { companyId: 'uuid optional', title: 'Task title', body: 'Full task detail', priority: 'normal', tags: ['backend'], assigneeId: null, reviewerId: null, requiresApproval: false } },
   { method: 'PUT', path: '/api/cards/:id', group: 'Kanban', auth: 'session', summary: 'Update a Kanban task. Include updatedAt for optimistic locking.', params: { id: 'Task UUID.' }, body: { title: 'Updated title', body: 'Updated detail', columnStatus: 'todo', updatedAt: 'ISO datetime from existing card' } },
+  { method: 'POST', path: '/api/cards/:id/cancel', group: 'Kanban', auth: 'session', summary: 'Cancel an active or queued task without archiving its history. Releases execution locks and cancels queued/running task-runs.', params: { id: 'Task UUID.' }, body: { reason: 'Optional cancellation reason.' } },
   { method: 'DELETE', path: '/api/cards/:id', group: 'Kanban', auth: 'session', summary: 'Archive a task while preserving historical logs, runs, and cost records.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/logs', group: 'Kanban', auth: 'session', summary: 'Read full task logs.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/comments', group: 'Kanban', auth: 'session', summary: 'Read task message board comments.', params: { id: 'Task UUID.' } },
@@ -71,7 +72,7 @@ const endpoints: ApiEndpoint[] = [
   { method: 'POST', path: '/api/cards/:id/run', group: 'Kanban', auth: 'session', summary: 'Queue a dispatch task-run attempt for the background worker.', params: { id: 'Task UUID.' } },
   { method: 'POST', path: '/api/cards/:id/review', group: 'Kanban', auth: 'session', summary: 'Queue a review task-run attempt for the background worker.', params: { id: 'Task UUID.' } },
   { method: 'POST', path: '/api/cards/:id/decompose', group: 'Kanban', auth: 'session', summary: 'Split a task into sub-tasks.', params: { id: 'Task UUID.' } },
-  { method: 'POST', path: '/api/webhook/task-complete', group: 'Kanban', auth: 'none', summary: 'External agent callback to report task progress/completion.', body: { cardId: 'uuid', status: 'done | blocked | in_review | in_progress | todo', summary: 'Short result', output: 'Full output/log', costUsd: 0.05 } },
+  { method: 'POST', path: '/api/webhook/task-complete', group: 'Kanban', auth: 'none', summary: 'External agent callback to report task progress/completion. Send taskRunId for idempotent completion processing.', body: { cardId: 'uuid', taskRunId: 'task-run uuid from prompt', status: 'done | blocked | in_review | in_progress | todo | cancelled', summary: 'Short result', output: 'Full output/log', costUsd: 0.05 } },
 
   { method: 'GET', path: '/api/agents', group: 'Agents', auth: 'session', summary: 'List agents visible to the current user.', query: { companyId: 'Optional company UUID.' } },
   { method: 'POST', path: '/api/agents', group: 'Agents', auth: 'session', summary: 'Create an agent.', body: { companyId: 'uuid optional', departmentId: 'uuid optional', name: 'Builder', slug: 'builder', role: 'worker', title: 'Backend Engineer', adapterType: 'mock', runtimeId: 'uuid optional', bossId: null, budgetPerTask: 1, budgetMonthly: 20 } },
@@ -162,7 +163,7 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
   if (endpoint.path === '/api/dashboard') {
     return {
       responseSchema: { stats: 'object', stageCounts: 'Record<CardStatus, number>', recentTaskLogs: 'TaskLog[]', recentApiEvents: 'ApiEvent[]' },
-      responseExample: { stats: { cards: 12, agents: 5, activeAgents: 4 }, stageCounts: { todo: 3, in_progress: 2, in_review: 1, done: 7, blocked: 1 }, recentTaskLogs: [], recentApiEvents: [] },
+      responseExample: { stats: { cards: 12, agents: 5, activeAgents: 4 }, stageCounts: { todo: 3, in_progress: 2, in_review: 1, done: 7, blocked: 1, cancelled: 0 }, recentTaskLogs: [], recentApiEvents: [] },
       rateLimit: endpoint.rateLimit ?? defaultRateLimit,
       requiredRole: roleDefault(endpoint),
     };
@@ -199,7 +200,7 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
   }
 
   if (endpoint.path.includes('/cards/:id/logs')) {
-    return { responseSchema: { type: 'array', items: { cardId: 'uuid', agentId: 'uuid | null', type: 'string', status: 'queued | running | success | failed', message: 'string', output: 'string | null' } }, responseExample: [{ cardId: 'card-uuid', type: 'stage', status: 'success', message: 'Stage changed from todo to in_progress.' }], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: { type: 'array', items: { cardId: 'uuid', agentId: 'uuid | null', type: 'string', status: 'queued | running | success | warning | failed', message: 'string', output: 'string | null' } }, responseExample: [{ cardId: 'card-uuid', type: 'stage', status: 'success', message: 'Stage changed from todo to in_progress.' }], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/cards/:id/comments')) {
@@ -212,6 +213,10 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
     const taskRun = { id: 'task-run-uuid', companyId: 'company-uuid', cardId: 'card-uuid', agentId: 'agent-uuid | null', heartbeatRunId: 'heartbeat-run-uuid | null', kind: 'dispatch | review', source: 'manual | loop | startup | queue', status: 'queued | running | success | failed | cancelled', attemptNumber: 1, createdAt: '2026-06-06T00:00:00.000Z' };
     if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: taskRun }, responseExample: [taskRun], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
     return { responseSchema: taskRun, responseExample: taskRun, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path.endsWith('/cancel')) {
+    return { responseSchema: { type: 'card', id: 'uuid', columnStatus: 'cancelled', updatedAt: 'ISO datetime' }, responseExample: { id: 'card-uuid', columnStatus: 'cancelled', lastError: 'Cancelled by operator.' }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/chat/sessions/:id/messages')) {
@@ -234,7 +239,7 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
   }
 
   if (endpoint.path.includes('/webhook/task-complete')) {
-    return { responseSchema: { ok: 'boolean' }, responseExample: { ok: true }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: { ok: 'boolean', duplicate: 'boolean optional', cardId: 'uuid', taskRunId: 'uuid optional', newStatus: 'CardStatus' }, responseExample: { ok: true, cardId: 'card-uuid', taskRunId: 'task-run-uuid', newStatus: 'done' }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   return {

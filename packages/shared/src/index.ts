@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const cardStatuses = ['todo', 'in_progress', 'in_review', 'done', 'blocked'] as const;
+export const cardStatuses = ['todo', 'in_progress', 'in_review', 'done', 'blocked', 'cancelled'] as const;
 export type CardStatus = (typeof cardStatuses)[number];
 export const legacyCardStatusAliases = { backlog: 'todo' } as const;
 const cardStatusInputs = ['backlog', ...cardStatuses] as const;
@@ -8,11 +8,12 @@ export const agentAdapterTypes = ['hermes', 'hermes-ssh', 'hermes-gateway', 'ope
 export type AgentAdapterType = (typeof agentAdapterTypes)[number];
 
 const allowedTransitions: Record<CardStatus, CardStatus[]> = {
-  todo: ['in_progress', 'blocked'],
-  in_progress: ['in_review', 'blocked'],
-  in_review: ['done', 'in_progress', 'blocked'],
+  todo: ['in_progress', 'blocked', 'cancelled'],
+  in_progress: ['in_review', 'done', 'blocked', 'cancelled'],
+  in_review: ['done', 'in_progress', 'blocked', 'cancelled'],
   done: [],
-  blocked: ['todo'],
+  blocked: ['todo', 'cancelled'],
+  cancelled: ['todo'],
 };
 
 export function canTransitionCard(from: CardStatus, to: CardStatus): boolean {
@@ -156,14 +157,14 @@ export const approvalDecisionSchema = z.object({
   decisionNote: z.string().trim().max(4000).optional(),
 });
 
-export const taskLogTypes = ['dispatch', 'retry', 'review', 'decomposition', 'cascade', 'webhook', 'manual', 'stage', 'comment', 'lock', 'recovery', 'budget', 'approval', 'queue'] as const;
+export const taskLogTypes = ['dispatch', 'retry', 'review', 'decomposition', 'cascade', 'webhook', 'manual', 'stage', 'comment', 'lock', 'lock_expired', 'recovery', 'cancel', 'budget', 'approval', 'queue'] as const;
 export type TaskLogType = (typeof taskLogTypes)[number];
 
 export const taskLogSchema = z.object({
   cardId: z.string().uuid(),
   agentId: z.string().uuid().nullable().optional(),
   type: z.enum(taskLogTypes),
-  status: z.enum(['queued', 'running', 'success', 'failed']),
+  status: z.enum(['queued', 'running', 'success', 'warning', 'failed']),
   message: z.string().trim().min(1).max(2000),
   output: z.string().optional(),
   costUsd: z.number().nonnegative().optional(),

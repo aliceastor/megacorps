@@ -136,6 +136,7 @@ The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds 
 - enqueue review task-run attempts when a reviewer is configured,
 - let the task-run worker claim queued work up to `TASK_RUN_WORKER_BATCH_SIZE`, move assigned work into `in_progress`, run the configured adapter, and move completed work to `in_review` or `done`,
 - hold review task-runs while their card is still `in_progress`, so long-running dispatches do not block unrelated queued work but reviewers do not judge unfinished output,
+- recover expired execution locks; expired `in_progress` work increments `retry_count`, returns to `todo` with backoff, or moves to `blocked` after `max_retries`,
 - cascade parent tasks when all sub-tasks are complete.
 
 Cron/debug endpoints:
@@ -147,6 +148,7 @@ Cron/debug endpoints:
 - `GET /api/cron/status`: in-memory scheduler state plus recent durable cron runs.
 - `GET /api/cron/runs`: cron run history.
 - `POST /api/cron/run`: manually run one dispatch heartbeat and enqueue eligible task runs.
+- `POST /api/cards/:id/cancel`: cancel active or queued work without archiving the task history.
 
 ## Direct agent chat
 
@@ -214,16 +216,16 @@ MegaCorps stores two complementary log streams:
 Phase 8/9 safety behavior:
 
 - A task must acquire an execution lock before an adapter run starts.
-- Expired locks are recovered by the dispatch loop, increment `retry_count`, schedule the next run with backoff, and move the card to `blocked` after `max_retries`.
+- Expired locks are recovered by the dispatch loop, write `lock_expired/warning`, increment `retry_count`, schedule the next run with backoff, and move the card to `blocked` after `max_retries`.
 - Adapter `success:false` now goes through retry/block handling instead of silently marking work done.
 - Budget policies can hard-stop an agent when monthly or per-task limits are reached.
 - Tasks requiring approval create pending approval records and can be approved/rejected from the Budget page.
 - Member hierarchy is based on `bossId`: the identity label is free text, while the important control-plane relation is who a member reports to and who reports to them.
 - Decomposed sub-tasks are delegated to direct reports when the parent task is assigned to a member with subordinates.
-- Work completed by a subordinate moves to `in_review` for the reporting manager by default, creating a bottom-up review path back toward the top-level member.
+- Work completed by a subordinate moves to `in_review` for a distinct configured reviewer or reporting manager. Self-review is not treated as a real review gate; if no distinct reviewer is available, successful dispatch goes directly to `done`.
 - In-app IP rate limiting is enabled by default. Tune `RATE_LIMIT_*` env vars or set `RATE_LIMIT_ENABLED=false` for local stress tests.
 - Mutation/manual execution routes require operator/admin roles. Viewer role can read authenticated UI data.
-- Task completion webhooks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret` with at least 16 characters and must send either `X-MegaCorps-Webhook-Secret` or `Authorization: Bearer`. A webhook `status=done` updates the card stage, clears active execution locks, and is protected from being overwritten by a late dispatch/review return.
+- Task completion webhooks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret` with at least 16 characters and must send either `X-MegaCorps-Webhook-Secret` or `Authorization: Bearer`. Agent prompts include `taskRunId`; repeated webhook completions with the same `taskRunId` return `duplicate: true` and do not re-write cost, comments, or stages. A webhook `status=done` updates the card stage, clears active execution locks, and is protected from being overwritten by a late dispatch/review return. `status=in_progress` is a progress update and does not release the active run.
 - Monthly agent spend resets on `BUDGET_RESET_DAY` UTC, default day 1, and the reset is marked in `cron_runs`.
 - Company membership rows scope visible companies and company-owned entities. Company operators/admins can mutate company data; company admins can manage memberships.
 - Manual Run/Review and cron dispatch enqueue `task_runs`; the in-process worker claims queue capacity without waiting for every active adapter call to finish and records linked `heartbeat_runs`.

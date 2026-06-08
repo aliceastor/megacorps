@@ -47,7 +47,7 @@ export async function dispatchToHermesGateway(agent: AgentLike, task: TaskContex
     if (!statusResp.ok) continue;
     const detail = await statusResp.json() as { status?: string; summary?: string; result?: string };
     status = detail.status ?? 'running';
-    if (status === 'done' || status === 'blocked') {
+    if (status === 'done' || status === 'blocked' || status === 'cancelled') {
       output = detail.summary ?? detail.result ?? '';
       // Try to get worker log for full output
       const logResp = await hermesFetch(agent, `/api/plugins/kanban/tasks/${taskId}/log?tail=50000`);
@@ -59,7 +59,7 @@ export async function dispatchToHermesGateway(agent: AgentLike, task: TaskContex
     }
   }
 
-  if (status !== 'done' && status !== 'blocked') {
+  if (status !== 'done' && status !== 'blocked' && status !== 'cancelled') {
     throw new Error(`Hermes task ${taskId} timed out after ${Math.round((Date.now() - started) / 1000)}s (status: ${status})`);
   }
 

@@ -10,7 +10,7 @@ type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
-type LogStatus = 'queued' | 'running' | 'success' | 'failed';
+type LogStatus = 'queued' | 'running' | 'success' | 'warning' | 'failed';
 type TaskRunKind = 'dispatch' | 'review';
 type TaskRunSource = 'manual' | 'loop' | 'startup' | 'queue';
 
@@ -46,11 +46,23 @@ function nextBackoff(retryCount: number): Date {
 }
 
 function isTerminalCardStatus(status: string | null | undefined): boolean {
-  return status === 'done' || status === 'blocked';
+  return status === 'done' || status === 'blocked' || status === 'cancelled';
+}
+
+function terminalRunStatus(status: string | null | undefined): 'success' | 'failed' | 'cancelled' {
+  if (status === 'cancelled') return 'cancelled';
+  if (status === 'blocked') return 'failed';
+  return 'success';
 }
 
 function reviewCanRun(status: string | null | undefined): boolean {
-  return status !== 'in_progress';
+  return status === 'in_review' || status === 'done';
+}
+
+function resolveEffectiveReviewerId(card: CardRow, agent: AgentRow): string | null {
+  if (card.reviewerId && card.reviewerId !== agent.id) return card.reviewerId;
+  if (agent.bossId && agent.bossId !== agent.id) return agent.bossId;
+  return null;
 }
 
 async function addTaskLog(input: {
@@ -145,7 +157,7 @@ async function completeTaskRun(runId: string | null | undefined, input: {
     durationSeconds: input.durationSeconds,
     completedAt: new Date(),
     updatedAt: new Date(),
-  }).where(eq(taskRuns.id, runId));
+  }).where(and(eq(taskRuns.id, runId), inArray(taskRuns.status, ['queued', 'running'])));
 }
 
 export async function enqueueTaskRun(cardId: string, kind: TaskRunKind = 'dispatch', source: TaskRunSource = 'manual', requestedByUserId?: string | null): Promise<TaskRunRow> {
@@ -520,17 +532,18 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
 async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unknown, runId?: string | null, taskRunId?: string | null): Promise<CardRow> {
   const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
   if (latest && isTerminalCardStatus(latest.columnStatus) && !latest.executionLockId && latest.activeHeartbeatRunId !== runId) {
+    const status = terminalRunStatus(latest.columnStatus);
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
-    await releaseExecutionLock(card.id, runId ?? null, latest.columnStatus === 'blocked' ? 'failed' : 'success');
+    await releaseExecutionLock(card.id, runId ?? null, status);
     await completeTaskRun(taskRunId, {
-      status: latest.columnStatus === 'blocked' ? 'failed' : 'success',
+      status,
       output: `Card was already ${latest.columnStatus} before dispatch returned.`,
     });
     await addTaskLog({
       cardId: card.id,
       agentId: agent.id,
       type: 'dispatch',
-      status: latest.columnStatus === 'blocked' ? 'failed' : 'success',
+      status: status === 'cancelled' ? 'warning' : status,
       message: `Dispatch result ignored because card was already ${latest.columnStatus}.`,
       output: error instanceof Error ? error.message : 'dispatch_finished_after_external_status',
     });
@@ -609,14 +622,15 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const adapter = getAdapter(agent.adapterType ?? 'hermes');
     const result = await adapter.dispatch(
       await buildExecutionAgent(agent),
-      { id: card.id, title: card.title, body: await buildTaskPrompt(card), timeoutSeconds: 300 },
+      { id: card.id, title: card.title, body: await buildTaskPrompt(card), timeoutSeconds: 300, taskRunId: options.taskRunId },
     );
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && !latest.executionLockId && latest.activeHeartbeatRunId !== run.id) {
+      const status = terminalRunStatus(latest.columnStatus);
       await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
-      await releaseExecutionLock(card.id, run.id, latest.columnStatus === 'blocked' ? 'failed' : 'success');
+      await releaseExecutionLock(card.id, run.id, status);
       await completeTaskRun(options.taskRunId, {
-        status: latest.columnStatus === 'blocked' ? 'failed' : 'success',
+        status,
         output: `Card was already ${latest.columnStatus} before dispatch returned.`,
         durationSeconds: result.durationSeconds,
       });
@@ -624,7 +638,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         cardId: card.id,
         agentId: agent.id,
         type: 'dispatch',
-        status: latest.columnStatus === 'blocked' ? 'failed' : 'success',
+        status: status === 'cancelled' ? 'warning' : status,
         message: `Dispatch output received after card was already ${latest.columnStatus}; keeping the current stage.`,
         output: result.output,
         durationSeconds: result.durationSeconds,
@@ -635,8 +649,8 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       throw new Error(result.output || 'adapter_reported_failure');
     }
-    const effectiveReviewerId = card.reviewerId ?? agent.bossId ?? null;
-    const nextStatus = card.requiresApproval || effectiveReviewerId ? 'in_review' : 'done';
+    const effectiveReviewerId = resolveEffectiveReviewerId(card, agent);
+    const nextStatus = effectiveReviewerId ? 'in_review' : 'done';
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
     const [updated] = await db.update(kanbanCards).set({
@@ -644,7 +658,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       executionLog: result.output,
       sessionId: result.sessionId,
       costUsd: result.costUsd.toString(),
-      reviewerId: effectiveReviewerId ?? card.reviewerId,
+      reviewerId: effectiveReviewerId,
       retryCount: 0,
       nextRunAt: null,
       completedAt: nextStatus === 'done' ? new Date() : null,
@@ -671,7 +685,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, nextStatus, costUsd: result.costUsd, budgetPaused } });
     await completeTaskRun(options.taskRunId, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
-    if (nextStatus === 'in_review') await createPendingApproval(updated, agent.id, effectiveReviewerId ? 'Reports-to review required' : 'Task requires approval');
+    if (nextStatus === 'in_review') await createPendingApproval(updated, agent.id, card.reviewerId === effectiveReviewerId ? 'Reviewer approval required' : 'Reports-to review required');
     if (nextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
     return updated;
   } catch (error) {
@@ -682,9 +696,10 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
 export async function reviewCard(cardId: string, options: { taskRunId?: string | null } = {}): Promise<CardRow> {
   const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
-  if (card.columnStatus === 'done') {
-    await addTaskLog({ cardId: card.id, agentId: card.reviewerId, type: 'review', status: 'success', message: 'Review skipped; card is already done.' });
-    await completeTaskRun(options.taskRunId, { status: 'success', output: 'Card is already done.' });
+  if (isTerminalCardStatus(card.columnStatus)) {
+    const status = terminalRunStatus(card.columnStatus);
+    await addTaskLog({ cardId: card.id, agentId: card.reviewerId, type: 'review', status: status === 'cancelled' ? 'warning' : status, message: `Review skipped; card is already ${card.columnStatus}.` });
+    await completeTaskRun(options.taskRunId, { status, output: `Card is already ${card.columnStatus}.` });
     return card;
   }
   if (card.columnStatus !== 'in_review') throw new Error(`card_not_ready_for_review:${card.columnStatus ?? 'todo'}`);
@@ -711,14 +726,15 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     const adapter = getAdapter(reviewer.adapterType ?? 'hermes');
     const result = await adapter.dispatch(
       await buildExecutionAgent(reviewer),
-      { id: card.id, title: `Review: ${card.title}`, body: await buildReviewPrompt(card), timeoutSeconds: 180 },
+      { id: card.id, title: `Review: ${card.title}`, body: await buildReviewPrompt(card), timeoutSeconds: 180, taskRunId: options.taskRunId },
     );
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && latest.columnStatus !== card.columnStatus && latest.activeHeartbeatRunId !== run.id) {
+      const status = terminalRunStatus(latest.columnStatus);
       await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
-      await db.update(heartbeatRuns).set({ status: latest.columnStatus === 'blocked' ? 'failed' : 'success', completedAt: new Date(), durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
+      await db.update(heartbeatRuns).set({ status, completedAt: new Date(), durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
       await completeTaskRun(options.taskRunId, {
-        status: latest.columnStatus === 'blocked' ? 'failed' : 'success',
+        status,
         output: `Card was already ${latest.columnStatus} before review returned.`,
         durationSeconds: result.durationSeconds,
       });
@@ -726,7 +742,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
         cardId: card.id,
         agentId: reviewer.id,
         type: 'review',
-        status: latest.columnStatus === 'blocked' ? 'failed' : 'success',
+        status: status === 'cancelled' ? 'warning' : status,
         message: `Review output received after card was already ${latest.columnStatus}; keeping the current stage.`,
         output: result.output,
         durationSeconds: result.durationSeconds,
@@ -841,8 +857,9 @@ async function recoverStaleExecutionLocks(app: FastifyInstance) {
     if (agentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agentId));
     if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'failed', error: 'stale_execution_lock_recovered', completedAt: new Date() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
     if (card.activeHeartbeatRunId) await db.update(taskRuns).set({ status: 'failed', error: 'stale_execution_lock_recovered', completedAt: new Date(), updatedAt: new Date() }).where(eq(taskRuns.heartbeatRunId, card.activeHeartbeatRunId));
-    await addTaskLog({ cardId: card.id, agentId, type: shouldRetry ? 'retry' : 'recovery', status: 'failed', message });
+    await addTaskLog({ cardId: card.id, agentId, type: 'lock_expired', status: 'warning', message });
     if (nextStatus !== (card.columnStatus ?? 'todo')) await addStageLog(card.id, agentId ?? null, card.columnStatus, nextStatus, 'stale-lock-recovery');
+    if (blocked) await addTaskLog({ cardId: card.id, agentId, type: 'retry', status: 'failed', message: `Max retries exceeded after ${retryCount} attempt(s).` });
     if (shouldRetry) await addCardMessage({ cardId: card.id, agentId, action: blocked ? 'agent_blocked' : 'agent_error', body: message });
     await addActivity({
       companyId: card.companyId,
@@ -1153,7 +1170,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
   if (focusAgent) {
     const manager = focusAgent.bossId ? agentById.get(focusAgent.bossId) : undefined;
     const reports = companyAgents.filter((agent) => agent.bossId === focusAgent.id);
-    const assigned = companyCards.filter((card) => card.assigneeId === focusAgent.id && !['done', 'blocked'].includes(card.columnStatus ?? 'todo')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
+    const assigned = companyCards.filter((card) => card.assigneeId === focusAgent.id && !['done', 'blocked', 'cancelled'].includes(card.columnStatus ?? 'todo')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
     const reviews = companyCards.filter((card) => card.reviewerId === focusAgent.id || reports.some((report) => report.id === card.assigneeId && card.columnStatus === 'in_review')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
     addContextSection(state, 'Invocation Agent Work Context', [
       `Agent: ${focusAgent.name}`,

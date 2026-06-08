@@ -336,7 +336,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const middleAgents = visibleAgents.filter((agent) => visibleAgents.some((item) => item.bossId === agent.id) && Boolean(agent.bossId));
   const leafAgents = visibleAgents.filter((agent) => !visibleAgents.some((item) => item.bossId === agent.id));
   const reviewCards = companyCards.filter((card) => card.columnStatus === 'in_review');
-  const openCards = companyCards.filter((card) => !['done', 'blocked'].includes(card.columnStatus ?? 'todo'));
+  const openCards = companyCards.filter((card) => !['done', 'blocked', 'cancelled'].includes(card.columnStatus ?? 'todo'));
   const selectedManager = selected?.bossId ? visibleAgents.find((agent) => agent.id === selected.bossId) : null;
   const selectedReports = selected ? visibleAgents.filter((agent) => agent.bossId === selected.id) : [];
   const selectedAssignedCards = selected ? companyCards.filter((card) => card.assigneeId === selected.id) : [];

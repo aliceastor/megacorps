@@ -3,7 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, ne, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema } from '@megacorps/shared';
+import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createProjectSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema } from '@megacorps/shared';
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
@@ -24,6 +24,16 @@ async function defaultCompanyId(): Promise<string> {
 
 function priorityToNumber(priority: string | undefined): number { return priority === 'urgent' ? 3 : priority === 'high' ? 2 : priority === 'low' ? -1 : 0; }
 function actorLabel(user: { email?: string; id?: string } | null): string { return user?.email ?? user?.id ?? 'system'; }
+function normalizedReviewerId(assigneeId: string | null | undefined, reviewerId: string | null | undefined): string | null {
+  if (!reviewerId) return null;
+  return reviewerId === assigneeId ? null : reviewerId;
+}
+
+function webhookRunStatus(status: string): 'success' | 'failed' | 'cancelled' {
+  if (status === 'cancelled') return 'cancelled';
+  if (status === 'blocked') return 'failed';
+  return 'success';
+}
 
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
@@ -601,7 +611,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/dashboard', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     if (access.companyIds.length === 0) {
-      return { stats: { companies: 0, tasks: 0, openTasks: 0, completedTasks: 0, blockedTasks: 0, agents: 0, activeAgents: 0, busyAgents: 0, activeRuns: 0, pendingApprovals: 0, budgetPolicies: 0, monthlyCost: 0 }, stages: {}, recentTaskLogs: [], recentApiEvents: [], recentActivity: [], recentRuns: [], pendingApprovals: [] };
+      return { stats: { companies: 0, tasks: 0, openTasks: 0, completedTasks: 0, blockedTasks: 0, cancelledTasks: 0, agents: 0, activeAgents: 0, busyAgents: 0, activeRuns: 0, pendingApprovals: 0, budgetPolicies: 0, monthlyCost: 0 }, stages: {}, recentTaskLogs: [], recentApiEvents: [], recentActivity: [], recentRuns: [], pendingApprovals: [] };
     }
     const [cards, agentRows, companyRows, recentTaskLogs, recentApiEvents, recentActivity, recentRuns, pendingApprovals, policyRows] = await Promise.all([
       db.select().from(kanbanCards).where(inArray(kanbanCards.companyId, access.companyIds)),
@@ -614,9 +624,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       db.select().from(approvals).where(and(inArray(approvals.companyId, access.companyIds), eq(approvals.status, 'pending'))).orderBy(desc(approvals.createdAt)).limit(50),
       db.select().from(budgetPolicies).where(and(inArray(budgetPolicies.companyId, access.companyIds), eq(budgetPolicies.isActive, true))),
     ]);
-    const openCards = cards.filter((card) => !['done', 'blocked'].includes(card.columnStatus ?? 'todo'));
+    const openCards = cards.filter((card) => !['done', 'blocked', 'cancelled'].includes(card.columnStatus ?? 'todo'));
     const completedCards = cards.filter((card) => card.columnStatus === 'done');
     const blockedCards = cards.filter((card) => card.columnStatus === 'blocked');
+    const cancelledCards = cards.filter((card) => card.columnStatus === 'cancelled');
     const activeAgents = agentRows.filter((agent) => agent.isActive !== false);
     const busyAgents = agentRows.filter((agent) => agent.isBusy);
     const monthlyCost = cards.reduce((sum, card) => sum + Number(card.costUsd ?? 0), 0);
@@ -627,6 +638,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         openTasks: openCards.length,
         completedTasks: completedCards.length,
         blockedTasks: blockedCards.length,
+        cancelledTasks: cancelledCards.length,
         agents: agentRows.length,
         activeAgents: activeAgents.length,
         busyAgents: busyAgents.length,
@@ -791,6 +803,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' });
     }
+    const reviewerId = normalizedReviewerId(input.assigneeId ?? null, input.reviewerId ?? null);
     const [card] = await db.insert(kanbanCards).values({
       companyId,
       title: input.title,
@@ -799,7 +812,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       tags: input.tags,
       departmentId: input.departmentId ?? null,
       assigneeId: input.assigneeId ?? null,
-      reviewerId: input.reviewerId ?? null,
+      reviewerId,
       projectId: input.projectId ?? null,
       goalId: input.goalId ?? null,
       parentCardId: input.parentCardId ?? null,
@@ -833,6 +846,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' });
     }
     if (input.updatedAt && existing.updatedAt && new Date(input.updatedAt).getTime() !== existing.updatedAt.getTime()) return reply.code(409).send({ error: 'card_modified' });
+    const nextAssigneeId = input.assigneeId === undefined ? existing.assigneeId : input.assigneeId ?? null;
+    const nextReviewerId = normalizedReviewerId(nextAssigneeId, input.reviewerId === undefined ? existing.reviewerId : input.reviewerId ?? null);
     const [card] = await db.update(kanbanCards).set({
       title: input.title,
       body: input.body,
@@ -841,14 +856,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       tags: input.tags,
       departmentId: input.departmentId,
       assigneeId: input.assigneeId,
-      reviewerId: input.reviewerId,
+      reviewerId: nextReviewerId,
       projectId: input.projectId,
       goalId: input.goalId,
       parentCardId: input.parentCardId,
       dependencyCardIds: input.dependencyCardIds,
       requiresApproval: input.requiresApproval,
       maxRetries: input.maxRetries,
-      completedAt: input.columnStatus === 'done' ? new Date() : undefined,
+      completedAt: input.columnStatus === 'done' ? new Date() : input.columnStatus ? null : undefined,
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, id)).returning();
     if (card && input.columnStatus && input.columnStatus !== existing.columnStatus) {
@@ -864,6 +879,44 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return card;
   });
 
+  app.post('/api/cards/:id/cancel', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const input = z.object({ reason: z.string().trim().max(1000).optional() }).parse(request.body ?? {});
+    const [existing] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, id), isNull(kanbanCards.deletedAt))).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'card_not_found' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    const now = new Date();
+    const reason = input.reason || `Cancelled by ${actorLabel(user)}.`;
+    await db.update(taskRuns).set({
+      status: 'cancelled',
+      completedAt: now,
+      updatedAt: now,
+      lockedBy: null,
+      lockedAt: null,
+      error: reason,
+    }).where(and(eq(taskRuns.cardId, id), inArray(taskRuns.status, ['queued', 'running'])));
+    if (existing.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', completedAt: now, error: reason }).where(eq(heartbeatRuns.id, existing.activeHeartbeatRunId));
+    if (existing.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, existing.assigneeId));
+    if (existing.executionLockedByAgentId && existing.executionLockedByAgentId !== existing.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, existing.executionLockedByAgentId));
+    const [card] = await db.update(kanbanCards).set({
+      columnStatus: 'cancelled',
+      lastError: reason,
+      nextRunAt: null,
+      executionLockId: null,
+      executionLockedByAgentId: null,
+      executionLockedAt: null,
+      executionLockExpiresAt: null,
+      activeHeartbeatRunId: null,
+      updatedAt: now,
+    }).where(eq(kanbanCards.id, id)).returning();
+    await db.insert(taskLogs).values({ cardId: id, agentId: existing.assigneeId, type: 'cancel', status: 'warning', message: reason });
+    if (existing.columnStatus !== 'cancelled') {
+      await db.insert(taskLogs).values({ cardId: id, agentId: existing.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${existing.columnStatus ?? 'todo'} to cancelled by ${actorLabel(user)}.` });
+    }
+    await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: existing.assigneeId, action: 'card.cancelled', entityType: 'card', entityId: id, details: { title: existing.title, reason } });
+    return card;
+  });
+
   app.delete('/api/cards/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const [existing] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, id), isNull(kanbanCards.deletedAt))).limit(1);
@@ -873,6 +926,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await db.update(kanbanCards).set({ parentCardId: null }).where(eq(kanbanCards.parentCardId, id));
     await db.update(taskRuns).set({ status: 'cancelled', completedAt: now, updatedAt: now, error: 'card_archived' }).where(and(eq(taskRuns.cardId, id), inArray(taskRuns.status, ['queued', 'running'])));
     if (existing.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', completedAt: now, error: 'card_archived' }).where(eq(heartbeatRuns.id, existing.activeHeartbeatRunId));
+    if (existing.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, existing.assigneeId));
+    if (existing.executionLockedByAgentId && existing.executionLockedByAgentId !== existing.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, existing.executionLockedByAgentId));
     await db.update(kanbanCards).set({
       deletedAt: now,
       executionLockId: null,
@@ -925,6 +980,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         updatedAt: new Date(),
       }).where(eq(kanbanCards.id, id));
       if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', error: `Paused by ${actorLabel(user)}`, completedAt: new Date() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
+      await db.update(taskRuns).set({ status: 'cancelled', error: `Paused by ${actorLabel(user)}`, completedAt: new Date(), updatedAt: new Date() }).where(and(eq(taskRuns.cardId, id), inArray(taskRuns.status, ['queued', 'running'])));
       await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to blocked by ${actorLabel(user)}.` });
     } else if (input.action === 'continue_run') {
       if (card.assigneeId) await db.update(agents).set({ isActive: true, isBusy: false }).where(eq(agents.id, card.assigneeId));
@@ -1222,38 +1278,78 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       : undefined;
     const providedSecret = Array.isArray(headerSecret) ? headerSecret[0] : headerSecret;
     if (!safeSecretEqual(providedSecret, expectedSecret) && !safeSecretEqual(bearer, expectedSecret)) return reply.code(401).send({ error: 'webhook_auth_required' });
-    const body = request.body as { cardId?: string; status?: string; summary?: string; output?: string; costUsd?: number };
-    if (!body.cardId || !body.status) return reply.code(400).send({ error: 'missing_fields' });
+    const parsedBody = z.object({
+      cardId: z.string().uuid(),
+      taskRunId: z.string().uuid().optional(),
+      idempotencyKey: z.string().uuid().optional(),
+      status: z.string(),
+      summary: z.string().optional(),
+      output: z.string().optional(),
+      costUsd: z.number().nonnegative().optional(),
+    }).safeParse(request.body);
+    if (!parsedBody.success) return reply.code(400).send({ error: 'invalid_body', issues: parsedBody.error.issues });
+    const body = parsedBody.data;
+    const taskRunId = body.taskRunId ?? body.idempotencyKey;
     const nextStatus = normalizeCardStatus(body.status);
-    if (!nextStatus) return reply.code(400).send({ error: 'invalid_status', allowed: ['todo', 'in_progress', 'in_review', 'done', 'blocked'], legacyAliases: { backlog: 'todo' } });
+    if (!nextStatus) return reply.code(400).send({ error: 'invalid_status', allowed: cardStatuses, legacyAliases: { backlog: 'todo' } });
+    const completesRun = nextStatus !== 'in_progress';
     const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, body.cardId), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
+    const [webhookTaskRun] = taskRunId ? await db.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).limit(1) : [];
+    if (taskRunId && !webhookTaskRun) return reply.code(404).send({ error: 'task_run_not_found' });
+    if (webhookTaskRun && webhookTaskRun.cardId !== card.id) return reply.code(409).send({ error: 'task_run_card_mismatch' });
+    if (taskRunId && completesRun) {
+      const [existingWebhook] = await db.select({ id: activityLog.id }).from(activityLog).where(and(
+        eq(activityLog.entityId, card.id),
+        eq(activityLog.actorId, 'webhook'),
+        ne(activityLog.action, 'webhook.task_in_progress'),
+        drizzleSql`${activityLog.details}->>'taskRunId' = ${taskRunId}`,
+      )).limit(1);
+      if (existingWebhook) return { ok: true, duplicate: true, cardId: body.cardId, taskRunId, newStatus: card.columnStatus };
+    }
     const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
     await db.update(kanbanCards).set({
       columnStatus: nextStatus,
       executionLog,
-      costUsd: body.costUsd?.toString(),
-      completedAt: nextStatus === 'done' ? new Date() : undefined,
-      executionLockId: null,
-      executionLockedByAgentId: null,
-      executionLockedAt: null,
-      executionLockExpiresAt: null,
-      activeHeartbeatRunId: null,
+      costUsd: completesRun ? body.costUsd?.toString() : undefined,
+      completedAt: nextStatus === 'done' ? new Date() : completesRun ? null : undefined,
+      retryCount: nextStatus === 'done' ? 0 : undefined,
+      nextRunAt: completesRun ? null : undefined,
+      lastError: nextStatus === 'blocked' || nextStatus === 'cancelled' ? body.summary ?? `webhook_${nextStatus}` : undefined,
+      executionLockId: completesRun ? null : undefined,
+      executionLockedByAgentId: completesRun ? null : undefined,
+      executionLockedAt: completesRun ? null : undefined,
+      executionLockExpiresAt: completesRun ? null : undefined,
+      activeHeartbeatRunId: completesRun ? null : undefined,
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, body.cardId));
     if (nextStatus !== card.columnStatus) await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by webhook` });
-    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'webhook', status: nextStatus === 'blocked' ? 'failed' : 'success', message: body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: body.costUsd?.toString() });
-    await db.insert(cardComments).values({ cardId: body.cardId, agentId: card.assigneeId, authorType: card.assigneeId ? 'agent' : 'system', action: nextStatus === 'blocked' ? 'agent_blocked' : 'agent_update', body: [body.summary, body.output].filter(Boolean).join('\n\n') || `Webhook marked card ${nextStatus}` });
-    if (card.assigneeId && body.costUsd) {
+    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'webhook', status: nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : 'success', message: body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
+    await db.insert(cardComments).values({
+      cardId: body.cardId,
+      agentId: card.assigneeId,
+      authorType: card.assigneeId ? 'agent' : 'system',
+      action: nextStatus === 'blocked' ? 'agent_blocked' : nextStatus === 'cancelled' ? 'agent_cancelled' : 'agent_update',
+      body: [body.summary, body.output].filter(Boolean).join('\n\n') || `Webhook marked card ${nextStatus}`,
+    });
+    if (completesRun && card.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, card.assigneeId));
+    if (completesRun && card.assigneeId && body.costUsd) {
       await db.update(agents).set({ spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${body.costUsd}` }).where(eq(agents.id, card.assigneeId));
       await db.insert(costEvents).values({ companyId: card.companyId, agentId: card.assigneeId, cardId: card.id, projectId: card.projectId, goalId: card.goalId, provider: 'webhook', model: 'external', costUsd: body.costUsd.toString() });
     }
-    if (card.activeHeartbeatRunId) {
-      await db.update(heartbeatRuns).set({ status: nextStatus === 'blocked' ? 'failed' : 'success', completedAt: new Date(), error: nextStatus === 'blocked' ? body.summary ?? 'blocked_by_webhook' : null, costUsd: body.costUsd?.toString() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
-      await db.update(taskRuns).set({ status: nextStatus === 'blocked' ? 'failed' : 'success', completedAt: new Date(), error: nextStatus === 'blocked' ? body.summary ?? 'blocked_by_webhook' : null, output: executionLog, costUsd: body.costUsd?.toString(), updatedAt: new Date() }).where(eq(taskRuns.heartbeatRunId, card.activeHeartbeatRunId));
+    const heartbeatRunId = webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId;
+    if (completesRun) {
+      const runStatus = webhookRunStatus(nextStatus);
+      const error = runStatus === 'failed' || runStatus === 'cancelled' ? body.summary ?? `webhook_${nextStatus}` : null;
+      if (heartbeatRunId) await db.update(heartbeatRuns).set({ status: runStatus, completedAt: new Date(), error, costUsd: body.costUsd?.toString() }).where(eq(heartbeatRuns.id, heartbeatRunId));
+      if (taskRunId) {
+        await db.update(taskRuns).set({ status: runStatus, completedAt: new Date(), lockedBy: null, lockedAt: null, error, output: executionLog, costUsd: body.costUsd?.toString(), updatedAt: new Date() }).where(eq(taskRuns.id, taskRunId));
+      } else if (heartbeatRunId) {
+        await db.update(taskRuns).set({ status: runStatus, completedAt: new Date(), lockedBy: null, lockedAt: null, error, output: executionLog, costUsd: body.costUsd?.toString(), updatedAt: new Date() }).where(eq(taskRuns.heartbeatRunId, heartbeatRunId));
+      }
     }
-    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: `webhook.task_${nextStatus}`, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd } });
+    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: `webhook.task_${nextStatus}`, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId } });
     if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
-    return { ok: true, cardId: body.cardId, newStatus: nextStatus };
+    return { ok: true, cardId: body.cardId, taskRunId, newStatus: nextStatus };
   });
 }

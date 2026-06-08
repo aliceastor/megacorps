@@ -3,17 +3,18 @@ import { DndContext, type DragEndEvent, useDraggable, useDroppable } from '@dnd-
 import { CSS } from '@dnd-kit/utilities';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, GitBranch, GripVertical, ListChecks, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, StopCircle, Trash2, X } from 'lucide-react';
+import { Ban, Bot, GitBranch, GripVertical, ListChecks, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, StopCircle, Trash2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
-const statuses = ['todo', 'in_progress', 'in_review', 'done', 'blocked'] as const;
+const statuses = ['todo', 'in_progress', 'in_review', 'done', 'blocked', 'cancelled'] as const;
 const statusLabels: Record<string, Record<string, string>> = {
   todo: { 'zh-TW': '待辦', en: 'Todo', ja: '未着手' },
   in_progress: { 'zh-TW': '執行中', en: 'In Progress', ja: '進行中' },
   in_review: { 'zh-TW': '審核中', en: 'In Review', ja: 'レビュー中' },
   done: { 'zh-TW': '完成', en: 'Done', ja: '完了' },
   blocked: { 'zh-TW': '受阻', en: 'Blocked', ja: 'ブロック' },
+  cancelled: { 'zh-TW': '已取消', en: 'Cancelled', ja: 'キャンセル' },
 };
 
 type Card = {
@@ -109,6 +110,7 @@ function apiEventMentionsCard(event: ApiEvent, cardId: string): boolean {
 function statusColor(status: string) {
   if (status === 'done') return '#16a34a';
   if (status === 'blocked') return '#dc2626';
+  if (status === 'cancelled') return '#64748b';
   if (status === 'in_progress') return '#2563eb';
   if (status === 'in_review') return '#9333ea';
   return 'var(--border)';
@@ -650,6 +652,7 @@ export function KanbanBoard() {
               <button className="btn" disabled={busy} onClick={() => action(`/api/cards/${selected.id}/review`, 'Review completed')}><ShieldCheck size={15} /> Review</button>
               <button className="btn" title="Split this task into smaller sub-tasks from its detail text." disabled={busy} onClick={() => action(`/api/cards/${selected.id}/decompose`, 'Sub-tasks created')}><GitBranch size={15} /> Split into Sub-tasks</button>
               <button className="btn" disabled={busy} onClick={() => { selectTab('comments'); setCommentAction('pause_agent'); }}><StopCircle size={15} /> Pause with Comment</button>
+              <button className="btn" disabled={busy || selected.columnStatus === 'cancelled'} onClick={() => action(`/api/cards/${selected.id}/cancel`, 'Task cancelled')}><Ban size={15} /> Cancel Task</button>
               <button className="btn" disabled={busy} onClick={deleteSelected} style={{ color: 'var(--danger)' }}><Trash2 size={15} /> Delete Task</button>
             </div>
           </div>}

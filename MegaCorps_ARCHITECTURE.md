@@ -2,6 +2,18 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.6 - Kanban Lifecycle Recovery and Idempotent Webhooks
+
+Date: 2026-06-08
+
+Completed in this pass:
+
+- Kanban stages now include `cancelled` alongside `todo`, `in_progress`, `in_review`, `done`, and `blocked`. `POST /api/cards/:id/cancel` cancels active or queued work without archiving task history.
+- Expired execution locks are recovered by the dispatch loop with `task_logs.type=lock_expired` and `status=warning`; expired `in_progress` work increments `retry_count`, backs off to `todo`, or moves to `blocked` after `max_retries`.
+- Dispatch completion no longer treats self-review as a valid quality gate. A distinct configured reviewer or distinct reporting manager can review; otherwise successful work goes directly to `done`.
+- Agent prompts include `taskRunId`, and `POST /api/webhook/task-complete` deduplicates repeated webhook completions for the same task run. Duplicate callbacks return `duplicate: true` without writing duplicate cost events, comments, or stage logs.
+- Webhook `status=in_progress` is treated as a progress update and does not release execution locks or mark the task run complete. Completion, review handoff, blocked, cancelled, or todo callbacks release active run state.
+
 ## Architecture Update v1.5 - Hermes SSH Env, Webhook Secret, and Bootstrap Recovery
 
 Date: 2026-06-08
@@ -164,7 +176,7 @@ The older phase checklist later in this document is kept as historical design no
 
 - [x] `kanban_cards`, `projects`, and `goals` tables.
 - [x] Card list/create/update/delete API.
-- [x] One canonical card stage field with five stages: `todo`, `in_progress`, `in_review`, `done`, `blocked`.
+- [x] One canonical card stage field with six stages: `todo`, `in_progress`, `in_review`, `done`, `blocked`, `cancelled`.
 - [x] Legacy `backlog` input normalized to `todo`.
 - [x] Status/assignee/tag/priority/limit/offset filtering API.
 - [~] Project and goal create/list API.
@@ -2480,7 +2492,7 @@ MegaCorps now follows the same product direction as `paperclipai/paperclip`: a c
 - Company: mission, dispatch heartbeat, auto-dispatch switch.
 - Department: grouping unit for agents and tasks.
 - O-chart: agents report to other agents via `bossId`; agents can also belong to departments.
-- Kanban: every task has one UUID and one stage: `todo`, `in_progress`, `in_review`, `done`, `blocked`. Legacy `backlog` input maps to `todo`.
+- Kanban: every task has one UUID and one stage: `todo`, `in_progress`, `in_review`, `done`, `blocked`, `cancelled`. Legacy `backlog` input maps to `todo`.
 - Logs: task lifecycle logs plus API lifecycle logs.
 - Intervention: users can comment, stop an agent, send instructions to agent context, and continue a run.
 

@@ -1,7 +1,7 @@
 import { getAdapterStringConfig } from './config.ts';
 
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
-export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' };
+export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat'; taskRunId?: string | null };
 export type TaskResult = { success: boolean; output: string; sessionId: string; tokensUsed: number; costUsd: number; durationSeconds: number };
 export type AgentLike = { hermesProfile: string | null; currentSessionId: string | null; adapterConfig?: Record<string, unknown> | null };
 
@@ -123,6 +123,9 @@ Respond to the user directly. Do not report task completion or call the Kanban w
 
   const apiUrl = megacorpsApiUrl(agent);
   const taskWebhookSecret = webhookSharedSecret(agent);
+  const webhookBodyExample = task.taskRunId
+    ? `{ "cardId": "${task.id}", "taskRunId": "${task.taskRunId}", "status": "done", "summary": "...", "output": "..." }`
+    : `{ "cardId": "${task.id}", "status": "done", "summary": "...", "output": "..." }`;
   return `You are now working under PLATFORM MegaCorps at ${apiUrl}.
 
 === Common API Endpoints ===
@@ -136,6 +139,7 @@ Respond to the user directly. Do not report task completion or call the Kanban w
 === Your Identity ===
 Agent: ${agent.hermesProfile ?? 'unknown'}
 Card ID: ${task.id}
+Task Run ID: ${task.taskRunId ?? 'none'}
 Card Title: ${task.title}
 
 === Task ===
@@ -145,7 +149,7 @@ ${task.body}
 When you complete this task, POST your results to:
 POST ${apiUrl}/api/webhook/task-complete
 ${taskWebhookSecret ? `Header: X-MegaCorps-Webhook-Secret: ${taskWebhookSecret}` : 'Webhook auth: no shared secret was provided in your runtime config.'}
-Body: { "cardId": "${task.id}", "status": "done", "summary": "...", "output": "..." }
+Body: ${webhookBodyExample}
 
 If you encounter errors, POST to the same endpoint with status "blocked".
 

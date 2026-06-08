@@ -1,6 +1,6 @@
 # MegaCorps Progress and Research Notes
 
-Last updated: 2026-06-06
+Last updated: 2026-06-08
 
 ## Executive Summary
 
@@ -15,7 +15,7 @@ The current local stack runs with Docker:
 Latest verified baseline:
 
 - Phase 1-15 operational MVP flows are implemented.
-- Company registry page, company memberships, company-scoped RBAC, department setup, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, DB-backed task-run queue, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
+- Company registry page, company memberships, company-scoped RBAC, department setup, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention, lifecycle logs, knowledge docs, project/goal context, execution locks, stale-lock retry/block recovery, DB-backed task-run queue, idempotent task-complete webhooks, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
 - Deployment is user-managed. Local-only Docker was used for QA in this pass; NAS/server deployment remains user-managed.
 - Browser plugin QA verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text.
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
@@ -28,6 +28,7 @@ Latest verified baseline:
 - Company-owned mutation/manual execution APIs now require company operator/admin membership checks.
 - Production auth onboarding now uses DB-backed `auth.signup_enabled` and `auth.jwt_secret`; signup defaults to enabled, signup becomes admin when no active admin exists, `POST /api/auth/bootstrap` can recover an admin when `BOOTSTRAP_TOKEN` is configured and no active admin exists, and the Admin page manages all accounts.
 - Docker CI is configured in `.github/workflows/docker-build.yml` for server and web images.
+- Round 3 Kanban reliability fixes are implemented: expired execution locks write `lock_expired/warning`, self-review is skipped unless a distinct reviewer/manager exists, task-complete webhooks dedupe by `taskRunId`, progress webhooks no longer release locks, and `POST /api/cards/:id/cancel` preserves task history while cancelling active work.
 
 ## Paperclip Research Summary
 
@@ -163,6 +164,7 @@ Implemented:
   - `in_review`
   - `done`
   - `blocked`
+  - `cancelled`
 - Legacy `backlog` API input is accepted as an alias and normalized to `todo`.
 - Kanban columns match the stage list.
 - Card detail panel includes:
@@ -407,7 +409,7 @@ Implemented:
   - `activeHeartbeatRunId`
 - `dispatchCard` now creates a heartbeat run and atomically acquires a lock before calling an adapter.
 - If another process already owns the lock, the run is cancelled and the task is not double-executed.
-- Expired locks are recovered by the dispatch loop, the agent is marked not busy, the task returns to `todo`, and recovery is logged.
+- Expired locks are recovered by the dispatch loop, the agent is marked not busy, `lock_expired/warning` is logged, and the task returns to `todo` with backoff or moves to `blocked` after `max_retries`.
 - Adapter results with `success: false` now go through retry/block handling instead of being treated as completed work.
 - `pause_agent` comments clear active locks and cancel the active heartbeat run.
 
