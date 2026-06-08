@@ -94,9 +94,9 @@ Completed in this pass:
 
 - Added the `hermes-ssh` adapter.
 - The server container now includes `openssh-client`.
-- Hermes SSH dispatch connects to the configured SSH host and runs `hermes chat --profile {profile} "{prompt}"`. No production SSH host is hardcoded.
+- Hermes SSH dispatch connects to the configured SSH host and runs `hermes -z "{prompt}" --profile {profile}`. No production SSH host is hardcoded.
 - SSH stdout/stderr, exit code, duration, estimated tokens, cost, and session id are recorded through the normal adapter result path.
-- `Settings -> Agent runtimes` and `Agents -> select agent` now expose Hermes SSH fields: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`, and `maxTurns`.
+- `Settings -> Agent runtimes` and `Agents -> select agent` now expose Hermes SSH fields: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, and `megacorpsApiUrl`.
 - Docker compose and `.env.example` include Hermes SSH environment fallbacks.
 - The web API client now tries the current browser host on port `4000` before falling back to the baked `NEXT_PUBLIC_API_URL`, which fixes NAS/browser deployments where a baked IP or `localhost` is unreachable from the current browser.
 - `GET /api/help` and `GET /api/help?format=markdown` now include response schemas, response examples, and explicit rate-limit notes for every endpoint.
@@ -470,8 +470,8 @@ UI entry points:
 Supported adapter fields:
 
 - `mock`: no endpoint required.
-- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`, `maxTurns`.
-- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`, `maxTurns`.
+- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`.
+- `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`.
 - `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `megacorpsApiUrl`.
 - `webhook`: `webhookUrl`.
 - `openclaw`: `openclawUrl`.
@@ -637,13 +637,13 @@ L1 集團 (Group)
 
 ### 2.1 基本原理
 
-MegaCorps 透過 **Portainer API** 對 `hermes-suite` 容器執行 `hermes chat` 指令，以 **single-query mode (-q)** 讓 Agent 執行一次性任務。
+MegaCorps uses the **Portainer API** to execute `hermes -z "<prompt>" --profile <profile>` inside the `hermes-suite` container for one-shot agent tasks.
 
 ```
 MegaCorps ──[Portainer API]──> hermes-suite container
                                  │
                                  ▼
-                    hermes chat -q --profile=alice "<task>"
+                    hermes -z "<task>" --profile alice
                                  │
                                  ▼
                     Agent 使用 tools/skills 執行任務
@@ -659,24 +659,19 @@ Current implementation note, 2026-06-06:
 - `hermes` remains the Portainer-backed adapter.
 - `hermes-ssh` is now the direct SSH-backed Hermes CLI adapter.
 - `hermes-ssh` requires a configured SSH host. The SSH user defaults to `root` when no user is configured.
-- The remote command shape is `hermes chat --profile {profile} "{prompt}"`, with optional `--resume` and `--max-turns`.
-- MegaCorps does not pass `--reasoning-effort` to Hermes CLI because Hermes v0.15.2 rejects that flag. Configure reasoning behavior in the Hermes profile/config instead.
+- The remote command shape is `hermes -z "{prompt}" --profile {profile}`. MegaCorps does not pass bare prompt text, `--resume`, or `--max-turns` through these CLI adapters.
+- MegaCorps does not pass `--reasoning-effort`, `--max-turns`, or bare prompt text to Hermes CLI because Hermes v0.15.2 rejects unsupported flags and unwrapped prompt arguments. Configure reasoning behavior in the Hermes profile/config instead.
 - Use `Settings -> Agent runtimes` to configure SSH host/user/port/key path, then attach that runtime to agents in `Agents`.
 
 ```bash
-hermes chat -q \
-  --profile=<agent_name> \
-  --resume <session_id> \
-  --max-turns 60 \
-  "<task_prompt>"
+hermes -z "<task_prompt>" \
+  --profile=<agent_name>
 ```
 
 | 參數 | 說明 |
 |---|---|
-| `-q` | Single-query mode：執行完退出 |
+| `-z` | Passes the one-shot prompt and exits. |
 | `--profile` | Agent profile（`/opt/data/profiles/<name>/`）|
-| `--resume` | Session ID，跨任務續接記憶 |
-| `--max-turns` | 最大 tool call 次數（防失控 loop）|
 
 ### 2.3 Session 管理（Agent 記憶連續性）
 
@@ -868,7 +863,7 @@ interface TaskResult {
 
 | Adapter | 調用方式 | 適用場景 |
 |---|---|---|
-| `hermes` | Portainer API → `hermes chat -q` | 主力 Agent |
+| `hermes` | Portainer API -> `hermes -z "<prompt>" --profile <profile>` | 主力 Agent |
 | `openclaw` | sessions_spawn / sessions_send | Mea 子任務 |
 | `claude_code` | CLI spawn | Coding 任務 |
 | `cursor` | CLI spawn | IDE 整合 |
@@ -1849,7 +1844,7 @@ Phase 6 ──▶ Phase 7 ──▶ Phase 8 ──▶ Phase 9
 - [ ] Agent Runtime 管理 API
 - [ ] **Hermes Adapter 實作**（核心！）
   - Portainer API 連線模組
-  - `hermes chat -q --profile=<agent> --resume <session_id> "<prompt>"` 執行
+  - `hermes -z "<prompt>" --profile <agent>` 執行
   - stdout / stderr parsing
   - Session ID 解析 + 存入 DB
   - Timeout handling
@@ -2135,7 +2130,7 @@ MegaCorps                    Hermes Worker Sidecar           Hermes CLI
    │  202 Accepted                 │                             │
    │  { run_id: "xxx" }            │                             │
    │ <──────────────────────────── │                             │
-   │                               │  spawn: hermes chat -q ...  │
+   │                               │  spawn: hermes -z ...       │
    │  (MegaCorps 不等待，           │ ──────────────────────────> │
    │   繼續處理其他 cards)          │                             │
    │                               │      ... Agent 執行中 ...    │
@@ -2154,7 +2149,7 @@ MegaCorps                    Hermes Worker Sidecar           Hermes CLI
 
 在 Hermes Suite 容器旁邊部署一個輕量 HTTP sidecar（Node.js / Python），負責：
 - 接收 MegaCorps 的 POST 請求
-- Spawn `hermes chat -q` 進程
+- Spawn `hermes -z` 進程
 - 監控進程狀態（timeout / OOM / crash）
 - 完成後 POST 結果到 callback URL
 
