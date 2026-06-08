@@ -17,7 +17,7 @@ type LiveEvent = {
 };
 
 function wsUrl(apiUrl: string): string {
-  const url = new URL(apiUrl);
+  const url = new URL(apiUrl, window.location.origin);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.pathname = '/api/live';
   url.search = '';
@@ -70,14 +70,15 @@ function LiveEvents() {
     let closed = false;
     let socket: WebSocket | null = null;
     const apiCandidates = getApiCandidates();
-    const candidates = apiCandidates.map(wsUrl);
+    const candidates = apiCandidates.filter((apiUrl) => !apiUrl.startsWith('/')).map(wsUrl);
     let candidateIndex = 0;
 
     const connect = async () => {
       if (closed) return;
       if (!(await hasLiveSession(apiCandidates))) return;
+      if (candidates.length === 0) return;
       if (closed) return;
-      socket = new WebSocket(candidates[candidateIndex] ?? candidates[0] ?? 'ws://localhost:4000/api/live');
+      socket = new WebSocket(candidates[candidateIndex] ?? candidates[0]!);
       socket.onmessage = (message) => {
         try {
           const event = JSON.parse(String(message.data)) as LiveEvent;

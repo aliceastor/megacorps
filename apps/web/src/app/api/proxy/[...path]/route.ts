@@ -1,18 +1,27 @@
 import { NextRequest } from 'next/server';
 
-const DEFAULT_SERVER_API_URL = 'http://localhost:4000';
+const DEFAULT_SERVER_API_URLS = ['http://server:4000', 'http://localhost:4000'];
 
-function serverApiUrl(): string {
-  const raw = process.env.SERVER_API_URL
-    ?? process.env.INTERNAL_API_URL
-    ?? process.env.NEXT_PUBLIC_API_URL
-    ?? DEFAULT_SERVER_API_URL;
-  return raw.replace(/\/+$/, '');
+function normalizeUrl(url: string): string {
+  return url.replace(/\/+$/, '');
 }
 
-function targetUrl(request: NextRequest, segments: string[]): string {
+function uniqueUrls(urls: Array<string | undefined>): string[] {
+  return Array.from(new Set(urls.filter(Boolean).map((url) => normalizeUrl(url!))));
+}
+
+function serverApiUrls(): string[] {
+  return uniqueUrls([
+    process.env.SERVER_API_URL,
+    process.env.INTERNAL_API_URL,
+    ...DEFAULT_SERVER_API_URLS,
+    process.env.NEXT_PUBLIC_API_URL,
+  ]);
+}
+
+function targetUrl(baseUrl: string, request: NextRequest, segments: string[]): string {
   const path = `/${segments.join('/')}`;
-  return `${serverApiUrl()}${path}${request.nextUrl.search}`;
+  return `${baseUrl}${path}${request.nextUrl.search}`;
 }
 
 async function proxy(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
@@ -22,18 +31,35 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
   headers.delete('x-forwarded-host');
   headers.delete('x-forwarded-proto');
 
-  const response = await fetch(targetUrl(request, path), {
-    method: request.method,
-    headers,
-    body: ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer(),
-    cache: 'no-store',
-  });
+  const body = ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer();
+  const tried: string[] = [];
+  let lastError: unknown;
 
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  });
+  for (const apiUrl of serverApiUrls()) {
+    tried.push(apiUrl);
+    try {
+      const response = await fetch(targetUrl(apiUrl, request, path), {
+        method: request.method,
+        headers,
+        body,
+        cache: 'no-store',
+      });
+
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  return Response.json({
+    error: 'api_proxy_unreachable',
+    tried,
+    message: lastError instanceof Error ? lastError.message : 'unknown proxy error',
+  }, { status: 502 });
 }
 
 export const GET = proxy;
