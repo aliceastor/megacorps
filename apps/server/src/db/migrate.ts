@@ -48,6 +48,8 @@ ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS company_id UUID REFERENCES c
 ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS local_workspace_root TEXT;
 ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS local_scratch_root TEXT;
 ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+CREATE TABLE IF NOT EXISTS machine_runners (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, slug TEXT NOT NULL, api_key_hash TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'offline', version TEXT, os TEXT, supported_runtimes TEXT[] DEFAULT '{}', max_concurrent INTEGER DEFAULT 1, active_slots INTEGER DEFAULT 0, local_workspace_root TEXT, local_scratch_root TEXT, runtime_statuses JSONB DEFAULT '{}', metadata JSONB DEFAULT '{}', last_heartbeat_at TIMESTAMPTZ, last_seen_ip TEXT, deleted_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now(), UNIQUE(company_id, slug));
+CREATE INDEX IF NOT EXISTS machine_runners_company_status_idx ON machine_runners(company_id, status, last_heartbeat_at DESC);
 CREATE TABLE IF NOT EXISTS kanban_cards (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), department_id UUID REFERENCES departments(id), project_id UUID REFERENCES projects(id), goal_id UUID REFERENCES goals(id), parent_card_id UUID REFERENCES kanban_cards(id), title TEXT NOT NULL, body TEXT NOT NULL, column_status TEXT DEFAULT 'todo', priority INTEGER DEFAULT 0, tags TEXT[] DEFAULT '{}', assignee_id UUID REFERENCES agents(id), reviewer_id UUID REFERENCES agents(id), dependency_card_ids UUID[] DEFAULT '{}', requires_approval BOOLEAN DEFAULT false, retry_count INTEGER DEFAULT 0, max_retries INTEGER DEFAULT 3, next_run_at TIMESTAMPTZ, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, last_error TEXT, review_feedback TEXT, created_by UUID REFERENCES users(id), execution_log TEXT, session_id TEXT, cost_usd NUMERIC(10,4), created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
 ALTER TABLE kanban_cards ALTER COLUMN column_status SET DEFAULT 'todo';
 UPDATE kanban_cards SET column_status = 'todo', updated_at = now() WHERE column_status = 'backlog';
@@ -66,6 +68,14 @@ ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS active_heartbeat_run_id UUID;
 ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS kanban_cards_execution_lock_expires_at_idx ON kanban_cards(execution_lock_expires_at);
 CREATE INDEX IF NOT EXISTS kanban_cards_company_deleted_at_idx ON kanban_cards(company_id, deleted_at);
+CREATE TABLE IF NOT EXISTS card_dependencies (card_id UUID NOT NULL REFERENCES kanban_cards(id), depends_on_card_id UUID NOT NULL REFERENCES kanban_cards(id), created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY(card_id, depends_on_card_id));
+CREATE INDEX IF NOT EXISTS card_dependencies_depends_on_idx ON card_dependencies(depends_on_card_id);
+INSERT INTO card_dependencies (card_id, depends_on_card_id)
+SELECT kc.id, dep.depends_on_card_id
+FROM kanban_cards kc
+CROSS JOIN LATERAL unnest(COALESCE(kc.dependency_card_ids, '{}'::uuid[])) AS dep(depends_on_card_id)
+WHERE dep.depends_on_card_id IS NOT NULL
+ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS heartbeat_runs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), card_id UUID REFERENCES kanban_cards(id), agent_id UUID REFERENCES agents(id), source TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running', lock_acquired_at TIMESTAMPTZ, started_at TIMESTAMPTZ DEFAULT now(), completed_at TIMESTAMPTZ, duration_seconds INTEGER, error TEXT, cost_usd NUMERIC(10,4), input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, created_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS heartbeat_runs_company_created_at_idx ON heartbeat_runs(company_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS heartbeat_runs_card_created_at_idx ON heartbeat_runs(card_id, created_at DESC);
@@ -75,6 +85,9 @@ ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS adapter_turn_id TEXT;
 CREATE INDEX IF NOT EXISTS task_runs_company_created_at_idx ON task_runs(company_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS task_runs_card_created_at_idx ON task_runs(card_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS task_runs_status_created_at_idx ON task_runs(status, created_at ASC);
+CREATE TABLE IF NOT EXISTS agent_sessions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), agent_id UUID NOT NULL REFERENCES agents(id), machine_runner_id UUID REFERENCES machine_runners(id), card_id UUID REFERENCES kanban_cards(id), task_run_id UUID REFERENCES task_runs(id), session_kind TEXT NOT NULL DEFAULT 'task', status TEXT NOT NULL DEFAULT 'active', public_key_jwk JSONB, public_key TEXT, fingerprint TEXT, metadata JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT now(), closed_at TIMESTAMPTZ, updated_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX IF NOT EXISTS agent_sessions_company_status_idx ON agent_sessions(company_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS agent_sessions_agent_status_idx ON agent_sessions(agent_id, status, created_at DESC);
 CREATE TABLE IF NOT EXISTS adapter_sessions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), agent_id UUID NOT NULL REFERENCES agents(id), runtime_id UUID REFERENCES agent_runtimes(id), adapter_type TEXT NOT NULL, scope_type TEXT NOT NULL, scope_id UUID NOT NULL, kind TEXT NOT NULL, adapter_session_id TEXT NOT NULL, last_turn_id TEXT, status TEXT NOT NULL DEFAULT 'active', metadata JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now(), UNIQUE(company_id, agent_id, scope_type, scope_id, kind));
 CREATE INDEX IF NOT EXISTS adapter_sessions_scope_idx ON adapter_sessions(company_id, scope_type, scope_id, kind);
 CREATE TABLE IF NOT EXISTS cron_runs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'loop', status TEXT NOT NULL DEFAULT 'running', started_at TIMESTAMPTZ DEFAULT now(), completed_at TIMESTAMPTZ, duration_seconds INTEGER, error TEXT, details JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT now());
@@ -84,6 +97,9 @@ CREATE INDEX IF NOT EXISTS task_logs_card_id_created_at_idx ON task_logs(card_id
 CREATE TABLE IF NOT EXISTS card_comments (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), card_id UUID NOT NULL REFERENCES kanban_cards(id), author_type TEXT NOT NULL DEFAULT 'user', author_id UUID REFERENCES users(id), body TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'comment', created_at TIMESTAMPTZ DEFAULT now());
 ALTER TABLE card_comments ADD COLUMN IF NOT EXISTS agent_id UUID REFERENCES agents(id);
 CREATE INDEX IF NOT EXISTS card_comments_card_id_created_at_idx ON card_comments(card_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS card_actions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), card_id UUID NOT NULL REFERENCES kanban_cards(id), actor_type TEXT NOT NULL, actor_id TEXT NOT NULL, user_id UUID REFERENCES users(id), agent_id UUID REFERENCES agents(id), machine_runner_id UUID REFERENCES machine_runners(id), session_id UUID REFERENCES agent_sessions(id), action TEXT NOT NULL, from_status TEXT, to_status TEXT, detail TEXT, metadata JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX IF NOT EXISTS card_actions_card_created_at_idx ON card_actions(card_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS card_actions_company_created_at_idx ON card_actions(company_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS work_products (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), card_id UUID REFERENCES kanban_cards(id), project_id UUID REFERENCES projects(id), agent_id UUID REFERENCES agents(id), task_run_id UUID REFERENCES task_runs(id), type TEXT NOT NULL DEFAULT 'external', title TEXT NOT NULL, summary TEXT, url TEXT, repo_provider TEXT, repo_url TEXT, branch TEXT, commit_sha TEXT, pull_request_url TEXT, metadata JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS work_products_card_created_at_idx ON work_products(card_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS work_products_project_created_at_idx ON work_products(project_id, created_at DESC);

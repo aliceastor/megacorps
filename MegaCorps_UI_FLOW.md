@@ -291,6 +291,7 @@ Data sources:
 - Delete/archive: `DELETE /api/cards/:id`
 - Comments: `GET/POST /api/cards/:id/comments`
 - Logs: `GET /api/cards/:id/logs`
+- Actions: `GET /api/cards/:id/actions`
 - API event related lookup: `GET /api/system-logs`
 - Work products: `GET/POST /api/cards/:id/work-products`
 
@@ -370,6 +371,7 @@ Message board tab elements:
 Logs tab elements:
 - Latest execution output
 - Cached task logs
+- Normalized card action timeline
 - Related API lifecycle events
 - Loading/refreshing indicators
 
@@ -396,7 +398,7 @@ Dialog/confirmation:
 - Toast notification appears for create/update/run/review/decompose/comment/work-product/cancel/delete outcomes.
 
 Cache/live behavior:
-- Card comments, logs, API logs, and work products are cached in browser `sessionStorage`.
+- Card comments, logs, action timeline, API logs, and work products are cached in browser `sessionStorage`.
 - React Query is used for board and tab data.
 - Live events refresh card comments, task logs, work products, and board state.
 
@@ -695,28 +697,39 @@ Data sources:
 - `GET /api/help?format=markdown`
 
 Elements:
-- Search input
-- API stat cards
-- Current Architecture panel:
-  - Surface cards for Dashboard, Companies, Departments, Agents, Projects, Workspace, Knowledge, Kanban, Direct Chat, Cron, Logs, Admin, Settings, Help
-  - Source-of-truth notes
-  - Multi-agent operating notes
-  - Remaining production gaps
-- Agent API entrypoint panel
-- Copy/open endpoint affordances
-- Grouped endpoint cards:
-  - Method
-  - Path
-  - Auth
-  - Required role
-  - Params
-  - Query
-  - Body
-  - Response
-  - Schema
-  - Example
-  - Rate limit
-  - Notes
+- Page tabs:
+  - API Catalog
+  - CLI Commands
+- API Catalog tab:
+  - Search input
+  - API stat cards
+  - Current Architecture panel:
+    - Surface cards for Dashboard, Companies, Departments, Agents, Projects, Workspace, Knowledge, Kanban, Direct Chat, Cron, Logs, Admin, Settings, Help
+    - Source-of-truth notes
+    - Multi-agent operating notes
+    - Remaining production gaps
+  - Agent API entrypoint panel
+  - Runner API and Agent Session API endpoint groups for machine runner keys, heartbeat, claim/complete, and Ed25519 JWT session calls
+  - Copy/open endpoint affordances
+  - Grouped endpoint cards:
+    - Method
+    - Path
+    - Auth
+    - Required role
+    - Params
+    - Query
+    - Body
+    - Response
+    - Schema
+    - Example
+    - Rate limit
+    - Notes
+- CLI Commands tab:
+  - Entrypoint copy row for `npm run dev -w packages/cli -- <command>`
+  - Environment variable list
+  - YAML manifest example
+  - Command cards for `login`, `apply`, `runner register`, and `runner daemon`
+  - Each command card shows auth mode, flags, env vars, example command, and lifecycle notes
 
 No modal overlays.
 
@@ -795,6 +808,10 @@ The following backend-supported fields or actions were missing or incomplete in 
 - `kanban_cards.priority`, `tags`, `dependency_card_ids`: added to New Card modal and Details tab.
 - `POST /api/cards/:id/work-products`: added Work Products form in Kanban detail drawer.
 - `task_runs.adapter_session_id`, `adapter_turn_id`: added to Logs task run cards.
+- `card_dependencies`: added as normalized dependency graph while Kanban still hydrates `dependencyCardIds` for existing UI flows.
+- `card_actions`: added normalized action timeline endpoint at `/api/cards/:id/actions`.
+- `machine_runners`: added runner registry/heartbeat/claim/complete APIs and CLI management; no dedicated UI page yet.
+- `agent_sessions`: added runner-created Ed25519 public-key sessions for agent-session JWT calls; no dedicated UI page yet.
 - `POST /api/agents` help body: updated with `capabilities`.
 - Browser API transport: added same-origin `/api/proxy` first, with direct browser-host and baked URL as fallbacks.
 - Departments: added direct agent department assignment, no-department assignment, reports-to editing, and clickable org-canvas agent editing.
@@ -802,6 +819,11 @@ The following backend-supported fields or actions were missing or incomplete in 
 - Cron: replaced scaffold-only rows with runnable `dispatch-heartbeat`, `daily-report`, and `health-check` jobs, each with company/runner metadata.
 - Kanban company filter: changed from multi-select list to a normal dropdown while preserving sort by company.
 - I18N: rebuilt corrupted zh-TW/en/ja locale dictionaries and wired sidebar/topbar labels to locale keys.
+- Help: added `API Catalog` and `CLI Commands` tabs backed by `GET /api/help`, with command docs for `login`, `apply`, `runner register`, and `runner daemon`.
+- API Help: added method+path coverage tests for every registered route and explicit runner/agent-session auth coverage.
+- Runner lifecycle: external runner dispatch claims now take execution locks and move cards to `in_progress`; review claims wait for reviewable card states; runner review success approves to `done`.
+- Agent Session API: claim/review/release now use the shared card lifecycle guard, cannot release another agent's card, and card-bound sessions cannot operate on other cards.
+- CLI apply: card dependency references are resolved after all manifest cards are known, so forward references in YAML are supported.
 
 ### No unsupported UI writes found
 
@@ -819,6 +841,10 @@ These DB surfaces are intentionally not presented as primary editable UI fields:
 - `cron_runs`: inspected through Logs/Cron heartbeat, not editable.
 - `activity_log`: inspected through Dashboard/Logs, not editable.
 - `adapter_sessions`: indirectly visible through task run adapter session/turn IDs; direct session management is via agent Reset Session.
+- `card_dependencies`: edited indirectly through card dependency controls/API.
+- `card_actions`: inspected through Kanban/API Help, not directly edited.
+- `machine_runners`: managed through API/CLI for now.
+- `agent_sessions`: created by runner API and authenticated by signed JWTs; no manual UI editor yet.
 - `heartbeat_runs` and `task_runs`: visible through Logs/Kanban, normally controlled by run/review/cancel/retry flows rather than manual field editing.
 - `cost_events`: visible in Budget, not editable.
 - `approvals`: visible in Budget and acted on through approve/reject, not arbitrary field editing.

@@ -6,13 +6,38 @@ export const legacyCardStatusAliases = { backlog: 'todo' } as const;
 const cardStatusInputs = ['backlog', ...cardStatuses] as const;
 export const agentAdapterTypes = ['hermes', 'hermes-ssh', 'hermes-gateway', 'codex-app', 'openclaw', 'webhook', 'mock'] as const;
 export type AgentAdapterType = (typeof agentAdapterTypes)[number];
+export const cardActorTypes = ['user', 'machine', 'system', 'agent:worker', 'agent:reviewer', 'agent:leader'] as const;
+export type CardActorType = (typeof cardActorTypes)[number];
+export const cardTransitionActions = ['claim', 'submit_review', 'request_help', 'approve', 'reject', 'complete', 'block', 'cancel', 'release', 'resume', 'reopen', 'manual_move'] as const;
+export type CardTransitionAction = (typeof cardTransitionActions)[number];
+
+type CardTransitionDef = {
+  from: readonly CardStatus[];
+  to: CardStatus;
+  allow: readonly CardActorType[];
+};
+
+const cardTransitionDefs: Record<CardTransitionAction, CardTransitionDef> = {
+  claim: { from: ['todo'], to: 'in_progress', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
+  submit_review: { from: ['in_progress'], to: 'in_review', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
+  request_help: { from: ['in_progress', 'blocked'], to: 'needs_review', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
+  approve: { from: ['in_review', 'needs_review'], to: 'done', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
+  reject: { from: ['in_review', 'needs_review'], to: 'todo', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
+  complete: { from: ['in_progress', 'in_review', 'needs_review'], to: 'done', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
+  block: { from: ['todo', 'in_progress', 'in_review', 'needs_review'], to: 'blocked', allow: ['machine', 'system', 'agent:worker', 'agent:reviewer', 'agent:leader', 'user'] },
+  cancel: { from: ['todo', 'in_progress', 'in_review', 'needs_review', 'blocked'], to: 'cancelled', allow: ['machine', 'system', 'agent:leader', 'user'] },
+  release: { from: ['in_progress'], to: 'todo', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
+  resume: { from: ['blocked', 'cancelled'], to: 'todo', allow: ['machine', 'system', 'agent:leader', 'user'] },
+  reopen: { from: ['done'], to: 'todo', allow: ['agent:leader', 'user'] },
+  manual_move: { from: cardStatuses, to: 'todo', allow: ['user', 'system'] },
+};
 
 const allowedTransitions: Record<CardStatus, CardStatus[]> = {
   todo: ['in_progress', 'blocked', 'cancelled'],
   in_progress: ['in_review', 'needs_review', 'done', 'blocked', 'cancelled'],
-  in_review: ['done', 'in_progress', 'blocked', 'cancelled'],
+  in_review: ['done', 'todo', 'in_progress', 'blocked', 'cancelled'],
   needs_review: ['todo', 'in_progress', 'done', 'blocked', 'cancelled'],
-  done: [],
+  done: ['todo'],
   blocked: ['todo', 'cancelled'],
   cancelled: ['todo'],
 };
@@ -20,6 +45,33 @@ const allowedTransitions: Record<CardStatus, CardStatus[]> = {
 export function canTransitionCard(from: CardStatus, to: CardStatus): boolean {
   if (from === to) return true;
   return allowedTransitions[from].includes(to);
+}
+
+export function getCardTransitionTarget(action: CardTransitionAction): CardStatus {
+  return cardTransitionDefs[action].to;
+}
+
+export function inferCardTransitionAction(from: CardStatus, to: CardStatus): CardTransitionAction | null {
+  if (from === to) return 'manual_move';
+  for (const action of cardTransitionActions) {
+    if (action === 'manual_move') continue;
+    const def = cardTransitionDefs[action];
+    if (def.to === to && def.from.includes(from)) return action;
+  }
+  return null;
+}
+
+export function validateCardTransition(action: CardTransitionAction, from: CardStatus, actorType: CardActorType, targetStatus?: CardStatus): { code: 'INVALID_TRANSITION' | 'FORBIDDEN'; message: string } | null {
+  const def = cardTransitionDefs[action];
+  if (!def.allow.includes(actorType)) return { code: 'FORBIDDEN', message: `${actorType} cannot perform ${action}` };
+  if (action === 'manual_move') {
+    if (!targetStatus) return { code: 'INVALID_TRANSITION', message: 'manual_move requires a target status' };
+    if (!canTransitionCard(from, targetStatus)) return { code: 'INVALID_TRANSITION', message: `Cannot move card from ${from} to ${targetStatus}` };
+    return null;
+  }
+  if (!def.from.includes(from)) return { code: 'INVALID_TRANSITION', message: `Cannot ${action} from ${from}; allowed from ${def.from.join(', ')}` };
+  if (targetStatus && targetStatus !== def.to) return { code: 'INVALID_TRANSITION', message: `${action} targets ${def.to}, not ${targetStatus}` };
+  return null;
 }
 
 export function normalizeCardStatus(value: string | null | undefined): CardStatus | undefined {
@@ -46,6 +98,70 @@ export const createCardSchema = z.object({
   dependencyCardIds: z.array(z.string().uuid()).default([]),
   requiresApproval: z.boolean().default(false),
   maxRetries: z.number().int().min(1).max(10).default(3),
+});
+
+export const createMachineRunnerSchema = z.object({
+  companyId: z.string().uuid().optional(),
+  name: z.string().trim().min(1).max(160),
+  slug: z.string().trim().regex(/^[a-z0-9-]+$/).max(80),
+  supportedRuntimes: z.array(z.string().trim().min(1).max(80)).default([]),
+  maxConcurrent: z.number().int().min(1).max(64).default(1),
+  localWorkspaceRoot: z.string().trim().max(1000).nullable().optional(),
+  localScratchRoot: z.string().trim().max(1000).nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+
+export const updateMachineRunnerSchema = createMachineRunnerSchema.partial().extend({
+  status: z.enum(['online', 'offline', 'disabled']).optional(),
+});
+
+export const runnerHeartbeatSchema = z.object({
+  name: z.string().trim().min(1).max(160).optional(),
+  version: z.string().trim().max(80).optional(),
+  os: z.string().trim().max(120).optional(),
+  supportedRuntimes: z.array(z.string().trim().min(1).max(80)).optional(),
+  maxConcurrent: z.number().int().min(1).max(64).optional(),
+  activeSlots: z.number().int().min(0).max(64).optional(),
+  localWorkspaceRoot: z.string().trim().max(1000).nullable().optional(),
+  localScratchRoot: z.string().trim().max(1000).nullable().optional(),
+  runtimeStatuses: z.record(z.string(), z.enum(['missing', 'unauthorized', 'unhealthy', 'limited', 'ready'])).optional(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+
+export const createAgentSessionSchema = z.object({
+  agentId: z.string().uuid(),
+  cardId: z.string().uuid().nullable().optional(),
+  taskRunId: z.string().uuid().nullable().optional(),
+  sessionKind: z.enum(['task', 'review', 'chat', 'leader']).default('task'),
+  publicKeyJwk: z.record(z.string(), z.unknown()).nullable().optional(),
+  publicKey: z.string().trim().max(4000).nullable().optional(),
+  fingerprint: z.string().trim().max(160).nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+
+export const runnerTaskClaimSchema = z.object({
+  companyId: z.string().uuid().optional(),
+  kinds: z.array(z.enum(['dispatch', 'review'])).optional(),
+});
+
+export const runnerTaskCompleteSchema = z.object({
+  status: z.enum(['success', 'failed', 'cancelled', 'done', 'blocked', 'needs_review', 'in_review']),
+  summary: z.string().trim().max(2000).optional(),
+  output: z.string().max(100_000).optional(),
+  error: z.string().trim().max(4000).nullable().optional(),
+  costUsd: z.number().nonnegative().optional(),
+  workProducts: z.array(z.object({
+    type: z.enum(['report', 'file', 'preview_url', 'pull_request', 'commit', 'screenshot', 'artifact', 'external']).default('external'),
+    title: z.string().trim().min(1).max(200),
+    summary: z.string().trim().max(2000).nullable().optional(),
+    url: z.string().trim().max(2000).nullable().optional(),
+    repoProvider: z.string().trim().max(80).nullable().optional(),
+    repoUrl: z.string().trim().max(1000).nullable().optional(),
+    branch: z.string().trim().max(200).nullable().optional(),
+    commitSha: z.string().trim().max(120).nullable().optional(),
+    pullRequestUrl: z.string().trim().max(1000).nullable().optional(),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+  })).default([]),
 });
 
 export const createCompanySchema = z.object({
@@ -260,6 +376,12 @@ export type CreateCardInput = z.infer<typeof createCardSchema>;
 export type UpdateCardInput = z.infer<typeof updateCardSchema>;
 export type CreateAgentInput = z.infer<typeof createAgentSchema>;
 export type CreateAgentRuntimeInput = z.infer<typeof createAgentRuntimeSchema>;
+export type CreateMachineRunnerInput = z.infer<typeof createMachineRunnerSchema>;
+export type UpdateMachineRunnerInput = z.infer<typeof updateMachineRunnerSchema>;
+export type RunnerHeartbeatInput = z.infer<typeof runnerHeartbeatSchema>;
+export type CreateAgentSessionInput = z.infer<typeof createAgentSessionSchema>;
+export type RunnerTaskClaimInput = z.infer<typeof runnerTaskClaimSchema>;
+export type RunnerTaskCompleteInput = z.infer<typeof runnerTaskCompleteSchema>;
 export type CreateCompanyMembershipInput = z.infer<typeof createCompanyMembershipSchema>;
 export type UpdateCompanyMembershipInput = z.infer<typeof updateCompanyMembershipSchema>;
 export type AdminUpdateUserInput = z.infer<typeof adminUpdateUserSchema>;

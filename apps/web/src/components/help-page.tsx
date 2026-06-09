@@ -1,13 +1,16 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
-import { BookOpen, Copy, ExternalLink, Search } from 'lucide-react';
+import { BookOpen, Copy, ExternalLink, FileCode2, Search, Terminal } from 'lucide-react';
 import { api, API_URL } from '@/lib/api';
+
+type HelpTab = 'api' | 'cli';
+type ApiAuth = 'none' | 'session' | 'runner' | 'agent-session';
 
 type ApiEndpoint = {
   method: string;
   path: string;
   group: string;
-  auth: 'none' | 'session';
+  auth: ApiAuth;
   requiredRole?: string;
   summary: string;
   query?: Record<string, string>;
@@ -18,6 +21,25 @@ type ApiEndpoint = {
   responseExample?: unknown;
   rateLimit?: string;
   notes?: string[];
+};
+
+type CliCommand = {
+  command: string;
+  summary: string;
+  auth: ApiAuth;
+  flags: Record<string, string>;
+  env: string[];
+  example: string;
+  lifecycle: string[];
+};
+
+type CliHelp = {
+  package: string;
+  binary: string;
+  runWithNpm: string;
+  env: string[];
+  manifestExample: string;
+  commands: CliCommand[];
 };
 
 type ArchitectureSurface = {
@@ -41,6 +63,7 @@ type ApiHelp = {
   rateLimits?: { enforced: boolean; summary: string; productionRecommendation: string };
   kanban: { stages: string[]; legacyAliases: Record<string, string>; note: string };
   adapters: string[];
+  cli: CliHelp;
   endpoints: ApiEndpoint[];
 };
 
@@ -68,11 +91,31 @@ function EndpointCard({ endpoint }: { endpoint: ApiEndpoint }) {
   </article>;
 }
 
+function CliCommandCard({ command }: { command: CliCommand }) {
+  return <article className="list-row help-endpoint">
+    <div className="help-endpoint-head">
+      <Terminal size={15} />
+      <b>megacorps {command.command}</b>
+      <span className="status-pill">{command.auth}</span>
+    </div>
+    <p>{command.summary}</p>
+    <b>Flags</b>
+    <CodeBlock value={command.flags} />
+    <b>Environment</b>
+    <div className="help-api-list">{command.env.map((item) => <code key={item}>{item}</code>)}</div>
+    <b>Example</b>
+    <CodeBlock value={command.example} />
+    <b>Lifecycle</b>
+    <ul className="help-note-list">{command.lifecycle.map((item) => <li key={item}>{item}</li>)}</ul>
+  </article>;
+}
+
 export function HelpPage() {
   const [help, setHelp] = useState<ApiHelp | null>(null);
   const [query, setQuery] = useState('');
   const [copied, setCopied] = useState('');
   const [error, setError] = useState('');
+  const [tab, setTab] = useState<HelpTab>('api');
 
   useEffect(() => {
     api<ApiHelp>('/api/help')
@@ -104,9 +147,9 @@ export function HelpPage() {
     <div className="page-head">
       <div>
         <h1>Help</h1>
-        <p>API catalog, Kanban stages, adapter types, and agent-facing integration notes.</p>
+        <p>API catalog, CLI commands, Kanban stages, adapter types, and agent-facing integration notes.</p>
       </div>
-      <a className="btn btn-primary" href={markdownUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} /> Markdown API</a>
+      <a className="btn btn-primary" href={markdownUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} /> Markdown Help</a>
     </div>
 
     {copied && <p className="status-pill">{copied} copied</p>}
@@ -115,10 +158,15 @@ export function HelpPage() {
       <section className="card stat-card"><span>Endpoints</span><b>{help.endpoints.length}</b></section>
       <section className="card stat-card"><span>Kanban stages</span><b>{help.kanban.stages.length}</b></section>
       <section className="card stat-card"><span>Adapters</span><b>{help.adapters.length}</b></section>
-      <section className="card stat-card"><span>Surfaces</span><b>{help.architecture?.surfaces.length ?? 0}</b></section>
+      <section className="card stat-card"><span>CLI commands</span><b>{help.cli.commands.length}</b></section>
     </div>
 
-    {help.architecture && <section className="card section-card">
+    <div className="tab-row page-tabs" role="tablist">
+      <button className={`tab ${tab === 'api' ? 'active' : ''}`} onClick={() => setTab('api')}><BookOpen size={14} /> API Catalog</button>
+      <button className={`tab ${tab === 'cli' ? 'active' : ''}`} onClick={() => setTab('cli')}><Terminal size={14} /> CLI Commands</button>
+    </div>
+
+    {tab === 'api' && help.architecture && <section className="card section-card">
       <div className="panel-title">
         <div><h2>Current Architecture</h2><p style={{ margin: 0, color: 'var(--muted)' }}>{help.architecture.model}</p></div>
         <BookOpen size={18} />
@@ -146,7 +194,7 @@ export function HelpPage() {
       </div> : null}
     </section>}
 
-    <section className="card section-card">
+    {tab === 'api' && <section className="card section-card">
       <div className="panel-title">
         <div><h2>Agent API entrypoint</h2><p style={{ margin: 0, color: 'var(--muted)' }}>Agents can start here to discover every MegaCorps API route.</p></div>
         <BookOpen size={18} />
@@ -171,13 +219,38 @@ export function HelpPage() {
         <span>Rate limits <b>{help.rateLimits?.enforced ? 'enabled' : 'not enforced in app'}</b></span>
       </div>
       {help.rateLimits && <p style={{ color: 'var(--muted)', margin: 0 }}>{help.rateLimits.summary}</p>}
-    </section>
+    </section>}
 
-    <div className="kanban-toolbar">
+    {tab === 'cli' && <section className="card section-card">
+      <div className="panel-title">
+        <div><h2>CLI commands</h2><p style={{ margin: 0, color: 'var(--muted)' }}>Command-line entrypoints for session users, machine runners, and YAML templates.</p></div>
+        <Terminal size={18} />
+      </div>
+      <div className="data-grid">
+        <div className="list-row">
+          <b>Entrypoint</b>
+          <p><code>{help.cli.runWithNpm}</code></p>
+          <button className="btn" onClick={() => copy(help.cli.runWithNpm, 'CLI entrypoint')}><Copy size={14} /> Copy</button>
+        </div>
+        <div className="list-row">
+          <b>Environment</b>
+          <ul className="help-note-list">{help.cli.env.map((item) => <li key={item}>{item}</li>)}</ul>
+        </div>
+      </div>
+      <div className="list-row">
+        <div className="help-endpoint-head"><FileCode2 size={15} /><b>YAML manifest example</b></div>
+        <CodeBlock value={help.cli.manifestExample} />
+      </div>
+      <div className="help-architecture-grid">
+        {help.cli.commands.map((command) => <CliCommandCard command={command} key={command.command} />)}
+      </div>
+    </section>}
+
+    {tab === 'api' && <div className="kanban-toolbar">
       <div className="input-wrap" style={{ flex: '1 1 280px' }}><Search size={15} /><input placeholder="Search APIs" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
-    </div>
+    </div>}
 
-    {groups.map((group) => <section className="card section-card" key={group}>
+    {tab === 'api' && groups.map((group) => <section className="card section-card" key={group}>
       <div className="panel-title"><h2>{group}</h2><span className="status-pill">{filtered.filter((endpoint) => endpoint.group === group).length} endpoints</span></div>
       <div className="table-list">
         {filtered.filter((endpoint) => endpoint.group === group).map((endpoint) => <EndpointCard endpoint={endpoint} key={`${endpoint.method} ${endpoint.path}`} />)}

@@ -1,4 +1,4 @@
-import { boolean, integer, jsonb, numeric, pgTable, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core';
+import { boolean, integer, jsonb, numeric, pgTable, primaryKey, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -120,6 +120,29 @@ export const agentRuntimes = pgTable('agent_runtimes', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 
+export const machineRunners = pgTable('machine_runners', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  name: text('name').notNull(),
+  slug: text('slug').notNull(),
+  apiKeyHash: text('api_key_hash').notNull().unique(),
+  status: text('status').notNull().default('offline'),
+  version: text('version'),
+  os: text('os'),
+  supportedRuntimes: text('supported_runtimes').array().default([]),
+  maxConcurrent: integer('max_concurrent').default(1),
+  activeSlots: integer('active_slots').default(0),
+  localWorkspaceRoot: text('local_workspace_root'),
+  localScratchRoot: text('local_scratch_root'),
+  runtimeStatuses: jsonb('runtime_statuses').default({}),
+  metadata: jsonb('metadata').default({}),
+  lastHeartbeatAt: timestamp('last_heartbeat_at', { withTimezone: true }),
+  lastSeenIp: text('last_seen_ip'),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+}, (table) => ({ companySlugUnique: unique().on(table.companyId, table.slug) }));
+
 export const kanbanCards = pgTable('kanban_cards', {
   id: uuid('id').primaryKey().defaultRandom(),
   companyId: uuid('company_id').notNull().references(() => companies.id),
@@ -156,6 +179,14 @@ export const kanbanCards = pgTable('kanban_cards', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
+
+export const cardDependencies = pgTable('card_dependencies', {
+  cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
+  dependsOnCardId: uuid('depends_on_card_id').notNull().references(() => kanbanCards.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.cardId, table.dependsOnCardId] }),
+}));
 
 export const heartbeatRuns = pgTable('heartbeat_runs', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -202,6 +233,24 @@ export const taskRuns = pgTable('task_runs', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 
+export const agentSessions = pgTable('agent_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  agentId: uuid('agent_id').notNull().references(() => agents.id),
+  machineRunnerId: uuid('machine_runner_id').references(() => machineRunners.id),
+  cardId: uuid('card_id').references(() => kanbanCards.id),
+  taskRunId: uuid('task_run_id').references(() => taskRuns.id),
+  sessionKind: text('session_kind').notNull().default('task'),
+  status: text('status').notNull().default('active'),
+  publicKeyJwk: jsonb('public_key_jwk'),
+  publicKey: text('public_key'),
+  fingerprint: text('fingerprint'),
+  metadata: jsonb('metadata').default({}),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  closedAt: timestamp('closed_at', { withTimezone: true }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
+
 export const adapterSessions = pgTable('adapter_sessions', {
   id: uuid('id').primaryKey().defaultRandom(),
   companyId: uuid('company_id').notNull().references(() => companies.id),
@@ -242,6 +291,24 @@ export const cardComments = pgTable('card_comments', {
   agentId: uuid('agent_id').references(() => agents.id),
   body: text('body').notNull(),
   action: text('action').notNull().default('comment'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+export const cardActions = pgTable('card_actions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
+  actorType: text('actor_type').notNull(),
+  actorId: text('actor_id').notNull(),
+  userId: uuid('user_id').references(() => users.id),
+  agentId: uuid('agent_id').references(() => agents.id),
+  machineRunnerId: uuid('machine_runner_id').references(() => machineRunners.id),
+  sessionId: uuid('session_id').references(() => agentSessions.id),
+  action: text('action').notNull(),
+  fromStatus: text('from_status'),
+  toStatus: text('to_status'),
+  detail: text('detail'),
+  metadata: jsonb('metadata').default({}),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 

@@ -680,6 +680,9 @@ button.card {
   cursor: pointer;
   min-height: 40px;
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .tab.active {

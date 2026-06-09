@@ -13,6 +13,7 @@ MegaCorps uses bounded context budgets, so long fields are clipped rather than o
 - Project repo binding and Git completion policy, when a project has a repository
 - Agent identity, title, soul/work style, reporting manager, direct reports
 - Same-company Kanban snapshot with compact card lines
+- Focus card dependency state and recent card action/log history
 - Focus-agent assigned work and review queue
 - Recent activity and heartbeat runs
 - Relevant knowledge docs
@@ -143,7 +144,7 @@ Previous review feedback:
 <feedback, if any>
 
 Kanban context snapshot:
-<bounded company board, focus card, messages, logs, activity, runs>
+<bounded company board, focus card, dependencies, messages, action timeline, logs, activity, runs>
 
 Company knowledge:
 <matching knowledge docs>
@@ -161,6 +162,14 @@ If you need ordinary QA on completed work, use status="in_review" and include th
 If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.
 If no reviewer/manager exists, the server will move top-level escalations to blocked for human intervention.
 ```
+
+External runner note:
+
+- Machine runner dispatch claims move the card to `in_progress` and take an execution lock before the runner receives the task payload.
+- Machine runner review claims only run after the card is already in `in_review` or `needs_review`.
+- A runner dispatch `success` moves to `in_review` when the card has a reviewer, otherwise `done`.
+- A runner review `success` approves the card to `done`.
+- Agent-session claim, review, and release endpoints use the same lifecycle guard as human/API updates. If the runner created the session with a `cardId`, that signed session can only operate on that card.
 
 ## Review Prompt
 

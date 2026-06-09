@@ -1,12 +1,16 @@
 import { and, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
+import { inferCardTransitionAction, normalizeCardStatus } from '@megacorps/shared';
 import { db, sql as rawSql } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardComments, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
+import { recordStageAction } from './card-actions.ts';
+import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
+import { agentRuntimeAvailable } from './runner-availability.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -198,12 +202,22 @@ async function addCardMessage(input: { cardId: string; agentId?: string | null; 
 }
 
 async function addStageLog(cardId: string, agentId: string | null, from: string | null, to: string, actor = 'system') {
-  await addTaskLog({
+  const fromStatus = normalizeCardStatus(from) ?? 'todo';
+  const toStatus = normalizeCardStatus(to) ?? 'todo';
+  const action = inferCardTransitionAction(fromStatus, toStatus) ?? 'manual_move';
+  const actorType = actor === 'review'
+    ? 'agent:reviewer'
+    : agentId
+      ? 'agent:worker'
+      : 'system';
+  await recordStageAction({
     cardId,
     agentId,
-    type: 'stage',
-    status: 'success',
-    message: `Stage changed from ${from ?? 'todo'} to ${to} by ${actor}.`,
+    actor: { type: actorType, id: agentId ?? actor, agentId },
+    fromStatus,
+    toStatus,
+    action,
+    detail: `Stage changed from ${fromStatus} to ${toStatus} by ${actor}.`,
   });
 }
 
@@ -387,13 +401,6 @@ export async function processTaskRunQueue(app: FastifyInstance): Promise<{ claim
   return result;
 }
 
-async function dependenciesMet(card: CardRow): Promise<boolean> {
-  const ids = card.dependencyCardIds ?? [];
-  if (ids.length === 0) return true;
-  const rows = await db.select({ id: kanbanCards.id, columnStatus: kanbanCards.columnStatus }).from(kanbanCards).where(inArray(kanbanCards.id, ids));
-  return rows.length === ids.length && rows.every((row) => row.columnStatus === 'done');
-}
-
 export async function getBudgetGuard(agent: AgentRow): Promise<{ monthlyLimit: number | null; perTaskLimit: number | null; warnAtPercent: number; hardStop: boolean }> {
   const rows = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, agent.companyId), eq(budgetPolicies.isActive, true)));
   const applicable = rows.filter((policy) => !policy.agentId || policy.agentId === agent.id);
@@ -510,6 +517,7 @@ async function selectBestAgent(card: CardRow): Promise<AgentRow | null> {
   for (const agent of rows) {
     if (!agent.isActive || agent.isBusy) continue;
     if (!(await budgetOk(agent))) continue;
+    if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'mock' }))) continue;
     available.push(agent);
   }
   return available.sort((a, b) => matchScore(card, b) - matchScore(card, a))[0] ?? null;
@@ -739,13 +747,14 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
   if (!agent) throw new Error('agent_not_found');
   if (!agent.isActive) throw new Error('agent_paused');
   if (agent.isBusy) throw new Error('agent_busy');
+  if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'mock' }))) throw new Error('agent_runtime_unavailable');
   if (!(await budgetOk(agent))) {
     await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, agent.id));
     await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'budget', status: 'failed', message: `Agent ${agent.name} is over budget and was paused before dispatch.` });
     await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'budget', agentId: agent.id, action: 'budget.preflight_hard_stop', entityType: 'agent', entityId: agent.id, details: { cardId: card.id } });
     throw new Error('agent_budget_exceeded');
   }
-  if (!(await dependenciesMet(card))) throw new Error('card_dependencies_not_met');
+  if (!(await cardDependenciesMet(card.id))) throw new Error('card_dependencies_not_met');
 
   const [busyAgent] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, agent.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
   if (!busyAgent) throw new Error('agent_busy');
@@ -900,6 +909,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
   const [reviewer] = await db.select().from(agents).where(and(eq(agents.id, reviewerId), isNull(agents.deletedAt))).limit(1);
   if (!reviewer) throw new Error('reviewer_not_found');
   if (reviewer.isBusy) throw new Error('reviewer_busy');
+  if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: reviewer.runtimeId, adapterType: reviewer.adapterType ?? 'mock' }))) throw new Error('reviewer_runtime_unavailable');
 
   const [busyReviewer] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, reviewer.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
   if (!busyReviewer) throw new Error('reviewer_busy');
@@ -1263,7 +1273,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
       for (const card of cards) {
         if (card.columnStatus === 'backlog' || card.columnStatus === 'todo') {
           if (card.nextRunAt && card.nextRunAt > now) { result.skipped += 1; continue; }
-          if (!(await dependenciesMet(card))) { result.skipped += 1; continue; }
+          if (!(await cardDependenciesMet(card.id))) { result.skipped += 1; continue; }
           try {
             const assigned = await ensureAssigned(card, source === 'manual' ? 'manual' : 'loop');
             if (assigned || card.assigneeId) {
@@ -1468,14 +1478,19 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
       focusCard.executionLog ? `Latest execution output:\n${clipText(focusCard.executionLog, 6000)}` : '',
     ].filter(Boolean).join('\n'), 14000);
 
-    const [messages, logs] = await Promise.all([
+    const [messages, actions, logs] = await Promise.all([
       db.select().from(cardComments).where(eq(cardComments.cardId, focusCard.id)).orderBy(desc(cardComments.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
+      db.select().from(cardActions).where(eq(cardActions.cardId, focusCard.id)).orderBy(desc(cardActions.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
       db.select().from(taskLogs).where(eq(taskLogs.cardId, focusCard.id)).orderBy(desc(taskLogs.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
     ]);
     addContextSection(state, 'Focus Task Message Board Latest', messages.reverse().map((message) => {
       const author = message.agentId ? agentById.get(message.agentId)?.name ?? message.agentId : message.authorType;
       return `- ${formatDate(message.createdAt)} | ${author} | ${message.action}: ${clipText(message.body, 900)}`;
     }).join('\n') || 'none', 7000);
+    addContextSection(state, 'Focus Task Action Timeline Latest', actions.reverse().map((action) => [
+      `- ${formatDate(action.createdAt)} | ${action.actorType}:${action.actorId} | ${action.action} | ${action.fromStatus ?? 'none'} -> ${action.toStatus ?? 'none'}`,
+      action.detail ? `  detail: ${clipText(action.detail, 700)}` : '',
+    ].filter(Boolean).join('\n')).join('\n') || 'none', 6000);
     addContextSection(state, 'Focus Task Lifecycle Latest', logs.reverse().map((log) => [
       `- ${formatDate(log.createdAt)} | ${log.type}/${log.status}: ${clipText(log.message, 700)}`,
       log.output ? `  output: ${clipText(log.output, 900)}` : '',

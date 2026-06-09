@@ -6,6 +6,8 @@ test('rate limit policy classifies sensitive routes', () => {
   assert.equal(rateLimitPolicyForPath('POST', '/api/auth/login')?.key, 'auth');
   assert.equal(rateLimitPolicyForPath('POST', '/api/chat/sessions/id/messages')?.key, 'chat');
   assert.equal(rateLimitPolicyForPath('POST', '/api/webhook/task-complete')?.key, 'webhook');
+  assert.equal(rateLimitPolicyForPath('POST', '/api/runner/task-runs/claim')?.key, 'runner');
+  assert.equal(rateLimitPolicyForPath('POST', '/api/agent/cards/id/claim')?.key, 'agent-session');
   assert.equal(rateLimitPolicyForPath('POST', '/api/cron/run')?.key, 'operator');
   assert.equal(rateLimitPolicyForPath('GET', '/api/cron/runs')?.key, 'read');
   assert.equal(rateLimitPolicyForPath('GET', '/api/help'), null);

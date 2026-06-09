@@ -6,7 +6,7 @@ type ApiEndpoint = {
   method: ApiMethod;
   path: string;
   group: string;
-  auth: 'none' | 'session';
+  auth: 'none' | 'session' | 'runner' | 'agent-session';
   requiredRole?: 'none' | 'viewer' | 'operator' | 'admin';
   summary: string;
   query?: Record<string, string>;
@@ -26,11 +26,100 @@ type ApiHelpEndpoint = ApiEndpoint & {
   requiredRole: 'none' | 'viewer' | 'operator' | 'admin';
 };
 
-const defaultRateLimit = 'In-app IP-based rate limiting is enforced by route bucket unless RATE_LIMIT_ENABLED=false. Defaults: auth 12/min, chat 40/min, webhook 120/min, operator 20/min, writes 120/min, reads 600/min.';
+type CliCommand = {
+  command: string;
+  summary: string;
+  auth: 'session' | 'runner' | 'none';
+  flags: Record<string, string>;
+  env: string[];
+  example: string;
+  lifecycle: string[];
+};
+
+const defaultRateLimit = 'In-app IP-based rate limiting is enforced by route bucket unless RATE_LIMIT_ENABLED=false. Defaults: auth 12/min, chat 40/min, webhook 120/min, runner 240/min, agent-session 240/min, operator 20/min, writes 120/min, reads 600/min.';
+
+const cliHelp = {
+  package: 'packages/cli',
+  binary: 'megacorps',
+  runWithNpm: 'npm run dev -w packages/cli -- <command>',
+  env: [
+    'MEGACORPS_API_URL: API base URL, default http://localhost:4000.',
+    'MEGACORPS_SESSION: raw session cookie value returned by login for session-authenticated commands.',
+    'MEGACORPS_RUNNER_KEY: raw machine runner key returned once by runner register or rotate-key.',
+    'MEGACORPS_RUNNER_WORKSPACE_ROOT: default local root used by runner daemon worktrees.',
+  ],
+  manifestExample: [
+    'defaultCompany: default',
+    'companies:',
+    '  - name: Default Company',
+    '    slug: default',
+    'departments:',
+    '  - company: default',
+    '    name: Engineering',
+    '    slug: engineering',
+    'projects:',
+    '  - company: default',
+    '    name: Web App',
+    '    repoUrl: https://github.com/org/repo',
+    '    workPath: apps/web',
+    'agents:',
+    '  - company: default',
+    '    department: engineering',
+    '    name: Builder',
+    '    slug: builder',
+    '    role: worker',
+    '    adapterType: mock',
+    'cards:',
+    '  - company: default',
+    '    project: Web App',
+    '    assignee: builder',
+    '    title: Smoke task',
+    '    body: Run the project smoke test.',
+    '    dependencies: []',
+  ].join('\n'),
+  commands: [
+    {
+      command: 'login',
+      summary: 'Authenticate with email/password and print the raw session cookie value for MEGACORPS_SESSION.',
+      auth: 'none',
+      flags: { '--email': 'Login email.', '--password': 'Login password.', '--api-url': 'Optional API URL override.' },
+      env: ['MEGACORPS_API_URL'],
+      example: 'npm run dev -w packages/cli -- login --api-url http://localhost:4000 --email admin@example.com --password "password"',
+      lifecycle: ['Calls POST /api/auth/login.', 'Prints only the session token so scripts can export MEGACORPS_SESSION.'],
+    },
+    {
+      command: 'apply',
+      summary: 'Apply a YAML company template for companies, departments, projects, agents, goals, and cards.',
+      auth: 'session',
+      flags: { '-f, --file': 'YAML manifest path.', '--session': 'Optional raw session cookie override.', '--api-url': 'Optional API URL override.' },
+      env: ['MEGACORPS_API_URL', 'MEGACORPS_SESSION'],
+      example: 'npm run dev -w packages/cli -- apply -f megacorps.yml --api-url http://localhost:4000',
+      lifecycle: ['Reads visible companies first.', 'Upserts companies/projects/agents/cards where supported.', 'Resolves card dependencies after all manifest cards are known.'],
+    },
+    {
+      command: 'runner register',
+      summary: 'Create a machine runner and print its raw one-time API key with redacted runner metadata.',
+      auth: 'session',
+      flags: { '--name': 'Runner display name.', '--slug': 'Company-unique runner slug.', '--company-id': 'Optional target company UUID.', '--supported-runtimes': 'Comma-separated runtime labels.', '--max-concurrent': 'Optional capacity.', '--workspace-root': 'Optional runner-local workspace root.', '--scratch-root': 'Optional runner-local scratch root.', '--session': 'Optional raw session cookie override.', '--api-url': 'Optional API URL override.' },
+      env: ['MEGACORPS_API_URL', 'MEGACORPS_SESSION'],
+      example: 'npm run dev -w packages/cli -- runner register --name "Local Runner" --slug local-runner --supported-runtimes mock,codex-app',
+      lifecycle: ['Calls POST /api/machine-runners.', 'Stores only the runner key hash in the database.', 'Operator role is required for the target company.'],
+    },
+    {
+      command: 'runner daemon',
+      summary: 'Run a scaffold-capable machine runner loop that heartbeats, claims task-runs, prepares Git worktrees, and completes scaffold runs.',
+      auth: 'runner',
+      flags: { '--runner-key': 'Raw machine runner key.', '--workspace-root': 'Local runner worktree root.', '--supported-runtimes': 'Comma-separated runtime labels reported during heartbeat.', '--interval-ms': 'Polling interval, default 5000.', '--once': 'Claim at most one task-run then exit.', '--no-complete': 'Leave claimed task-runs running for an external worker.', '--scaffold-status': 'Completion status for scaffold mode, default needs_review.', '--api-url': 'Optional API URL override.' },
+      env: ['MEGACORPS_API_URL', 'MEGACORPS_RUNNER_KEY', 'MEGACORPS_RUNNER_WORKSPACE_ROOT'],
+      example: 'npm run dev -w packages/cli -- runner daemon --once --workspace-root C:\\megacorps-runner',
+      lifecycle: ['Calls POST /api/runner/heartbeat.', 'Claims queued dispatch/review task-runs from POST /api/runner/task-runs/claim.', 'Creates or updates Git worktrees from Project Authority fields.', 'Completes with POST /api/runner/task-runs/:id/complete unless --no-complete is set.'],
+    },
+  ] satisfies CliCommand[],
+};
 
 const endpoints: ApiEndpoint[] = [
   { method: 'GET', path: '/health', group: 'System', auth: 'none', summary: 'Read server health.', response: '{ ok: true }' },
-  { method: 'GET', path: '/api/help', group: 'System', auth: 'none', summary: 'List MegaCorps API endpoints, current architecture, and usage.', query: { format: 'Optional. Use markdown or md for text/markdown output.' }, responseSchema: { service: 'string', help: 'object', architecture: 'object', auth: 'object', rateLimits: 'object', kanban: 'object', adapters: 'string[]', endpoints: 'ApiHelpEndpoint[]' }, responseExample: { service: 'MegaCorps API', architecture: { surfaces: [{ name: 'Projects', purpose: 'Repo/work-path authority.' }] }, endpoints: [{ method: 'GET', path: '/health', responseSchema: { ok: 'boolean' }, responseExample: { ok: true } }] } },
+  { method: 'GET', path: '/api/help', group: 'System', auth: 'none', summary: 'List MegaCorps API endpoints, CLI commands, current architecture, and usage.', query: { format: 'Optional. Use markdown or md for text/markdown output.' }, responseSchema: { service: 'string', help: 'object', architecture: 'object', auth: 'object', rateLimits: 'object', kanban: 'object', adapters: 'string[]', cli: 'CliHelp', endpoints: 'ApiHelpEndpoint[]' }, responseExample: { service: 'MegaCorps API', architecture: { surfaces: [{ name: 'Projects', purpose: 'Repo/work-path authority.' }] }, cli: { commands: [{ command: 'apply', auth: 'session' }] }, endpoints: [{ method: 'GET', path: '/health', responseSchema: { ok: 'boolean' }, responseExample: { ok: true } }] } },
   { method: 'GET', path: '/api/live', group: 'System', auth: 'session', summary: 'WebSocket live event stream for React Query cache invalidation. Events are filtered to the authenticated user company memberships.' },
   { method: 'GET', path: '/api/auth/status', group: 'Auth', auth: 'none', summary: 'Read public onboarding state. Signup is DB-configured and defaults to enabled; signup becomes admin when no active admin exists.' },
   { method: 'POST', path: '/api/auth/bootstrap', group: 'Auth', auth: 'none', summary: 'Bootstrap or recover the global admin account when BOOTSTRAP_TOKEN is configured and no active admin exists.', body: { token: 'BOOTSTRAP_TOKEN value or send X-MegaCorps-Bootstrap-Token header', email: 'admin@example.com', name: 'Admin', password: 'at least 8 chars' } },
@@ -69,6 +158,7 @@ const endpoints: ApiEndpoint[] = [
   { method: 'POST', path: '/api/cards/:id/cancel', group: 'Kanban', auth: 'session', summary: 'Cancel an active or queued task without archiving its history. Releases execution locks and cancels queued/running task-runs.', params: { id: 'Task UUID.' }, body: { reason: 'Optional cancellation reason.' } },
   { method: 'DELETE', path: '/api/cards/:id', group: 'Kanban', auth: 'session', summary: 'Archive a task while preserving historical logs, runs, and cost records.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/logs', group: 'Kanban', auth: 'session', summary: 'Read full task logs.', params: { id: 'Task UUID.' } },
+  { method: 'GET', path: '/api/cards/:id/actions', group: 'Kanban', auth: 'session', summary: 'Read the normalized card action timeline. This records lifecycle actions, actors, from/to status, runner/session ids, and metadata separately from raw task logs.', params: { id: 'Task UUID.' }, query: { limit: '1-500, default 200.' } },
   { method: 'GET', path: '/api/cards/:id/comments', group: 'Kanban', auth: 'session', summary: 'Read task message board comments.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/work-products', group: 'Kanban', auth: 'session', summary: 'Read reviewable work products for a task: PRs, commits, preview URLs, reports, screenshots, and artifacts.', params: { id: 'Task UUID.' } },
   { method: 'POST', path: '/api/cards/:id/work-products', group: 'Kanban', auth: 'session', summary: 'Attach a reviewable work product to a task. Prefer Git/URL metadata over local-only paths for multi-system agents.', params: { id: 'Task UUID.' }, body: { type: 'pull_request | commit | preview_url | report | screenshot | artifact | file | external', title: 'PR #42', summary: 'What changed', url: 'https://...', repoUrl: 'https://github.com/org/repo', branch: 'megacorps/card-1234-alice', commitSha: 'abc123', pullRequestUrl: 'https://github.com/org/repo/pull/42' } },
@@ -91,6 +181,20 @@ const endpoints: ApiEndpoint[] = [
   { method: 'POST', path: '/api/agent-runtimes', group: 'Agents', auth: 'session', summary: 'Create a runtime preset. localWorkspaceRoot/localScratchRoot are runtime-owned local paths for that machine; project repo/workPath remain the shared project policy. codex-app supports stdio or authenticated WebSocket app-server transport.', body: { name: 'Codex App Server', adapterType: 'codex-app', localWorkspaceRoot: '/home/alice/workspaces', localScratchRoot: '/tmp/megacorps', isActive: true, config: { codexTransport: 'stdio | websocket', codexCommand: 'codex', codexArgs: 'app-server', codexAppServerUrl: 'ws://codex-runner.example:4500', codexWsToken: 'secret bearer token for websocket', codexModel: 'optional model', codexCwd: '/home/alice/workspaces/project', codexSandbox: 'workspace-write' } } },
   { method: 'PUT', path: '/api/agent-runtimes/:id', group: 'Agents', auth: 'session', summary: 'Update a runtime preset, including adapter config and runtime-local workspace/scratch roots.', params: { id: 'Runtime UUID.' } },
   { method: 'DELETE', path: '/api/agent-runtimes/:id', group: 'Agents', auth: 'session', summary: 'Delete a runtime preset.', params: { id: 'Runtime UUID.' } },
+  { method: 'GET', path: '/api/machine-runners', group: 'Runners', auth: 'session', summary: 'List machine runners visible to the current user. API key hashes are never returned.', query: { companyId: 'Optional company UUID.' } },
+  { method: 'POST', path: '/api/machine-runners', group: 'Runners', auth: 'session', summary: 'Create a machine runner and return its raw API key once. Store the key in the runner process as MEGACORPS_RUNNER_KEY.', body: { companyId: 'uuid optional', name: 'Runner host', slug: 'runner-host', supportedRuntimes: ['mock', 'codex-app'], maxConcurrent: 2, localWorkspaceRoot: '/srv/megacorps/workspaces', localScratchRoot: '/srv/megacorps/scratch' } },
+  { method: 'PUT', path: '/api/machine-runners/:id', group: 'Runners', auth: 'session', summary: 'Update runner metadata, capacity, status, runtime support, or local roots. Does not rotate the API key.', params: { id: 'Machine runner UUID.' } },
+  { method: 'POST', path: '/api/machine-runners/:id/rotate-key', group: 'Runners', auth: 'session', summary: 'Rotate a runner API key and return the new raw key once.', params: { id: 'Machine runner UUID.' } },
+  { method: 'DELETE', path: '/api/machine-runners/:id', group: 'Runners', auth: 'session', summary: 'Disable and soft-delete a machine runner.', params: { id: 'Machine runner UUID.' } },
+  { method: 'GET', path: '/api/runner/me', group: 'Runner Agent API', auth: 'runner', summary: 'Read the authenticated runner identity using Authorization: Bearer MEGACORPS_RUNNER_KEY or X-MegaCorps-Runner-Key.' },
+  { method: 'POST', path: '/api/runner/heartbeat', group: 'Runner Agent API', auth: 'runner', summary: 'Update runner liveness, capacity, supported runtimes, runtime health, and local workspace roots.', body: { name: 'Runner host', version: '0.1.0', os: 'linux/x64', supportedRuntimes: ['mock', 'codex-app'], maxConcurrent: 2, activeSlots: 1, runtimeStatuses: { 'codex-app': 'ready' } } },
+  { method: 'POST', path: '/api/runner/agent-sessions', group: 'Runner Agent API', auth: 'runner', summary: 'Open an agent session with a public Ed25519 JWK or PEM key. Agents can then call the agent-session API with a signed JWT whose sub is the session id and aid is the agent id. When cardId is set, card APIs are restricted to that card.', body: { agentId: 'agent uuid', cardId: 'optional card uuid', taskRunId: 'optional task-run uuid', sessionKind: 'task | review | chat | leader', publicKeyJwk: { kty: 'OKP', crv: 'Ed25519', x: 'base64url' } } },
+  { method: 'POST', path: '/api/runner/task-runs/claim', group: 'Runner Agent API', auth: 'runner', summary: 'Atomically claim the highest-priority queued task-run matching runner company and supported runtime.', body: { kinds: ['dispatch', 'review'] } },
+  { method: 'POST', path: '/api/runner/task-runs/:id/complete', group: 'Runner Agent API', auth: 'runner', summary: 'Complete a runner-claimed task-run and attach work products such as branches, commits, PRs, reports, screenshots, or artifacts.', params: { id: 'Task-run UUID.' }, body: { status: 'success | failed | cancelled | done | blocked | needs_review | in_review', summary: 'Short result', output: 'Full output/log', costUsd: 0.01, workProducts: [{ type: 'pull_request', title: 'PR #42', pullRequestUrl: 'https://github.com/org/repo/pull/42', branch: 'megacorps/card-1234-alice' }] } },
+  { method: 'GET', path: '/api/agent/me', group: 'Agent Session API', auth: 'agent-session', summary: 'Read the active agent/session identity using an Ed25519-signed JWT from a runner-created agent session.' },
+  { method: 'POST', path: '/api/agent/cards/:id/claim', group: 'Agent Session API', auth: 'agent-session', summary: 'Agent-session endpoint for a worker to claim its assigned card and move it to in_progress.', params: { id: 'Task UUID.' } },
+  { method: 'POST', path: '/api/agent/cards/:id/review', group: 'Agent Session API', auth: 'agent-session', summary: 'Agent-session endpoint for a worker to submit output for quality review or help review.', params: { id: 'Task UUID.' }, body: { summary: 'Short output', output: 'Full output/log', needsHelp: false } },
+  { method: 'POST', path: '/api/agent/cards/:id/release', group: 'Agent Session API', auth: 'agent-session', summary: 'Agent-session endpoint for a worker to release a card back to todo and clear active locks.', params: { id: 'Task UUID.' } },
 
   { method: 'GET', path: '/api/chat/sessions', group: 'Chat', auth: 'session', summary: 'List direct-chat sessions.', query: { companyId: 'Optional company UUID.', agentId: 'Optional agent UUID.', projectId: 'Optional project UUID, or none for no-project chat.', limit: '1-200, default 100.' } },
   { method: 'POST', path: '/api/chat/sessions', group: 'Chat', auth: 'session', summary: 'Create a direct-chat session with an agent. projectId scopes the prompt goal context; null keeps the session in no-project chat.', body: { companyId: 'uuid', agentId: 'uuid', projectId: null, title: 'Session title optional' } },
@@ -128,7 +232,8 @@ const currentArchitecture = {
     'Projects: Project Authority for repo provider, repoUrl, project workPath, branch policy, runtime services, setup/test commands, workspacePathHint, and project goals.',
     'Workspace: company folder manager and authoritative non-coding project-file location paths; runtime-local clone paths are not shared truth.',
     'Knowledge: company-scoped markdown docs by tag for prompt context.',
-    'Kanban: task lifecycle, assignee/reviewer, project/goal context, work products, comments, manual run/review/decompose.',
+    'Kanban: normalized task lifecycle, card dependency graph, action timeline, assignee/reviewer, project/goal context, work products, comments, manual run/review/decompose.',
+    'Runners: machine runner registry, hashed runner API keys, runner heartbeat/capacity/runtime health, runner task-run claim/complete, and agent-session Ed25519 JWT auth.',
     'Cron: dispatch-heartbeat, daily-report, health-check, company scope, runner metadata, and run history.',
   ],
   surfaces: [
@@ -152,12 +257,13 @@ const currentArchitecture = {
     'Use company/department/project goals directly. There is no separate derived goal layer.',
     'Use work products with URLs, repo metadata, branches, commits, PRs, previews, reports, screenshots, or artifacts so reviewers can inspect output across machines.',
     'Use needs_review for reviewer guidance when an assignee cannot complete a task; use in_review for quality review after completion.',
+    'Use machine runners when work must execute outside the API process. Runner API keys authenticate machines; runner-created agent sessions authenticate agents with Ed25519 JWTs.',
     'Use PUT /api/agents/:id with only departmentId and/or bossId for org changes. Adapter/runtime validation is only applied when runtimeId or adapterType is sent.',
   ],
   remainingGaps: [
     'Persistent Workspace file/folder API is still a product gap; the current Workspace page derives local authority paths from companies/projects.',
-    'Service-agent API keys and machine-to-machine scoped tokens are still needed for a production multi-agent deployment.',
-    'Org canvas is functional but still grid-based; a richer zoom/pan canvas with edge routing would be better for large organizations.',
+    'Runner daemon is scaffold-capable, but production PR provider integration, streaming progress, sandbox policy, and secret-reference management still need deeper hardening.',
+    'Fine-grained service-account roles beyond machine runners are still needed for external integrations that should not own a full user session.',
   ],
 };
 
@@ -165,6 +271,9 @@ function entityFromEndpoint(endpoint: ApiEndpoint): string {
   if (endpoint.path.includes('/companies')) return 'company';
   if (endpoint.path.includes('/departments')) return 'department';
   if (endpoint.path.includes('/work-products')) return 'workProduct';
+  if (endpoint.path.includes('/machine-runners')) return 'machineRunner';
+  if (endpoint.path.includes('/agent-sessions')) return 'agentSession';
+  if (endpoint.path.includes('/cards/:id/actions')) return 'cardAction';
   if (endpoint.path.includes('/api/live')) return 'liveEvent';
   if (endpoint.path.includes('/cards') || endpoint.path.includes('/webhook/task-complete')) return 'card';
   if (endpoint.path.includes('/agents') && !endpoint.path.includes('/agent-runtimes')) return 'agent';
@@ -187,7 +296,7 @@ function entityFromEndpoint(endpoint: ApiEndpoint): string {
 }
 
 function roleDefault(endpoint: ApiEndpoint): 'none' | 'viewer' | 'operator' | 'admin' {
-  if (endpoint.auth === 'none') return 'none';
+  if (endpoint.auth !== 'session') return 'none';
   if (endpoint.requiredRole) return endpoint.requiredRole;
   if (endpoint.path === '/api/auth/logout') return 'viewer';
   if (endpoint.method !== 'GET') return 'operator';
@@ -265,8 +374,37 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
     return { responseSchema: runtime, responseExample: runtime, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
+  if (endpoint.path.includes('/machine-runners')) {
+    const runner = { id: 'runner-uuid', companyId: 'company-uuid', name: 'Runner host', slug: 'runner-host', status: 'online', supportedRuntimes: ['mock', 'codex-app'], maxConcurrent: 2, activeSlots: 0, lastHeartbeatAt: '2026-06-09T00:00:00.000Z' };
+    if (endpoint.path.endsWith('/rotate-key') || endpoint.method === 'POST') return { responseSchema: { runner, apiKey: 'string returned once when created/rotated' }, responseExample: { runner, apiKey: 'mcr_example' }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: runner }, responseExample: [runner], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: runner, responseExample: runner, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path === '/api/runner/me' || endpoint.path === '/api/runner/heartbeat') {
+    const runner = { id: 'runner-uuid', companyId: 'company-uuid', name: 'Runner host', slug: 'runner-host', status: 'online', supportedRuntimes: ['mock'], maxConcurrent: 2, activeSlots: 0 };
+    return { responseSchema: runner, responseExample: runner, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path.includes('/api/runner/agent-sessions')) {
+    const session = { id: 'session-uuid', agentId: 'agent-uuid', machineRunnerId: 'runner-uuid', cardId: 'card-uuid | null', taskRunId: 'task-run-uuid | null', sessionKind: 'task', status: 'active', fingerprint: 'sha256-prefix' };
+    return { responseSchema: session, responseExample: session, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path === '/api/agent/me') {
+    return { responseSchema: { session: 'AgentSession', agent: 'Agent' }, responseExample: { session: { id: 'session-uuid', status: 'active' }, agent: { id: 'agent-uuid', name: 'Worker' } }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path.includes('/api/agent/cards')) {
+    return { responseSchema: { type: 'card', id: 'uuid', columnStatus: 'CardStatus' }, responseExample: { id: 'card-uuid', columnStatus: endpoint.path.endsWith('/claim') ? 'in_progress' : endpoint.path.endsWith('/release') ? 'todo' : 'in_review' }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
   if (endpoint.path.includes('/cards/:id/logs')) {
     return { responseSchema: { type: 'array', items: { cardId: 'uuid', agentId: 'uuid | null', type: 'string', status: 'queued | running | success | warning | failed', message: 'string', output: 'string | null' } }, responseExample: [{ cardId: 'card-uuid', type: 'stage', status: 'success', message: 'Stage changed from todo to in_progress.' }], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path.includes('/cards/:id/actions')) {
+    return { responseSchema: { type: 'array', items: { id: 'uuid', cardId: 'uuid', actorType: 'user | machine | agent:worker | agent:reviewer | system', action: 'claim | submit_review | approve | manual_move | ...', fromStatus: 'CardStatus | null', toStatus: 'CardStatus | null', metadata: 'object' } }, responseExample: [{ id: 'action-uuid', cardId: 'card-uuid', actorType: 'machine', action: 'claim', fromStatus: 'todo', toStatus: 'in_progress', metadata: { runnerId: 'runner-uuid' } }], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/cards/:id/comments')) {
@@ -337,7 +475,7 @@ export function apiHelpCatalog() {
     },
     architecture: currentArchitecture,
     auth: {
-      mode: 'Cookie session with company membership role checks. Signup is DB-configured and defaults to enabled; if no active admin exists, the next signup becomes global admin and default-company admin. If BOOTSTRAP_TOKEN is configured, POST /api/auth/bootstrap can create or recover the admin account only while no active admin exists. Viewer can read data for visible companies; company operator/admin is required for company-scoped mutation, run/review/decompose, adapter tests, runtime edits, and budget decisions. Manual cron remains an operator system action.',
+      mode: 'Cookie session with company membership role checks for human/API management. Runner endpoints use Authorization: Bearer MEGACORPS_RUNNER_KEY or X-MegaCorps-Runner-Key against hashed machine runner keys. Agent-session endpoints use Ed25519-signed JWTs from runner-created sessions. Signup is DB-configured and defaults to enabled; if no active admin exists, the next signup becomes global admin and default-company admin. If BOOTSTRAP_TOKEN is configured, POST /api/auth/bootstrap can create or recover the admin account only while no active admin exists. Viewer can read data for visible companies; company operator/admin is required for company-scoped mutation, run/review/decompose, adapter tests, runtime edits, and budget decisions. Manual cron remains an operator system action.',
       login: 'POST /api/auth/login',
       signup: 'POST /api/auth/signup',
       bootstrap: 'POST /api/auth/bootstrap',
@@ -354,12 +492,17 @@ export function apiHelpCatalog() {
       note: 'backlog and todo are merged. Send todo for new work; legacy backlog input is accepted and normalized to todo. The web board visually groups in_review/needs_review and blocked/cancelled while the API preserves canonical statuses.',
     },
     adapters: agentAdapterTypes,
+    cli: cliHelp,
     endpoints: catalogEndpoints,
   };
 }
 
 function jsonBlock(value: unknown): string {
   return `\n\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``;
+}
+
+function fencedBlock(language: string, value: string): string {
+  return `\n\`\`\`${language}\n${value}\n\`\`\``;
 }
 
 export function apiHelpMarkdown(): string {
@@ -397,6 +540,29 @@ export function apiHelpMarkdown(): string {
     '## Kanban Stages',
     `Canonical stages: ${catalog.kanban.stages.join(', ')}`,
     'Legacy alias: backlog -> todo',
+    '',
+    '## CLI Commands',
+    `Package: ${catalog.cli.package}`,
+    `Run with npm: ${catalog.cli.runWithNpm}`,
+    '',
+    '### CLI Environment',
+    ...catalog.cli.env.map((item) => `- ${item}`),
+    '',
+    '### YAML Manifest Example',
+    fencedBlock('yaml', catalog.cli.manifestExample),
+    '',
+    ...catalog.cli.commands.flatMap((command) => [
+      `### megacorps ${command.command}`,
+      command.summary,
+      `Auth: ${command.auth}`,
+      `Env: ${command.env.join(', ') || 'none'}`,
+      `Flags: ${JSON.stringify(command.flags)}`,
+      'Example:',
+      fencedBlock('powershell', command.example),
+      'Lifecycle:',
+      ...command.lifecycle.map((item) => `- ${item}`),
+      '',
+    ]),
     '',
     '## Endpoints',
   ];

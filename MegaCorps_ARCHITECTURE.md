@@ -2,6 +2,35 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.15 - API/CLI Help Parity And Runner Lifecycle Guard
+
+Date: 2026-06-09
+
+Completed in this pass:
+
+- Reviewed every registered HTTP route and added a server test that fails when a route is missing from `/api/help`.
+- Added a first-class CLI command catalog to `GET /api/help`, `GET /api/help?format=markdown`, and the Web Help page.
+- Added a `CLI Commands` Help tab for `login`, `apply`, `runner register`, and `runner daemon`, including env vars, flags, examples, lifecycle notes, and YAML manifest example.
+- Split rate-limit buckets for runner and agent-session APIs so `/api/help` matches the actual route policy: auth, chat, webhook, runner, agent-session, operator, writes, and reads.
+- Hardened external runner lifecycle handling: runner claim now validates card status, gates dispatch by dependencies, syncs dispatch cards to `in_progress`, takes an execution lock with the task-run id, and skips review claims until cards are actually in `in_review` or `needs_review`.
+- Hardened runner completion: dispatch `success` still moves to `in_review` when a reviewer is configured, while review `success` now approves to `done`; all runner completions pass through the shared actor-aware lifecycle state machine.
+- Hardened agent-session card APIs so worker claim/review/release cannot bypass status transitions, cannot release another agent's card, and card-bound sessions cannot operate on other cards.
+- Improved CLI YAML `apply` so card dependencies are resolved after all manifest cards are created or updated, allowing forward references in the manifest.
+
+## Architecture Update v1.14 - Runner API, Card Lifecycle, and CLI
+
+Date: 2026-06-09
+
+Completed in this pass:
+
+- Added a shared actor-aware card lifecycle state machine for claim, submit-review, help-request, approve/reject, complete, block, cancel, release, resume, reopen, and manual move validation.
+- Added `card_dependencies` as the normalized prerequisite graph. `kanban_cards.dependency_card_ids` remains synchronized for old clients, while dispatch/runner claim gates now use the normalized graph.
+- Added `card_actions` as a durable card action timeline separate from raw `task_logs`. Human updates, comments/interventions, dispatch stage changes, runner claims, and runner completions now write normalized actor/from/to/action metadata.
+- Added `machine_runners` with hashed API keys, heartbeat state, capacity, runtime health, supported runtime labels, and machine-local workspace/scratch roots.
+- Added runner APIs for heartbeat, task-run claim, task-run completion, and runner-created agent sessions. Agent-session APIs verify Ed25519-signed JWTs with `sub=<sessionId>` and `aid=<agentId>`.
+- Added a new `packages/cli` workspace with `login`, YAML `apply`, `runner register`, and `runner daemon` commands. The daemon can prepare repo worktrees from project `repoUrl`, `defaultBranch`, and `workBranchPattern`, write `.megacorps/task-*.json`, and complete scaffold runs as `needs_review` unless `--no-complete` is set.
+- Updated `/api/help`, `/api/help?format=markdown`, README, and progress notes so the machine runner, agent-session, dependency graph, action timeline, and CLI surfaces are discoverable.
+
 ## Architecture Update v1.13 - Scoped UI Repairs And Same-Origin API Proxy
 
 Date: 2026-06-09

@@ -3,7 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, ne, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createProjectSchema, createWorkProductSchema, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema } from '@megacorps/shared';
+import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema, validateCardTransition } from '@megacorps/shared';
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
@@ -13,10 +13,13 @@ import { adapterRequiresRuntime } from './adapters/config.ts';
 import { buildExecutionAgent, cascadeParentStatus, decomposeCard, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
 import { registerChatRoutes } from './chat.ts';
 import { registerCronRoutes } from './cron-routes.ts';
+import { registerRunnerRoutes } from './runner-routes.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
 import { resetAdapterSessionsForAgent } from './adapter-sessions.ts';
+import { getCardActions, recordCardAction, recordStageAction } from './card-actions.ts';
+import { hydrateCardDependencyState, setCardDependencies } from './card-dependencies.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
@@ -250,6 +253,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/health', async () => ({ ok: true }));
   await registerChatRoutes(app);
   await registerCronRoutes(app);
+  await registerRunnerRoutes(app);
   app.get('/api/help', async (request, reply) => {
     const query = request.query as { format?: string };
     if (query.format === 'markdown' || query.format === 'md') {
@@ -883,7 +887,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       query.tag ? drizzleSql`${query.tag} = ANY(${kanbanCards.tags})` : undefined,
     ].filter(Boolean);
     const where = filters.length ? and(...filters) : undefined;
-    return db.select().from(kanbanCards).where(where).orderBy(desc(kanbanCards.updatedAt)).limit(Number(query.limit ?? 100)).offset(Number(query.offset ?? 0));
+    const rows = await db.select().from(kanbanCards).where(where).orderBy(desc(kanbanCards.updatedAt)).limit(Number(query.limit ?? 100)).offset(Number(query.offset ?? 0));
+    return hydrateCardDependencyState(rows);
   });
 
   app.post('/api/cards', async (request, reply) => {
@@ -921,9 +926,30 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       maxRetries: input.maxRetries,
       createdBy: user.id,
     }).returning();
-    if (card) await db.insert(taskLogs).values({ cardId: card.id, type: 'stage', status: 'success', message: `Stage set to ${card.columnStatus ?? 'todo'} by ${actorLabel(user)}` });
-    if (card) await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'card.created', entityType: 'card', entityId: card.id, details: { title: card.title, stage: card.columnStatus } });
-    if (card) publishLiveEvent({ type: 'card.created', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId });
+    if (card) {
+      await setCardDependencies(card.id, input.dependencyCardIds);
+      await recordStageAction({
+        cardId: card.id,
+        actor: { type: 'user', id: user.id, userId: user.id },
+        fromStatus: null,
+        toStatus: card.columnStatus ?? 'todo',
+        action: 'create',
+        detail: `Stage set to ${card.columnStatus ?? 'todo'} by ${actorLabel(user)}.`,
+      });
+      await recordCardAction({
+        companyId: card.companyId,
+        cardId: card.id,
+        actor: { type: 'user', id: user.id, userId: user.id },
+        action: 'card.created',
+        toStatus: card.columnStatus,
+        detail: `Card created by ${actorLabel(user)}.`,
+        metadata: { title: card.title, dependencyCardIds: input.dependencyCardIds },
+      });
+      await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'card.created', entityType: 'card', entityId: card.id, details: { title: card.title, stage: card.columnStatus } });
+      publishLiveEvent({ type: 'card.created', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId });
+      const [hydrated] = await hydrateCardDependencyState([card]);
+      return reply.code(201).send(hydrated ?? card);
+    }
     return reply.code(201).send(card);
   });
 
@@ -954,6 +980,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' });
     }
     if (input.updatedAt && existing.updatedAt && new Date(input.updatedAt).getTime() !== existing.updatedAt.getTime()) return reply.code(409).send({ error: 'card_modified' });
+    const fromStatus = normalizeCardStatus(existing.columnStatus) ?? 'todo';
+    const toStatus = input.columnStatus ? normalizeCardStatus(input.columnStatus) : undefined;
+    const transitionAction = toStatus && toStatus !== fromStatus ? inferCardTransitionAction(fromStatus, toStatus) ?? 'manual_move' : null;
+    if (transitionAction && toStatus) {
+      const transitionError = validateCardTransition(transitionAction, fromStatus, 'user', toStatus);
+      if (transitionError) return reply.code(transitionError.code === 'FORBIDDEN' ? 403 : 409).send({ error: transitionError.message, code: transitionError.code });
+    }
+    if (input.dependencyCardIds !== undefined) {
+      try {
+        await setCardDependencies(id, nextDependencyCardIds);
+      } catch (error) {
+        return reply.code(409).send({ error: error instanceof Error ? error.message : 'card_dependency_update_failed' });
+      }
+    }
     const [card] = await db.update(kanbanCards).set({
       title: input.title,
       body: input.body,
@@ -972,17 +1012,35 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       completedAt: input.columnStatus === 'done' ? new Date() : input.columnStatus ? null : undefined,
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, id)).returning();
-    if (card && input.columnStatus && input.columnStatus !== existing.columnStatus) {
-      await db.insert(taskLogs).values({
+    if (card && transitionAction && toStatus) {
+      await recordStageAction({
         cardId: card.id,
         agentId: card.assigneeId,
-        type: 'stage',
-        status: 'success',
-        message: `Stage changed from ${existing.columnStatus ?? 'todo'} to ${input.columnStatus} by ${actorLabel(user)}`,
+        actor: { type: 'user', id: user.id, userId: user.id },
+        fromStatus,
+        toStatus,
+        action: transitionAction,
+        detail: `Stage changed from ${fromStatus} to ${toStatus} by ${actorLabel(user)}.`,
+        metadata: { dependencyCardIds: nextDependencyCardIds },
+      });
+    } else if (card) {
+      await recordCardAction({
+        companyId: card.companyId,
+        cardId: card.id,
+        actor: { type: 'user', id: user.id, userId: user.id },
+        action: input.dependencyCardIds !== undefined ? 'card.dependencies_updated' : 'card.updated',
+        fromStatus: existing.columnStatus,
+        toStatus: card.columnStatus,
+        detail: `Card updated by ${actorLabel(user)}.`,
+        metadata: { dependencyCardIds: nextDependencyCardIds },
       });
     }
     if (card) await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: card.assigneeId, action: input.columnStatus && input.columnStatus !== existing.columnStatus ? 'card.stage_changed' : 'card.updated', entityType: 'card', entityId: card.id, details: { from: existing.columnStatus, to: input.columnStatus, title: card.title } });
     if (card) publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: input.columnStatus && input.columnStatus !== existing.columnStatus ? 'card.stage_changed' : 'card.updated' });
+    if (card) {
+      const [hydrated] = await hydrateCardDependencyState([card]);
+      return hydrated ?? card;
+    }
     return card;
   });
 
@@ -1018,7 +1076,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }).where(eq(kanbanCards.id, id)).returning();
     await db.insert(taskLogs).values({ cardId: id, agentId: existing.assigneeId, type: 'cancel', status: 'warning', message: reason });
     if (existing.columnStatus !== 'cancelled') {
-      await db.insert(taskLogs).values({ cardId: id, agentId: existing.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${existing.columnStatus ?? 'todo'} to cancelled by ${actorLabel(user)}.` });
+      await recordStageAction({
+        cardId: id,
+        agentId: existing.assigneeId,
+        actor: { type: 'user', id: user.id, userId: user.id },
+        fromStatus: existing.columnStatus ?? 'todo',
+        toStatus: 'cancelled',
+        action: 'cancel',
+        detail: `Stage changed from ${existing.columnStatus ?? 'todo'} to cancelled by ${actorLabel(user)}.`,
+        logStatus: 'warning',
+        metadata: { reason },
+      });
     }
     await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: existing.assigneeId, action: 'card.cancelled', entityType: 'card', entityId: id, details: { title: existing.title, reason } });
     publishLiveEvent({ type: 'card.updated', companyId: existing.companyId, entityType: 'card', entityId: id, cardId: id, projectId: existing.projectId, action: 'card.cancelled' });
@@ -1053,6 +1121,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
     if (!card) return reply;
     return getTaskLogs(card.id);
+  });
+  app.get('/api/cards/:id/actions', async (request, reply) => {
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    const query = request.query as { limit?: string };
+    return getCardActions(card.id, Number(query.limit ?? 200));
   });
   app.get('/api/cards/:id/comments', async (request, reply) => {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
@@ -1130,12 +1204,31 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }).where(eq(kanbanCards.id, id));
       if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', error: `Paused by ${actorLabel(user)}`, completedAt: new Date() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
       await db.update(taskRuns).set({ status: 'cancelled', error: `Paused by ${actorLabel(user)}`, completedAt: new Date(), updatedAt: new Date() }).where(and(eq(taskRuns.cardId, id), inArray(taskRuns.status, ['queued', 'running'])));
-      await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to blocked by ${actorLabel(user)}.` });
+      await recordStageAction({
+        cardId: id,
+        agentId: card.assigneeId,
+        actor: { type: 'user', id: user.id, userId: user.id },
+        fromStatus: card.columnStatus ?? 'todo',
+        toStatus: 'blocked',
+        action: 'block',
+        detail: `Stage changed from ${card.columnStatus ?? 'todo'} to blocked by ${actorLabel(user)}.`,
+        logStatus: 'warning',
+        metadata: { commentId: comment?.id },
+      });
       publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'card.blocked' });
     } else if (input.action === 'continue_run') {
       if (card.assigneeId) await db.update(agents).set({ isActive: true, isBusy: false }).where(eq(agents.id, card.assigneeId));
       await db.update(kanbanCards).set({ columnStatus: 'todo', lastError: null, nextRunAt: null, updatedAt: new Date() }).where(eq(kanbanCards.id, id));
-      await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to todo by ${actorLabel(user)}.` });
+      await recordStageAction({
+        cardId: id,
+        agentId: card.assigneeId,
+        actor: { type: 'user', id: user.id, userId: user.id },
+        fromStatus: card.columnStatus ?? 'todo',
+        toStatus: 'todo',
+        action: card.columnStatus === 'blocked' || card.columnStatus === 'cancelled' ? 'resume' : 'manual_move',
+        detail: `Stage changed from ${card.columnStatus ?? 'todo'} to todo by ${actorLabel(user)}.`,
+        metadata: { commentId: comment?.id },
+      });
       publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'card.continue_run' });
     } else if (input.action === 'send_to_agent') {
       await db.insert(taskLogs).values({ cardId: id, agentId: card.assigneeId, type: 'comment', status: 'queued', message: 'Comment queued for agent context on the next run.', output: input.body });
@@ -1167,7 +1260,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         activeHeartbeatRunId: null,
         updatedAt: new Date(),
       }).where(eq(kanbanCards.id, id));
-      await db.insert(taskLogs).values({ cardId: id, agentId: reviewerId ?? card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by ${actorLabel(user)}.` });
+      await recordStageAction({
+        cardId: id,
+        agentId: reviewerId ?? card.assigneeId,
+        actor: { type: 'user', id: user.id, userId: user.id },
+        fromStatus: card.columnStatus ?? 'todo',
+        toStatus: nextStatus,
+        action: reviewerId ? 'request_help' : 'block',
+        detail: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by ${actorLabel(user)}.`,
+        logStatus: reviewerId ? 'success' : 'warning',
+        metadata: { commentId: comment?.id, reviewerId, reason },
+      });
       await db.insert(taskLogs).values({ cardId: id, agentId: reviewerId ?? card.assigneeId, type: 'escalation', status: reviewerId ? 'queued' : 'failed', message: reason, output: input.body });
       await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: reviewerId ?? card.assigneeId, action: reviewerId ? 'card.escalated_to_reviewer' : 'card.escalation_blocked', entityType: 'card', entityId: card.id, details: { commentId: comment?.id, reviewerId, reason } });
       publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: reviewerId ? 'card.escalated_to_reviewer' : 'card.escalation_blocked' });

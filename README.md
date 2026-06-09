@@ -1,4 +1,4 @@
-# MegaCorps Phase 1-18 Control Plane MVP
+# MegaCorps Phase 1-20 Control Plane MVP
 
 Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm workspaces.
 
@@ -34,6 +34,25 @@ Remote Docker note:
 - `npm run test`
 - `npm run typecheck`
 - `npm run build`
+- `npm run build -w packages/cli`
+
+CLI examples:
+
+```powershell
+npm run dev -w packages/cli -- login --api-url http://localhost:4000 --email admin@example.com --password "password"
+$env:MEGACORPS_SESSION="session-cookie-value-from-login"
+npm run dev -w packages/cli -- apply -f megacorps.yml --api-url http://localhost:4000
+npm run dev -w packages/cli -- runner register --name "Local Runner" --slug local-runner --supported-runtimes mock,codex-app
+$env:MEGACORPS_RUNNER_KEY="mcr_..."
+npm run dev -w packages/cli -- runner daemon --once --workspace-root C:\megacorps-runner
+```
+
+CLI/API help:
+
+- `GET /api/help`: JSON catalog for every HTTP route plus CLI commands, auth mode, required roles, response examples, and rate-limit buckets.
+- `GET /api/help?format=markdown`: Markdown version of the same catalog for agents and operators.
+- `/help`: Web Help page with `API Catalog` and `CLI Commands` tabs.
+- `apply` supports companies, departments, projects, agents, goals, and cards. Card dependency references are resolved after all manifest cards are created or updated, so YAML cards can depend on cards defined later in the same file.
 
 Local red-team cleanup:
 
@@ -85,6 +104,14 @@ For Codex App Server, create a runtime preset with `adapterType=codex-app`. Stdi
 For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or the agent override panel.
 Task-complete webhooks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret` with at least 16 characters. MegaCorps injects the configured secret into dispatched agent prompts as `X-MegaCorps-Webhook-Secret`.
 
+Machine runners:
+
+- Human/session APIs manage runners through `/api/machine-runners`. Creating or rotating a runner returns the raw API key once; the database stores only a SHA-256 hash.
+- Runner processes authenticate with `Authorization: Bearer MEGACORPS_RUNNER_KEY` or `X-MegaCorps-Runner-Key`, send `/api/runner/heartbeat`, claim `/api/runner/task-runs/claim`, and complete `/api/runner/task-runs/:id/complete`.
+- Runner-created agent sessions store an Ed25519 public key. Agent-session APIs require a JWT signed by that private key with `sub=<sessionId>` and `aid=<agentId>`. If the session was created with a `cardId`, card claim/review/release calls are restricted to that card.
+- The CLI runner daemon is a scaffold-capable foundation: it heartbeats, claims queued work, prepares Git worktrees from project `repoUrl` / branch policy, writes `.megacorps/task-*.json`, and can complete the run as `needs_review` by default.
+- Dispatch runner claims take a task-run execution lock and move the card to `in_progress`. Review runner claims wait until the card is in `in_review` or `needs_review`; review `success` moves the card to `done`.
+
 Hermes suite operational notes:
 
 - Prefer a Hermes suite image with `openssh-server` preinstalled for production. Installing it in the Hermes entrypoint works for debugging, but it slows every restart and is external to this MegaCorps image.
@@ -105,6 +132,7 @@ Hermes suite operational notes:
 - `Logs`: cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
 - `Admin`: tabbed global account management, signup switch, invites, roles, account status, and password resets.
 - `Settings`: tabbed runtime presets, company settings, departments, company members, and advanced configuration.
+- `Help`: API Catalog and CLI Commands tabs generated from `/api/help`.
 - `Budget`: direct governance route for budget policies, approvals, spend, and cost events. It is intentionally outside the primary sidebar while the IA is focused on company/department/project/workspace operations.
   Runtime health summaries show adapter status, attached agents, last run status, and capabilities. Company members can be managed by email with viewer/operator/admin roles.
 
@@ -129,12 +157,13 @@ Hermes suite operational notes:
 - Phase 17: React Query browser cache plus authenticated WebSocket live events for chat, Kanban card updates, task logs, comments, projects, goals, and work products.
 - Phase 18: repo-centric project workspace policy with project-level `repoUrl` and `workPath`, pull-before-run/push-after-run prompt protocol, and first-class task work products for PRs, commits, previews, reports, screenshots, and artifacts.
 - Phase 19: Codex app-server adapter, platform-owned agent `soul`, and durable adapter session records for direct chat and task-scoped Codex threads.
+- Phase 20: normalized card lifecycle actions, `card_dependencies` graph, machine runners with hashed API keys, runner heartbeat/claim/complete APIs, Ed25519 agent sessions, and MegaCorps CLI YAML apply/runner daemon scaffold.
 
 Reference-informed next phases:
 
-- Phase 20: dependency/blocker graph with derived ready state and richer handoff records.
-- Phase 21: company template import/export with secret references.
-- Phase 22: worker sidecar, distributed queue locks, and richer runtime liveness probes.
+- Phase 21: company template export/import hardening with secret references.
+- Phase 22: runner PR provider integration, streaming progress, sandbox policy, and richer runtime liveness probes.
+- Phase 23: fine-grained service-account roles for non-runner integrations.
 
 ## Paperclip-inspired loop
 
@@ -154,8 +183,8 @@ The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds 
 
 Cron/debug endpoints:
 
-- `GET /api/help`: machine-readable API catalog for agents and integrations, including current architecture, UI surface responsibilities, response schema examples, and rate-limit notes.
-- `GET /api/help?format=markdown`: Markdown API catalog with current architecture, body examples, response examples, and rate-limit notes.
+- `GET /api/help`: machine-readable API and CLI catalog for agents and integrations, including current architecture, UI surface responsibilities, response schema examples, required roles, and rate-limit notes.
+- `GET /api/help?format=markdown`: Markdown API/CLI catalog with current architecture, CLI examples, body examples, response examples, and rate-limit notes.
 - `GET /api/agent-runtimes/health`: runtime status, attached agent counts, last run state, and adapter capabilities.
 - `GET /api/task-runs`: queued/running/completed dispatch and review attempts.
 - `GET /api/cron/status`: in-memory scheduler state plus recent durable cron runs.
@@ -243,6 +272,10 @@ MegaCorps stores two complementary log streams:
 - `adapter_sessions`: adapter-native session/thread continuity by scope, currently used for Codex app-server direct chat and card-scoped dispatch/review threads.
 - `card_comments`: per-task message board entries from users, agents, system/webhook completions, and intervention actions.
 - `work_products`: reviewable deliverables by card/project/agent/task-run, including repo URLs, branches, commits, PRs, previews, reports, screenshots, artifacts, and external URLs.
+- `card_dependencies`: normalized prerequisite graph for cards; the legacy `kanban_cards.dependency_card_ids` array is synchronized for old clients.
+- `card_actions`: normalized card lifecycle/action timeline with actor type, from/to status, runner/session ids, and metadata.
+- `machine_runners`: external runner machines with hashed API keys, heartbeat/capacity/runtime health, and local workspace roots.
+- `agent_sessions`: runner-created agent sessions with Ed25519 public key material for signed agent-session JWTs.
 
 Phase 8/9 safety behavior:
 
