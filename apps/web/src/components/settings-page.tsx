@@ -315,7 +315,7 @@ export function SettingsPage() {
             <div className="meta-grid">
               <span>Last run <b>{runtime.lastRunAt ? new Date(runtime.lastRunAt).toLocaleString() : 'none'}</b></span>
               <span>Last status <b>{runtime.lastRunStatus ?? 'none'}</b></span>
-              <span>Capabilities <b>{runtime.capabilities?.join(', ') || 'none'}</b></span>
+              <span>Runtime features <b>{runtime.capabilities?.join(', ') || 'none'}</b></span>
               <span>Error <b>{runtime.lastError ?? 'none'}</b></span>
             </div>
           </div>)}

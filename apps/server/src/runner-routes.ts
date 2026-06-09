@@ -6,7 +6,7 @@ import { createAgentSessionSchema, createMachineRunnerSchema, inferCardTransitio
 import { requireAnyVisibleCompany, requireCompanyRole } from './access.ts';
 import { assertCardTransition, recordCardAction, recordStageAction } from './card-actions.ts';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agentSessions, agents, cardComments, companies, heartbeatRuns, kanbanCards, machineRunners, projects, taskLogs, taskRuns, workProducts } from './db/schema.ts';
+import { activityLog, agentRuntimes, agentSessions, agents, cardComments, companies, externalWaits, heartbeatRuns, kanbanCards, machineRunners, projects, taskLogs, taskRuns, workProducts } from './db/schema.ts';
 import { publishLiveEvent } from './live.ts';
 import { generateRunnerApiKey, hashRunnerApiKey, requireAgentSessionAuth, requireRunnerAuth } from './runner-auth.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
@@ -171,6 +171,20 @@ async function createRunnerTaskCompletion(input: {
       metadata: product.metadata,
     })));
   }
+  let externalWaitId: string | null = null;
+  if (nextStatus === 'waiting_on_external') {
+    const externalProduct = input.body.workProducts.find((product) => product.pullRequestUrl || product.url || product.commitSha || product.branch);
+    const [wait] = await db.insert(externalWaits).values({
+      companyId: card.companyId,
+      cardId: card.id,
+      waitingFor: input.body.summary ?? externalProduct?.title ?? 'external completion',
+      provider: externalProduct?.repoProvider ?? (externalProduct?.pullRequestUrl ? 'git' : 'external'),
+      externalId: externalProduct?.commitSha ?? externalProduct?.branch ?? null,
+      externalUrl: externalProduct?.pullRequestUrl ?? externalProduct?.url ?? null,
+      status: 'waiting',
+    }).returning();
+    externalWaitId = wait?.id ?? null;
+  }
   if (nextStatus !== fromStatus) {
     await recordStageAction({
       cardId: card.id,
@@ -207,7 +221,7 @@ async function createRunnerTaskCompletion(input: {
     action: `runner.task_${nextStatus}`,
     entityType: 'card',
     entityId: card.id,
-    details: { taskRunId: input.run.id, runnerId: input.runner.id, status: input.body.status, costUsd: input.body.costUsd },
+    details: { taskRunId: input.run.id, runnerId: input.runner.id, status: input.body.status, costUsd: input.body.costUsd, externalWaitId },
   });
   if (comment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: comment.id, cardId: card.id, projectId: card.projectId, action: comment.action });
   return updated ?? card;

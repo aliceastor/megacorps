@@ -1,6 +1,6 @@
 # MegaCorps UI Flow
 
-Generated: 2026-06-09
+Generated: 2026-06-10
 
 This document is a textual inventory of every current web UI surface, including route pages, shell controls, drawers, modal overlays, confirmation dialogs, tabs, and major page elements. It also records the DB/API alignment audit performed during this pass.
 
@@ -300,6 +300,7 @@ Component:
 
 Data sources:
 - `GET /api/companies`
+- `GET /api/departments`
 - `GET /api/positions`
 - `GET /api/agents`
 - `POST /api/positions`
@@ -313,6 +314,13 @@ Elements:
 - Position editor:
   - Position name
   - Slug
+  - Description
+  - Rank
+  - Company boss checkbox
+  - Cross-department delegation checkbox
+  - Active position checkbox
+  - Default department selector
+  - Manager position selector
   - Position prompt textarea
   - Prompt preview showing the injected `You are ...` sentence plus the custom prompt
   - Save Position
@@ -322,6 +330,7 @@ Elements:
 Prompt behavior:
 - Agents assigned to a position receive `You are <position> in <department> department of firm <company>.`
 - The custom position prompt follows that sentence in Direct Chat and Kanban dispatch prompts.
+- New companies default to one `CEO` boss position. Only one active position per company can be marked as the company boss, and root Kanban dispatch prefers an idle active agent assigned to that boss position.
 
 ## Direct Chat
 
@@ -375,6 +384,9 @@ Data sources:
 - Actions: `GET /api/cards/:id/actions`
 - API event related lookup: `GET /api/system-logs`
 - Work products: `GET/POST /api/cards/:id/work-products`
+- Rollup/context: `GET /api/cards/:id/rollup`, `GET /api/cards/:id/context`, `GET/POST /api/cards/:id/context-snapshots`
+- External waits/events: `GET/POST /api/cards/:id/external-waits`, `GET/POST /api/external-events`
+- Required tools/integration: `GET/PUT /api/cards/:id/required-tools`, `GET/POST /api/cards/:id/integrations`
 - Agent delegation: dispatch output with a strict `DELEGATE:` bullet list creates child cards for the assignee's direct reports.
 
 Top toolbar elements:
@@ -387,7 +399,7 @@ Top toolbar elements:
 - New Card button
 
 Board elements:
-- Columns: `todo`, `in_progress`, `in_review`, `needs_review`, `done`, `blocked`, `cancelled`
+- Columns: `todo`, `in_progress`, `in_review`/`needs_review`, `waiting_on_external`, `done`, `blocked`/`cancelled`
 - Draggable cards
 - Card badges: requires review, retry count, cost, tags
 - Priority color/label
@@ -439,6 +451,7 @@ Details tab elements:
 - Dependencies multi-select
 - Max retries input
 - Requires approval checkbox
+- Lifecycle metadata available through API: decision mode, rollup status, required child policy, child requirement level, estimated weight/duration, task budget limit, revision count/max revisions, and required deterministic tools
 - Metadata grid: UUID, stage, priority, cost, session, retries, active run, execution lock
 - Review feedback output
 - Actions: Save, Revert, Run Now, Review, Split into Sub-tasks, Pause with Comment, Cancel Task, Delete Task

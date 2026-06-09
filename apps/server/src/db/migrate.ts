@@ -20,7 +20,15 @@ CREATE INDEX IF NOT EXISTS user_invites_company_status_idx ON user_invites(compa
 CREATE INDEX IF NOT EXISTS user_invites_email_status_idx ON user_invites(email, status);
 CREATE TABLE IF NOT EXISTS departments (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, slug TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT now());
 CREATE TABLE IF NOT EXISTS positions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, slug TEXT NOT NULL, prompt TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now(), UNIQUE(company_id, slug));
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS rank INTEGER DEFAULT 100;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS is_company_boss BOOLEAN DEFAULT false;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS can_delegate_across_departments BOOLEAN DEFAULT false;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS default_department_id UUID REFERENCES departments(id);
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS manager_position_id UUID;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;
 CREATE INDEX IF NOT EXISTS positions_company_created_at_idx ON positions(company_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS positions_one_company_boss_idx ON positions(company_id) WHERE is_company_boss = true AND is_active = true;
 CREATE TABLE IF NOT EXISTS projects (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, description TEXT, repo_provider TEXT DEFAULT 'github', repo_url TEXT, work_path TEXT, default_branch TEXT DEFAULT 'main', protected_branches TEXT[] DEFAULT '{main,master}', work_branch_pattern TEXT DEFAULT 'megacorps/card-{cardId}-{agentSlug}', pull_before_run BOOLEAN DEFAULT true, push_after_run BOOLEAN DEFAULT true, completion_policy TEXT DEFAULT 'push_or_pr', setup_command TEXT, test_command TEXT, runtime_services JSONB DEFAULT '{}', workspace_path_hint TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS repo_provider TEXT DEFAULT 'github';
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS repo_url TEXT;
@@ -63,6 +71,15 @@ ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
 ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
 ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS last_error TEXT;
 ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS review_feedback TEXT;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS decision_mode TEXT;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS rollup_status TEXT;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS required_child_policy TEXT DEFAULT 'all_required_accepted';
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS child_requirement_level TEXT DEFAULT 'required';
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS estimated_weight NUMERIC(10,2);
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS estimated_duration_minutes INTEGER;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS task_budget_limit NUMERIC(10,4);
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS revision_count INTEGER DEFAULT 0;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS max_revisions INTEGER DEFAULT 3;
 ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS execution_lock_id UUID;
 ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS execution_locked_by_agent_id UUID REFERENCES agents(id);
 ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS execution_locked_at TIMESTAMPTZ;
@@ -106,6 +123,22 @@ CREATE INDEX IF NOT EXISTS card_actions_company_created_at_idx ON card_actions(c
 CREATE TABLE IF NOT EXISTS work_products (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), card_id UUID REFERENCES kanban_cards(id), project_id UUID REFERENCES projects(id), agent_id UUID REFERENCES agents(id), task_run_id UUID REFERENCES task_runs(id), type TEXT NOT NULL DEFAULT 'external', title TEXT NOT NULL, summary TEXT, url TEXT, repo_provider TEXT, repo_url TEXT, branch TEXT, commit_sha TEXT, pull_request_url TEXT, metadata JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS work_products_card_created_at_idx ON work_products(card_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS work_products_project_created_at_idx ON work_products(project_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS card_integrations (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), parent_card_id UUID NOT NULL REFERENCES kanban_cards(id), integrator_agent_id UUID REFERENCES agents(id), source_child_card_ids UUID[] DEFAULT '{}', summary TEXT NOT NULL, accepted_work_product_ids UUID[] DEFAULT '{}', dropped_work_product_ids UUID[] DEFAULT '{}', conflict_notes TEXT, status TEXT NOT NULL DEFAULT 'draft', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX IF NOT EXISTS card_integrations_parent_created_at_idx ON card_integrations(parent_card_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS external_events (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), project_id UUID REFERENCES projects(id), root_card_id UUID REFERENCES kanban_cards(id), card_id UUID NOT NULL REFERENCES kanban_cards(id), provider TEXT NOT NULL DEFAULT 'generic', event_type TEXT NOT NULL, external_id TEXT, external_url TEXT, status TEXT NOT NULL, payload_hash TEXT, payload_summary TEXT, payload JSONB DEFAULT '{}', received_at TIMESTAMPTZ DEFAULT now(), processed_at TIMESTAMPTZ);
+CREATE INDEX IF NOT EXISTS external_events_card_received_at_idx ON external_events(card_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS external_events_company_received_at_idx ON external_events(company_id, received_at DESC);
+CREATE TABLE IF NOT EXISTS external_waits (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), card_id UUID NOT NULL REFERENCES kanban_cards(id), waiting_for TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'generic', external_id TEXT, external_url TEXT, timeout_at TIMESTAMPTZ, status TEXT NOT NULL DEFAULT 'waiting', created_at TIMESTAMPTZ DEFAULT now(), resolved_at TIMESTAMPTZ);
+CREATE INDEX IF NOT EXISTS external_waits_card_status_idx ON external_waits(card_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS external_waits_company_status_idx ON external_waits(company_id, status, created_at DESC);
+CREATE TABLE IF NOT EXISTS tool_registry (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), project_id UUID REFERENCES projects(id), name TEXT NOT NULL, version TEXT NOT NULL DEFAULT '1.0.0', description TEXT, input_schema JSONB DEFAULT '{}', output_schema JSONB DEFAULT '{}', owner_agent_id UUID REFERENCES agents(id), owner_user_id UUID REFERENCES users(id), is_required_eligible BOOLEAN DEFAULT false, is_active BOOLEAN DEFAULT true, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now(), UNIQUE(company_id, name, version));
+CREATE INDEX IF NOT EXISTS tool_registry_company_active_idx ON tool_registry(company_id, is_active, name);
+CREATE TABLE IF NOT EXISTS card_required_tools (card_id UUID NOT NULL REFERENCES kanban_cards(id), tool_id UUID NOT NULL REFERENCES tool_registry(id), reason TEXT, created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY(card_id, tool_id));
+CREATE INDEX IF NOT EXISTS card_required_tools_tool_idx ON card_required_tools(tool_id);
+CREATE TABLE IF NOT EXISTS task_context_snapshots (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), root_card_id UUID REFERENCES kanban_cards(id), current_card_id UUID NOT NULL REFERENCES kanban_cards(id), task_run_id UUID REFERENCES task_runs(id), agent_id UUID REFERENCES agents(id), mode TEXT NOT NULL DEFAULT 'manual', context_hash TEXT NOT NULL, token_estimate INTEGER DEFAULT 0, included_card_ids UUID[] DEFAULT '{}', included_comment_ids UUID[] DEFAULT '{}', included_log_ids UUID[] DEFAULT '{}', redaction_summary TEXT, summary_json JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX IF NOT EXISTS task_context_snapshots_card_created_at_idx ON task_context_snapshots(current_card_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS task_context_requests (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), root_card_id UUID REFERENCES kanban_cards(id), current_card_id UUID NOT NULL REFERENCES kanban_cards(id), agent_id UUID REFERENCES agents(id), requested_card_ids UUID[] DEFAULT '{}', requested_log_kinds TEXT[] DEFAULT '{}', reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', created_at TIMESTAMPTZ DEFAULT now(), resolved_at TIMESTAMPTZ);
+CREATE INDEX IF NOT EXISTS task_context_requests_card_status_idx ON task_context_requests(current_card_id, status, created_at DESC);
 CREATE TABLE IF NOT EXISTS chat_sessions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), agent_id UUID NOT NULL REFERENCES agents(id), user_id UUID REFERENCES users(id), title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', agent_session_id TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
 ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id);
 CREATE INDEX IF NOT EXISTS chat_sessions_company_agent_updated_at_idx ON chat_sessions(company_id, agent_id, updated_at DESC);
@@ -149,4 +182,32 @@ WHERE NOT EXISTS (
   await sql`UPDATE agent_runtimes SET company_id = (SELECT id FROM companies WHERE slug = 'default' LIMIT 1) WHERE company_id IS NULL`;
   const runtimes = await sql`SELECT id FROM agent_runtimes WHERE name = 'Local Mock Runtime' LIMIT 1`;
   if (runtimes.length === 0) await sql`INSERT INTO agent_runtimes (company_id, name, adapter_type, config, is_active) VALUES ((SELECT id FROM companies WHERE slug = 'default' LIMIT 1), 'Local Mock Runtime', 'mock', '{}', true)`;
+  await sql`
+UPDATE positions p
+SET is_company_boss = true,
+    can_delegate_across_departments = true,
+    rank = 0,
+    updated_at = now()
+WHERE p.slug = 'ceo'
+  AND NOT EXISTS (
+    SELECT 1 FROM positions boss
+    WHERE boss.company_id = p.company_id
+      AND boss.is_company_boss = true
+      AND boss.is_active = true
+  )`;
+  await sql`
+INSERT INTO positions (company_id, name, slug, prompt, description, rank, is_company_boss, can_delegate_across_departments)
+SELECT c.id, 'CEO', 'ceo', 'Own final company-level task confirmation, decomposition, escalation, and integration.', 'Default company boss position generated by migration.', 0, true, true
+FROM companies c
+WHERE NOT EXISTS (
+    SELECT 1 FROM positions boss
+    WHERE boss.company_id = c.id
+      AND boss.is_company_boss = true
+      AND boss.is_active = true
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM positions existing
+    WHERE existing.company_id = c.id
+      AND existing.slug = 'ceo'
+  )`;
 }

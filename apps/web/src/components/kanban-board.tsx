@@ -8,7 +8,7 @@ import { Ban, ExternalLink, GitBranch, GripVertical, ListChecks, MessageSquare, 
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
-const statuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'done', 'blocked', 'cancelled'] as const;
+const statuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'done', 'blocked', 'cancelled'] as const;
 type CardStatus = (typeof statuses)[number];
 const priorities = ['urgent', 'high', 'normal', 'low'] as const;
 const workProductTypes = ['report', 'file', 'preview_url', 'pull_request', 'commit', 'screenshot', 'artifact', 'external'] as const;
@@ -18,16 +18,18 @@ const statusLabels: Record<CardStatus, LocaleLabels> = {
   in_progress: { 'zh-TW': '執行中', en: 'In Progress', ja: '進行中' },
   in_review: { 'zh-TW': '審核中', en: 'In Review', ja: 'レビュー中' },
   needs_review: { 'zh-TW': '求助審核', en: 'Needs Review', ja: '支援レビュー' },
+  waiting_on_external: { 'zh-TW': '等待外部', en: 'Waiting External', ja: '外部待ち' },
   done: { 'zh-TW': '完成', en: 'Done', ja: '完了' },
   blocked: { 'zh-TW': '受阻', en: 'Blocked', ja: 'ブロック' },
   cancelled: { 'zh-TW': '已取消', en: 'Cancelled', ja: 'キャンセル' },
 };
-type StatusGroupId = 'todo' | 'in_progress' | 'review' | 'done' | 'blocked_cancelled';
+type StatusGroupId = 'todo' | 'in_progress' | 'review' | 'external_wait' | 'done' | 'blocked_cancelled';
 type StatusGroup = { id: StatusGroupId; statuses: readonly CardStatus[]; dropStatus: CardStatus };
 const statusGroups: readonly StatusGroup[] = [
   { id: 'todo', statuses: ['todo'], dropStatus: 'todo' },
   { id: 'in_progress', statuses: ['in_progress'], dropStatus: 'in_progress' },
   { id: 'review', statuses: ['in_review', 'needs_review'], dropStatus: 'in_review' },
+  { id: 'external_wait', statuses: ['waiting_on_external'], dropStatus: 'waiting_on_external' },
   { id: 'done', statuses: ['done'], dropStatus: 'done' },
   { id: 'blocked_cancelled', statuses: ['blocked', 'cancelled'], dropStatus: 'blocked' },
 ] as const;
@@ -35,6 +37,7 @@ const statusGroupLabels: Record<StatusGroupId, LocaleLabels> = {
   todo: statusLabels.todo,
   in_progress: statusLabels.in_progress,
   review: { 'zh-TW': '審核中 / 求助審核', en: 'In Review / Needs Review', ja: 'レビュー中 / 支援レビュー' },
+  external_wait: statusLabels.waiting_on_external,
   done: statusLabels.done,
   blocked_cancelled: { 'zh-TW': '受阻 / 已取消', en: 'Blocked / Cancelled', ja: 'ブロック / キャンセル' },
 };
@@ -141,11 +144,13 @@ function statusColor(status: string) {
   if (status === 'in_progress') return '#2563eb';
   if (status === 'in_review') return '#9333ea';
   if (status === 'needs_review') return '#ca8a04';
+  if (status === 'waiting_on_external') return '#0d9488';
   return 'var(--border)';
 }
 
 function statusGroupColor(groupId: StatusGroupId) {
   if (groupId === 'review') return statusColor('in_review');
+  if (groupId === 'external_wait') return statusColor('waiting_on_external');
   if (groupId === 'blocked_cancelled') return statusColor('blocked');
   return statusColor(groupId);
 }

@@ -2,6 +2,20 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.17 - Hierarchical Lifecycle Foundation
+
+Date: 2026-06-10
+
+Completed in this pass:
+
+- Added the hierarchical task workflow design and implementation roadmap in [MegaCorps_HIERARCHICAL_TASK_WORKFLOW.md](./MegaCorps_HIERARCHICAL_TASK_WORKFLOW.md).
+- Extended Positions from reusable prompt text into operational authority metadata: rank, company-boss flag, cross-department delegation, default department, manager position, and active state.
+- New companies now create a default `CEO` boss position. A company can have only one active boss position, and the dispatch selector prefers an active idle agent assigned to that boss position for root cards.
+- Extended Kanban cards with decision mode, rollup status, required child policy, child requirement level, estimated weight/duration, task budget limit, revision count/max revisions, and required deterministic tool links.
+- Added `waiting_on_external` as a lifecycle stage for PR/CI/deploy/export/approval waits. Runner/webhook completion releases execution locks and records an external wait; `/api/external-events` wakes the card into review, rework, done, or blocked.
+- Added lifecycle APIs for recursive card rollup, TaskContextPackage, context snapshots, external waits/events, deterministic tool registry, card required tools, and parent integration records.
+- Updated Kanban UI status columns, Positions UI, `/api/help`, API Help tests, prompt injection docs, README, progress notes, and UI flow docs for the new lifecycle foundation.
+
 ## Architecture Update v1.16 - Company Positions And Role Prompt Injection
 
 Date: 2026-06-09
@@ -143,7 +157,7 @@ Date: 2026-06-08
 
 Completed in this pass:
 
-- Kanban stages now include `cancelled` alongside `todo`, `in_progress`, `in_review`, `done`, and `blocked`. v1.7 adds `needs_review`. `POST /api/cards/:id/cancel` cancels active or queued work without archiving task history.
+- Kanban stages now include `cancelled` alongside `todo`, `in_progress`, `in_review`, `done`, and `blocked`. v1.7 adds `needs_review`; v1.17 adds `waiting_on_external` for CI/CD, deploy, export, and outside-approval waits. `POST /api/cards/:id/cancel` cancels active or queued work without archiving task history.
 - Expired execution locks are recovered by the dispatch loop with `task_logs.type=lock_expired` and `status=warning`; expired `in_progress` work increments `retry_count`, backs off to `todo`, or moves to `blocked` after `max_retries`.
 - Dispatch completion no longer treats self-review as a valid quality gate. A distinct configured reviewer or distinct reporting manager can review; otherwise successful work goes directly to `done`.
 - Agent prompts include `taskRunId`, and `POST /api/webhook/task-complete` deduplicates repeated webhook completions for the same task run. Duplicate callbacks return `duplicate: true` without writing duplicate cost events, comments, or stage logs.
@@ -2645,7 +2659,7 @@ MegaCorps now follows the same product direction as `paperclipai/paperclip`: a c
 - Company: mission, dispatch heartbeat, auto-dispatch switch.
 - Department: grouping unit for agents and tasks.
 - O-chart: agents report to other agents via `bossId`; agents can also belong to departments.
-- Kanban: every task has one UUID and one stage: `todo`, `in_progress`, `in_review`, `needs_review`, `done`, `blocked`, `cancelled`. Legacy `backlog` input maps to `todo`.
+- Kanban: every task has one UUID and one stage: `todo`, `in_progress`, `in_review`, `needs_review`, `waiting_on_external`, `done`, `blocked`, `cancelled`. Legacy `backlog` input maps to `todo`.
 - Logs: task lifecycle logs plus API lifecycle logs.
 - Intervention: users can comment, stop an agent, send instructions to agent context, and continue a run.
 

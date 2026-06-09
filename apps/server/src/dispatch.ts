@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { inferCardTransitionAction, normalizeCardStatus } from '@megacorps/shared';
 import { db, sql as rawSql } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, cardRequiredTools, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, toolRegistry } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
@@ -538,6 +538,10 @@ function matchScore(card: CardRow, agent: AgentRow): number {
 
 async function selectBestAgent(card: CardRow): Promise<AgentRow | null> {
   const rows = await db.select().from(agents).where(and(eq(agents.companyId, card.companyId), isNull(agents.deletedAt)));
+  const bossPositions = card.parentCardId
+    ? []
+    : await db.select({ id: positions.id }).from(positions).where(and(eq(positions.companyId, card.companyId), eq(positions.isCompanyBoss, true), eq(positions.isActive, true)));
+  const bossPositionIds = new Set(bossPositions.map((position) => position.id));
   const available = [];
   for (const agent of rows) {
     if (!agent.isActive || agent.isBusy) continue;
@@ -545,6 +549,8 @@ async function selectBestAgent(card: CardRow): Promise<AgentRow | null> {
     if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'mock' }))) continue;
     available.push(agent);
   }
+  const bossAgents = available.filter((agent) => agent.positionId && bossPositionIds.has(agent.positionId));
+  if (bossAgents.length > 0) return bossAgents.sort((a, b) => matchScore(card, b) - matchScore(card, a))[0] ?? null;
   return available.sort((a, b) => matchScore(card, b) - matchScore(card, a))[0] ?? null;
 }
 
@@ -696,12 +702,24 @@ async function recordCostAndEnforceBudget(card: CardRow, agent: AgentRow, runId:
 
 export async function cascadeParentStatus(parentCardId: string | null): Promise<void> {
   if (!parentCardId) return;
-  const children = await db.select().from(kanbanCards).where(eq(kanbanCards.parentCardId, parentCardId));
-  if (children.length === 0 || !children.every((child) => child.columnStatus === 'done')) return;
   const [parent] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, parentCardId), isNull(kanbanCards.deletedAt))).limit(1);
+  if (!parent) return;
+  if (parent.requiredChildPolicy === 'manual') return;
+  const children = await db.select().from(kanbanCards).where(and(eq(kanbanCards.parentCardId, parentCardId), isNull(kanbanCards.deletedAt)));
+  if (children.length === 0) return;
+  const required = children.filter((child) => (child.childRequirementLevel ?? 'required') === 'required');
+  const policy = parent.requiredChildPolicy ?? 'all_required_accepted';
+  const ready = policy === 'all_non_cancelled_accepted'
+    ? children.filter((child) => child.columnStatus !== 'cancelled').every((child) => child.columnStatus === 'done')
+    : policy === 'threshold'
+      ? children.reduce((sum, child) => sum + (child.columnStatus === 'done' ? Number(child.estimatedWeight ?? 1) || 1 : 0), 0) >= children.reduce((sum, child) => sum + (Number(child.estimatedWeight ?? 1) || 1), 0) * 0.8
+      : required.length > 0
+        ? required.every((child) => child.columnStatus === 'done')
+        : children.every((child) => child.columnStatus === 'done' || child.columnStatus === 'cancelled');
+  if (!ready) return;
   await db.update(kanbanCards).set({ columnStatus: 'done', completedAt: new Date(), updatedAt: new Date() }).where(eq(kanbanCards.id, parentCardId));
   if (parent?.columnStatus !== 'done') await addStageLog(parentCardId, null, parent?.columnStatus ?? null, 'done', 'cascade');
-  await addTaskLog({ cardId: parentCardId, type: 'cascade', status: 'success', message: 'All sub-tasks completed; parent card marked done.' });
+  await addTaskLog({ cardId: parentCardId, type: 'cascade', status: 'success', message: `Child completion policy ${policy} satisfied; parent card marked done.` });
 }
 
 async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unknown, runId?: string | null, taskRunId?: string | null): Promise<CardRow> {
@@ -1598,11 +1616,22 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
     const focusAssignee = focusCard.assigneeId ? agentById.get(focusCard.assigneeId) : undefined;
     const focusReviewer = focusCard.reviewerId ? agentById.get(focusCard.reviewerId) : undefined;
     const focusAssigneeRuntime = focusAssignee?.runtimeId ? runtimeById.get(focusAssignee.runtimeId) : undefined;
+    const requiredTools = await db.select({ cardTool: cardRequiredTools, tool: toolRegistry })
+      .from(cardRequiredTools)
+      .innerJoin(toolRegistry, eq(cardRequiredTools.toolId, toolRegistry.id))
+      .where(eq(cardRequiredTools.cardId, focusCard.id));
     addContextSection(state, 'Focus Task Full Context', [
       `ID: ${focusCard.id}`,
       `Title: ${focusCard.title}`,
       `Stage: ${focusCard.columnStatus ?? 'todo'}`,
       `Priority: ${focusCard.priority ?? 0}`,
+      `Decision mode: ${focusCard.decisionMode ?? 'not set'}`,
+      `Rollup status: ${focusCard.rollupStatus ?? 'not set'}`,
+      `Required child policy: ${focusCard.requiredChildPolicy ?? 'all_required_accepted'}`,
+      `Child requirement level: ${focusCard.childRequirementLevel ?? 'required'}`,
+      `Estimated weight: ${focusCard.estimatedWeight ?? 'not set'}`,
+      `Estimated duration minutes: ${focusCard.estimatedDurationMinutes ?? 'not set'}`,
+      `Task budget limit: ${focusCard.taskBudgetLimit ?? 'not set'}`,
       `Department: ${focusCard.departmentId ? departmentById.get(focusCard.departmentId)?.name ?? focusCard.departmentId : 'none'}`,
       `Project: ${focusCard.projectId ? projectById.get(focusCard.projectId)?.name ?? focusCard.projectId : 'none'}`,
       `Project repo:\n${projectRepoLines(focusCard.projectId ? projectById.get(focusCard.projectId) : null, focusAssigneeRuntime).join('\n')}`,
@@ -1615,6 +1644,8 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
       `Dependencies:\n${deps.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
       `Requires approval: ${focusCard.requiresApproval ? 'yes' : 'no'}`,
       `Retry: ${focusCard.retryCount ?? 0}/${focusCard.maxRetries ?? 3}`,
+      `Review revisions: ${focusCard.revisionCount ?? 0}/${focusCard.maxRevisions ?? 3}`,
+      `Required deterministic tools:\n${requiredTools.map(({ cardTool, tool }) => `- ${tool.name}@${tool.version}: ${tool.description ?? 'no description'}${cardTool.reason ? ` (reason: ${cardTool.reason})` : ''}`).join('\n') || 'none'}`,
       `Session: ${focusCard.sessionId ?? 'none'}`,
       `Cost USD: ${focusCard.costUsd ?? '0'}`,
       'Body:',

@@ -1,6 +1,6 @@
 # MegaCorps Prompt Injection Format
 
-Last updated: 2026-06-09
+Last updated: 2026-06-10
 
 This document describes the prompt content MegaCorps injects for Direct Chat and Kanban task runs. Redacted outbound prompt snapshots are stored in `prompt_logs` and inspected from Logs -> Prompts.
 
@@ -13,8 +13,9 @@ MegaCorps uses bounded context budgets, so long fields are clipped rather than o
 - Project repo binding and Git completion policy, when a project has a repository
 - Agent name, position, reporting manager, direct reports
 - Agent position prompt when `agent.positionId` is set
+- Position authority metadata such as rank, active state, company boss flag, and cross-department delegation policy
 - Same-company Kanban snapshot with compact card lines
-- Focus card dependency state and recent card action/log history
+- Focus card lifecycle metadata, dependency state, required child policy, required deterministic tools, and recent card action/log history
 - Focus-agent assigned work and review queue
 - Recent activity and heartbeat runs
 - Relevant knowledge docs
@@ -72,7 +73,7 @@ This deliberately uses task-scoped sessions rather than project-scoped sessions.
 
 ## Agent Position Prompt
 
-Positions are company-scoped reusable role prompts. Operators create them from `Positions`, then assign one to an agent from the Agent create/edit flow.
+Positions are company-scoped reusable authority/role prompts. Operators create them from `Positions`, then assign one to an agent from the Agent create/edit flow. New companies default to one `CEO` boss position; only one active position per company can be marked as the company boss.
 
 When an agent has a position, MegaCorps injects:
 
@@ -152,6 +153,15 @@ Goal context:
 Card: <title>
 Status: <columnStatus>
 Priority: <number>
+Decision mode: <execute | delegate | hybrid | review | integrate | not set>
+Rollup status: <planning | delegated | waiting_on_children | waiting_on_dependencies | waiting_on_external | integrating | ready_for_review | done | blocked | not set>
+Required child policy: <all_required_accepted | all_non_cancelled_accepted | threshold | manual>
+Child requirement level: <required | optional | follow_up>
+Estimated duration minutes: <number | not set>
+Task budget limit: <amount | not set>
+Review revisions: <revisionCount>/<maxRevisions>
+Required deterministic tools:
+- <tool name>@<version>: <description> (reason: <reason>)
 
 Previous review feedback:
 <feedback, if any>
@@ -175,6 +185,7 @@ DELEGATE:
 - <sub-task title for a direct report>
 - <another sub-task title for a direct report>
 When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, report URL, screenshot URL, or artifact URL instead of local-only file paths.
+If you produced a PR/deploy/export and must wait for CI/CD, deployment, or external approval, complete the run with status="waiting_on_external" and include the external URL/id in the summary/output or work product. MegaCorps records an external wait and releases execution locks. Do not keep working just to poll an outside system.
 If you need ordinary QA on completed work, use status="in_review" and include the completed output.
 If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.
 If no reviewer/manager exists above you, provide the best final answer instead of escalating; MegaCorps accepts top-level guidance requests as done.
@@ -185,6 +196,7 @@ External runner note:
 - Machine runner dispatch claims move the card to `in_progress` and take an execution lock before the runner receives the task payload.
 - Machine runner review claims only run after the card is already in `in_review` or `needs_review`.
 - A runner dispatch `success` moves to `in_review` when the card has a reviewer, otherwise `done`.
+- A runner dispatch `waiting_on_external` releases execution locks and moves the card to `waiting_on_external`; later external events move it to review, rework, done, or blocked.
 - A runner review `success` approves the card to `done`.
 - Agent-session claim, review, and release endpoints use the same lifecycle guard as human/API updates. If the runner created the session with a `cardId`, that signed session can only operate on that card.
 

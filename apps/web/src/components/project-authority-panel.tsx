@@ -304,7 +304,7 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
         </div>
 
         <section className="project-section">
-          <h3>Identity</h3>
+          <h3>Project basics</h3>
           <div className="project-form-grid">
             <label className="field-label">Project name<input className="input" value={projectName} onChange={(event) => setProjectName(event.target.value)} /></label>
             <label className="field-label">Runtime-local path hint<input className="input" value={workspacePathHint} onChange={(event) => setWorkspacePathHint(event.target.value)} placeholder="Optional runtime-local clone/folder hint only" /></label>

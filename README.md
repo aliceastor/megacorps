@@ -7,6 +7,7 @@ Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm work
 - [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md): current progress, Paperclip/Hermes Kanban reference review, implemented features, gap analysis, and next phase plan.
 - [MegaCorps_ARCHITECTURE.md](./MegaCorps_ARCHITECTURE.md): long-form architecture notes and implementation updates.
 - [MegaCorps_PROMPT_INJECTION.md](./MegaCorps_PROMPT_INJECTION.md): Direct Chat and Kanban prompt context format, company/department/project/card goal context, and escalation webhook payloads.
+- [MegaCorps_HIERARCHICAL_TASK_WORKFLOW.md](./MegaCorps_HIERARCHICAL_TASK_WORKFLOW.md): target hierarchical task decomposition, bottom-up review, context package, external events, deterministic tools, and complete roadmap.
 
 ## Run locally
 
@@ -65,10 +66,10 @@ Get-Content scripts/cleanup-redteam-data.sql | docker exec -i megacorps-postgres
 MegaCorps now has two configuration layers:
 
 1. Open `Settings -> Agent runtimes` and create a reusable runtime preset.
-2. Open `Positions` to define reusable company role prompts when an office/title should carry standing instructions.
+2. Open `Positions` to define reusable company authority/role prompts when an office/title should carry standing instructions. Each company has one boss position, defaulting to `CEO`, used for root task ownership.
 3. Open `Agents` to find/sort agents in the management table, then choose a position, runtime preset, or adapter override fields on that agent.
 
-When an agent has a position, Direct Chat and Kanban prompts include `You are <position> in <department> department of firm <company>.` followed by the custom position prompt. Use Positions for reusable office/role authority.
+When an agent has a position, Direct Chat and Kanban prompts include `You are <position> in <department> department of firm <company>.` followed by the custom position prompt. Use Positions for reusable office/role authority, rank, boss authority, and cross-department delegation policy.
 
 Runtime presets can also define `localWorkspaceRoot` and `localScratchRoot`, the local folders used by agents attached to that runtime for repo clones/caches and temporary task files.
 Agent overrides win over runtime presets. When `.env` adapter fallback is enabled, runtime presets win over `.env` defaults.
@@ -114,6 +115,7 @@ Machine runners:
 - Runner-created agent sessions store an Ed25519 public key. Agent-session APIs require a JWT signed by that private key with `sub=<sessionId>` and `aid=<agentId>`. If the session was created with a `cardId`, card claim/review/release calls are restricted to that card.
 - The CLI runner daemon is a scaffold-capable foundation: it heartbeats, claims queued work, prepares Git worktrees from project `repoUrl` / branch policy, writes `.megacorps/task-*.json`, and can complete the run as `needs_review` by default.
 - Dispatch runner claims take a task-run execution lock and move the card to `in_progress`. Review runner claims wait until the card is in `in_review` or `needs_review`; review `success` moves the card to `done`.
+- Runner or webhook completion can now return `waiting_on_external` for PR/CI/deploy/approval waits. MegaCorps releases execution locks, records an external wait, and later `/api/external-events` can wake the card into review, rework, done, or blocked.
 
 Hermes suite operational notes:
 
@@ -125,15 +127,15 @@ Hermes suite operational notes:
 - `Dashboard`: operating overview, stage counts, recent task logs, recent API lifecycle events.
 - `Companies`: pure company CRUD plus company goals.
 - `Departments`: department management, direct agent membership assignment, reporting-line editing, clickable org canvas agent editing, and department goals.
-- `Positions`: reusable company role prompts, assigned-agent visibility, and prompt preview.
+- `Positions`: reusable company authority/role prompts, one company boss position, rank, cross-department delegation, assigned-agent visibility, and prompt preview.
 - `Agents`: sortable/findable agent management table, position assignment, pause/resume/fire, runtime and adapter configuration.
 - `Projects`: unified project authority workbench for project CRUD, repo settings, branch policy, runtime services, work path, and project goals.
 - `Workspace`: company folder manager and authoritative workspace paths for non-coding project files.
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
-- `Kanban`: task UUIDs, stage columns, company dropdown/project/assignee filters, sort by company/date/priority, ticket thread, work products, sub-tasks, logs, run/review/decompose/delete.
+- `Kanban`: task UUIDs, stage columns including `waiting_on_external`, company dropdown/project/assignee filters, sort by company/date/priority, ticket thread, work products, sub-tasks, rollup/context APIs, external waits/events, required deterministic tools, integrations, logs, run/review/decompose/delete.
 - `Direct Chat`: company -> project/no-project -> agent -> session direct messaging with resumable adapter sessions.
 - `Cron`: dispatch heartbeat status, company intervals, job/company/runner-scoped manual runs, daily-report/health-check run records, and run history.
-- `Logs`: outbound prompt snapshots, cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
+- `Logs`: outbound prompt snapshots, prompt/context inspection, cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
 - `Admin`: tabbed global account management, signup switch, invites, roles, account status, and password resets.
 - `Settings`: tabbed runtime presets, company settings, departments, company members, and advanced configuration.
 - `Help`: API Catalog and CLI Commands tabs generated from `/api/help`.
@@ -163,12 +165,13 @@ Hermes suite operational notes:
 - Phase 19: Codex app-server adapter and durable adapter session records for direct chat and task-scoped Codex threads.
 - Phase 20: normalized card lifecycle actions, `card_dependencies` graph, machine runners with hashed API keys, runner heartbeat/claim/complete APIs, Ed25519 agent sessions, and MegaCorps CLI YAML apply/runner daemon scaffold.
 - Phase 21: reusable company positions, agent position assignment, Direct Chat/Kanban position prompt injection, and CLI/API help coverage.
+- Phase 22: hierarchical lifecycle foundation: explicit boss-position authority, card lifecycle metadata, required child policy, context snapshots, rollup/context APIs, external waits/events with `waiting_on_external`, deterministic tool registry, card required tools, parent integrations, and updated API Help/docs.
 
 Reference-informed next phases:
 
-- Phase 22: company template export/import hardening with secret references.
-- Phase 23: runner PR provider integration, streaming progress, sandbox policy, and richer runtime liveness probes.
-- Phase 24: fine-grained service-account roles for non-runner integrations.
+- Phase 23: company template export/import hardening with secret references.
+- Phase 24: runner PR provider integration, streaming progress, sandbox policy, and richer runtime liveness probes.
+- Phase 25: fine-grained service-account roles for non-runner integrations.
 
 ## Paperclip-inspired loop
 
@@ -181,6 +184,7 @@ The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds 
 - enqueue dispatch task-run attempts,
 - enqueue review task-run attempts when a reviewer is configured,
 - let the task-run worker claim queued work up to `TASK_RUN_WORKER_BATCH_SIZE`, move assigned work into `in_progress`, run the configured adapter, create delegated child tasks when an agent returns an explicit `DELEGATE:` plan, and move completed work to `in_review`, `needs_review`, `done`, or `blocked`,
+- move PR/CI/deploy/approval waits to `waiting_on_external` without holding execution locks; external events wake the card into review, rework, done, or blocked,
 - hold review task-runs while their card is still `in_progress`, so long-running dispatches do not block unrelated queued work but reviewers do not judge unfinished output,
 - distinguish quality review (`in_review`) from help/escalation review (`needs_review`). If an assignee cannot complete a task, the required output is attempted methods, blocker/root cause, reviewer questions, and partial output/logs. MegaCorps queues review when a distinct reviewer/manager exists; dispatch-side top-level guidance requests are accepted as `done` with the output preserved,
 - recover expired execution locks; expired `in_progress` work increments `retry_count`, returns to `todo` with backoff, or moves to `blocked` after `max_retries`,
@@ -196,6 +200,10 @@ Cron/debug endpoints:
 - `GET /api/cron/runs`: cron run history.
 - `POST /api/cron/run`: manually run one cron job. `dispatch-heartbeat` can be scoped to a company and runner metadata; `daily-report` and `health-check` record completed manual runs with company/runner details.
 - `POST /api/cards/:id/cancel`: cancel active or queued work without archiving the task history.
+- `GET /api/cards/:id/rollup`: recursive child status, next action, external wait count, ETA, and budget rollup.
+- `GET /api/cards/:id/context`: TaskContextPackage for root mission, parent chain, flow map, main cast, message/log digest, and rollup.
+- `POST /api/cards/:id/external-waits` and `POST /api/external-events`: enter and resolve external waits.
+- `GET/POST/PUT/DELETE /api/tools` and `PUT /api/cards/:id/required-tools`: deterministic tool registry and leaf-card tool requirements.
 
 ## Direct agent chat
 

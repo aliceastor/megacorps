@@ -65,6 +65,13 @@ export const positions = pgTable('positions', {
   name: text('name').notNull(),
   slug: text('slug').notNull(),
   prompt: text('prompt'),
+  description: text('description'),
+  rank: integer('rank').default(100),
+  isCompanyBoss: boolean('is_company_boss').default(false),
+  canDelegateAcrossDepartments: boolean('can_delegate_across_departments').default(false),
+  defaultDepartmentId: uuid('default_department_id').references(() => departments.id),
+  managerPositionId: uuid('manager_position_id'),
+  isActive: boolean('is_active').default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 }, (table) => ({ companySlugUnique: unique().on(table.companyId, table.slug) }));
@@ -169,6 +176,15 @@ export const kanbanCards = pgTable('kanban_cards', {
   reviewerId: uuid('reviewer_id').references(() => agents.id),
   dependencyCardIds: uuid('dependency_card_ids').array().default([]),
   requiresApproval: boolean('requires_approval').default(false),
+  decisionMode: text('decision_mode'),
+  rollupStatus: text('rollup_status'),
+  requiredChildPolicy: text('required_child_policy').default('all_required_accepted'),
+  childRequirementLevel: text('child_requirement_level').default('required'),
+  estimatedWeight: numeric('estimated_weight', { precision: 10, scale: 2 }),
+  estimatedDurationMinutes: integer('estimated_duration_minutes'),
+  taskBudgetLimit: numeric('task_budget_limit', { precision: 10, scale: 4 }),
+  revisionCount: integer('revision_count').default(0),
+  maxRevisions: integer('max_revisions').default(3),
   retryCount: integer('retry_count').default(0),
   maxRetries: integer('max_retries').default(3),
   nextRunAt: timestamp('next_run_at', { withTimezone: true }),
@@ -340,6 +356,111 @@ export const workProducts = pgTable('work_products', {
   pullRequestUrl: text('pull_request_url'),
   metadata: jsonb('metadata').default({}),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+export const cardIntegrations = pgTable('card_integrations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  parentCardId: uuid('parent_card_id').notNull().references(() => kanbanCards.id),
+  integratorAgentId: uuid('integrator_agent_id').references(() => agents.id),
+  sourceChildCardIds: uuid('source_child_card_ids').array().default([]),
+  summary: text('summary').notNull(),
+  acceptedWorkProductIds: uuid('accepted_work_product_ids').array().default([]),
+  droppedWorkProductIds: uuid('dropped_work_product_ids').array().default([]),
+  conflictNotes: text('conflict_notes'),
+  status: text('status').notNull().default('draft'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
+
+export const externalEvents = pgTable('external_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  projectId: uuid('project_id').references(() => projects.id),
+  rootCardId: uuid('root_card_id').references(() => kanbanCards.id),
+  cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
+  provider: text('provider').notNull().default('generic'),
+  eventType: text('event_type').notNull(),
+  externalId: text('external_id'),
+  externalUrl: text('external_url'),
+  status: text('status').notNull(),
+  payloadHash: text('payload_hash'),
+  payloadSummary: text('payload_summary'),
+  payload: jsonb('payload').default({}),
+  receivedAt: timestamp('received_at', { withTimezone: true }).defaultNow(),
+  processedAt: timestamp('processed_at', { withTimezone: true }),
+});
+
+export const externalWaits = pgTable('external_waits', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
+  waitingFor: text('waiting_for').notNull(),
+  provider: text('provider').notNull().default('generic'),
+  externalId: text('external_id'),
+  externalUrl: text('external_url'),
+  timeoutAt: timestamp('timeout_at', { withTimezone: true }),
+  status: text('status').notNull().default('waiting'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+});
+
+export const toolRegistry = pgTable('tool_registry', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  projectId: uuid('project_id').references(() => projects.id),
+  name: text('name').notNull(),
+  version: text('version').notNull().default('1.0.0'),
+  description: text('description'),
+  inputSchema: jsonb('input_schema').default({}),
+  outputSchema: jsonb('output_schema').default({}),
+  ownerAgentId: uuid('owner_agent_id').references(() => agents.id),
+  ownerUserId: uuid('owner_user_id').references(() => users.id),
+  isRequiredEligible: boolean('is_required_eligible').default(false),
+  isActive: boolean('is_active').default(true),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+}, (table) => ({ companyToolVersionUnique: unique().on(table.companyId, table.name, table.version) }));
+
+export const cardRequiredTools = pgTable('card_required_tools', {
+  cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
+  toolId: uuid('tool_id').notNull().references(() => toolRegistry.id),
+  reason: text('reason'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.cardId, table.toolId] }),
+}));
+
+export const taskContextSnapshots = pgTable('task_context_snapshots', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  rootCardId: uuid('root_card_id').references(() => kanbanCards.id),
+  currentCardId: uuid('current_card_id').notNull().references(() => kanbanCards.id),
+  taskRunId: uuid('task_run_id').references(() => taskRuns.id),
+  agentId: uuid('agent_id').references(() => agents.id),
+  mode: text('mode').notNull().default('manual'),
+  contextHash: text('context_hash').notNull(),
+  tokenEstimate: integer('token_estimate').default(0),
+  includedCardIds: uuid('included_card_ids').array().default([]),
+  includedCommentIds: uuid('included_comment_ids').array().default([]),
+  includedLogIds: uuid('included_log_ids').array().default([]),
+  redactionSummary: text('redaction_summary'),
+  summaryJson: jsonb('summary_json').default({}),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+export const taskContextRequests = pgTable('task_context_requests', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  rootCardId: uuid('root_card_id').references(() => kanbanCards.id),
+  currentCardId: uuid('current_card_id').notNull().references(() => kanbanCards.id),
+  agentId: uuid('agent_id').references(() => agents.id),
+  requestedCardIds: uuid('requested_card_ids').array().default([]),
+  requestedLogKinds: text('requested_log_kinds').array().default([]),
+  reason: text('reason').notNull(),
+  status: text('status').notNull().default('open'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  resolvedAt: timestamp('resolved_at', { withTimezone: true }),
 });
 
 export const chatSessions = pgTable('chat_sessions', {

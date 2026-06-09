@@ -7,12 +7,13 @@ import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, a
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
-import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
+import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { buildExecutionAgent, cascadeParentStatus, decomposeCard, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
 import { registerChatRoutes } from './chat.ts';
 import { registerCronRoutes } from './cron-routes.ts';
+import { registerLifecycleRoutes } from './lifecycle-routes.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
@@ -260,6 +261,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await registerChatRoutes(app);
   await registerCronRoutes(app);
   await registerRunnerRoutes(app);
+  await registerLifecycleRoutes(app);
   app.get('/api/help', async (request, reply) => {
     const query = request.query as { format?: string };
     if (query.format === 'markdown' || query.format === 'md') {
@@ -717,14 +719,29 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/companies', async (request, reply) => {
     const user = await requireRole(request, reply, 'operator'); if (!user) return reply;
     const input = createCompanySchema.parse(request.body);
-    const [company] = await db.insert(companies).values({
-      name: input.name,
-      slug: input.slug,
-      mission: input.mission ?? null,
-      dispatchIntervalSeconds: input.dispatchIntervalSeconds,
-      autoDispatchEnabled: input.autoDispatchEnabled,
-    }).returning();
-    if (company) await db.insert(companyMemberships).values({ companyId: company.id, userId: user.id, role: 'admin', status: 'active' }).onConflictDoNothing();
+    const company = await db.transaction(async (tx) => {
+      const [created] = await tx.insert(companies).values({
+        name: input.name,
+        slug: input.slug,
+        mission: input.mission ?? null,
+        dispatchIntervalSeconds: input.dispatchIntervalSeconds,
+        autoDispatchEnabled: input.autoDispatchEnabled,
+      }).returning();
+      if (!created) return null;
+      await tx.insert(companyMemberships).values({ companyId: created.id, userId: user.id, role: 'admin', status: 'active' }).onConflictDoNothing();
+      await tx.insert(positions).values({
+        companyId: created.id,
+        name: 'CEO',
+        slug: 'ceo',
+        prompt: 'Own final company-level task confirmation, decomposition, escalation, and integration.',
+        description: 'Default company boss position.',
+        rank: 0,
+        isCompanyBoss: true,
+        canDelegateAcrossDepartments: true,
+      }).onConflictDoNothing();
+      await tx.insert(activityLog).values({ companyId: created.id, actorType: 'user', actorId: user.id, userId: user.id, action: 'company.created', entityType: 'company', entityId: created.id, details: { name: created.name } });
+      return created;
+    });
     return reply.code(201).send(company);
   });
   app.put('/api/companies/:id', async (request, reply) => {
@@ -904,7 +921,31 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/positions', async (request, reply) => {
     const input = createPositionSchema.parse(request.body);
     const user = await requireCompanyRole(request, reply, input.companyId, 'operator'); if (!user) return reply;
-    const [position] = await db.insert(positions).values({ ...input, prompt: optionalText(input.prompt) ?? null }).returning();
+    if (input.defaultDepartmentId) {
+      try { await ensureCompanyReferences(input.companyId, { departmentId: input.defaultDepartmentId }); }
+      catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
+    }
+    if (input.managerPositionId) {
+      const [manager] = await db.select({ id: positions.id }).from(positions).where(and(eq(positions.id, input.managerPositionId), eq(positions.companyId, input.companyId))).limit(1);
+      if (!manager) return reply.code(400).send({ error: 'manager_position_company_mismatch' });
+    }
+    if (input.isCompanyBoss && input.isActive) {
+      const [existingBoss] = await db.select({ id: positions.id }).from(positions).where(and(eq(positions.companyId, input.companyId), eq(positions.isCompanyBoss, true), eq(positions.isActive, true))).limit(1);
+      if (existingBoss) return reply.code(409).send({ error: 'company_boss_position_exists', existingPositionId: existingBoss.id });
+    }
+    const [position] = await db.insert(positions).values({
+      companyId: input.companyId,
+      name: input.name,
+      slug: input.slug,
+      prompt: optionalText(input.prompt) ?? null,
+      description: optionalText(input.description) ?? null,
+      rank: input.rank,
+      isCompanyBoss: input.isCompanyBoss,
+      canDelegateAcrossDepartments: input.canDelegateAcrossDepartments,
+      defaultDepartmentId: input.defaultDepartmentId ?? null,
+      managerPositionId: input.isCompanyBoss ? null : input.managerPositionId ?? null,
+      isActive: input.isActive,
+    }).returning();
     if (position) await db.insert(activityLog).values({ companyId: position.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'position.created', entityType: 'position', entityId: position.id, details: { name: position.name } });
     return reply.code(201).send(position);
   });
@@ -915,10 +956,38 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!existing) return reply.code(404).send({ error: 'position_not_found' });
     if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'position_company_immutable' });
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    const nextDefaultDepartmentId = input.defaultDepartmentId === undefined ? existing.defaultDepartmentId : input.defaultDepartmentId ?? null;
+    const nextManagerPositionId = input.managerPositionId === undefined ? existing.managerPositionId : input.managerPositionId ?? null;
+    const nextIsCompanyBoss = input.isCompanyBoss === undefined ? existing.isCompanyBoss : input.isCompanyBoss;
+    const nextIsActive = input.isActive === undefined ? existing.isActive : input.isActive;
+    if (nextDefaultDepartmentId) {
+      try { await ensureCompanyReferences(existing.companyId, { departmentId: nextDefaultDepartmentId }); }
+      catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
+    }
+    if (nextManagerPositionId) {
+      if (nextManagerPositionId === id) return reply.code(409).send({ error: 'position_cannot_manage_itself' });
+      const [manager] = await db.select({ id: positions.id }).from(positions).where(and(eq(positions.id, nextManagerPositionId), eq(positions.companyId, existing.companyId))).limit(1);
+      if (!manager) return reply.code(400).send({ error: 'manager_position_company_mismatch' });
+    }
+    if (nextIsCompanyBoss && nextIsActive) {
+      const [existingBoss] = await db.select({ id: positions.id }).from(positions).where(and(eq(positions.companyId, existing.companyId), eq(positions.isCompanyBoss, true), eq(positions.isActive, true), ne(positions.id, id))).limit(1);
+      if (existingBoss) return reply.code(409).send({ error: 'company_boss_position_exists', existingPositionId: existingBoss.id });
+    }
+    if (existing.isCompanyBoss && existing.isActive && (!nextIsCompanyBoss || !nextIsActive)) {
+      const [replacementBoss] = await db.select({ id: positions.id }).from(positions).where(and(eq(positions.companyId, existing.companyId), eq(positions.isCompanyBoss, true), eq(positions.isActive, true), ne(positions.id, id))).limit(1);
+      if (!replacementBoss) return reply.code(409).send({ error: 'company_boss_position_required', message: 'Assign another active boss position before disabling this one.' });
+    }
     const [position] = await db.update(positions).set({
       name: input.name,
       slug: input.slug,
       prompt: input.prompt === undefined ? undefined : optionalText(input.prompt) ?? null,
+      description: input.description === undefined ? undefined : optionalText(input.description) ?? null,
+      rank: input.rank,
+      isCompanyBoss: input.isCompanyBoss,
+      canDelegateAcrossDepartments: input.canDelegateAcrossDepartments,
+      defaultDepartmentId: input.defaultDepartmentId === undefined ? undefined : input.defaultDepartmentId ?? null,
+      managerPositionId: nextIsCompanyBoss ? null : input.managerPositionId === undefined ? undefined : input.managerPositionId ?? null,
+      isActive: input.isActive,
       updatedAt: new Date(),
     }).where(eq(positions.id, id)).returning();
     if (!position) return reply.code(404).send({ error: 'position_not_found' });
@@ -930,6 +999,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [position] = await db.select().from(positions).where(eq(positions.id, id)).limit(1);
     if (!position) return reply.code(404).send({ error: 'position_not_found' });
     const user = await requireCompanyRole(request, reply, position.companyId, 'operator'); if (!user) return reply;
+    if (position.isCompanyBoss && position.isActive) return reply.code(409).send({ error: 'company_boss_position_required', message: 'Assign another boss position before deleting this one.' });
     await db.update(agents).set({ positionId: null }).where(eq(agents.positionId, id));
     await db.delete(positions).where(eq(positions.id, id));
     await db.insert(activityLog).values({ companyId: position.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'position.deleted', entityType: 'position', entityId: id, details: { name: position.name } });
@@ -988,6 +1058,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       parentCardId: input.parentCardId ?? null,
       dependencyCardIds: input.dependencyCardIds,
       requiresApproval: input.requiresApproval,
+      decisionMode: input.decisionMode ?? null,
+      rollupStatus: input.rollupStatus ?? null,
+      requiredChildPolicy: input.requiredChildPolicy,
+      childRequirementLevel: input.childRequirementLevel,
+      estimatedWeight: input.estimatedWeight === undefined || input.estimatedWeight === null ? null : input.estimatedWeight.toString(),
+      estimatedDurationMinutes: input.estimatedDurationMinutes ?? null,
+      taskBudgetLimit: input.taskBudgetLimit === undefined || input.taskBudgetLimit === null ? null : input.taskBudgetLimit.toString(),
+      revisionCount: input.revisionCount,
+      maxRevisions: input.maxRevisions,
       maxRetries: input.maxRetries,
       createdBy: user.id,
     }).returning();
@@ -1073,6 +1152,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       parentCardId: nextParentCardId,
       dependencyCardIds: nextDependencyCardIds,
       requiresApproval: input.requiresApproval,
+      decisionMode: input.decisionMode === undefined ? undefined : input.decisionMode ?? null,
+      rollupStatus: input.rollupStatus === undefined ? undefined : input.rollupStatus ?? null,
+      requiredChildPolicy: input.requiredChildPolicy,
+      childRequirementLevel: input.childRequirementLevel,
+      estimatedWeight: input.estimatedWeight === undefined ? undefined : input.estimatedWeight === null ? null : input.estimatedWeight.toString(),
+      estimatedDurationMinutes: input.estimatedDurationMinutes === undefined ? undefined : input.estimatedDurationMinutes ?? null,
+      taskBudgetLimit: input.taskBudgetLimit === undefined ? undefined : input.taskBudgetLimit === null ? null : input.taskBudgetLimit.toString(),
+      revisionCount: input.revisionCount,
+      maxRevisions: input.maxRevisions,
       maxRetries: input.maxRetries,
       completedAt: input.columnStatus === 'done' ? new Date() : input.columnStatus ? null : undefined,
       updatedAt: new Date(),
@@ -1806,6 +1894,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       activeHeartbeatRunId: completesRun ? null : undefined,
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, body.cardId));
+    let externalWaitId: string | null = null;
+    if (nextStatus === 'waiting_on_external') {
+      const externalProduct = body.workProducts.find((product) => product.pullRequestUrl || product.url || product.commitSha || product.branch);
+      const [wait] = await db.insert(externalWaits).values({
+        companyId: card.companyId,
+        cardId: card.id,
+        waitingFor: body.summary ?? externalProduct?.title ?? 'external completion',
+        provider: externalProduct?.repoProvider ?? (externalProduct?.pullRequestUrl ? 'git' : 'external'),
+        externalId: externalProduct?.commitSha ?? externalProduct?.branch ?? null,
+        externalUrl: externalProduct?.pullRequestUrl ?? externalProduct?.url ?? null,
+        status: 'waiting',
+      }).returning();
+      externalWaitId = wait?.id ?? null;
+    }
     if (nextStatus !== card.columnStatus) await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by webhook` });
     await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: escalation ? 'escalation' : 'webhook', status: nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : nextStatus === 'needs_review' ? 'queued' : 'success', message: escalation ? (nextStatus === 'needs_review' ? 'Webhook requested reviewer guidance; help review queued.' : 'Webhook requested guidance but no reviewer is available; output accepted as final and card marked done.') : body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
     const [webhookComment] = await db.insert(cardComments).values({
@@ -1854,7 +1956,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await db.update(taskRuns).set({ status: runStatus, completedAt: new Date(), lockedBy: null, lockedAt: null, error, output: executionLog, costUsd: body.costUsd?.toString(), updatedAt: new Date() }).where(eq(taskRuns.heartbeatRunId, heartbeatRunId));
       }
     }
-    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: `webhook.task_${nextStatus}`, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId, requestedStatus, escalation, reviewerId: escalationReviewerId, topLevelGuidanceAccepted } });
+    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: `webhook.task_${nextStatus}`, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId, requestedStatus, escalation, reviewerId: escalationReviewerId, topLevelGuidanceAccepted, externalWaitId } });
     if (nextStatus === 'needs_review') await enqueueTaskRun(card.id, 'review', 'queue');
     if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
     return { ok: true, cardId: body.cardId, taskRunId, requestedStatus, newStatus: nextStatus, reviewerId: escalationReviewerId };

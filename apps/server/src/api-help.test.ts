@@ -52,9 +52,19 @@ const registeredRoutes = [
   ['DELETE', '/api/cards/:id'],
   ['GET', '/api/cards/:id/logs'],
   ['GET', '/api/cards/:id/actions'],
+  ['GET', '/api/cards/:id/rollup'],
+  ['GET', '/api/cards/:id/context'],
+  ['GET', '/api/cards/:id/context-snapshots'],
+  ['POST', '/api/cards/:id/context-snapshots'],
   ['GET', '/api/cards/:id/comments'],
   ['GET', '/api/cards/:id/work-products'],
   ['POST', '/api/cards/:id/work-products'],
+  ['GET', '/api/cards/:id/external-waits'],
+  ['POST', '/api/cards/:id/external-waits'],
+  ['GET', '/api/cards/:id/required-tools'],
+  ['PUT', '/api/cards/:id/required-tools'],
+  ['GET', '/api/cards/:id/integrations'],
+  ['POST', '/api/cards/:id/integrations'],
   ['POST', '/api/cards/:id/comments'],
   ['POST', '/api/cards/:id/run'],
   ['POST', '/api/cards/:id/review'],
@@ -71,6 +81,10 @@ const registeredRoutes = [
   ['POST', '/api/agent-runtimes'],
   ['PUT', '/api/agent-runtimes/:id'],
   ['DELETE', '/api/agent-runtimes/:id'],
+  ['GET', '/api/tools'],
+  ['POST', '/api/tools'],
+  ['PUT', '/api/tools/:id'],
+  ['DELETE', '/api/tools/:id'],
   ['POST', '/api/agents/:id/test-connection'],
   ['GET', '/api/projects'],
   ['POST', '/api/projects'],
@@ -83,6 +97,8 @@ const registeredRoutes = [
   ['PUT', '/api/knowledge-docs/:id'],
   ['DELETE', '/api/knowledge-docs/:id'],
   ['POST', '/api/webhook/task-complete'],
+  ['GET', '/api/external-events'],
+  ['POST', '/api/external-events'],
   ['GET', '/api/machine-runners'],
   ['POST', '/api/machine-runners'],
   ['PUT', '/api/machine-runners/:id'],
@@ -111,11 +127,18 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.equal(typeof catalog.rateLimits.enforced, 'boolean');
   assert.match(catalog.rateLimits.summary, /rate limiting/i);
   assert.ok(catalog.adapters.includes('hermes-ssh'));
+  assert.ok(catalog.kanban.stages.includes('waiting_on_external'));
   assert.match(catalog.architecture.model, /multi-agent control plane/i);
+  assert.match(catalog.architecture.model, /deterministic tools/i);
   assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Projects' && surface.purpose.includes('Project Authority')));
   assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Positions' && surface.primaryApi.includes('/api/positions')));
+  assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'External Events' && surface.primaryApi.includes('/api/external-events')));
+  assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Tools' && surface.primaryApi.includes('/api/tools')));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/departments' && endpoint.group === 'Departments'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/positions' && endpoint.group === 'Positions'));
+  assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/cards/:id/context' && endpoint.group === 'Kanban Lifecycle'));
+  assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/cards/:id/external-waits' && endpoint.group === 'External Events'));
+  assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/tools' && endpoint.group === 'Tools'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/auth/bootstrap'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/runner/task-runs/claim' && endpoint.auth === 'runner'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/agent/cards/:id/claim' && endpoint.auth === 'agent-session'));
@@ -147,4 +170,7 @@ test('api help markdown exposes response schema and rate limit sections', () => 
   assert.match(markdown, /megacorps runner daemon/);
   assert.match(markdown, /Response schema:/);
   assert.match(markdown, /hermes-ssh/);
+  assert.match(markdown, /waiting_on_external/);
+  assert.match(markdown, /TaskContextPackage/);
+  assert.match(markdown, /deterministic tool/i);
 });
