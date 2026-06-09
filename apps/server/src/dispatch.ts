@@ -82,6 +82,34 @@ function assigneeNeedsReview(output: string | null | undefined): boolean {
   return /\b(needs[_ -]?review|needs[_ -]?guidance|needs[_ -]?reviewer|escalat(?:e|ed|ion)|cannot[_ -]?complete|unable[_ -]?to[_ -]?complete|stuck|blocked:)\b/i.test(text);
 }
 
+function delegationItems(output: string | null | undefined): string[] {
+  const lines = (output ?? '').split(/\r?\n/);
+  const start = lines.findIndex((line) => /^\s*(?:#{1,4}\s*)?(?:DELEGATE|DELEGATION|SUB-?TASKS?|TASKS FOR DIRECT REPORTS)\s*:?\s*$/i.test(line));
+  if (start < 0) return [];
+  const items: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (items.length > 0 && /^\s*(?:#{1,4}\s*)?(?:STATUS|DONE|FINAL|OUTPUT|REVIEW|NOTES?|RECOMMENDATION)\s*:?\s*$/i.test(line)) break;
+    const match = line.match(/^\s*(?:[-*]|\d+[.)])\s+(.+?)\s*$/);
+    if (!match) continue;
+    const title = match[1]?.replace(/\s+/g, ' ').trim();
+    if (title && !items.includes(title)) items.push(title.slice(0, 180));
+    if (items.length >= 8) break;
+  }
+  return items;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function dispatchCompletionDecision(output: string | null | undefined, effectiveReviewerId: string | null) {
+  const needsHelpReview = assigneeNeedsReview(output);
+  const nextStatus = needsHelpReview
+    ? effectiveReviewerId ? 'needs_review' : 'done'
+    : effectiveReviewerId ? 'in_review' : 'done';
+  return { needsHelpReview, nextStatus, topLevelGuidanceAccepted: needsHelpReview && !effectiveReviewerId };
+}
+
 type ReviewDecision = 'approved' | 'revision_requested' | 'escalate';
 
 function reviewDecision(output: string, mode: 'quality' | 'help'): ReviewDecision {
@@ -813,11 +841,46 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       throw new Error(result.output || 'adapter_reported_failure');
     }
+    const delegatedRows = await createDelegatedSubtasks(card, agent, delegationItems(result.output));
+    if (delegatedRows.length > 0) {
+      const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+      await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
+      const [updated] = await db.update(kanbanCards).set({
+        columnStatus: 'in_progress',
+        executionLog: result.output,
+        sessionId: result.sessionId,
+        costUsd: result.costUsd.toString(),
+        retryCount: 0,
+        nextRunAt: null,
+        completedAt: null,
+        lastError: null,
+        executionLockId: null,
+        executionLockedByAgentId: null,
+        executionLockedAt: null,
+        executionLockExpiresAt: null,
+        activeHeartbeatRunId: null,
+        updatedAt: new Date(),
+      }).where(eq(kanbanCards.id, card.id)).returning();
+      await releaseExecutionLock(card.id, run.id, 'success', null, result.costUsd, result.durationSeconds);
+      await addTaskLog({
+        cardId: card.id,
+        agentId: agent.id,
+        type: 'decomposition',
+        status: 'success',
+        message: `Delegation plan accepted; ${delegatedRows.length} sub-task(s) queued for direct reports.`,
+        output: result.output,
+        costUsd: result.costUsd,
+        durationSeconds: result.durationSeconds,
+      });
+      await addCardMessage({ cardId: card.id, agentId: agent.id, action: 'agent_delegated', body: result.output });
+      await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: 'dispatch.delegated', entityType: 'card', entityId: card.id, details: { runId: run.id, childCount: delegatedRows.length, budgetPaused } });
+      await completeTaskRun(options.taskRunId, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      for (const child of delegatedRows) await enqueueTaskRun(child.id, 'dispatch', 'queue');
+      if (!updated) throw new Error('card_update_failed');
+      return updated;
+    }
     const effectiveReviewerId = resolveEffectiveReviewerId(card, agent);
-    const needsHelpReview = assigneeNeedsReview(result.output);
-    const nextStatus = needsHelpReview
-      ? effectiveReviewerId ? 'needs_review' : 'blocked'
-      : effectiveReviewerId ? 'in_review' : 'done';
+    const { needsHelpReview, nextStatus, topLevelGuidanceAccepted } = dispatchCompletionDecision(result.output, effectiveReviewerId);
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
     const [updated] = await db.update(kanbanCards).set({
@@ -826,10 +889,10 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       sessionId: result.sessionId,
       costUsd: result.costUsd.toString(),
       reviewerId: effectiveReviewerId,
-      retryCount: nextStatus === 'blocked' ? card.retryCount : 0,
+      retryCount: 0,
       nextRunAt: null,
       completedAt: nextStatus === 'done' ? new Date() : null,
-      lastError: nextStatus === 'blocked' ? 'Assignee requested reviewer guidance, but no reviewer or manager is available.' : null,
+      lastError: null,
       executionLockId: null,
       executionLockedByAgentId: null,
       executionLockedAt: null,
@@ -843,11 +906,11 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       cardId: card.id,
       agentId: agent.id,
       type: needsHelpReview ? 'escalation' : 'dispatch',
-      status: nextStatus === 'blocked' ? 'failed' : 'success',
+      status: 'success',
       message: needsHelpReview
         ? nextStatus === 'needs_review'
           ? 'Assignee requested reviewer guidance; help review queued.'
-          : 'Assignee requested guidance but no reviewer or manager is available; card blocked.'
+          : 'Assignee requested guidance but has no reviewer or manager; output accepted as final and card marked done.'
         : nextStatus === 'in_review'
           ? 'Dispatch completed; card moved to quality review.'
           : 'Dispatch completed; card marked done.',
@@ -855,9 +918,9 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
     });
-    await addCardMessage({ cardId: card.id, agentId: agent.id, action: needsHelpReview ? (nextStatus === 'blocked' ? 'agent_blocked' : 'agent_escalated') : 'agent_update', body: result.output });
-    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: needsHelpReview ? (nextStatus === 'blocked' ? 'dispatch.blocked' : 'dispatch.needs_review') : 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, nextStatus, costUsd: result.costUsd, budgetPaused, reviewerId: effectiveReviewerId, escalation: needsHelpReview } });
-    await completeTaskRun(options.taskRunId, { status: nextStatus === 'blocked' ? 'failed' : 'success', error: nextStatus === 'blocked' ? 'no_reviewer_available' : null, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+    await addCardMessage({ cardId: card.id, agentId: agent.id, action: needsHelpReview && nextStatus === 'needs_review' ? 'agent_escalated' : 'agent_update', body: result.output });
+    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: needsHelpReview && nextStatus === 'needs_review' ? 'dispatch.needs_review' : 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, nextStatus, costUsd: result.costUsd, budgetPaused, reviewerId: effectiveReviewerId, escalation: needsHelpReview, topLevelGuidanceAccepted } });
+    await completeTaskRun(options.taskRunId, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
     if (nextStatus === 'in_review') await createPendingApproval(updated, agent.id, card.reviewerId === effectiveReviewerId ? 'Reviewer approval required' : 'Reports-to review required');
     if (nextStatus === 'needs_review') {
@@ -1093,6 +1156,43 @@ export async function decomposeCard(cardId: string): Promise<CardRow[]> {
   })).returning();
   await addTaskLog({ cardId: parent.id, type: 'decomposition', status: 'success', message: directReports.length ? `Created ${rows.length} sub-task(s) and delegated them to direct reports.` : `Created ${rows.length} sub-task(s).` });
   await addActivity({ companyId: parent.companyId, actorType: 'system', actorId: 'decomposition', agentId: parent.assigneeId, action: 'card.decomposed', entityType: 'card', entityId: parent.id, details: { childCount: rows.length, delegatedToReports: directReports.length > 0 } });
+  return rows;
+}
+
+async function createDelegatedSubtasks(parent: CardRow, leader: AgentRow, titles: string[]): Promise<CardRow[]> {
+  if (titles.length === 0) return [];
+  const directReports = await db.select().from(agents).where(and(eq(agents.bossId, leader.id), eq(agents.isActive, true), isNull(agents.deletedAt)));
+  if (directReports.length === 0) return [];
+  const rows = await db.insert(kanbanCards).values(titles.map((rawTitle, index) => {
+    const explicitReport = directReports.find((report) => {
+      const prefix = `${report.name}:`.toLowerCase();
+      const slugPrefix = `${report.slug}:`.toLowerCase();
+      const lower = rawTitle.toLowerCase();
+      return lower.startsWith(prefix) || lower.startsWith(slugPrefix);
+    });
+    const delegate = explicitReport ?? directReports[index % directReports.length]!;
+    const reportPrefixes = directReports.flatMap((report) => [report.name, report.slug]).map(escapeRegex).join('|');
+    const title = rawTitle.replace(new RegExp(`^(${reportPrefixes}):\\s*`, 'i'), '').trim() || rawTitle;
+    return {
+      companyId: parent.companyId,
+      departmentId: delegate?.departmentId ?? parent.departmentId,
+      projectId: parent.projectId,
+      goalId: parent.goalId,
+      parentCardId: parent.id,
+      title,
+      body: `Delegated by ${leader.name} from ${parent.title}\n\n${title}`,
+      columnStatus: 'todo',
+      priority: parent.priority,
+      tags: [...(parent.tags ?? []), 'delegated'],
+      assigneeId: delegate.id,
+      reviewerId: leader.id,
+      requiresApproval: true,
+      createdBy: parent.createdBy,
+      maxRetries: parent.maxRetries,
+    };
+  })).returning();
+  await addTaskLog({ cardId: parent.id, agentId: leader.id, type: 'decomposition', status: 'success', message: `Created ${rows.length} delegated sub-task(s) for direct reports.` });
+  await addActivity({ companyId: parent.companyId, actorType: 'agent', actorId: leader.id, agentId: leader.id, action: 'card.delegated_to_reports', entityType: 'card', entityId: parent.id, details: { childCount: rows.length, delegatedToReports: true } });
   return rows;
 }
 
@@ -1371,6 +1471,11 @@ export function startDispatchLoop(app: FastifyInstance): void {
   void runDispatchCronTick(app, 'startup');
 }
 
+export const dispatchInternals = {
+  delegationItems,
+  dispatchCompletionDecision,
+};
+
 function clipText(value: string | null | undefined, maxChars: number): string {
   const text = value?.trim() ?? '';
   if (text.length <= maxChars) return text;
@@ -1606,11 +1711,15 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
     clipText(card.body, TASK_BODY_CHAR_LIMIT),
     'Completion protocol:',
     [
-      `If you can complete the task, post the final answer back through the MegaCorps webhook with status="done".`,
+      `If the task is simple enough for you to finish directly, complete it yourself and post the final answer back through the MegaCorps webhook with status="done".`,
+      `If you have direct reports and the task should move through the company hierarchy, do not execute every part yourself. Return a delegation plan with this exact heading and bullet format so MegaCorps can create child cards:`,
+      `DELEGATE:`,
+      `- <sub-task title for a direct report>`,
+      `- <another sub-task title for a direct report>`,
       `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, report URL, screenshot URL, or artifact URL instead of local-only file paths.`,
       `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
       `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
-      `If no reviewer/manager exists, the server will move top-level escalations to blocked for human intervention.`,
+      `If no reviewer/manager exists above you, provide the best final answer instead of escalating; MegaCorps will accept top-level guidance requests as done.`,
     ].join('\n'),
   ].filter(Boolean).join('\n\n');
 }

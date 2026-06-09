@@ -169,11 +169,15 @@ Task body:
 <card body>
 
 Completion protocol:
-If you can complete the task, post the final answer back through the MegaCorps webhook with status="done".
+If the task is simple enough for you to finish directly, complete it yourself and post the final answer back through the MegaCorps webhook with status="done".
+If you have direct reports and the task should move through the company hierarchy, do not execute every part yourself. Return a delegation plan with this exact heading and bullet format so MegaCorps can create child cards:
+DELEGATE:
+- <sub-task title for a direct report>
+- <another sub-task title for a direct report>
 When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, report URL, screenshot URL, or artifact URL instead of local-only file paths.
 If you need ordinary QA on completed work, use status="in_review" and include the completed output.
 If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.
-If no reviewer/manager exists, the server will move top-level escalations to blocked for human intervention.
+If no reviewer/manager exists above you, provide the best final answer instead of escalating; MegaCorps accepts top-level guidance requests as done.
 ```
 
 External runner note:
@@ -207,7 +211,7 @@ Decide one of:
 - ESCALATE if your manager must decide.
 ```
 
-If the reviewer has no manager and cannot resolve the task, MegaCorps moves the card to `blocked`.
+If the reviewer has no manager and cannot resolve the task, MegaCorps moves review escalations to `blocked`; dispatch-side top-level guidance requests are accepted as `done` with the agent output preserved.
 
 ## Direct Chat Prompt
 
@@ -261,7 +265,7 @@ When an assignee cannot solve a task, the preferred callback is:
 }
 ```
 
-`status=blocked` with explicit needs-guidance/escalation wording is also promoted to `needs_review` when an independent reviewer or manager exists. If none exists, the card becomes `blocked`.
+`status=blocked` with explicit needs-guidance/escalation wording is also promoted to `needs_review` when an independent reviewer or manager exists. If none exists, dispatch/webhook output is accepted as `done` and preserved on the card.
 
 ## Work Product Payload
 

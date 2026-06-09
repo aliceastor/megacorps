@@ -1778,7 +1778,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const actorAgentId = webhookTaskRun?.agentId ?? card.assigneeId;
     const escalation = isGuidanceEscalation(requestedStatus, executionLog);
     const escalationReviewerId = escalation ? await resolveIndependentReviewerForCard(card, actorAgentId) : null;
-    const nextStatus = escalation ? escalationReviewerId ? 'needs_review' : 'blocked' : requestedStatus;
+    const topLevelGuidanceAccepted = escalation && !escalationReviewerId;
+    const nextStatus = escalation ? escalationReviewerId ? 'needs_review' : 'done' : requestedStatus;
     const completesRun = nextStatus !== 'in_progress';
     if (taskRunId && completesRun) {
       const [existingWebhook] = await db.select({ id: activityLog.id }).from(activityLog).where(and(
@@ -1806,7 +1807,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, body.cardId));
     if (nextStatus !== card.columnStatus) await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by webhook` });
-    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: escalation ? 'escalation' : 'webhook', status: nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : nextStatus === 'needs_review' ? 'queued' : 'success', message: escalation ? (nextStatus === 'needs_review' ? 'Webhook requested reviewer guidance; help review queued.' : 'Webhook requested guidance but no reviewer is available; card blocked.') : body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
+    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: escalation ? 'escalation' : 'webhook', status: nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : nextStatus === 'needs_review' ? 'queued' : 'success', message: escalation ? (nextStatus === 'needs_review' ? 'Webhook requested reviewer guidance; help review queued.' : 'Webhook requested guidance but no reviewer is available; output accepted as final and card marked done.') : body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
     const [webhookComment] = await db.insert(cardComments).values({
       cardId: body.cardId,
       agentId: card.assigneeId,
@@ -1853,7 +1854,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await db.update(taskRuns).set({ status: runStatus, completedAt: new Date(), lockedBy: null, lockedAt: null, error, output: executionLog, costUsd: body.costUsd?.toString(), updatedAt: new Date() }).where(eq(taskRuns.heartbeatRunId, heartbeatRunId));
       }
     }
-    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: `webhook.task_${nextStatus}`, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId, requestedStatus, escalation, reviewerId: escalationReviewerId } });
+    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: `webhook.task_${nextStatus}`, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId, requestedStatus, escalation, reviewerId: escalationReviewerId, topLevelGuidanceAccepted } });
     if (nextStatus === 'needs_review') await enqueueTaskRun(card.id, 'review', 'queue');
     if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
     return { ok: true, cardId: body.cardId, taskRunId, requestedStatus, newStatus: nextStatus, reviewerId: escalationReviewerId };

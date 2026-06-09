@@ -375,6 +375,7 @@ Data sources:
 - Actions: `GET /api/cards/:id/actions`
 - API event related lookup: `GET /api/system-logs`
 - Work products: `GET/POST /api/cards/:id/work-products`
+- Agent delegation: dispatch output with a strict `DELEGATE:` bullet list creates child cards for the assignee's direct reports.
 
 Top toolbar elements:
 - Search input
