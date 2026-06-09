@@ -210,6 +210,26 @@ select option {
   background: var(--primary);
 }
 
+.nav-link.sub-nav-link {
+  width: calc(100% - 22px);
+  min-height: 38px;
+  margin-left: 22px;
+  padding-left: 10px;
+  font-size: 13px;
+}
+
+.nav-link.sub-nav-link::after {
+  content: "";
+  position: absolute;
+  left: -12px;
+  top: -6px;
+  bottom: 50%;
+  width: 12px;
+  border-left: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
+  border-bottom-left-radius: 6px;
+}
+
 .sidebar-status {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -239,6 +259,17 @@ select option {
   justify-content: center;
   padding-left: 9px;
   padding-right: 9px;
+}
+
+.sidebar-compact .nav-link.sub-nav-link {
+  width: 100%;
+  min-height: 44px;
+  margin-left: 0;
+  font-size: inherit;
+}
+
+.sidebar-compact .nav-link.sub-nav-link::after {
+  display: none;
 }
 
 .page-head {
@@ -1693,6 +1724,10 @@ button.card {
   justify-self: start;
 }
 
+.department-create-modal {
+  width: min(680px, calc(100vw - 32px));
+}
+
 .department-command .form-grid {
   grid-template-columns: minmax(220px, 0.8fr) repeat(2, minmax(180px, 1fr));
 }
@@ -1864,6 +1899,177 @@ button.agent-node-card {
   min-height: 0;
 }
 
+.company-o-chart-page {
+  min-width: 0;
+}
+
+.o-chart-company-select {
+  min-width: min(300px, 100%);
+}
+
+.company-o-stage {
+  min-height: min(620px, calc(100dvh - 260px));
+  padding: 18px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 18px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 0, color-mix(in srgb, var(--primary) 10%, transparent), transparent 28rem),
+    color-mix(in srgb, var(--card) 94%, #000 6%);
+}
+
+.company-o-stage-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+  color: var(--foreground);
+}
+
+.company-o-stage-head h2 {
+  margin: 0 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.company-o-stage-head span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.company-o-scroll {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 28px 20px 34px;
+}
+
+.company-o-node {
+  position: relative;
+  min-width: 250px;
+  display: grid;
+  justify-items: center;
+}
+
+.company-o-card {
+  position: relative;
+  z-index: 2;
+  width: 250px;
+  min-height: 72px;
+  border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+  border-radius: 999px;
+  padding: 12px 16px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  background: color-mix(in srgb, var(--background) 56%, var(--card));
+  color: var(--foreground);
+  box-shadow: 0 16px 38px color-mix(in srgb, #000 28%, transparent);
+  text-align: left;
+  cursor: pointer;
+}
+
+.company-o-card:hover,
+.company-o-card.active {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, var(--card));
+}
+
+.company-o-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--card-strong) 58%, transparent);
+}
+
+.company-o-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.company-o-copy b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--foreground) 94%, var(--primary) 12%);
+}
+
+.company-o-copy small {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.company-o-copy .org-agent-dot {
+  width: 7px;
+  height: 7px;
+  box-shadow: none;
+}
+
+.company-o-node.has-children > .company-o-card::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -28px;
+  width: 1px;
+  height: 28px;
+  background: color-mix(in srgb, var(--border) 74%, transparent);
+}
+
+.company-o-children {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 20px;
+  min-width: max-content;
+  padding-top: 42px;
+}
+
+.company-o-children::before {
+  content: "";
+  position: absolute;
+  top: 21px;
+  left: 125px;
+  right: 125px;
+  height: 1px;
+  background: color-mix(in srgb, var(--border) 74%, transparent);
+}
+
+.company-o-children > .company-o-node::before {
+  content: "";
+  position: absolute;
+  top: -21px;
+  left: 50%;
+  width: 1px;
+  height: 21px;
+  background: color-mix(in srgb, var(--border) 74%, transparent);
+}
+
+.company-o-details {
+  max-width: none;
+}
+
 @media (max-width: 1100px) {
   .project-workbench {
     grid-template-columns: 1fr;
@@ -1889,6 +2095,12 @@ button.agent-node-card {
   .sidebar-head { justify-content: space-between; }
   .sidebar-compact .brand-lockup { display: flex; }
   .sidebar-compact .nav-link { justify-content: flex-start; }
+  .nav-link.sub-nav-link,
+  .sidebar-compact .nav-link.sub-nav-link {
+    width: 100%;
+    margin-left: 0;
+  }
+  .nav-link.sub-nav-link::after { display: none; }
   .sidebar-body { overflow: visible; padding-right: 0; }
   .sidebar-footer { gap: 8px; }
   .nav-list { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 14px; }
@@ -1953,6 +2165,12 @@ button.agent-node-card {
   .org-children { gap: 12px; }
   .org-children::before { left: 105px; right: 105px; }
   .agent-node-card { max-width: none; }
+  .company-o-stage { min-height: 460px; }
+  .company-o-scroll { justify-content: flex-start; padding-left: 2px; padding-right: 2px; }
+  .company-o-node { min-width: 220px; }
+  .company-o-card { width: 220px; border-radius: 8px; }
+  .company-o-children { gap: 12px; }
+  .company-o-children::before { left: 110px; right: 110px; }
   .chat-thread-head { align-items: flex-start; flex-direction: column; }
   .chat-bubble { max-width: 94%; }
   .chat-composer { grid-template-columns: 1fr; }

@@ -3,14 +3,17 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, Building2, CircleHelp, Clock3, FileClock, FolderGit2, FolderOpen, Kanban, LayoutDashboard, Languages, LogOut, Menu, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, User, Check } from 'lucide-react';
+import { BookOpen, Building2, ChartGantt, CircleHelp, Clock3, FileClock, FolderGit2, FolderOpen, Kanban, LayoutDashboard, Languages, LogOut, Menu, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, User, Check, type LucideIcon } from 'lucide-react';
 import { useLocale, localeList, localeNames } from '@/lib/locale-context';
 import { api } from '@/lib/api';
 
-const nav = [
+type NavItem = { href: string; labelKey: string; fallback: string; icon: LucideIcon; level?: number; exact?: boolean };
+
+const nav: NavItem[] = [
   { href: '/dashboard', labelKey: 'nav.dashboard', fallback: 'Dashboard', icon: LayoutDashboard },
   { href: '/companies', labelKey: 'nav.companies', fallback: 'Companies', icon: Building2 },
-  { href: '/departments', labelKey: 'nav.departments', fallback: 'Departments', icon: Network },
+  { href: '/departments', labelKey: 'nav.departments', fallback: 'Departments', icon: Network, exact: true },
+  { href: '/departments/o-chart', labelKey: 'nav.oChart', fallback: 'O-Chart', icon: ChartGantt, level: 1 },
   { href: '/agents', labelKey: 'nav.agents', fallback: 'Agents', icon: Network },
   { href: '/projects', labelKey: 'nav.projects', fallback: 'Projects', icon: FolderGit2 },
   { href: '/workspaces', labelKey: 'nav.workspaces', fallback: 'Workspace', icon: FolderOpen },
@@ -21,12 +24,11 @@ const nav = [
   { href: '/logs', labelKey: 'nav.logs', fallback: 'Logs', icon: FileClock },
 ];
 
-const utilityNav = [
+const utilityNav: NavItem[] = [
   { href: '/settings', labelKey: 'nav.settings', fallback: 'Settings', icon: Settings },
 ];
 
 const adminNav = { href: '/admin', labelKey: 'nav.admin', fallback: 'Admin', icon: ShieldCheck };
-type NavItem = (typeof nav)[number] | (typeof utilityNav)[number] | typeof adminNav;
 const USER_EMAIL_STORAGE_KEY = 'megacorps.userEmail';
 const USER_ROLE_STORAGE_KEY = 'megacorps.userRole';
 
@@ -59,8 +61,8 @@ function DropdownItem({ onClick, children, active }: { onClick: () => void; chil
 }
 
 function SidebarLink({ item, label, open, pathname }: { item: NavItem; label: string; open: boolean; pathname: string }) {
-  const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-  return <Link className={`nav-link ${active ? 'active' : ''}`} href={item.href} title={label} aria-label={label}>
+  const active = item.exact ? pathname === item.href : pathname === item.href || pathname.startsWith(`${item.href}/`);
+  return <Link className={`nav-link ${item.level ? 'sub-nav-link' : ''} ${active ? 'active' : ''}`} href={item.href} title={label} aria-label={label}>
     <item.icon size={18} />
     {open && <span>{label}</span>}
   </Link>;

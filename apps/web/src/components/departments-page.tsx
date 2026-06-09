@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
-import { Network, Pencil, Plus, Target, UserCheck, Users } from 'lucide-react';
+import { Pencil, Plus, Target, Users, X } from 'lucide-react';
 import { api } from '@/lib/api';
 
 type Company = { id: string; name: string; slug: string };
@@ -28,6 +28,7 @@ export function DepartmentsPage() {
   const [busyAgentId, setBusyAgentId] = useState('');
   const [busy, setBusy] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState('');
+  const [departmentCreateOpen, setDepartmentCreateOpen] = useState(false);
 
   const companyDepartments = useMemo(() => departments.filter((department) => department.companyId === companyId), [departments, companyId]);
   const companyAgents = useMemo(() => agents.filter((agent) => agent.companyId === companyId), [agents, companyId]);
@@ -72,6 +73,7 @@ export function DepartmentsPage() {
       const department = await api<Department>('/api/departments', { method: 'POST', body: JSON.stringify({ companyId, name: deptName.trim(), slug: deptSlug.trim() }) });
       setDeptName('');
       setDeptSlug('');
+      setDepartmentCreateOpen(false);
       setToast('Department added');
       await refresh(companyId, department.id);
     } catch (err) {
@@ -113,30 +115,49 @@ export function DepartmentsPage() {
     }
   }
 
+  function startNewDepartment() {
+    setDeptName('');
+    setDeptSlug('');
+    setError('');
+    setDepartmentCreateOpen(true);
+  }
+
   const addDepartmentDisabled = !companyId || busy || !deptName.trim() || !deptSlug.trim();
 
   return <div className="page-stack departments-page">
     <div className="page-head">
-      <div><h1>Departments</h1><p>Manage department membership, reporting lines, org chart, and department goals.</p></div>
+      <div><h1>Departments</h1><p>Manage department membership, reporting lines, and department goals.</p></div>
+      <button className="btn" disabled={!companyId} title={companyId ? 'Create department' : 'Create a company first'} onClick={startNewDepartment}><Plus size={15} /> New Department</button>
     </div>
     {toast && <p className="status-pill">{toast}</p>}
     {error && <p className="form-error">{error}</p>}
 
-    <section className="card section-card department-command">
-      <div className="panel-title"><div><h2>Department Management</h2><span className="status-pill">{companyDepartments.length} departments</span></div><Network size={18} /></div>
-      <div className="form-grid">
-        <label className="field-label">Company<select className="input compact" value={companyId} onChange={(event) => { setCompanyId(event.target.value); setDepartmentId(''); void refresh(event.target.value, ''); }}>
-          {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
-        </select></label>
-        <label className="field-label">New department<input className="input" value={deptName} onChange={(event) => setDeptName(event.target.value)} disabled={!companyId} /></label>
-        <label className="field-label">Slug<input className="input" value={deptSlug} onChange={(event) => setDeptSlug(slugify(event.target.value))} disabled={!companyId} /></label>
-      </div>
-      <button className="btn" title={companyId ? 'Add department' : 'Create a company first before adding departments'} disabled={addDepartmentDisabled} onClick={addDepartment}><Plus size={14} /> Add Department</button>
-    </section>
+    {departmentCreateOpen && <div className="overlay">
+      <section className="card modal department-create-modal" role="dialog" aria-modal="true" aria-labelledby="new-department-title">
+        <div className="panel-title">
+          <div><h2 id="new-department-title">New Department</h2><span className="status-pill">{companies.find((company) => company.id === companyId)?.name ?? 'No company'}</span></div>
+          <button className="btn icon-btn" aria-label="Close new department" onClick={() => setDepartmentCreateOpen(false)}><X size={16} /></button>
+        </div>
+        <div className="form-grid">
+          <label className="field-label">Company<select className="input" value={companyId} onChange={(event) => { setCompanyId(event.target.value); setDepartmentId(''); void refresh(event.target.value, ''); }}>
+            {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+          </select></label>
+          <label className="field-label">Department name<input className="input" value={deptName} onChange={(event) => setDeptName(event.target.value)} disabled={!companyId} /></label>
+          <label className="field-label">Slug<input className="input" value={deptSlug} onChange={(event) => setDeptSlug(slugify(event.target.value))} disabled={!companyId} /></label>
+        </div>
+        <div className="action-row" style={{ justifyContent: 'flex-end' }}>
+          <button className="btn" onClick={() => setDepartmentCreateOpen(false)}>Cancel</button>
+          <button className="btn btn-primary" title={companyId ? 'Add department' : 'Create a company first before adding departments'} disabled={addDepartmentDisabled} onClick={addDepartment}><Plus size={14} /> Add Department</button>
+        </div>
+      </section>
+    </div>}
 
     <div className="department-workbench">
       <aside className="card section-card department-rail">
         <div className="panel-title"><h2>Departments</h2><span className="status-pill">{companyDepartments.length}</span></div>
+        <label className="field-label">Company<select className="input compact" value={companyId} onChange={(event) => { setCompanyId(event.target.value); setDepartmentId(''); void refresh(event.target.value, ''); }}>
+          {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+        </select></label>
         <div className="table-list">
           {companyDepartments.map((department) => <button className={`list-row selectable-row ${department.id === selectedDepartment?.id ? 'active' : ''}`} key={department.id} onClick={() => setDepartmentId(department.id)}>
             <b>{department.name}</b>
@@ -173,33 +194,6 @@ export function DepartmentsPage() {
             </table>
           </div>
           {companyAgents.length === 0 && <p className="chat-empty">No agents in this company yet.</p>}
-        </section>
-
-        <section className="card section-card">
-          <div className="panel-title"><div><h2><UserCheck size={18} /> Interactive Org Canvas</h2><span className="status-pill">{selectedDepartment ? selectedDepartment.name : 'Full company'}</span></div></div>
-          <div className="org-canvas">
-            {companyAgents.map((agent) => {
-              const department = companyDepartments.find((item) => item.id === agent.departmentId);
-              const manager = companyAgents.find((item) => item.id === agent.bossId);
-              return <article className={`org-canvas-node ${selectedAgentId === agent.id ? 'active' : ''}`} key={agent.id}>
-                <button type="button" className="org-canvas-person" onClick={() => setSelectedAgentId(agent.id)}>
-                  <div className="org-agent-head"><span className={`org-agent-dot ${agent.isBusy ? 'busy' : agent.isActive === false ? 'offline' : 'active'}`} /><b>{agent.name}</b><span className="mini-edit"><Pencil size={13} /> Edit</span></div>
-                  <div className="org-agent-meta"><span>{agent.title || agent.role}</span><span>{department?.name ?? 'No department'} / reports to {manager?.name ?? 'top-level'}</span></div>
-                </button>
-                <div className="org-canvas-controls">
-                  <select className="input compact" disabled={busyAgentId === agent.id} value={agent.departmentId ?? ''} onChange={(event) => void updateAgentOrg(agent, { departmentId: event.target.value || null })}>
-                    <option value="">No department</option>
-                    {companyDepartments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                  </select>
-                  <select className="input compact" disabled={busyAgentId === agent.id} value={agent.bossId ?? ''} onChange={(event) => void updateAgentOrg(agent, { bossId: event.target.value || null })}>
-                    <option value="">Top-level</option>
-                    {companyAgents.filter((candidate) => candidate.id !== agent.id).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
-                  </select>
-                </div>
-              </article>;
-            })}
-            {companyAgents.length === 0 && <p className="chat-empty">No agents to render.</p>}
-          </div>
         </section>
 
         {selectedAgent && <section className="card section-card agent-inline-editor">
