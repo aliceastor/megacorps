@@ -1908,7 +1908,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }).returning();
       externalWaitId = wait?.id ?? null;
     }
-    if (nextStatus !== card.columnStatus) await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by webhook` });
+    if (nextStatus !== card.columnStatus) {
+      const fromStatus = normalizeCardStatus(card.columnStatus) ?? 'todo';
+      const toStatus = normalizeCardStatus(nextStatus) ?? fromStatus;
+      await recordStageAction({
+        cardId: body.cardId,
+        agentId: card.assigneeId,
+        actor: { type: 'system', id: 'webhook' },
+        fromStatus,
+        toStatus,
+        action: inferCardTransitionAction(fromStatus, toStatus) ?? `webhook.task_${nextStatus}`,
+        detail: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by webhook.`,
+        metadata: { taskRunId, requestedStatus, externalWaitId },
+        logStatus: nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : 'success',
+      });
+    }
     await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: escalation ? 'escalation' : 'webhook', status: nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : nextStatus === 'needs_review' ? 'queued' : 'success', message: escalation ? (nextStatus === 'needs_review' ? 'Webhook requested reviewer guidance; help review queued.' : 'Webhook requested guidance but no reviewer is available; output accepted as final and card marked done.') : body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
     const [webhookComment] = await db.insert(cardComments).values({
       cardId: body.cardId,

@@ -13,7 +13,7 @@ Completed in this pass:
 - New companies now create a default `CEO` boss position. A company can have only one active boss position, and the dispatch selector prefers an active idle agent assigned to that boss position for root cards.
 - Extended Kanban cards with decision mode, rollup status, required child policy, child requirement level, estimated weight/duration, task budget limit, revision count/max revisions, and required deterministic tool links.
 - Added `waiting_on_external` as a lifecycle stage for PR/CI/deploy/export/approval waits. Runner/webhook completion releases execution locks and records an external wait; `/api/external-events` wakes the card into review, rework, done, or blocked.
-- Added lifecycle APIs for recursive card rollup, TaskContextPackage, context snapshots, external waits/events, deterministic tool registry, card required tools, and parent integration records.
+- Added lifecycle APIs for recursive card rollup, TaskContextPackage, context snapshots, context requests, external waits/events, deterministic tool registry, card required tools, and parent integration records.
 - Updated Kanban UI status columns, Positions UI, `/api/help`, API Help tests, prompt injection docs, README, progress notes, and UI flow docs for the new lifecycle foundation.
 
 ## Architecture Update v1.16 - Company Positions And Role Prompt Injection

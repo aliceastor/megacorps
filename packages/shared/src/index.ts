@@ -400,6 +400,17 @@ export const createTaskContextSnapshotSchema = z.object({
   summaryJson: z.record(z.string(), z.unknown()).default({}),
 });
 
+export const createTaskContextRequestSchema = z.object({
+  agentId: z.string().uuid().nullable().optional(),
+  requestedCardIds: z.array(z.string().uuid()).default([]),
+  requestedLogKinds: z.array(z.string().trim().min(1).max(80)).default([]),
+  reason: z.string().trim().min(1).max(4000),
+});
+
+export const updateTaskContextRequestSchema = z.object({
+  status: z.enum(['open', 'approved', 'rejected', 'resolved', 'cancelled']),
+});
+
 export const createBudgetPolicySchema = z.object({
   companyId: z.string().uuid(),
   agentId: z.string().uuid().nullable().optional(),
@@ -501,6 +512,8 @@ export type UpdateToolInput = z.infer<typeof updateToolSchema>;
 export type CardRequiredToolsInput = z.infer<typeof cardRequiredToolsSchema>;
 export type CreateCardIntegrationInput = z.infer<typeof createCardIntegrationSchema>;
 export type CreateTaskContextSnapshotInput = z.infer<typeof createTaskContextSnapshotSchema>;
+export type CreateTaskContextRequestInput = z.infer<typeof createTaskContextRequestSchema>;
+export type UpdateTaskContextRequestInput = z.infer<typeof updateTaskContextRequestSchema>;
 export type CreateBudgetPolicyInput = z.infer<typeof createBudgetPolicySchema>;
 export type ApprovalDecisionInput = z.infer<typeof approvalDecisionSchema>;
 export type TaskLogInput = z.infer<typeof taskLogSchema>;

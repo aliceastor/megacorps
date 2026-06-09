@@ -2122,3 +2122,31 @@ The roadmap is complete when this scenario works end to end:
 12. The root owner receives the final integrated output.
 13. Root owner confirms completion.
 14. Logs show the prompt, context seen, decisions, work products, external events, and review chain for audit.
+
+## Implementation Audit - 2026-06-10
+
+This section records the code-level status after the lifecycle/API/help review pass.
+
+Implemented in the current codebase:
+
+- Default company boss position: new companies create one `CEO` position with `isCompanyBoss=true`, and migrations backfill one active boss position per company.
+- Root assignment: unassigned root cards prefer an active idle agent assigned to the company boss position, then fall back to normal matching.
+- Recursive delegation foundation: explicit `DELEGATE:` output creates child cards for direct reports; each child records parent, assignee, and reviewer.
+- Bottom-up completion: parent cards cascade to `done` when the configured child completion policy is satisfied.
+- Card lifecycle metadata: decision mode, rollup status, child policy, child requirement level, weight, duration, budget, and revision limits are stored and exposed through card APIs.
+- `waiting_on_external`: runner/webhook/manual wait flows release execution locks and record external waits; external events wake cards into review, rework, done, or blocked.
+- TaskContextPackage: `/api/cards/:id/context` returns root mission, parent chain, flow map, main cast, message/log/action digests, context requests, and rollup.
+- Context audit: context snapshots and context requests are stored and exposed through API Help.
+- Deterministic tool registry foundation: tools can be registered, marked required-eligible, and attached to cards as required tools.
+- Parent integrations: parent cards can record accepted/dropped child outputs and conflict notes.
+- API discovery: `/api/help`, `/api/help?format=markdown`, and Web Help cover all registered routes, with route-coverage tests.
+- Normalized lifecycle audit: human, runner, external event, and webhook stage changes write normalized card actions where applicable.
+
+Still future / Phase 23+ hardening:
+
+- Full deterministic tool invocation runner, schema-validated tool outputs, and hard enforcement that an agent cannot skip a required tool.
+- Branch-per-agent isolation, automatic PR creation/provider integration, and automatic merge-conflict resolution beyond recorded parent integration/conflict notes.
+- Streaming run progress from external runners.
+- Production worker fleet hardening for distributed locks, multi-replica queue ownership, and richer runtime liveness probes.
+- Company template export/import and secret reference management.
+- Fine-grained service-account roles for non-runner integrations.

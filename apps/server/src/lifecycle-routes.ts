@@ -6,9 +6,11 @@ import {
   createCardIntegrationSchema,
   createExternalEventSchema,
   createExternalWaitSchema,
+  createTaskContextRequestSchema,
   createTaskContextSnapshotSchema,
   createToolSchema,
   normalizeCardStatus,
+  updateTaskContextRequestSchema,
   updateToolSchema,
 } from '@megacorps/shared';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
@@ -24,6 +26,7 @@ import {
   externalEvents,
   externalWaits,
   kanbanCards,
+  taskContextRequests,
   taskContextSnapshots,
   taskLogs,
   taskRuns,
@@ -171,10 +174,11 @@ async function taskContextPackage(card: CardRow) {
     parentChain.unshift(parent);
     current = parent;
   }
-  const [comments, logs, actions] = await Promise.all([
+  const [comments, logs, actions, contextRequests] = await Promise.all([
     db.select().from(cardComments).where(inArray(cardComments.cardId, [...flowCardIds])).orderBy(desc(cardComments.createdAt)).limit(30),
     db.select().from(taskLogs).where(inArray(taskLogs.cardId, [...flowCardIds])).orderBy(desc(taskLogs.createdAt)).limit(30),
     db.select().from(cardActions).where(eq(cardActions.cardId, card.id)).orderBy(desc(cardActions.createdAt)).limit(30),
+    db.select().from(taskContextRequests).where(inArray(taskContextRequests.currentCardId, [...flowCardIds])).orderBy(desc(taskContextRequests.createdAt)).limit(30),
   ]);
   return {
     rootMission: root ? { id: root.id, title: root.title, body: root.body, status: root.columnStatus, priority: root.priority, tags: root.tags } : null,
@@ -185,6 +189,7 @@ async function taskContextPackage(card: CardRow) {
     mainCast: cast.map((agent) => ({ id: agent.id, name: agent.name, departmentId: agent.departmentId, positionId: agent.positionId, bossId: agent.bossId, adapterType: agent.adapterType, isBusy: agent.isBusy, isActive: agent.isActive })),
     messageDigest: comments.map((comment) => ({ id: comment.id, cardId: comment.cardId, authorType: comment.authorType, action: comment.action, body: comment.body.slice(0, 1000), createdAt: comment.createdAt })),
     logDigest: logs.map((log) => ({ id: log.id, cardId: log.cardId, type: log.type, status: log.status, message: log.message, createdAt: log.createdAt })),
+    contextRequests: contextRequests.map((row) => ({ id: row.id, currentCardId: row.currentCardId, agentId: row.agentId, requestedCardIds: row.requestedCardIds ?? [], requestedLogKinds: row.requestedLogKinds ?? [], reason: row.reason, status: row.status, createdAt: row.createdAt, resolvedAt: row.resolvedAt })),
     actions: actions.map((action) => ({ id: action.id, action: action.action, fromStatus: action.fromStatus, toStatus: action.toStatus, detail: action.detail, createdAt: action.createdAt })),
     rollup: await cardRollup(card),
   };
@@ -234,6 +239,69 @@ export async function registerLifecycleRoutes(app: FastifyInstance): Promise<voi
     }).returning();
     if (snapshot) await recordCardAction({ companyId: access.card.companyId, cardId: access.card.id, actor: { type: 'user', id: access.user.id, userId: access.user.id }, action: 'context.snapshot_created', detail: `Context snapshot created for ${input.mode}.`, metadata: { snapshotId: snapshot.id } });
     return reply.code(201).send(snapshot);
+  });
+
+  app.get('/api/cards/:id/context-requests', async (request, reply) => {
+    const card = await visibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    return db.select().from(taskContextRequests).where(eq(taskContextRequests.currentCardId, card.id)).orderBy(desc(taskContextRequests.createdAt)).limit(200);
+  });
+
+  app.post('/api/cards/:id/context-requests', async (request, reply) => {
+    const access = await operatorCard(request, reply, (request.params as { id: string }).id);
+    if (!access) return reply;
+    const input = createTaskContextRequestSchema.parse(request.body ?? {});
+    const rootId = await rootCardId(access.card);
+    if (input.requestedCardIds.length > 0) {
+      const requestedRows = await db.select({ id: kanbanCards.id }).from(kanbanCards).where(and(inArray(kanbanCards.id, input.requestedCardIds), eq(kanbanCards.companyId, access.card.companyId), isNull(kanbanCards.deletedAt)));
+      if (requestedRows.length !== input.requestedCardIds.length) return reply.code(400).send({ error: 'requested_context_card_company_mismatch' });
+    }
+    const [contextRequest] = await db.insert(taskContextRequests).values({
+      companyId: access.card.companyId,
+      rootCardId: rootId,
+      currentCardId: access.card.id,
+      agentId: input.agentId ?? access.card.assigneeId,
+      requestedCardIds: input.requestedCardIds,
+      requestedLogKinds: input.requestedLogKinds,
+      reason: input.reason,
+      status: 'open',
+    }).returning();
+    if (contextRequest) {
+      await recordCardAction({
+        companyId: access.card.companyId,
+        cardId: access.card.id,
+        actor: { type: 'user', id: access.user.id, userId: access.user.id },
+        action: 'context.request_created',
+        detail: input.reason,
+        metadata: { contextRequestId: contextRequest.id, requestedCardIds: input.requestedCardIds, requestedLogKinds: input.requestedLogKinds },
+      });
+      await db.insert(activityLog).values({ companyId: access.card.companyId, actorType: 'user', actorId: access.user.id, userId: access.user.id, agentId: input.agentId ?? access.card.assigneeId, action: 'context_request.created', entityType: 'card', entityId: access.card.id, details: { contextRequestId: contextRequest.id, requestedCardIds: input.requestedCardIds, requestedLogKinds: input.requestedLogKinds } });
+    }
+    return reply.code(201).send(contextRequest);
+  });
+
+  app.put('/api/context-requests/:id', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const input = updateTaskContextRequestSchema.parse(request.body ?? {});
+    const [existing] = await db.select().from(taskContextRequests).where(eq(taskContextRequests.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'context_request_not_found' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    const [updated] = await db.update(taskContextRequests).set({
+      status: input.status,
+      resolvedAt: input.status === 'open' ? null : new Date(),
+    }).where(eq(taskContextRequests.id, id)).returning();
+    if (updated) {
+      await recordCardAction({
+        companyId: existing.companyId,
+        cardId: existing.currentCardId,
+        actor: { type: 'user', id: user.id, userId: user.id },
+        action: 'context.request_updated',
+        detail: `Context request ${input.status}.`,
+        metadata: { contextRequestId: id, status: input.status },
+      });
+      await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: existing.agentId, action: 'context_request.updated', entityType: 'context_request', entityId: id, details: { status: input.status, currentCardId: existing.currentCardId } });
+    }
+    return updated;
   });
 
   app.get('/api/cards/:id/external-waits', async (request, reply) => {
@@ -325,7 +393,14 @@ export async function registerLifecycleRoutes(app: FastifyInstance): Promise<voi
         completedAt: toStatus === 'done' ? now : null,
         updatedAt: now,
       }).where(eq(kanbanCards.id, card.id));
-      await recordStageAction({ cardId: card.id, agentId: card.assigneeId, actor: { type: 'user', id: user.id, userId: user.id }, fromStatus, toStatus, action: input.status === 'success' ? 'external_success' : input.status === 'failure' ? 'external_failure' : 'manual_move', detail: `External ${input.provider}/${input.eventType} reported ${input.status}.`, metadata: { externalEventId: event?.id } });
+      const action = input.status === 'success'
+        ? 'external_success'
+        : toStatus === 'in_progress'
+          ? 'external_failure'
+          : toStatus === 'blocked'
+            ? 'block'
+            : 'manual_move';
+      await recordStageAction({ cardId: card.id, agentId: card.assigneeId, actor: { type: 'user', id: user.id, userId: user.id }, fromStatus, toStatus, action, detail: `External ${input.provider}/${input.eventType} reported ${input.status}.`, metadata: { externalEventId: event?.id } });
       if (toStatus === 'in_review') await enqueueTaskRun(card.id, 'review', 'queue');
       if (toStatus === 'done') await cascadeParentStatus(card.parentCardId);
     }

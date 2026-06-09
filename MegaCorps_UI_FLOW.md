@@ -384,7 +384,7 @@ Data sources:
 - Actions: `GET /api/cards/:id/actions`
 - API event related lookup: `GET /api/system-logs`
 - Work products: `GET/POST /api/cards/:id/work-products`
-- Rollup/context: `GET /api/cards/:id/rollup`, `GET /api/cards/:id/context`, `GET/POST /api/cards/:id/context-snapshots`
+- Rollup/context: `GET /api/cards/:id/rollup`, `GET /api/cards/:id/context`, `GET/POST /api/cards/:id/context-snapshots`, `GET/POST /api/cards/:id/context-requests`, `PUT /api/context-requests/:id`
 - External waits/events: `GET/POST /api/cards/:id/external-waits`, `GET/POST /api/external-events`
 - Required tools/integration: `GET/PUT /api/cards/:id/required-tools`, `GET/POST /api/cards/:id/integrations`
 - Agent delegation: dispatch output with a strict `DELEGATE:` bullet list creates child cards for the assignee's direct reports.

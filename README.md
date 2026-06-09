@@ -201,7 +201,8 @@ Cron/debug endpoints:
 - `POST /api/cron/run`: manually run one cron job. `dispatch-heartbeat` can be scoped to a company and runner metadata; `daily-report` and `health-check` record completed manual runs with company/runner details.
 - `POST /api/cards/:id/cancel`: cancel active or queued work without archiving the task history.
 - `GET /api/cards/:id/rollup`: recursive child status, next action, external wait count, ETA, and budget rollup.
-- `GET /api/cards/:id/context`: TaskContextPackage for root mission, parent chain, flow map, main cast, message/log digest, and rollup.
+- `GET /api/cards/:id/context`: TaskContextPackage for root mission, parent chain, flow map, main cast, message/log/context-request digest, and rollup.
+- `GET/POST /api/cards/:id/context-requests` and `PUT /api/context-requests/:id`: request, inspect, and resolve scoped extra-context requests when a task needs more than the bounded package.
 - `POST /api/cards/:id/external-waits` and `POST /api/external-events`: enter and resolve external waits.
 - `GET/POST/PUT/DELETE /api/tools` and `PUT /api/cards/:id/required-tools`: deterministic tool registry and leaf-card tool requirements.
 

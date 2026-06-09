@@ -56,6 +56,9 @@ const registeredRoutes = [
   ['GET', '/api/cards/:id/context'],
   ['GET', '/api/cards/:id/context-snapshots'],
   ['POST', '/api/cards/:id/context-snapshots'],
+  ['GET', '/api/cards/:id/context-requests'],
+  ['POST', '/api/cards/:id/context-requests'],
+  ['PUT', '/api/context-requests/:id'],
   ['GET', '/api/cards/:id/comments'],
   ['GET', '/api/cards/:id/work-products'],
   ['POST', '/api/cards/:id/work-products'],
@@ -137,6 +140,7 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/departments' && endpoint.group === 'Departments'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/positions' && endpoint.group === 'Positions'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/cards/:id/context' && endpoint.group === 'Kanban Lifecycle'));
+  assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/cards/:id/context-requests' && endpoint.group === 'Kanban Lifecycle'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/cards/:id/external-waits' && endpoint.group === 'External Events'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/tools' && endpoint.group === 'Tools'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/auth/bootstrap'));
@@ -172,5 +176,6 @@ test('api help markdown exposes response schema and rate limit sections', () => 
   assert.match(markdown, /hermes-ssh/);
   assert.match(markdown, /waiting_on_external/);
   assert.match(markdown, /TaskContextPackage/);
+  assert.match(markdown, /context requests/i);
   assert.match(markdown, /deterministic tool/i);
 });

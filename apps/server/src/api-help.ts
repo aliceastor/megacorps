@@ -174,6 +174,9 @@ const endpoints: ApiEndpoint[] = [
   { method: 'GET', path: '/api/cards/:id/context', group: 'Kanban Lifecycle', auth: 'session', summary: 'Read the TaskContextPackage for a card: root mission, parent chain, current card, flow map, main cast, message digest, log digest, action timeline, and rollup.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/context-snapshots', group: 'Kanban Lifecycle', auth: 'session', summary: 'Read stored context snapshots for a card so operators can inspect what context was available at decision time.', params: { id: 'Task UUID.' } },
   { method: 'POST', path: '/api/cards/:id/context-snapshots', group: 'Kanban Lifecycle', auth: 'session', summary: 'Store a current TaskContextPackage snapshot for audit/debugging.', params: { id: 'Task UUID.' }, body: { mode: 'dispatch | review | integrate | manual', agentId: 'optional agent UUID', taskRunId: 'optional task-run UUID', summaryJson: { note: 'optional operator metadata' } } },
+  { method: 'GET', path: '/api/cards/:id/context-requests', group: 'Kanban Lifecycle', auth: 'session', summary: 'Read agent/operator requests for additional scoped context on a card.', params: { id: 'Task UUID.' } },
+  { method: 'POST', path: '/api/cards/:id/context-requests', group: 'Kanban Lifecycle', auth: 'session', summary: 'Create a request for extra context when the current TaskContextPackage is insufficient. Requested card ids must belong to the same company.', params: { id: 'Task UUID.' }, body: { agentId: 'optional agent UUID', requestedCardIds: ['related card uuid'], requestedLogKinds: ['task_logs', 'comments', 'actions'], reason: 'Why this extra context is needed.' } },
+  { method: 'PUT', path: '/api/context-requests/:id', group: 'Kanban Lifecycle', auth: 'session', summary: 'Resolve or update a context request status after the requested context has been handled.', params: { id: 'Context request UUID.' }, body: { status: 'open | approved | rejected | resolved | cancelled' } },
   { method: 'GET', path: '/api/cards/:id/comments', group: 'Kanban', auth: 'session', summary: 'Read task message board comments.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/work-products', group: 'Kanban', auth: 'session', summary: 'Read reviewable work products for a task: PRs, commits, preview URLs, reports, screenshots, and artifacts.', params: { id: 'Task UUID.' } },
   { method: 'POST', path: '/api/cards/:id/work-products', group: 'Kanban', auth: 'session', summary: 'Attach a reviewable work product to a task. Prefer Git/URL metadata over local-only paths for multi-system agents.', params: { id: 'Task UUID.' }, body: { type: 'pull_request | commit | preview_url | report | screenshot | artifact | file | external', title: 'PR #42', summary: 'What changed', url: 'https://...', repoUrl: 'https://github.com/org/repo', branch: 'megacorps/card-1234-alice', commitSha: 'abc123', pullRequestUrl: 'https://github.com/org/repo/pull/42' } },
@@ -276,7 +279,7 @@ const currentArchitecture = {
     { name: 'Projects', route: '/projects', purpose: 'Dedicated Project Authority workbench for repo/work-path policy, runtime services, branch policy, commands, and project goals.', primaryApi: ['/api/projects', '/api/goals'] },
     { name: 'Workspace', route: '/workspaces', purpose: 'Company folder manager and authority path surface for non-coding project files.', primaryApi: ['/api/companies', '/api/projects'] },
     { name: 'Knowledge', route: '/knowledge', purpose: 'Company-scoped markdown knowledge documents injected by tag/context.', primaryApi: ['/api/knowledge-docs'] },
-    { name: 'Kanban', route: '/kanban', purpose: 'Task creation, recursive lifecycle, assignment, project/goal context, comments, work products, rollup, context snapshots, external waits, required tools, integrations, run/review/decompose.', primaryApi: ['/api/cards', '/api/cards/:id/run', '/api/cards/:id/review', '/api/cards/:id/work-products', '/api/cards/:id/rollup', '/api/cards/:id/context'] },
+    { name: 'Kanban', route: '/kanban', purpose: 'Task creation, recursive lifecycle, assignment, project/goal context, comments, work products, rollup, context snapshots/requests, external waits, required tools, integrations, run/review/decompose.', primaryApi: ['/api/cards', '/api/cards/:id/run', '/api/cards/:id/review', '/api/cards/:id/work-products', '/api/cards/:id/rollup', '/api/cards/:id/context'] },
     { name: 'External Events', route: '/kanban', purpose: 'Track cards waiting on CI/CD, deployment, exports, or outside approvals and wake them through event records.', primaryApi: ['/api/cards/:id/external-waits', '/api/external-events'] },
     { name: 'Tools', route: '/settings', purpose: 'Register deterministic tools and attach required verified transformations to leaf cards.', primaryApi: ['/api/tools', '/api/cards/:id/required-tools'] },
     { name: 'Direct Chat', route: '/chat', purpose: 'Project-scoped or no-project agent chat sessions with durable adapter session continuity.', primaryApi: ['/api/chat/sessions', '/api/chat/sessions/:id/messages'] },
@@ -292,7 +295,7 @@ const currentArchitecture = {
     'Use company Positions for reusable role-specific prompt injection. Assigned agents receive "You are <position> in <department> department of firm <company>." followed by the custom position prompt.',
     'Use work products with URLs, repo metadata, branches, commits, PRs, previews, reports, screenshots, or artifacts so reviewers can inspect output across machines.',
     'Use waiting_on_external when a card has produced a PR/deploy/export and must wait for outside CI/CD or approval; do not keep execution locks while waiting.',
-    'Use TaskContextPackage and context snapshots to inspect root mission, parent chain, flow map, main cast, message digest, and log digest seen by an agent.',
+    'Use TaskContextPackage, context snapshots, and context requests to inspect root mission, parent chain, flow map, main cast, message digest, log digest, and explicit requests for extra scoped context.',
     'Use deterministic tools for fragile data conversion and schema validation; required tools must be registered and required-eligible before attaching them to cards.',
     'Use needs_review for reviewer guidance when an assignee cannot complete a task and has an independent reviewer/manager; top-level dispatch guidance is accepted as done with output preserved. Use in_review for quality review after completion.',
     'Use machine runners when work must execute outside the API process. Runner API keys authenticate machines; runner-created agent sessions authenticate agents with Ed25519 JWTs.',
@@ -448,8 +451,14 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
     return { responseSchema: snapshot, responseExample: snapshot, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
+  if (endpoint.path.includes('/context-requests')) {
+    const contextRequest = { id: 'context-request-uuid', currentCardId: 'card-uuid', agentId: 'agent-uuid', requestedCardIds: ['related-card-uuid'], requestedLogKinds: ['task_logs'], reason: 'Need sibling implementation logs.', status: 'open', resolvedAt: null };
+    if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: contextRequest }, responseExample: [contextRequest], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: contextRequest, responseExample: contextRequest, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
   if (endpoint.path.includes('/context')) {
-    return { responseSchema: { rootMission: 'object', parentChain: 'array', currentCard: 'object', flowMap: 'array', mainCast: 'array', messageDigest: 'array', logDigest: 'array', rollup: 'object' }, responseExample: { rootMission: { id: 'root-card-uuid', title: 'Large task' }, parentChain: [], flowMap: [], mainCast: [], messageDigest: [], logDigest: [], rollup: { rollupPercent: 50 } }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: { rootMission: 'object', parentChain: 'array', currentCard: 'object', flowMap: 'array', mainCast: 'array', messageDigest: 'array', logDigest: 'array', contextRequests: 'array', rollup: 'object' }, responseExample: { rootMission: { id: 'root-card-uuid', title: 'Large task' }, parentChain: [], flowMap: [], mainCast: [], messageDigest: [], logDigest: [], contextRequests: [], rollup: { rollupPercent: 50 } }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/integrations')) {
