@@ -6,6 +6,14 @@ import { api } from '@/lib/api';
 type Company = { id: string; name: string };
 type KnowledgeDoc = { id: string; companyId: string; title: string; tags: string[]; body: string; updatedAt?: string };
 
+function formatTimestamp(value?: string): string {
+  if (!value) return 'not updated';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'not updated';
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 export function KnowledgePage() {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
@@ -43,7 +51,7 @@ export function KnowledgePage() {
     await refresh(companyId);
   }
 
-  return <div style={{ display: 'grid', gap: 16 }}>
+  return <div className="page-stack knowledge-page">
     <div className="page-head"><div><h1>Knowledge</h1><p>Markdown docs injected into agent prompts by company and tags.</p></div><button className="btn" onClick={reset}><Plus size={15} /> New doc</button></div>
     <div className="data-grid">
       <section className="card section-card">
@@ -56,8 +64,12 @@ export function KnowledgePage() {
       <section className="card section-card">
         <h2>Company docs</h2>
         <div className="table-list">
-          {docs.map((doc) => <div className="list-row" key={doc.id}>
-            <b>{doc.title}</b><p>{(doc.tags ?? []).join(', ') || 'general'} / {doc.updatedAt ? new Date(doc.updatedAt).toLocaleString() : ''}</p>
+          {docs.map((doc) => <div className="list-row knowledge-doc-row" key={doc.id}>
+            <b>{doc.title}</b>
+            <div className="knowledge-doc-meta">
+              {(doc.tags?.length ? doc.tags : ['general']).map((tag) => <span className="badge" key={tag}>{tag}</span>)}
+              <span>Updated {formatTimestamp(doc.updatedAt)}</span>
+            </div>
             <div className="action-row"><button className="btn" onClick={() => edit(doc)}>Edit</button><button className="btn" style={{ color: 'var(--danger)' }} onClick={() => remove(doc)}><Trash2 size={14} /> Delete</button></div>
           </div>)}
         </div>

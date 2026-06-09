@@ -193,7 +193,7 @@ function Column({ status, cards, companies, onSelect }: { status: string; cards:
       {statusLabels[status]?.[locale] ?? status}
       <span style={{ background: 'var(--border)', borderRadius: 99, padding: '2px 8px', fontSize: 12 }}>{cards.length}</span>
     </h3>
-    <div ref={setNodeRef} className="card kanban-column-dropzone" style={{ outline: isOver ? '2px solid var(--primary)' : 'none', transition: 'outline 150ms' }}>
+    <div ref={setNodeRef} className={`card kanban-column-dropzone ${cards.length === 0 ? 'is-empty' : ''}`} style={{ outline: isOver ? '2px solid var(--primary)' : 'none', transition: 'outline 150ms' }}>
       <AnimatePresence>
         {cards.map((card) => <DraggableCard key={card.id} card={card} companyName={companies.find((company) => company.id === card.companyId)?.name} onSelect={onSelect} />)}
       </AnimatePresence>

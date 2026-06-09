@@ -1,6 +1,5 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import Link from 'next/link';
 import { Building2, Plus, Save, Target, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
 
@@ -192,7 +191,14 @@ export function CompaniesPage() {
           </div>
         </section>
 
-        <section className="card section-card">
+        <section className="stat-grid company-stats-grid" aria-label="Selected company summary">
+          <div className="card stat-card"><span>Departments</span><b>{selectedDepartments.length}</b></div>
+          <div className="card stat-card"><span>Agents</span><b>{selectedAgents.length}</b></div>
+          <div className="card stat-card"><span>Projects</span><b>{selectedProjects.length}</b></div>
+          <div className="card stat-card"><span>Kanban cards</span><b>{selectedCards.length}</b></div>
+        </section>
+
+        <section className="card section-card company-goal-card">
           <div className="panel-title"><div><h2>Company Goals</h2><span className="status-pill">{companyGoals.length} goals</span></div><Target size={18} /></div>
           <label className="field-label">Goal title<input className="input" value={goalTitle} onChange={(event) => setGoalTitle(event.target.value)} disabled={!selectedCompany} /></label>
           <label className="field-label">Goal body<textarea className="input" rows={3} value={goalBody} onChange={(event) => setGoalBody(event.target.value)} disabled={!selectedCompany} /></label>
@@ -200,21 +206,6 @@ export function CompaniesPage() {
           <div className="table-list">
             {companyGoals.map((goal) => <div className="list-row" key={goal.id}><b>{goal.title}</b><p>{goal.body || 'No goal body'}</p></div>)}
             {selectedCompany && companyGoals.length === 0 && <p className="chat-empty">No company goals yet.</p>}
-          </div>
-        </section>
-
-        <section className="stat-grid">
-          <div className="card stat-card"><span>Departments</span><b>{selectedDepartments.length}</b></div>
-          <div className="card stat-card"><span>Agents</span><b>{selectedAgents.length}</b></div>
-          <div className="card stat-card"><span>Projects</span><b>{selectedProjects.length}</b></div>
-          <div className="card stat-card"><span>Kanban cards</span><b>{selectedCards.length}</b></div>
-        </section>
-
-        <section className="card section-card">
-          <div className="panel-title"><h2>Next pages</h2><span className="status-pill">single-purpose flow</span></div>
-          <div className="action-row">
-            <Link className="btn" href="/departments">Manage departments and org chart</Link>
-            <Link className="btn" href="/agents">Configure agents</Link>
           </div>
         </section>
       </main>

@@ -32,9 +32,7 @@ export function DepartmentsPage() {
   const companyDepartments = useMemo(() => departments.filter((department) => department.companyId === companyId), [departments, companyId]);
   const companyAgents = useMemo(() => agents.filter((agent) => agent.companyId === companyId), [agents, companyId]);
   const selectedDepartment = departmentId === '__unassigned' ? null : companyDepartments.find((department) => department.id === departmentId) ?? companyDepartments[0] ?? null;
-  const selectedDepartmentAgents = selectedDepartment ? companyAgents.filter((agent) => agent.departmentId === selectedDepartment.id) : [];
   const unassignedAgents = companyAgents.filter((agent) => !agent.departmentId);
-  const selectedViewAgents = departmentId === '__unassigned' ? unassignedAgents : selectedDepartmentAgents;
   const selectedAgent = companyAgents.find((agent) => agent.id === selectedAgentId) ?? null;
   const departmentGoals = useMemo(() => goals.filter((goal) => goal.departmentId === selectedDepartment?.id), [goals, selectedDepartment?.id]);
 
@@ -201,17 +199,6 @@ export function DepartmentsPage() {
               </article>;
             })}
             {companyAgents.length === 0 && <p className="chat-empty">No agents to render.</p>}
-          </div>
-        </section>
-
-        <section className="card section-card">
-          <div className="panel-title"><div><h2>Selected Department</h2><span className="status-pill">{selectedDepartment?.name ?? 'No department'}</span></div></div>
-          <div className="org-node-list">
-            {selectedViewAgents.map((agent) => <button type="button" className={`agent-node-card org-agent-node ${selectedAgentId === agent.id ? 'active' : ''}`} key={agent.id} onClick={() => setSelectedAgentId(agent.id)}>
-              <div className="org-agent-head"><span className={`org-agent-dot ${agent.isBusy ? 'busy' : agent.isActive === false ? 'offline' : 'active'}`} /><b>{agent.name}</b></div>
-              <div className="org-agent-meta"><span>{agent.title || agent.role}</span><span>reports to {companyAgents.find((item) => item.id === agent.bossId)?.name ?? 'top-level'}</span></div>
-            </button>)}
-            {selectedViewAgents.length === 0 && <p className="chat-empty">No agents in this view.</p>}
           </div>
         </section>
 

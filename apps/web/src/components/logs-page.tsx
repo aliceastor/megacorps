@@ -61,10 +61,10 @@ export function LogsPage() {
   const visibleTaskRuns = taskRuns.filter((run) => !filter || `${run.kind} ${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(filter.toLowerCase()));
   const visibleCronRuns = (cron?.recentRuns ?? []).filter((run) => !filter || `${run.name} ${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(filter.toLowerCase()));
 
-  return <div style={{ display: 'grid', gap: 16 }}>
+  return <div className="page-stack logs-page">
     <div className="page-head"><div><h1>Logs</h1><p>API lifecycle, product activity, heartbeat runs, locks, costs, and errors.</p></div></div>
     <div className="input-wrap"><input placeholder="Filter logs" value={filter} onChange={(event) => setFilter(event.target.value)} /></div>
-    <div className="data-grid">
+    <div className="logs-grid">
       <section className="card section-card">
         <div className="panel-title">
           <div><h2>Cron heartbeat</h2><span className="status-pill">{cron?.enabled === false ? 'disabled' : cron?.running ? 'running' : cron?.lastStatus ?? 'unknown'}</span></div>

@@ -91,7 +91,7 @@ export function WorkspacesPage() {
     setToast('Workspace item removed locally');
   }
 
-  return <div className="page-stack">
+  return <div className="page-stack workspace-page">
     <div className="page-head">
       <div><h1>Workspace</h1><p>Company folder manager and authoritative location path for non-coding project files.</p></div>
     </div>
