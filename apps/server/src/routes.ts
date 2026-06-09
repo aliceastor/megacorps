@@ -3,7 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, ne, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createPositionSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema, validateCardTransition } from '@megacorps/shared';
+import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createPositionSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateAgentSchema, updateCardSchema, updateCompanyMembershipSchema, validateCardTransition } from '@megacorps/shared';
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
@@ -1421,7 +1421,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.put('/api/agents/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
-    const input = createAgentSchema.partial().parse(request.body);
+    const input = updateAgentSchema.parse(request.body);
     const [existing] = await db.select().from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
     if (!existing) return reply.code(404).send({ error: 'agent_not_found' });
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
@@ -1617,6 +1617,36 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!row) return reply.code(404).send({ error: 'project_not_found' });
     publishLiveEvent({ type: 'project.updated', companyId: row.companyId, entityType: 'project', entityId: row.id });
     return row;
+  });
+  app.delete('/api/projects/:id', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const [existing] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'project_not_found' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    const [
+      [cardUsage],
+      [workProductUsage],
+      [chatSessionUsage],
+      [costUsage],
+    ] = await Promise.all([
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(kanbanCards).where(eq(kanbanCards.projectId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(workProducts).where(eq(workProducts.projectId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(chatSessions).where(eq(chatSessions.projectId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(costEvents).where(eq(costEvents.projectId, id)),
+    ]);
+    const blocking = Object.entries({
+      cards: cardUsage?.count ?? 0,
+      workProducts: workProductUsage?.count ?? 0,
+      chatSessions: chatSessionUsage?.count ?? 0,
+      costEvents: costUsage?.count ?? 0,
+    }).filter(([, count]) => Number(count) > 0);
+    if (blocking.length > 0) return reply.code(409).send({ error: 'project_not_empty', blocking: Object.fromEntries(blocking) });
+    await db.transaction(async (tx) => {
+      await tx.delete(goals).where(eq(goals.projectId, id));
+      await tx.delete(projects).where(eq(projects.id, id));
+    });
+    publishLiveEvent({ type: 'project.deleted', companyId: existing.companyId, entityType: 'project', entityId: id });
+    return { ok: true };
   });
   app.get('/api/goals', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;

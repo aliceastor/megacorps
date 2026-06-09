@@ -11,7 +11,6 @@ type Agent = {
   companyId: string;
   name: string;
   role: string;
-  title?: string | null;
   adapterType?: string | null;
   isActive?: boolean | null;
   isBusy?: boolean | null;
@@ -353,7 +352,7 @@ export function ChatPage() {
         </div>
         <div className="chat-agent-card">
           <span className="chat-avatar large">{selectedAgent?.name.slice(0, 2).toUpperCase() ?? '--'}</span>
-          <div><b>{selectedAgent?.name ?? 'No agent'}</b><span>{selectedAgent?.title || selectedAgent?.role || 'No identity'}</span></div>
+          <div><b>{selectedAgent?.name ?? 'No agent'}</b><span>{selectedAgent?.role || 'No identity'}</span></div>
           <em style={{ color: status.color }}>{status.label}</em>
         </div>
         <div className="chat-list">

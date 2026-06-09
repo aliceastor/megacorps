@@ -74,6 +74,7 @@ const registeredRoutes = [
   ['GET', '/api/projects'],
   ['POST', '/api/projects'],
   ['PUT', '/api/projects/:id'],
+  ['DELETE', '/api/projects/:id'],
   ['GET', '/api/goals'],
   ['POST', '/api/goals'],
   ['GET', '/api/knowledge-docs'],

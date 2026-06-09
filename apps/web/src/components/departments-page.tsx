@@ -5,7 +5,7 @@ import { api } from '@/lib/api';
 
 type Company = { id: string; name: string; slug: string };
 type Department = { id: string; companyId: string; name: string; slug: string };
-type Agent = { id: string; companyId: string; departmentId?: string | null; bossId?: string | null; name: string; role: string; title?: string | null; adapterType?: string | null; isActive?: boolean; isBusy?: boolean };
+type Agent = { id: string; companyId: string; departmentId?: string | null; bossId?: string | null; name: string; role: string; adapterType?: string | null; isActive?: boolean; isBusy?: boolean };
 type Goal = { id: string; companyId: string; departmentId?: string | null; projectId?: string | null; title: string; body?: string | null };
 
 function slugify(value: string): string {
@@ -179,7 +179,7 @@ export function DepartmentsPage() {
               <thead><tr><th>Agent</th><th>Department</th><th>Reports to</th><th>Status</th></tr></thead>
               <tbody>
                 {companyAgents.map((agent) => <tr key={agent.id}>
-                  <td><button type="button" className="text-button agent-name-button" onClick={() => setSelectedAgentId(agent.id)}><b>{agent.name}</b><small>{agent.title || agent.role} / {agent.adapterType ?? 'mock'}</small></button></td>
+                  <td><button type="button" className="text-button agent-name-button" onClick={() => setSelectedAgentId(agent.id)}><b>{agent.name}</b><small>{agent.role} / {agent.adapterType ?? 'mock'}</small></button></td>
                   <td><select className="input compact" disabled={busyAgentId === agent.id} value={agent.departmentId ?? ''} onChange={(event) => void updateAgentOrg(agent, { departmentId: event.target.value || null })}>
                     <option value="">No department</option>
                     {companyDepartments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
@@ -199,7 +199,7 @@ export function DepartmentsPage() {
         {selectedAgent && <section className="card section-card agent-inline-editor">
           <div className="panel-title"><div><h2><Pencil size={18} /> Agent Editor</h2><span className="status-pill">{selectedAgent.name}</span></div></div>
           <div className="agent-editor-summary">
-            <b>{selectedAgent.title || selectedAgent.role}</b>
+            <b>{selectedAgent.role}</b>
             <span>{selectedAgent.adapterType ?? 'mock'} / {selectedAgent.isBusy ? 'busy' : selectedAgent.isActive === false ? 'offline' : 'ready'}</span>
           </div>
           <div className="form-grid department-agent-edit-grid">

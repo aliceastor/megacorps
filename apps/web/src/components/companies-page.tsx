@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Building2, Plus, Save, Target, Trash2 } from 'lucide-react';
-import { api } from '@/lib/api';
+import { ApiError, api } from '@/lib/api';
 
 type Company = { id: string; name: string; slug: string; mission?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean; createdAt?: string };
 type Department = { id: string; companyId: string; name: string; slug: string };
@@ -9,9 +9,32 @@ type Agent = { id: string; companyId: string };
 type Project = { id: string; companyId: string };
 type Card = { id: string; companyId: string };
 type Goal = { id: string; companyId: string; departmentId?: string | null; projectId?: string | null; title: string; body?: string | null };
+type Membership = { companyId: string; role: 'viewer' | 'operator' | 'admin'; status?: string };
+type Me = { memberships: Membership[] };
 
 function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+function formatBlocking(blocking: unknown): string {
+  if (!blocking || typeof blocking !== 'object') return '';
+  return Object.entries(blocking as Record<string, unknown>)
+    .filter(([, count]) => Number(count) > 0)
+    .map(([key, count]) => `${key}: ${count}`)
+    .join(', ');
+}
+
+function companyDeleteErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.data && typeof error.data === 'object') {
+    const data = error.data as { error?: unknown; blocking?: unknown; requiredRole?: unknown };
+    if (data.error === 'company_not_empty') {
+      const blocking = formatBlocking(data.blocking);
+      return `Company still has linked records${blocking ? ` (${blocking})` : ''}.`;
+    }
+    if (data.error === 'company_role_required') return `Company ${data.requiredRole ?? 'admin'} role is required to delete this company.`;
+    if (data.error === 'company_access_denied') return 'You do not have access to delete this company.';
+  }
+  return error instanceof Error ? error.message : 'Company delete failed';
 }
 
 export function CompaniesPage() {
@@ -21,6 +44,7 @@ export function CompaniesPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
+  const [memberships, setMemberships] = useState<Membership[]>([]);
   const [companyId, setCompanyId] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [companySlug, setCompanySlug] = useState('');
@@ -40,17 +64,25 @@ export function CompaniesPage() {
   const selectedProjects = useMemo(() => projects.filter((project) => project.companyId === companyId), [projects, companyId]);
   const selectedCards = useMemo(() => cards.filter((card) => card.companyId === companyId), [cards, companyId]);
   const companyGoals = useMemo(() => goals.filter((goal) => goal.companyId === companyId && !goal.departmentId && !goal.projectId), [goals, companyId]);
+  const selectedCompanyRole = memberships.find((membership) => membership.companyId === companyId && membership.status !== 'disabled')?.role ?? null;
+  const canDeleteSelectedCompany = selectedCompanyRole === 'admin';
+  const deleteCompanyTitle = !selectedCompany
+    ? 'Select a company first'
+    : canDeleteSelectedCompany
+      ? 'Delete company'
+      : 'Requires company admin role';
 
   async function refresh(nextCompanyId = companyId) {
     setError('');
     try {
-      const [companyRows, departmentRows, agentRows, projectRows, cardRows, goalRows] = await Promise.all([
+      const [companyRows, departmentRows, agentRows, projectRows, cardRows, goalRows, me] = await Promise.all([
         api<Company[]>('/api/companies'),
         api<Department[]>('/api/departments'),
         api<Agent[]>('/api/agents'),
         api<Project[]>('/api/projects'),
         api<Card[]>('/api/cards'),
         api<Goal[]>('/api/goals'),
+        api<Me>('/api/me'),
       ]);
       setCompanies(companyRows);
       setDepartments(departmentRows);
@@ -58,6 +90,7 @@ export function CompaniesPage() {
       setProjects(projectRows);
       setCards(cardRows);
       setGoals(goalRows);
+      setMemberships(me.memberships ?? []);
       const activeCompany = companyRows.find((company) => company.id === nextCompanyId) ?? companyRows[0];
       if (activeCompany) selectCompany(activeCompany);
       else startNewCompany(false);
@@ -129,7 +162,7 @@ export function CompaniesPage() {
       setToast('Company deleted');
       await refresh('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Company delete failed');
+      setError(companyDeleteErrorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -187,7 +220,7 @@ export function CompaniesPage() {
           <label className="field-label">Mission<textarea className="input" rows={4} value={mission} onChange={(event) => setMission(event.target.value)} /></label>
           <div className="action-row">
             <button className="btn btn-primary" disabled={busy || !companyName.trim() || !companySlug.trim()} onClick={saveCompany}><Save size={15} /> Save Company</button>
-            <button className="btn" disabled={busy || !selectedCompany} onClick={deleteCompany} style={{ color: 'var(--danger)' }}><Trash2 size={15} /> Delete Company</button>
+            <button className="btn" disabled={busy || !selectedCompany || !canDeleteSelectedCompany} title={deleteCompanyTitle} onClick={deleteCompany} style={{ color: 'var(--danger)' }}><Trash2 size={15} /> Delete Company</button>
           </div>
         </section>
 

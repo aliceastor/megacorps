@@ -209,6 +209,11 @@ export const createAgentSchema = z.object({
   budgetMonthly: z.number().nonnegative().optional(),
 });
 
+export const updateAgentSchema = createAgentSchema.omit({ adapterType: true, capabilities: true }).partial().extend({
+  adapterType: z.enum(agentAdapterTypes).optional(),
+  capabilities: z.array(z.string().trim().min(1).max(80)).optional(),
+});
+
 export const createAgentRuntimeSchema = z.object({
   companyId: z.string().uuid().optional(),
   name: z.string().trim().min(1).max(120),

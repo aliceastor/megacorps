@@ -1970,8 +1970,8 @@ button.agent-node-card {
   border-radius: 999px;
   padding: 12px 16px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
   align-items: center;
   background: color-mix(in srgb, var(--background) 56%, var(--card));
   color: var(--foreground);
@@ -2004,6 +2004,9 @@ button.agent-node-card {
 
 .company-o-copy b {
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

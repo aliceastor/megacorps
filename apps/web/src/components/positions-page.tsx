@@ -5,7 +5,7 @@ import { api } from '@/lib/api';
 
 type Company = { id: string; name: string; slug: string };
 type Position = { id: string; companyId: string; name: string; slug: string; prompt?: string | null; createdAt?: string; updatedAt?: string };
-type Agent = { id: string; companyId: string; positionId?: string | null; name: string; role: string; title?: string | null };
+type Agent = { id: string; companyId: string; positionId?: string | null; name: string; role: string };
 
 function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -167,7 +167,7 @@ export function PositionsPage() {
         <section className="card section-card">
           <div className="panel-title"><h2>Assigned agents</h2><span className="status-pill">{assignedAgents.length}</span></div>
           <div className="table-list">
-            {assignedAgents.map((agent) => <div className="list-row" key={agent.id}><b>{agent.name}</b><p>{agent.title || agent.role}</p></div>)}
+            {assignedAgents.map((agent) => <div className="list-row" key={agent.id}><b>{agent.name}</b><p>{agent.role}</p></div>)}
             {selectedPosition && assignedAgents.length === 0 && <p className="chat-empty">No agents use this position yet.</p>}
             {!selectedPosition && <p className="chat-empty">Select or create a position to see assigned agents.</p>}
           </div>

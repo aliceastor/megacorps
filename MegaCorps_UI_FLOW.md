@@ -227,7 +227,6 @@ Overlay:
 Step 1: Identity
 - Name
 - Slug
-- Title
 - Identity label
 - Soul/persona
 - Capability checkboxes
@@ -247,7 +246,7 @@ Step 3: Runtime and budget
 
 Selected-agent panel elements:
 - Effective adapter config summary, including runtime-inherited values and per-agent overrides
-- Name, slug, identity label, title, profile
+- Name, slug, identity label, profile
 - Adapter and runtime preset selectors
 - Department, position, and reports-to selectors
 - Capabilities, per-task budget, monthly budget
@@ -317,7 +316,8 @@ Elements:
   - Message list
   - Optimistic outgoing user message
   - Agent typing/generating indicator
-  - Message composer textarea
+- Message composer textarea
+- No-project sessions filter injected Kanban context to no-project cards and omit project records/goals/activity
   - Send button
 
 No modal overlays.
@@ -607,6 +607,7 @@ Data sources:
 - `GET /api/projects`
 - `POST /api/projects`
 - `PUT /api/projects/:id`
+- `DELETE /api/projects/:id`
 - `GET /api/goals`
 - `POST /api/goals`
 
@@ -615,7 +616,7 @@ Elements:
 - Unified Project Authority workbench:
   - New project row
   - Project rows
-  - Save/Add action in the editor header
+  - Save/Add/Delete actions in the editor header
 - Project identity section:
   - Project name
   - Description

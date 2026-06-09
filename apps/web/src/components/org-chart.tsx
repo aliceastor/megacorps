@@ -12,7 +12,6 @@ type Agent = {
   name: string;
   slug: string;
   role: string;
-  title?: string;
   soul?: string | null;
   hermesProfile?: string;
   adapterType?: string;
@@ -143,7 +142,6 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const [slug, setSlug] = useState('');
   const [profile, setProfile] = useState('local-debug');
   const [role, setRole] = useState('member');
-  const [agentTitle, setAgentTitle] = useState('');
   const [soul, setSoul] = useState('');
   const [agentCapabilities, setAgentCapabilities] = useState('');
   const [agentBudgetPerTask, setAgentBudgetPerTask] = useState('');
@@ -194,7 +192,6 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       name: selected.name,
       slug: selected.slug,
       role: selected.role,
-      title: selected.title ?? '',
       soul: selected.soul ?? '',
       hermesProfile: selected.hermesProfile ?? '',
       adapterType: selected.adapterType ?? 'mock',
@@ -229,7 +226,6 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
           name: name.trim(),
           slug: slug.trim(),
           role: role.trim() || 'member',
-          title: agentTitle.trim(),
           soul: soul.trim() || null,
           capabilities: parseCsv(agentCapabilities),
           adapterType,
@@ -247,7 +243,6 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       setPositionId('');
       setRuntimeId('');
       setRole('member');
-      setAgentTitle('');
       setSoul('');
       setAgentCapabilities('');
       setAgentBudgetPerTask('');
@@ -367,7 +362,6 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
         name: String(agentDraft.name ?? selected.name),
         slug: String(agentDraft.slug ?? selected.slug),
         role: String(agentDraft.role ?? selected.role).trim() || 'member',
-        title: String(agentDraft.title ?? ''),
         soul: agentDraft.soul ? String(agentDraft.soul) : null,
         adapterType: String(agentDraft.adapterType ?? selected.adapterType ?? 'mock'),
         adapterConfig: agentDraft.adapterConfig ?? {},
@@ -512,7 +506,6 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
               <div className="form-grid">
                 <label className="field-label">Name<input className="input" value={name} onChange={(event) => setName(event.target.value)} /></label>
                 <label className="field-label">Slug<input className="input" value={slug} onChange={(event) => setSlug(event.target.value)} /></label>
-                <label className="field-label">Title<input className="input" value={agentTitle} onChange={(event) => setAgentTitle(event.target.value)} /></label>
                 <label className="field-label">Identity<select className="input" value={role} onChange={(event) => setRole(event.target.value)}>
                   <option value="member">member</option>
                   <option value="worker">worker</option>
@@ -617,7 +610,6 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
               <label className="field-label">Name<input className="input" value={String(agentDraft?.name ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), name: e.target.value })} /></label>
               <label className="field-label">Slug<input className="input" value={String(agentDraft?.slug ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), slug: e.target.value })} /></label>
               <label className="field-label">Identity label<input className="input" value={String(agentDraft?.role ?? 'member')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), role: e.target.value })} /></label>
-              <label className="field-label">Title<input className="input" value={String(agentDraft?.title ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), title: e.target.value })} /></label>
               <label className="field-label">Profile<input className="input" value={String(agentDraft?.hermesProfile ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), hermesProfile: e.target.value })} /></label>
               <label className="field-label">Adapter<select className="input" value={String(agentDraft?.adapterType ?? 'mock')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), adapterType: e.target.value })}>
                 <option value="mock">Mock</option>

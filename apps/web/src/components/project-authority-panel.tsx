@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
-import { BriefcaseBusiness, FolderGit2, GitBranch, Plus, Save, Target } from 'lucide-react';
-import { api } from '@/lib/api';
+import { BriefcaseBusiness, FolderGit2, GitBranch, Plus, Save, Target, Trash2 } from 'lucide-react';
+import { ApiError, api } from '@/lib/api';
 
 type Company = { id: string; name: string };
 type Project = {
@@ -36,6 +36,25 @@ type ProjectAuthorityPanelProps = {
 
 function parseList(value: string): string[] {
   return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function formatBlocking(blocking: unknown): string {
+  if (!blocking || typeof blocking !== 'object') return '';
+  return Object.entries(blocking as Record<string, unknown>)
+    .filter(([, count]) => Number(count) > 0)
+    .map(([key, count]) => `${key}: ${count}`)
+    .join(', ');
+}
+
+function projectErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof ApiError && error.data && typeof error.data === 'object') {
+    const data = error.data as { error?: unknown; blocking?: unknown };
+    if (data.error === 'project_not_empty') {
+      const blocking = formatBlocking(data.blocking);
+      return `Project still has linked records${blocking ? ` (${blocking})` : ''}.`;
+    }
+  }
+  return error instanceof Error ? error.message : fallback;
 }
 
 export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', description = 'Project CRUD, repository rules, branch policy, work path, and project goals.', compact = false, showPageHead = false }: ProjectAuthorityPanelProps) {
@@ -214,6 +233,23 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
     }
   }
 
+  async function deleteProject() {
+    if (!selectedProject) return;
+    if (!window.confirm(`Delete project "${selectedProject.name}"? Cards, work products, chat sessions, and cost history must be empty.`)) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api(`/api/projects/${selectedProject.id}`, { method: 'DELETE' });
+      setToast('Project deleted');
+      resetProjectDraft();
+      await refresh(activeCompanyId);
+    } catch (err) {
+      setError(projectErrorMessage(err, 'Failed to delete project'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function addGoal() {
     if (!activeCompanyId || !selectedProject || !goalTitle.trim()) return;
     setBusy(true);
@@ -260,7 +296,10 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
         <div className="project-editor-head">
           <div><h2><FolderGit2 size={18} /> {selectedProject ? selectedProject.name : 'New Project'}</h2><span className="status-pill">{selectedProject ? 'editing authority' : 'create authority'}</span></div>
           {selectedProject
-            ? <button className="btn btn-primary" disabled={busy || !projectName.trim()} onClick={saveProject}><Save size={15} /> Save project</button>
+            ? <div className="action-row">
+              <button className="btn" disabled={busy} onClick={deleteProject} style={{ color: 'var(--danger)' }}><Trash2 size={15} /> Delete project</button>
+              <button className="btn btn-primary" disabled={busy || !projectName.trim()} onClick={saveProject}><Save size={15} /> Save project</button>
+            </div>
             : <button className="btn btn-primary" disabled={busy || !projectName.trim()} onClick={addProject}><Plus size={15} /> Add project</button>}
         </div>
 

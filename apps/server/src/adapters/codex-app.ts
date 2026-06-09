@@ -251,7 +251,6 @@ function buildCodexPrompt(agent: AgentLike, task: TaskContext): string {
   const fallbackIdentity = [
     `Name: ${agent.name ?? agent.hermesProfile ?? 'unknown'}`,
     `Role: ${agent.role ?? 'agent'}`,
-    agent.title ? `Title: ${agent.title}` : '',
   ].filter(Boolean).join('\n');
   const soul = configuredString(agent.soul) ?? fallbackIdentity;
   return [

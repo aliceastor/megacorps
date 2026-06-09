@@ -11,7 +11,7 @@ MegaCorps uses bounded context budgets, so long fields are clipped rather than o
 - Company name, mission, dispatch settings
 - Company goals, department goals, project goals
 - Project repo binding and Git completion policy, when a project has a repository
-- Agent identity, title, soul/work style, reporting manager, direct reports
+- Agent identity, soul/work style, reporting manager, direct reports
 - Agent position prompt when `agent.positionId` is set
 - Same-company Kanban snapshot with compact card lines
 - Focus card dependency state and recent card action/log history
@@ -49,7 +49,7 @@ Applicable goals:
 - <all company + matching department/project + selected goals>
 ```
 
-For Direct Chat, the session `projectId` controls the project goal layer. A null `projectId` is treated as no-project/general chat.
+For Direct Chat, the session `projectId` controls the project goal layer and Kanban snapshot scope. A null `projectId` is treated as no-project/general chat and excludes project records, project goals, project activity, and project-linked cards from the injected chat context.
 
 ## Agent Soul And Codex App-Server Wrapper
 
@@ -61,7 +61,7 @@ When `adapterType=codex-app`, MegaCorps wraps the normal Direct Chat or Kanban p
 You are running through Codex app-server as a MegaCorps agent. MegaCorps is the source of truth for your identity, task scope, goals, and completion protocol.
 
 === Agent Soul ===
-<agent.soul, or fallback name/role/title>
+<agent.soul, or fallback name/role>
 
 === Adapter Session ===
 Codex thread: <existing thread id | new>
@@ -242,13 +242,12 @@ Project goals:
 
 Agent name: <agent name>
 Identity label: <agent role>
-Title: <agent title | none>
 Adapter: <adapter type>
 Soul:
 <agent.soul, if configured>
 
 Kanban context snapshot:
-<bounded same-company board and focus-agent work context>
+<bounded same-company board and focus-agent work context, filtered to no-project cards when projectId is null>
 
 Conversation history:
 [user] <message>

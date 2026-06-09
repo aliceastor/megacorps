@@ -20,6 +20,7 @@ type ProjectRow = typeof projects.$inferSelect;
 type RuntimeRow = typeof agentRuntimes.$inferSelect;
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
+type KanbanContextOptions = { focusCardId?: string; focusAgentId?: string | null; budgetChars?: number; projectId?: string | null };
 type LogStatus = 'queued' | 'running' | 'success' | 'warning' | 'failed';
 type TaskRunKind = 'dispatch' | 'review';
 type TaskRunSource = 'manual' | 'loop' | 'startup' | 'queue';
@@ -456,7 +457,6 @@ export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: st
     id: agent.id,
     name: agent.name,
     role: agent.role,
-    title: agent.title,
     soul: agent.soul,
     adapterType,
     runtimeId: agent.runtimeId,
@@ -503,11 +503,11 @@ async function rememberTaskAdapterSession(card: CardRow, agent: AgentRow, kind: 
 function matchScore(card: CardRow, agent: AgentRow): number {
   let score = 0;
   if (card.departmentId && agent.departmentId === card.departmentId) score += 50;
-  const haystack = `${agent.role} ${agent.title ?? ''} ${(agent.capabilities ?? []).join(' ')}`.toLowerCase();
+  const haystack = `${agent.role} ${(agent.capabilities ?? []).join(' ')}`.toLowerCase();
   for (const tag of card.tags ?? []) if (haystack.includes(tag.toLowerCase())) score += 10;
-  if (/review|qa|audit/i.test(card.title + card.body) && /review|qa|audit/i.test(agent.role + agent.title)) score += 8;
-  if (/design|ui|ux/i.test(card.title + card.body) && /design|ui|ux/i.test(agent.role + agent.title)) score += 8;
-  if (/code|api|backend|frontend|bug|build/i.test(card.title + card.body) && /engineer|developer|coder/i.test(agent.role + agent.title)) score += 8;
+  if (/review|qa|audit/i.test(card.title + card.body) && /review|qa|audit/i.test(agent.role)) score += 8;
+  if (/design|ui|ux/i.test(card.title + card.body) && /design|ui|ux/i.test(agent.role)) score += 8;
+  if (/code|api|backend|frontend|bug|build/i.test(card.title + card.body) && /engineer|developer|coder/i.test(agent.role)) score += 8;
   score += Math.max(0, 10 - Number(agent.spentThisMonth ?? 0));
   return score;
 }
@@ -1372,6 +1372,10 @@ function compactCardLine(card: CardRow, agentById: Map<string, AgentRow>): strin
   ].join(' | ');
 }
 
+function hasProjectScope(options: KanbanContextOptions): boolean {
+  return Object.prototype.hasOwnProperty.call(options, 'projectId');
+}
+
 function addContextSection(state: { remaining: number; sections: string[]; truncated: boolean }, title: string, body: string, maxSectionChars = 8000): void {
   const trimmed = body.trim();
   if (!trimmed || state.remaining <= 0) return;
@@ -1383,7 +1387,7 @@ function addContextSection(state: { remaining: number; sections: string[]; trunc
   if (trimmed.length > clipped.length) state.truncated = true;
 }
 
-export async function buildCompanyKanbanContext(companyId: string, options: { focusCardId?: string; focusAgentId?: string | null; budgetChars?: number } = {}): Promise<string> {
+export async function buildCompanyKanbanContext(companyId: string, options: KanbanContextOptions = {}): Promise<string> {
   const budget = Math.max(8000, options.budgetChars ?? CONTEXT_CHAR_BUDGET);
   const state = { remaining: budget, sections: [] as string[], truncated: false };
   const [company] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
@@ -1404,6 +1408,10 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
   const positionById = new Map(companyPositions.map((position) => [position.id, position]));
   const projectById = new Map(companyProjects.map((project) => [project.id, project]));
   const goalById = new Map(companyGoals.map((goal) => [goal.id, goal]));
+  const scopedToProject = hasProjectScope(options);
+  const scopedProjects = scopedToProject ? (options.projectId ? companyProjects.filter((project) => project.id === options.projectId) : []) : companyProjects;
+  const scopedGoals = scopedToProject ? companyGoals.filter((goal) => !goal.projectId || goal.projectId === options.projectId) : companyGoals;
+  const scopedCards = scopedToProject ? companyCards.filter((card) => options.projectId ? card.projectId === options.projectId : !card.projectId) : companyCards;
   const focusCard = options.focusCardId ? companyCards.find((card) => card.id === options.focusCardId) : undefined;
   const focusAgent = options.focusAgentId ? agentById.get(options.focusAgentId) : undefined;
 
@@ -1414,21 +1422,22 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
     `Dispatch interval seconds: ${company?.dispatchIntervalSeconds ?? 10}`,
     `Departments: ${companyDepartments.map((department) => `${department.name} (${department.slug})`).join(', ') || 'none'}`,
     `Positions: ${companyPositions.map((position) => `${position.name} (${position.slug})`).join(', ') || 'none'}`,
-    `Projects: ${companyProjects.map((project) => project.name).join(', ') || 'none'}`,
-    `Goals:\n${companyGoals.map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
+    `Projects: ${scopedToProject ? scopedProjects.map((project) => project.name).join(', ') || 'not included for no-project chat' : companyProjects.map((project) => project.name).join(', ') || 'none'}`,
+    `Goals:\n${scopedGoals.map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
   ].join('\n'), 2600);
 
-  const statusCounts = companyCards.reduce<Record<string, number>>((acc, card) => {
+  const statusCounts = scopedCards.reduce<Record<string, number>>((acc, card) => {
     const key = card.columnStatus ?? 'todo';
     acc[key] = (acc[key] ?? 0) + 1;
     return acc;
   }, {});
-  const boardLines = companyCards.slice(0, KANBAN_CONTEXT_CARD_LIMIT).map((card) => compactCardLine(card, agentById));
+  const boardLines = scopedCards.slice(0, KANBAN_CONTEXT_CARD_LIMIT).map((card) => compactCardLine(card, agentById));
   addContextSection(state, 'Kanban Board Snapshot', [
-    `Total cards: ${companyCards.length}`,
+    `Scope: ${scopedToProject ? options.projectId ? `project ${scopedProjects[0]?.name ?? options.projectId}` : 'no-project cards only' : 'all company cards'}`,
+    `Total cards: ${scopedCards.length}`,
     `Stage counts: ${Object.entries(statusCounts).map(([status, count]) => `${status}=${count}`).join(', ') || 'none'}`,
     ...boardLines,
-    companyCards.length > boardLines.length ? `[omitted ${companyCards.length - boardLines.length} older cards due context limit]` : '',
+    scopedCards.length > boardLines.length ? `[omitted ${scopedCards.length - boardLines.length} older cards due context limit]` : '',
   ].filter(Boolean).join('\n'), 14000);
 
   if (focusAgent) {
@@ -1438,8 +1447,8 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
     const position = focusAgent.positionId ? positionById.get(focusAgent.positionId) : undefined;
     const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt });
     const reports = companyAgents.filter((agent) => agent.bossId === focusAgent.id);
-    const assigned = companyCards.filter((card) => card.assigneeId === focusAgent.id && !['done', 'blocked', 'cancelled'].includes(card.columnStatus ?? 'todo')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
-    const reviews = companyCards.filter((card) => card.reviewerId === focusAgent.id || reports.some((report) => report.id === card.assigneeId && ['in_review', 'needs_review'].includes(card.columnStatus ?? 'todo'))).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
+    const assigned = scopedCards.filter((card) => card.assigneeId === focusAgent.id && !['done', 'blocked', 'cancelled'].includes(card.columnStatus ?? 'todo')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
+    const reviews = scopedCards.filter((card) => card.reviewerId === focusAgent.id || reports.some((report) => report.id === card.assigneeId && ['in_review', 'needs_review'].includes(card.columnStatus ?? 'todo'))).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
     addContextSection(state, 'Invocation Agent Work Context', [
       `Agent: ${focusAgent.name}`,
       `Identity label: ${focusAgent.role}`,
@@ -1506,11 +1515,16 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
     ].filter(Boolean).join('\n')).join('\n') || 'none', 7000);
   }
 
-  addContextSection(state, 'Recent Company Activity', recentActivity.map((event) => [
+  const scopedRuns = scopedToProject ? recentRuns.filter((run) => {
+    if (!run.cardId) return true;
+    const card = companyCards.find((item) => item.id === run.cardId);
+    return options.projectId ? card?.projectId === options.projectId : !card?.projectId;
+  }) : recentRuns;
+  addContextSection(state, 'Recent Company Activity', scopedToProject && !options.projectId ? 'omitted for no-project chat' : recentActivity.map((event) => [
     `- ${formatDate(event.createdAt)} | ${event.actorType}:${event.actorId} | ${event.action} | ${event.entityType}:${event.entityId}`,
     `  details=${clipText(JSON.stringify(event.details ?? {}), 800)}`,
   ].join('\n')).join('\n') || 'none', 5000);
-  addContextSection(state, 'Recent Heartbeat Runs', recentRuns.map((run) => [
+  addContextSection(state, 'Recent Heartbeat Runs', scopedRuns.map((run) => [
     `- ${formatDate(run.createdAt)} | ${run.source}/${run.status} | card=${run.cardId ?? 'none'} | agent=${run.agentId ? agentById.get(run.agentId)?.name ?? run.agentId : 'none'} | duration=${run.durationSeconds ?? 0}s | cost=${run.costUsd ?? '0'}`,
     run.error ? `  error=${clipText(run.error, 500)}` : '',
   ].filter(Boolean).join('\n')).join('\n') || 'none', 5000);

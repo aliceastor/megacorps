@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canTransitionCard, cardStatusSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createCardSchema, createMachineRunnerSchema, createProjectSchema, inferCardTransitionAction, runnerHeartbeatSchema, signupSchema, validateCardTransition } from './index.ts';
+import { canTransitionCard, cardStatusSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createCardSchema, createMachineRunnerSchema, createProjectSchema, inferCardTransitionAction, runnerHeartbeatSchema, signupSchema, updateAgentSchema, validateCardTransition } from './index.ts';
 
 test('allows the canonical card status path and blocks invalid skips', () => {
   assert.deepEqual([...cardStatuses], ['todo', 'in_progress', 'in_review', 'needs_review', 'done', 'blocked', 'cancelled']);
@@ -68,6 +68,10 @@ test('accepts MVP agent adapter options', () => {
   assert.equal(createAgentSchema.safeParse({ name: 'SSH Alice', slug: 'ssh-alice', role: 'worker', adapterType: 'hermes-ssh', hermesProfile: 'alice' }).success, true);
   assert.equal(createAgentSchema.safeParse({ name: 'Codex Alice', slug: 'codex-alice', role: 'worker', adapterType: 'codex-app', soul: 'Careful code reviewer with a concise working style.' }).success, true);
   assert.equal(createAgentSchema.safeParse({ name: 'Local', slug: 'local', role: 'worker', adapterType: 'mock', hermesProfile: 'local-debug' }).success, true);
+});
+
+test('agent updates do not inherit create-time adapter defaults', () => {
+  assert.deepEqual(updateAgentSchema.parse({ bossId: null }), { bossId: null });
 });
 
 test('signup requires a real password length', () => {

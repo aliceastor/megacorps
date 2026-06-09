@@ -86,7 +86,6 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
     [
       `Agent name: ${agent.name}`,
       `Identity label: ${agent.role}`,
-      `Title: ${agent.title ?? 'none'}`,
       agent.soul ? `Soul:\n${agent.soul.slice(0, 1200)}` : '',
       `Adapter: ${agent.adapterType}`,
     ].join('\n'),
@@ -274,7 +273,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         data: { agentId: agent.id, runId: run.id },
       });
       const recent = await db.select().from(chatMessages).where(eq(chatMessages.sessionId, session.id)).orderBy(desc(chatMessages.createdAt)).limit(30);
-      const kanbanContext = await buildCompanyKanbanContext(session.companyId, { focusAgentId: agent.id, budgetChars: 20_000 });
+      const kanbanContext = await buildCompanyKanbanContext(session.companyId, { focusAgentId: agent.id, projectId: session.projectId ?? null, budgetChars: 20_000 });
       const goalContext = await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
       const prompt = buildChatPrompt(company, agent, recent.reverse(), kanbanContext, goalContext);
       const adapter = getAdapter(agent.adapterType ?? 'hermes');

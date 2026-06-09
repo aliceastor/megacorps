@@ -1,18 +1,19 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
-import { Building2, Network, UserRound, Users } from 'lucide-react';
+import { Building2, Network, Users } from 'lucide-react';
 import { api } from '@/lib/api';
 
 type Company = { id: string; name: string; slug: string };
 type Department = { id: string; companyId: string; name: string; slug: string };
+type Position = { id: string; companyId: string; name: string; slug: string };
 type Agent = {
   id: string;
   companyId: string;
   departmentId?: string | null;
+  positionId?: string | null;
   bossId?: string | null;
   name: string;
   role: string;
-  title?: string | null;
   adapterType?: string | null;
   isActive?: boolean;
   isBusy?: boolean;
@@ -24,14 +25,11 @@ function agentStatus(agent: Agent): string {
   return 'active';
 }
 
-function agentLabel(agent: Agent): string {
-  return agent.title || agent.role || 'Agent';
-}
-
-function OChartNode({ agent, agents, departments, selectedId, onSelect, lineage = new Set<string>() }: {
+function OChartNode({ agent, agents, departments, positions, selectedId, onSelect, lineage = new Set<string>() }: {
   agent: Agent;
   agents: Agent[];
   departments: Department[];
+  positions: Position[];
   selectedId?: string;
   onSelect: (agent: Agent) => void;
   lineage?: Set<string>;
@@ -39,17 +37,18 @@ function OChartNode({ agent, agents, departments, selectedId, onSelect, lineage 
   const nextLineage = new Set(lineage).add(agent.id);
   const children = agents.filter((item) => item.bossId === agent.id && !nextLineage.has(item.id));
   const department = departments.find((item) => item.id === agent.departmentId);
+  const position = positions.find((item) => item.id === agent.positionId);
+  const assignment = `${position?.name ?? agent.role}${department ? ` / ${department.name}` : ''}`;
   return <div className={`company-o-node${children.length ? ' has-children' : ''}`}>
     <button type="button" className={`company-o-card ${selectedId === agent.id ? 'active' : ''}`} onClick={() => onSelect(agent)}>
-      <span className="company-o-icon"><UserRound size={16} /></span>
       <span className="company-o-copy">
-        <b>{agentLabel(agent)}</b>
-        <small><span className={`org-agent-dot ${agentStatus(agent)}`} /> {agent.name}</small>
-        <small>{department?.name ?? 'No department'} / {agent.adapterType ?? 'mock'}</small>
+        <b><span className={`org-agent-dot ${agentStatus(agent)}`} /> {agent.name}</b>
+        <small>{assignment}</small>
+        <small>{agent.adapterType ?? 'mock'}</small>
       </span>
     </button>
     {children.length > 0 && <div className="company-o-children">
-      {children.map((child) => <OChartNode key={child.id} agent={child} agents={agents} departments={departments} selectedId={selectedId} onSelect={onSelect} lineage={nextLineage} />)}
+      {children.map((child) => <OChartNode key={child.id} agent={child} agents={agents} departments={departments} positions={positions} selectedId={selectedId} onSelect={onSelect} lineage={nextLineage} />)}
     </div>}
   </div>;
 }
@@ -57,6 +56,7 @@ function OChartNode({ agent, agents, departments, selectedId, onSelect, lineage 
 export function CompanyOChartPage() {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
+  const [positions, setPositions] = useState<Position[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [companyId, setCompanyId] = useState('');
   const [selectedAgentId, setSelectedAgentId] = useState('');
@@ -65,13 +65,15 @@ export function CompanyOChartPage() {
   async function refresh(nextCompanyId = companyId) {
     setError('');
     try {
-      const [companyRows, departmentRows, agentRows] = await Promise.all([
+      const [companyRows, departmentRows, positionRows, agentRows] = await Promise.all([
         api<Company[]>('/api/companies'),
         api<Department[]>('/api/departments'),
+        api<Position[]>('/api/positions'),
         api<Agent[]>('/api/agents'),
       ]);
       setCompanies(companyRows);
       setDepartments(departmentRows);
+      setPositions(positionRows);
       setAgents(agentRows);
       const activeCompanyId = companyRows.some((company) => company.id === nextCompanyId) ? nextCompanyId : companyRows[0]?.id ?? '';
       setCompanyId(activeCompanyId);
@@ -84,6 +86,7 @@ export function CompanyOChartPage() {
 
   const selectedCompany = companies.find((company) => company.id === companyId) ?? null;
   const companyDepartments = useMemo(() => departments.filter((department) => department.companyId === companyId), [departments, companyId]);
+  const companyPositions = useMemo(() => positions.filter((position) => position.companyId === companyId), [positions, companyId]);
   const companyAgents = useMemo(() => agents.filter((agent) => agent.companyId === companyId), [agents, companyId]);
   const companyAgentIds = useMemo(() => new Set(companyAgents.map((agent) => agent.id)), [companyAgents]);
   const roots = useMemo(() => {
@@ -92,6 +95,7 @@ export function CompanyOChartPage() {
   }, [companyAgents, companyAgentIds]);
   const selectedAgent = companyAgents.find((agent) => agent.id === selectedAgentId) ?? null;
   const selectedDepartment = selectedAgent ? companyDepartments.find((department) => department.id === selectedAgent.departmentId) : null;
+  const selectedPosition = selectedAgent ? companyPositions.find((position) => position.id === selectedAgent.positionId) : null;
   const directReports = selectedAgent ? companyAgents.filter((agent) => agent.bossId === selectedAgent.id) : [];
 
   return <div className="page-stack company-o-chart-page">
@@ -109,7 +113,7 @@ export function CompanyOChartPage() {
         <Building2 size={18} />
       </div>
       <div className="company-o-scroll" aria-label="Company organization chart">
-        {roots.length > 0 ? roots.map((agent) => <OChartNode key={agent.id} agent={agent} agents={companyAgents} departments={companyDepartments} selectedId={selectedAgent?.id} onSelect={(next) => setSelectedAgentId(next.id)} />) : <div className="chat-empty-state"><Users size={28} /><b>No agents in this company</b><span>Create agents first, then assign reporting lines in Departments.</span></div>}
+        {roots.length > 0 ? roots.map((agent) => <OChartNode key={agent.id} agent={agent} agents={companyAgents} departments={companyDepartments} positions={companyPositions} selectedId={selectedAgent?.id} onSelect={(next) => setSelectedAgentId(next.id)} />) : <div className="chat-empty-state"><Users size={28} /><b>No agents in this company</b><span>Create agents first, then assign reporting lines in Departments.</span></div>}
       </div>
     </section>
 
@@ -117,7 +121,7 @@ export function CompanyOChartPage() {
       <div className="panel-title"><div><h2>{selectedAgent.name}</h2><span className="status-pill">{agentStatus(selectedAgent)}</span></div></div>
       <div className="meta-grid">
         <span>Role <b>{selectedAgent.role}</b></span>
-        <span>Title <b>{selectedAgent.title || 'not set'}</b></span>
+        <span>Position <b>{selectedPosition?.name ?? 'No position'}</b></span>
         <span>Department <b>{selectedDepartment?.name ?? 'No department'}</b></span>
         <span>Reports to <b>{companyAgents.find((agent) => agent.id === selectedAgent.bossId)?.name ?? 'top-level'}</b></span>
         <span>Direct reports <b>{directReports.length}</b></span>
