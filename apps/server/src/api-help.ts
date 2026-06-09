@@ -114,8 +114,8 @@ const endpoints: ApiEndpoint[] = [
   { method: 'GET', path: '/api/approvals', group: 'Budget', auth: 'session', summary: 'List approvals.', query: { companyId: 'Optional company UUID.', status: 'Optional approval status.', cardId: 'Optional task UUID.', limit: '1-500, default 200.' } },
   { method: 'PUT', path: '/api/approvals/:id', group: 'Budget', auth: 'session', summary: 'Decide an approval.', params: { id: 'Approval UUID.' }, body: { status: 'approved | rejected | revision_requested | cancelled', decisionNote: 'Optional note' } },
 
-  { method: 'GET', path: '/api/cron/status', group: 'Cron', auth: 'session', requiredRole: 'operator', summary: 'Read dispatch loop status.' },
-  { method: 'GET', path: '/api/cron/runs', group: 'Cron', auth: 'session', requiredRole: 'operator', summary: 'Read cron/heartbeat loop runs.', query: { limit: '1-200, default 50.' } },
+  { method: 'GET', path: '/api/cron/status', group: 'Cron', auth: 'session', requiredRole: 'viewer', summary: 'Read dispatch loop status.' },
+  { method: 'GET', path: '/api/cron/runs', group: 'Cron', auth: 'session', requiredRole: 'viewer', summary: 'Read cron/heartbeat loop runs.', query: { limit: '1-200, default 50.' } },
   { method: 'POST', path: '/api/cron/run', group: 'Cron', auth: 'session', summary: 'Run one cron job now. dispatch-heartbeat can be scoped to a company; daily-report and health-check record completed manual runs with company/runner metadata.', body: { job: 'dispatch-heartbeat | daily-report | health-check', companyId: 'uuid optional/null', runnerAgentId: 'uuid optional/null', schedule: { type: 'every | cron | at', intervalSeconds: 10, expression: '*/10 * * * *' } } },
 ];
 
@@ -351,7 +351,7 @@ export function apiHelpCatalog() {
     kanban: {
       stages: cardStatuses,
       legacyAliases: legacyCardStatusAliases,
-      note: 'backlog and todo are merged. Send todo for new work; legacy backlog input is accepted and normalized to todo. in_review is quality review for completed work. needs_review is help/escalation review for work the assignee cannot complete.',
+      note: 'backlog and todo are merged. Send todo for new work; legacy backlog input is accepted and normalized to todo. The web board visually groups in_review/needs_review and blocked/cancelled while the API preserves canonical statuses.',
     },
     adapters: agentAdapterTypes,
     endpoints: catalogEndpoints,

@@ -9,9 +9,11 @@ import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
 const statuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'done', 'blocked', 'cancelled'] as const;
+type CardStatus = (typeof statuses)[number];
 const priorities = ['urgent', 'high', 'normal', 'low'] as const;
 const workProductTypes = ['report', 'file', 'preview_url', 'pull_request', 'commit', 'screenshot', 'artifact', 'external'] as const;
-const statusLabels: Record<string, Record<string, string>> = {
+type LocaleLabels = Record<string, string>;
+const statusLabels: Record<CardStatus, LocaleLabels> = {
   todo: { 'zh-TW': '待辦', en: 'Todo', ja: '未着手' },
   in_progress: { 'zh-TW': '執行中', en: 'In Progress', ja: '進行中' },
   in_review: { 'zh-TW': '審核中', en: 'In Review', ja: 'レビュー中' },
@@ -19,6 +21,22 @@ const statusLabels: Record<string, Record<string, string>> = {
   done: { 'zh-TW': '完成', en: 'Done', ja: '完了' },
   blocked: { 'zh-TW': '受阻', en: 'Blocked', ja: 'ブロック' },
   cancelled: { 'zh-TW': '已取消', en: 'Cancelled', ja: 'キャンセル' },
+};
+type StatusGroupId = 'todo' | 'in_progress' | 'review' | 'done' | 'blocked_cancelled';
+type StatusGroup = { id: StatusGroupId; statuses: readonly CardStatus[]; dropStatus: CardStatus };
+const statusGroups: readonly StatusGroup[] = [
+  { id: 'todo', statuses: ['todo'], dropStatus: 'todo' },
+  { id: 'in_progress', statuses: ['in_progress'], dropStatus: 'in_progress' },
+  { id: 'review', statuses: ['in_review', 'needs_review'], dropStatus: 'in_review' },
+  { id: 'done', statuses: ['done'], dropStatus: 'done' },
+  { id: 'blocked_cancelled', statuses: ['blocked', 'cancelled'], dropStatus: 'blocked' },
+] as const;
+const statusGroupLabels: Record<StatusGroupId, LocaleLabels> = {
+  todo: statusLabels.todo,
+  in_progress: statusLabels.in_progress,
+  review: { 'zh-TW': '審核中 / 求助審核', en: 'In Review / Needs Review', ja: 'レビュー中 / 支援レビュー' },
+  done: statusLabels.done,
+  blocked_cancelled: { 'zh-TW': '受阻 / 已取消', en: 'Blocked / Cancelled', ja: 'ブロック / キャンセル' },
 };
 
 type Card = {
@@ -126,6 +144,27 @@ function statusColor(status: string) {
   return 'var(--border)';
 }
 
+function statusGroupColor(groupId: StatusGroupId) {
+  if (groupId === 'review') return statusColor('in_review');
+  if (groupId === 'blocked_cancelled') return statusColor('blocked');
+  return statusColor(groupId);
+}
+
+function statusGroupById(id: string): StatusGroup | undefined {
+  return statusGroups.find((group) => group.id === id);
+}
+
+function cardStatusRank(group: StatusGroup, status: string): number {
+  const index = group.statuses.indexOf(status as CardStatus);
+  return index === -1 ? group.statuses.length : index;
+}
+
+function cardsForStatusGroup(cards: Card[], group: StatusGroup): Card[] {
+  const grouped = cards.filter((card) => group.statuses.includes(card.columnStatus as CardStatus));
+  if (group.statuses.length === 1) return grouped;
+  return [...grouped].sort((left, right) => cardStatusRank(group, left.columnStatus) - cardStatusRank(group, right.columnStatus));
+}
+
 function goalScope(goal: Goal): string {
   if (goal.projectId) return 'Project';
   if (goal.departmentId) return 'Department';
@@ -184,13 +223,13 @@ async function fetchKanbanBoard() {
   return { cards, agents, companies, departments, projects, goals };
 }
 
-function Column({ status, cards, companies, onSelect }: { status: string; cards: Card[]; companies: Company[]; onSelect: (card: Card) => void }) {
+function Column({ group, cards, companies, onSelect }: { group: StatusGroup; cards: Card[]; companies: Company[]; onSelect: (card: Card) => void }) {
   const { locale } = useLocale();
-  const { setNodeRef, isOver } = useDroppable({ id: status });
+  const { setNodeRef, isOver } = useDroppable({ id: group.id });
   return <section className="kanban-column">
     <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, margin: '0 0 8px' }}>
-      <span style={{ width: 8, height: 8, borderRadius: 99, background: statusColor(status) }} />
-      {statusLabels[status]?.[locale] ?? status}
+      <span style={{ width: 8, height: 8, borderRadius: 99, background: statusGroupColor(group.id) }} />
+      {statusGroupLabels[group.id]?.[locale] ?? group.id}
       <span style={{ background: 'var(--border)', borderRadius: 99, padding: '2px 8px', fontSize: 12 }}>{cards.length}</span>
     </h3>
     <div ref={setNodeRef} className={`card kanban-column-dropzone ${cards.length === 0 ? 'is-empty' : ''}`} style={{ outline: isOver ? '2px solid var(--primary)' : 'none', transition: 'outline 150ms' }}>
@@ -702,8 +741,10 @@ export function KanbanBoard() {
     const id = String(event.active.id);
     const over = event.over?.id ? String(event.over.id) : '';
     const card = cards.find((c) => c.id === id);
-    if (!card || !over || card.columnStatus === over) return;
-    try { await updateCard(card, { columnStatus: over }); }
+    const group = statusGroupById(over);
+    const nextStatus = group?.dropStatus ?? (statuses.includes(over as CardStatus) ? (over as CardStatus) : null);
+    if (!card || !nextStatus || card.columnStatus === nextStatus || group?.statuses.includes(card.columnStatus as CardStatus)) return;
+    try { await updateCard(card, { columnStatus: nextStatus }); }
     catch (err) { setToast({ message: err instanceof Error ? err.message : 'Failed to move card', type: 'error' }); }
   }
 
@@ -842,7 +883,7 @@ export function KanbanBoard() {
     {loading ? <p style={{ textAlign: 'center', opacity: 0.55 }}>Loading...</p> : (
       <DndContext onDragEnd={onDragEnd}>
         <div className="kanban-columns">
-          {statuses.map((status) => <Column key={status} status={status} companies={companies} cards={visibleCards.filter((card) => card.columnStatus === status)} onSelect={(card) => { setSelected(card); setTab('details'); }} />)}
+          {statusGroups.map((group) => <Column key={group.id} group={group} companies={companies} cards={cardsForStatusGroup(visibleCards, group)} onSelect={(card) => { setSelected(card); setTab('details'); }} />)}
         </div>
       </DndContext>
     )}
