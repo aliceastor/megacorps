@@ -7,7 +7,7 @@ import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, a
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
-import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
+import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { buildExecutionAgent, cascadeParentStatus, decomposeCard, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
@@ -20,6 +20,7 @@ import { publishLiveEvent } from './live.ts';
 import { resetAdapterSessionsForAgent } from './adapter-sessions.ts';
 import { getCardActions, recordCardAction, recordStageAction } from './card-actions.ts';
 import { hydrateCardDependencyState, setCardDependencies } from './card-dependencies.ts';
+import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
@@ -503,6 +504,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const limit = Math.min(Math.max(Number(query.limit ?? 100), 1), 500);
     return db.select().from(apiEvents).where(eq(apiEvents.userId, user.id)).orderBy(desc(apiEvents.createdAt)).limit(limit);
   });
+  app.get('/api/prompt-logs', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    const query = request.query as { companyId?: string; cardId?: string; agentId?: string; source?: string; limit?: string };
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
+    const filters = [
+      query.companyId ? eq(promptLogs.companyId, query.companyId) : inArray(promptLogs.companyId, access.companyIds),
+      query.cardId ? eq(promptLogs.cardId, query.cardId) : undefined,
+      query.agentId ? eq(promptLogs.agentId, query.agentId) : undefined,
+      query.source ? eq(promptLogs.source, query.source) : undefined,
+    ].filter(Boolean);
+    return db.select().from(promptLogs).where(filters.length ? and(...filters) : undefined).orderBy(desc(promptLogs.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+  });
   app.get('/api/activity', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string; entityType?: string; limit?: string };
@@ -753,6 +766,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       [workProductUsage],
       [chatSessionUsage],
       [chatMessageUsage],
+      [promptLogUsage],
     ] = await Promise.all([
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(departments).where(eq(departments.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(positions).where(eq(positions.companyId, id)),
@@ -773,6 +787,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(workProducts).where(eq(workProducts.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(chatSessions).where(eq(chatSessions.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(chatMessages).where(eq(chatMessages.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(promptLogs).where(eq(promptLogs.companyId, id)),
     ]);
     const usage = {
       departments: departmentUsage?.count ?? 0,
@@ -794,6 +809,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       workProducts: workProductUsage?.count ?? 0,
       chatSessions: chatSessionUsage?.count ?? 0,
       chatMessages: chatMessageUsage?.count ?? 0,
+      promptLogs: promptLogUsage?.count ?? 0,
     };
     const blocking = Object.entries(usage ?? {}).filter(([, count]) => Number(count) > 0);
     if (blocking.length > 0) return reply.code(409).send({ error: 'company_not_empty', blocking: Object.fromEntries(blocking) });
@@ -1553,7 +1569,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireCompanyRole(request, reply, agent.companyId, 'operator'); if (!user) return reply;
     try {
       const adapter = getAdapter(agent.adapterType ?? 'hermes');
-      return await adapter.dispatch(await buildExecutionAgent(agent), { id: 'test', title: 'Connection test', body: 'Return OK.', timeoutSeconds: 300 });
+      const executionAgent = await buildExecutionAgent(agent);
+      const task = { id: 'test', title: 'Connection test', body: 'Return OK.', timeoutSeconds: 300 };
+      await recordPromptLog({
+        companyId: agent.companyId,
+        agentId: agent.id,
+        source: 'test',
+        adapterType: agent.adapterType ?? 'hermes',
+        title: task.title,
+        prompt: promptSnapshotForAdapter(executionAgent, task),
+        metadata: { requestedByUserId: user.id, megacorpsPromptChars: task.body.length },
+      });
+      return await adapter.dispatch(executionAgent, task);
     }
     catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : 'connection_failed' }); }
   });
@@ -1628,17 +1655,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       [workProductUsage],
       [chatSessionUsage],
       [costUsage],
+      [promptLogUsage],
     ] = await Promise.all([
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(kanbanCards).where(eq(kanbanCards.projectId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(workProducts).where(eq(workProducts.projectId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(chatSessions).where(eq(chatSessions.projectId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(costEvents).where(eq(costEvents.projectId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(promptLogs).where(eq(promptLogs.projectId, id)),
     ]);
     const blocking = Object.entries({
       cards: cardUsage?.count ?? 0,
       workProducts: workProductUsage?.count ?? 0,
       chatSessions: chatSessionUsage?.count ?? 0,
       costEvents: costUsage?.count ?? 0,
+      promptLogs: promptLogUsage?.count ?? 0,
     }).filter(([, count]) => Number(count) > 0);
     if (blocking.length > 0) return reply.code(409).send({ error: 'project_not_empty', blocking: Object.fromEntries(blocking) });
     await db.transaction(async (tx) => {

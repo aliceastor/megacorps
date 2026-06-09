@@ -8,7 +8,7 @@ test('registry includes codex app adapter', () => {
   assert.equal(typeof adapter.dispatch, 'function');
 });
 
-test('codex app prompt injects MegaCorps soul and session policy', () => {
+test('codex app prompt injects MegaCorps agent name and thread policy', () => {
   const prompt = codexAppInternals.buildCodexPrompt({
     id: 'agent-1',
     name: 'Alice Astor',
@@ -27,8 +27,9 @@ test('codex app prompt injects MegaCorps soul and session policy', () => {
     body: 'Do the work.',
   });
 
-  assert.match(prompt, /=== Agent Soul ===\nDirect, careful, and repo-focused\./);
-  assert.match(prompt, /Session policy: Direct Chat uses one thread per chat session/);
+  assert.match(prompt, /=== Agent ===\nName: Alice Astor/);
+  assert.doesNotMatch(prompt, /Direct, careful, and repo-focused/);
+  assert.match(prompt, /Thread policy: Direct Chat uses one thread per chat session/);
   assert.match(prompt, /https:\/\/megacorps\.example\/api\/webhook\/task-complete/);
   assert.match(prompt, /"taskRunId": "run-1"/);
 });

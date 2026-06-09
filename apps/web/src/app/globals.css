@@ -1902,6 +1902,37 @@ button.agent-node-card {
   min-height: 0;
 }
 
+.prompt-log-row {
+  display: grid;
+  gap: 8px;
+}
+
+.prompt-log-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.prompt-log-head b {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.prompt-log-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.prompt-log-body {
+  max-height: min(520px, 55dvh);
+}
+
 .company-o-chart-page {
   min-width: 0;
 }
@@ -2076,6 +2107,51 @@ button.agent-node-card {
   max-width: none;
 }
 
+.agent-table-toolbar {
+  margin-bottom: 16px;
+}
+
+.agent-table-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(260px, 1fr);
+  gap: 10px;
+  align-items: end;
+}
+
+.agent-search-field .input-wrap {
+  min-height: 40px;
+}
+
+.agent-management-table th,
+.agent-management-table td {
+  white-space: nowrap;
+}
+
+.agent-management-table td:first-child,
+.agent-management-table td:nth-child(2),
+.agent-management-table td:nth-child(3),
+.agent-management-table td:nth-child(4) {
+  white-space: normal;
+  min-width: 150px;
+}
+
+.table-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.action-row.compact {
+  flex-wrap: nowrap;
+}
+
+.action-row.compact .btn {
+  flex: 0 0 auto;
+}
+
 @media (max-width: 1100px) {
   .project-workbench {
     grid-template-columns: 1fr;
@@ -2112,6 +2188,7 @@ button.agent-node-card {
   .nav-list { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 14px; }
   .nav-list-utility { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .content-area { padding: 16px; }
+  .agent-table-controls { grid-template-columns: 1fr; }
   .split-layout,
   .workspace-layout,
   .knowledge-page .data-grid,

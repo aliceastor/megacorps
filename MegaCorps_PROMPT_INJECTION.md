@@ -2,7 +2,7 @@
 
 Last updated: 2026-06-09
 
-This document describes the prompt content MegaCorps injects for Direct Chat and Kanban task runs.
+This document describes the prompt content MegaCorps injects for Direct Chat and Kanban task runs. Redacted outbound prompt snapshots are stored in `prompt_logs` and inspected from Logs -> Prompts.
 
 ## Shared Context Blocks
 
@@ -11,7 +11,7 @@ MegaCorps uses bounded context budgets, so long fields are clipped rather than o
 - Company name, mission, dispatch settings
 - Company goals, department goals, project goals
 - Project repo binding and Git completion policy, when a project has a repository
-- Agent identity, soul/work style, reporting manager, direct reports
+- Agent name, position, reporting manager, direct reports
 - Agent position prompt when `agent.positionId` is set
 - Same-company Kanban snapshot with compact card lines
 - Focus card dependency state and recent card action/log history
@@ -51,21 +51,19 @@ Applicable goals:
 
 For Direct Chat, the session `projectId` controls the project goal layer and Kanban snapshot scope. A null `projectId` is treated as no-project/general chat and excludes project records, project goals, project activity, and project-linked cards from the injected chat context.
 
-## Agent Soul And Codex App-Server Wrapper
-
-`soul` is MegaCorps' platform-owned identity/personality/work-style prompt for an agent. Hermes agents can still use a native `hermesProfile`, but adapters without native profiles, especially `codex-app`, should use `soul` as the primary identity definition.
+## Codex App-Server Wrapper
 
 When `adapterType=codex-app`, MegaCorps wraps the normal Direct Chat or Kanban prompt with:
 
 ```text
-You are running through Codex app-server as a MegaCorps agent. MegaCorps is the source of truth for your identity, task scope, goals, and completion protocol.
+You are running through Codex app-server as a MegaCorps agent. MegaCorps is the source of truth for task scope, goals, position prompts, and completion protocol.
 
-=== Agent Soul ===
-<agent.soul, or fallback name/role>
+=== Agent ===
+Name: <agent name>
 
-=== Adapter Session ===
+=== Adapter Thread ===
 Codex thread: <existing thread id | new>
-Session policy: Direct Chat uses one thread per chat session. Kanban uses one thread per card, agent, and dispatch/review kind. Every retry or continuation is a new turn in that thread.
+Thread policy: Direct Chat uses one thread per chat session. Kanban uses one thread per card, agent, and dispatch/review kind. Every retry or continuation is a new turn in that thread.
 
 <normal MegaCorps Direct Chat or Kanban task prompt>
 ```
@@ -83,7 +81,7 @@ You are <position name> in <department name | unassigned> department of firm <co
 <custom position prompt>
 ```
 
-The position prompt is injected for both Direct Chat and Kanban task dispatch. It is separate from `agent.soul`: `position` defines the reusable office/role contract, while `soul` defines that specific agent's personality, habits, and work style.
+The position prompt is injected for both Direct Chat and Kanban task dispatch. Position is the reusable office/role contract and is the primary human-managed prompt surface for an agent.
 
 ## Project Repository And Work Path Protocol
 
@@ -141,13 +139,10 @@ Goal: <selected goal title>
 <selected goal body>
 
 Assigned member: <agent name>
-Identity label: <agent role>
 Position: <position name | none>
 Position prompt:
 You are <position name> in <department name | unassigned> department of firm <company name>.
 <custom position prompt>
-Soul:
-<agent.soul, if configured>
 Reports to: <manager name | top-level>
 Direct reports: <report list | none>
 
@@ -241,10 +236,7 @@ Project goals:
 <session project goals>
 
 Agent name: <agent name>
-Identity label: <agent role>
 Adapter: <adapter type>
-Soul:
-<agent.soul, if configured>
 
 Kanban context snapshot:
 <bounded same-company board and focus-agent work context, filtered to no-project cards when projectId is null>

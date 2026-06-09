@@ -19,6 +19,7 @@ const registeredRoutes = [
   ['GET', '/api/admin/users'],
   ['PUT', '/api/admin/users/:id'],
   ['GET', '/api/system-logs'],
+  ['GET', '/api/prompt-logs'],
   ['GET', '/api/activity'],
   ['GET', '/api/heartbeat-runs'],
   ['GET', '/api/task-runs'],

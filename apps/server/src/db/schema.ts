@@ -369,6 +369,25 @@ export const chatMessages = pgTable('chat_messages', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 
+export const promptLogs = pgTable('prompt_logs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  agentId: uuid('agent_id').references(() => agents.id),
+  cardId: uuid('card_id').references(() => kanbanCards.id),
+  projectId: uuid('project_id').references(() => projects.id),
+  goalId: uuid('goal_id').references(() => goals.id),
+  heartbeatRunId: uuid('heartbeat_run_id').references(() => heartbeatRuns.id),
+  taskRunId: uuid('task_run_id').references(() => taskRuns.id),
+  chatSessionId: uuid('chat_session_id').references(() => chatSessions.id),
+  source: text('source').notNull(),
+  adapterType: text('adapter_type').notNull(),
+  title: text('title').notNull(),
+  prompt: text('prompt').notNull(),
+  promptHash: text('prompt_hash').notNull(),
+  metadata: jsonb('metadata').default({}),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
 export const apiEvents = pgTable('api_events', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').references(() => users.id),

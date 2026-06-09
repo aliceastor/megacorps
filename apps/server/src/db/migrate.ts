@@ -114,6 +114,10 @@ CREATE INDEX IF NOT EXISTS chat_sessions_user_updated_at_idx ON chat_sessions(us
 CREATE TABLE IF NOT EXISTS chat_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), session_id UUID NOT NULL REFERENCES chat_sessions(id), company_id UUID NOT NULL REFERENCES companies(id), agent_id UUID NOT NULL REFERENCES agents(id), user_id UUID REFERENCES users(id), author_type TEXT NOT NULL, body TEXT NOT NULL, metadata JSONB DEFAULT '{}', cost_usd NUMERIC(10,4), duration_seconds INTEGER, created_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS chat_messages_session_created_at_idx ON chat_messages(session_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS chat_messages_agent_created_at_idx ON chat_messages(agent_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS prompt_logs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), agent_id UUID REFERENCES agents(id), card_id UUID REFERENCES kanban_cards(id), project_id UUID REFERENCES projects(id), goal_id UUID REFERENCES goals(id), heartbeat_run_id UUID REFERENCES heartbeat_runs(id), task_run_id UUID REFERENCES task_runs(id), chat_session_id UUID REFERENCES chat_sessions(id), source TEXT NOT NULL, adapter_type TEXT NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL, prompt_hash TEXT NOT NULL, metadata JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX IF NOT EXISTS prompt_logs_company_created_at_idx ON prompt_logs(company_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS prompt_logs_agent_created_at_idx ON prompt_logs(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS prompt_logs_card_created_at_idx ON prompt_logs(card_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS api_events (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id), method TEXT NOT NULL, path TEXT NOT NULL, status_code INTEGER, request_body JSONB, response_body JSONB, error TEXT, duration_ms INTEGER, created_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS api_events_created_at_idx ON api_events(created_at DESC);
 CREATE INDEX IF NOT EXISTS api_events_user_id_created_at_idx ON api_events(user_id, created_at DESC);

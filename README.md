@@ -66,9 +66,9 @@ MegaCorps now has two configuration layers:
 
 1. Open `Settings -> Agent runtimes` and create a reusable runtime preset.
 2. Open `Positions` to define reusable company role prompts when an office/title should carry standing instructions.
-3. Open `Agents`, select an agent, then choose a position, runtime preset, or adapter override fields on that agent.
+3. Open `Agents` to find/sort agents in the management table, then choose a position, runtime preset, or adapter override fields on that agent.
 
-When an agent has a position, Direct Chat and Kanban prompts include `You are <position> in <department> department of firm <company>.` followed by the custom position prompt. Use Positions for reusable office/role authority; use agent `soul` for that individual agent's personality, habits, and working style.
+When an agent has a position, Direct Chat and Kanban prompts include `You are <position> in <department> department of firm <company>.` followed by the custom position prompt. Use Positions for reusable office/role authority.
 
 Runtime presets can also define `localWorkspaceRoot` and `localScratchRoot`, the local folders used by agents attached to that runtime for repo clones/caches and temporary task files.
 Agent overrides win over runtime presets. When `.env` adapter fallback is enabled, runtime presets win over `.env` defaults.
@@ -103,7 +103,7 @@ Supported runtime fields:
 Hermes CLI adapters invoke one-shot prompts as `hermes -z "<prompt>" --profile <profile>`. They intentionally do not pass `--reasoning-effort`, `--max-turns`, or a bare prompt argument; Hermes v0.15.2 rejects unsupported flags and treats bare prompt text as unrecognized arguments. Configure provider/model reasoning behavior inside the Hermes profile/config instead.
 For Hermes Portainer, the agent still needs a `hermesProfile`; the runtime tells MegaCorps where to execute it.
 For Hermes SSH, create a runtime preset with `adapterType=hermes-ssh`, set `sshHost` to your Hermes host, set the SSH user/key path reachable inside the server container, and set each agent's `hermesProfile` to the Hermes profile name such as `alice`. The SSH user defaults to `root` and can be overridden. The deploy compose mounts persistent SSH keys at `/home/megacorps/.ssh`, with `/home/megacorps/.ssh/id_ed25519` as the default key path. SSH dispatch imports `/proc/1/environ` before running Hermes so container-level provider API keys remain visible to the SSH session.
-For Codex App Server, create a runtime preset with `adapterType=codex-app`. Stdio mode launches `codex app-server` by default; WebSocket mode uses `codexAppServerUrl` and should use a bearer/capability token. Codex agents should set `soul`, because MegaCorps owns the agent identity/personality/work style instead of relying on a Hermes profile. Direct Chat keeps one Codex thread per chat session. Kanban keeps one Codex thread per card, agent, and dispatch/review kind; every retry or continuation is a new turn in that thread.
+For Codex App Server, create a runtime preset with `adapterType=codex-app`. Stdio mode launches `codex app-server` by default; WebSocket mode uses `codexAppServerUrl` and should use a bearer token. Direct Chat keeps one Codex thread per chat session. Kanban keeps one Codex thread per card, agent, and dispatch/review kind; every retry or continuation is a new turn in that thread.
 For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or the agent override panel.
 Task-complete webhooks require `WEBHOOK_SHARED_SECRET` or DB setting `webhook.shared_secret` with at least 16 characters. MegaCorps injects the configured secret into dispatched agent prompts as `X-MegaCorps-Webhook-Secret`.
 
@@ -126,14 +126,14 @@ Hermes suite operational notes:
 - `Companies`: pure company CRUD plus company goals.
 - `Departments`: department management, direct agent membership assignment, reporting-line editing, clickable org canvas agent editing, and department goals.
 - `Positions`: reusable company role prompts, assigned-agent visibility, and prompt preview.
-- `Agents`: member hierarchy, guided agent creation, position assignment, pause/resume/fire/reset, runtime and adapter configuration.
+- `Agents`: sortable/findable agent management table, position assignment, pause/resume/fire, runtime and adapter configuration.
 - `Projects`: unified project authority workbench for project CRUD, repo settings, branch policy, runtime services, work path, and project goals.
 - `Workspace`: company folder manager and authoritative workspace paths for non-coding project files.
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
 - `Kanban`: task UUIDs, stage columns, company dropdown/project/assignee filters, sort by company/date/priority, ticket thread, work products, sub-tasks, logs, run/review/decompose/delete.
 - `Direct Chat`: company -> project/no-project -> agent -> session direct messaging with resumable adapter sessions.
 - `Cron`: dispatch heartbeat status, company intervals, job/company/runner-scoped manual runs, daily-report/health-check run records, and run history.
-- `Logs`: cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
+- `Logs`: outbound prompt snapshots, cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
 - `Admin`: tabbed global account management, signup switch, invites, roles, account status, and password resets.
 - `Settings`: tabbed runtime presets, company settings, departments, company members, and advanced configuration.
 - `Help`: API Catalog and CLI Commands tabs generated from `/api/help`.
@@ -160,7 +160,7 @@ Hermes suite operational notes:
 - Phase 16: help/escalation review via `needs_review`, company/department/project goals, project-scoped Direct Chat, and the Projects/Workspace split.
 - Phase 17: React Query browser cache plus authenticated WebSocket live events for chat, Kanban card updates, task logs, comments, projects, goals, and work products.
 - Phase 18: repo-centric project workspace policy with project-level `repoUrl` and `workPath`, pull-before-run/push-after-run prompt protocol, and first-class task work products for PRs, commits, previews, reports, screenshots, and artifacts.
-- Phase 19: Codex app-server adapter, platform-owned agent `soul`, and durable adapter session records for direct chat and task-scoped Codex threads.
+- Phase 19: Codex app-server adapter and durable adapter session records for direct chat and task-scoped Codex threads.
 - Phase 20: normalized card lifecycle actions, `card_dependencies` graph, machine runners with hashed API keys, runner heartbeat/claim/complete APIs, Ed25519 agent sessions, and MegaCorps CLI YAML apply/runner daemon scaffold.
 - Phase 21: reusable company positions, agent position assignment, Direct Chat/Kanban position prompt injection, and CLI/API help coverage.
 
@@ -172,7 +172,7 @@ Reference-informed next phases:
 
 ## Paperclip-inspired loop
 
-MegaCorps follows the same control-plane idea as Paperclip: manage goals and an org chart, not individual terminal sessions. A company owns departments, agents, tasks, goals, and dispatch settings. Agents report through an O-chart (`bossId`) and can be grouped by department. The Companies page now focuses on company CRUD and company goals; Departments and Agents render the org lanes/tree and agent configuration panels.
+MegaCorps follows the same control-plane idea as Paperclip: manage goals and an org chart, not individual terminal sessions. A company owns departments, agents, tasks, goals, and dispatch settings. Agents report through an O-chart (`bossId`) and can be grouped by department. The Companies page focuses on company CRUD and company goals; Departments owns the O-Chart and agent property editing; Agents is the sortable management table.
 
 The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds with `DISPATCH_LOOP_INTERVAL_MS=10000`; each company also has `dispatchIntervalSeconds` and `autoDispatchEnabled`. On each company heartbeat:
 
@@ -247,7 +247,6 @@ Every task dispatch, review, and direct chat invocation receives a bounded Kanba
 - parent/child/dependency task context,
 - focus agent open work and review queue,
 - focus agent position sentence and custom position prompt when configured,
-- focus agent soul/personality/work style when configured,
 - latest task message board entries,
 - latest task lifecycle logs,
 - project repository policy, project work path, and Git workflow instructions,
@@ -269,6 +268,7 @@ MegaCorps stores two complementary log streams:
 
 - `task_logs`: stage changes, dispatch/review/decomposition/comment events, agent output.
 - `api_events`: full API lifecycle with method, path, status, request, response, error, duration, and user id. Sensitive fields such as password/token/secret/jwt are redacted.
+- `prompt_logs`: redacted outbound prompt snapshots for dispatch, review, Direct Chat, and adapter connection tests, with agent/task/chat/run metadata.
 - `activity_log`: product-level audit events for cards, agents, approvals, budget policies, locks, recovery, and webhook completions.
 - `task_runs`: DB-backed queue jobs for dispatch/review attempts with queued/running/success/failed state.
 - `heartbeat_runs`: every dispatch/review run with source, status, lock, cost, duration, and error.
@@ -290,7 +290,7 @@ Phase 8/9 safety behavior:
 - Adapter `success:false` now goes through retry/block handling instead of silently marking work done.
 - Budget policies can hard-stop an agent when monthly or per-task limits are reached.
 - Tasks requiring approval create pending approval records and can be approved/rejected from the Budget page.
-- Member hierarchy is based on `bossId`: the identity label is free text, while the important control-plane relation is who a member reports to and who reports to them.
+- Member hierarchy is based on `bossId`: position and department carry the human-facing assignment meaning, while the legacy agent `role` field remains only for compatibility.
 - Decomposed sub-tasks are delegated to direct reports when the parent task is assigned to a member with subordinates.
 - Work completed by a subordinate moves to `in_review` for a distinct configured reviewer or reporting manager. Self-review is not treated as a real review gate; if no distinct reviewer is available, successful dispatch goes directly to `done`.
 - Work the assignee cannot solve moves to `needs_review` for a help/escalation review when an independent reviewer or manager exists. Reviewers can finish directly (`done`), return guidance (`todo`), or escalate to their manager. If a top-level reviewer cannot solve it, the card becomes `blocked`.

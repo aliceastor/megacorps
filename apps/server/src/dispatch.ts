@@ -12,6 +12,7 @@ import { recordStageAction } from './card-actions.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
 import { agentRuntimeAvailable } from './runner-availability.ts';
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
+import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -503,11 +504,6 @@ async function rememberTaskAdapterSession(card: CardRow, agent: AgentRow, kind: 
 function matchScore(card: CardRow, agent: AgentRow): number {
   let score = 0;
   if (card.departmentId && agent.departmentId === card.departmentId) score += 50;
-  const haystack = `${agent.role} ${(agent.capabilities ?? []).join(' ')}`.toLowerCase();
-  for (const tag of card.tags ?? []) if (haystack.includes(tag.toLowerCase())) score += 10;
-  if (/review|qa|audit/i.test(card.title + card.body) && /review|qa|audit/i.test(agent.role)) score += 8;
-  if (/design|ui|ux/i.test(card.title + card.body) && /design|ui|ux/i.test(agent.role)) score += 8;
-  if (/code|api|backend|frontend|bug|build/i.test(card.title + card.body) && /engineer|developer|coder/i.test(agent.role)) score += 8;
   score += Math.max(0, 10 - Number(agent.spentThisMonth ?? 0));
   return score;
 }
@@ -773,10 +769,24 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
   try {
     const adapter = getAdapter(agent.adapterType ?? 'hermes');
     const adapterSessionId = await scopedAdapterSessionId(card, agent, 'dispatch');
-    const result = await adapter.dispatch(
-      await buildExecutionAgent(agent, agent.adapterType === 'codex-app' ? adapterSessionId : undefined),
-      { id: card.id, title: card.title, body: await buildTaskPrompt(card), timeoutSeconds: 300, taskRunId: options.taskRunId },
-    );
+    const executionAgent = await buildExecutionAgent(agent, agent.adapterType === 'codex-app' ? adapterSessionId : undefined);
+    const taskPrompt = await buildTaskPrompt(card);
+    const task = { id: card.id, title: card.title, body: taskPrompt, timeoutSeconds: 300, taskRunId: options.taskRunId };
+    await recordPromptLog({
+      companyId: card.companyId,
+      agentId: agent.id,
+      cardId: card.id,
+      projectId: card.projectId,
+      goalId: card.goalId,
+      heartbeatRunId: run.id,
+      taskRunId: options.taskRunId ?? null,
+      source: 'dispatch',
+      adapterType: agent.adapterType ?? 'hermes',
+      title: card.title,
+      prompt: promptSnapshotForAdapter(executionAgent, task),
+      metadata: { adapterSessionId, source, megacorpsPromptChars: taskPrompt.length },
+    });
+    const result = await adapter.dispatch(executionAgent, task);
     await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && !latest.executionLockId && latest.activeHeartbeatRunId !== run.id) {
@@ -920,10 +930,24 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     const adapter = getAdapter(reviewer.adapterType ?? 'hermes');
     const promptCard = reviewerId === card.reviewerId ? card : { ...card, reviewerId };
     const adapterSessionId = await scopedAdapterSessionId(card, reviewer, 'review');
-    const result = await adapter.dispatch(
-      await buildExecutionAgent(reviewer, reviewer.adapterType === 'codex-app' ? adapterSessionId : undefined),
-      { id: card.id, title: `Review: ${card.title}`, body: await buildReviewPrompt(promptCard), timeoutSeconds: 180, taskRunId: options.taskRunId },
-    );
+    const executionAgent = await buildExecutionAgent(reviewer, reviewer.adapterType === 'codex-app' ? adapterSessionId : undefined);
+    const reviewPrompt = await buildReviewPrompt(promptCard);
+    const reviewTask = { id: card.id, title: `Review: ${card.title}`, body: reviewPrompt, timeoutSeconds: 180, taskRunId: options.taskRunId };
+    await recordPromptLog({
+      companyId: card.companyId,
+      agentId: reviewer.id,
+      cardId: card.id,
+      projectId: card.projectId,
+      goalId: card.goalId,
+      heartbeatRunId: run.id,
+      taskRunId: options.taskRunId ?? null,
+      source: 'review',
+      adapterType: reviewer.adapterType ?? 'hermes',
+      title: reviewTask.title,
+      prompt: promptSnapshotForAdapter(executionAgent, reviewTask),
+      metadata: { adapterSessionId, reviewMode, megacorpsPromptChars: reviewPrompt.length },
+    });
+    const result = await adapter.dispatch(executionAgent, reviewTask);
     await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && latest.columnStatus !== card.columnStatus && latest.activeHeartbeatRunId !== run.id) {
@@ -1451,14 +1475,12 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
     const reviews = scopedCards.filter((card) => card.reviewerId === focusAgent.id || reports.some((report) => report.id === card.assigneeId && ['in_review', 'needs_review'].includes(card.columnStatus ?? 'todo'))).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
     addContextSection(state, 'Invocation Agent Work Context', [
       `Agent: ${focusAgent.name}`,
-      `Identity label: ${focusAgent.role}`,
       `Position: ${position?.name ?? 'none'}`,
       positionPrompt ? `Position prompt:\n${positionPrompt}` : '',
-      focusAgent.soul ? `Soul:\n${clipText(focusAgent.soul, 1200)}` : '',
       `Runtime: ${runtime?.name ?? focusAgent.runtimeId ?? 'none'}`,
       ...runtimeLocalLines(runtime),
       `Reports to: ${manager?.name ?? 'top-level'}`,
-      `Direct reports: ${reports.map((report) => `${report.name} (${report.role})`).join(', ') || 'none'}`,
+      `Direct reports: ${reports.map((report) => report.name).join(', ') || 'none'}`,
       `Assigned open work:\n${assigned.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
       `Review queue:\n${reviews.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
     ].join('\n'), 6000);
@@ -1558,12 +1580,10 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
     goal ? `Goal: ${goal.title}\n${goal.body ?? ''}` : '',
     assignee ? [
       `Assigned member: ${assignee.name}`,
-      `Identity label: ${assignee.role}`,
       `Position: ${position?.name ?? 'none'}`,
       positionPrompt ? `Position prompt:\n${positionPrompt}` : '',
-      assignee.soul ? `Soul:\n${clipText(assignee.soul, 1200)}` : '',
       `Reports to: ${manager?.name ?? 'top-level'}`,
-      `Direct reports: ${reports.length ? reports.map((report) => `${report.name} (${report.role})`).join(', ') : 'none'}`,
+      `Direct reports: ${reports.length ? reports.map((report) => report.name).join(', ') : 'none'}`,
     ].join('\n') : '',
     [
       'Goal context:',

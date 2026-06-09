@@ -179,7 +179,7 @@ Elements:
   - Department selector
   - Reports-to selector
   - Status
-- Interactive Org Canvas:
+- Inline assignment canvas:
   - All company agents
   - Inline Department selector
   - Inline Reports-to selector
@@ -189,6 +189,37 @@ Elements:
   - Add Department Goal
   - Department goal list
 - Selected department/no-department agent cards
+
+## Departments O-Chart
+
+Route:
+- `/departments/o-chart`
+
+Component:
+- `CompanyOChartPage`
+
+Data sources:
+- `GET /api/companies`
+- `GET /api/departments`
+- `GET /api/positions`
+- `GET /api/agent-runtimes`
+- `GET /api/agents`
+- `PUT /api/agents/:id`
+- Agent runtime/test/pause/resume endpoints
+
+Elements:
+- Company selector
+- Company O-Chart tree with each card showing:
+  - Status light and agent name
+  - Position plus department when present
+  - Adapter
+- Clicking an agent card selects it and opens the property editor
+- Selected-agent property editor:
+  - Name and slug
+  - Department, position, and reports-to
+  - Profile, adapter, and runtime
+  - Per-task and monthly budget
+  - Save, Test, Pause/Resume
 
 ## Agents
 
@@ -209,27 +240,32 @@ Data sources:
 - `GET /api/approvals`
 - `POST /api/agents`
 - `PUT /api/agents/:id`
-- Agent runtime/test/pause/resume/reset/delete endpoints
+- Agent runtime/test/pause/resume/delete endpoints
 
 Elements:
 - Company context selector with existing companies only; no New Company placeholder on the Agents page
-- Agent creation panel with New Agent button
-- Position assignment dropdown
-- Department org lanes
-- Unassigned department lane
-- Selected agent detail panel as described above
+- Find input for name, slug, department, position, manager, adapter, profile, or status
+- Sortable agent management table
+  - Agent
+  - Position
+  - Department
+  - Reports to
+  - Adapter
+  - Status
+  - Spend
+  - Actions
+- Row actions for edit, test connection, pause, and resume
+- Selected agent detail editor as described below
+- New Agent button in the page header
 
 ### Agents Modal: New Agent
 
 Overlay:
 - `overlay` + `agent-wizard-modal`
 
-Step 1: Identity
+Step 1: Basics
 - Name
 - Slug
-- Identity label
-- Soul/persona
-- Capability checkboxes
 
 Step 2: Assignment
 - Company
@@ -246,14 +282,13 @@ Step 3: Runtime and budget
 
 Selected-agent panel elements:
 - Effective adapter config summary, including runtime-inherited values and per-agent overrides
-- Name, slug, identity label, profile
+- Name, slug, profile
 - Adapter and runtime preset selectors
 - Department, position, and reports-to selectors
-- Capabilities, per-task budget, monthly budget
-- Soul textarea
+- Per-task budget and monthly budget
 - Adapter override fields, adapter-type aware
 - Direct reports, assigned work, review queue
-- Save, Test, Pause/Resume, Reset Session, Fire
+- Save, Test, Pause/Resume, Fire
 
 ## Positions
 
@@ -543,6 +578,7 @@ Route:
 
 Data sources:
 - `GET /api/system-logs`
+- `GET /api/prompt-logs`
 - `GET /api/activity`
 - `GET /api/heartbeat-runs`
 - `GET /api/task-runs`
@@ -551,6 +587,19 @@ Data sources:
 
 Elements:
 - Filter logs input
+- Tabs:
+  - Prompts
+  - Runs
+  - Activity
+  - API
+- Outbound prompt list:
+  - Source
+  - Adapter
+  - Title
+  - Agent/card/project/chat/run IDs
+  - Prompt hash
+  - Redacted prompt body
+  - Metadata
 - Cron heartbeat card:
   - Status
   - Run now button
@@ -839,9 +888,10 @@ This pass compared UI fields with the shared schemas, API route handlers, and DB
 
 ### Fixed during this pass
 
-The following backend-supported fields or actions were missing or incomplete in the UI and are now surfaced:
+The following backend-supported fields or actions were missing or incomplete in the UI and are now surfaced or intentionally retired from the operator workflow:
 
-- `agents.capabilities`: added to shared schema, server create/update routes, API help, guided agent wizard, and selected-agent edit UI.
+- Agent management was converted from O-Chart lanes to a sortable/findable table; Departments now owns O-Chart editing.
+- Agent Identity, Soul/persona, and operator capability checkboxes were removed from the visible creation/edit flow. The backend still keeps legacy compatibility fields, but dispatch and Codex prompt injection now use name, position, department, runtime, and task context instead.
 - `agents.budget_per_task`: added to guided agent wizard and selected-agent edit UI.
 - `projects.protected_branches`: added to Projects editor and Repository Protocol summary.
 - `projects.runtime_services`: added to Projects editor as validated JSON.
@@ -859,9 +909,9 @@ The following backend-supported fields or actions were missing or incomplete in 
 - `card_actions`: added normalized action timeline endpoint at `/api/cards/:id/actions`.
 - `machine_runners`: added runner registry/heartbeat/claim/complete APIs and CLI management; no dedicated UI page yet.
 - `agent_sessions`: added runner-created Ed25519 public-key sessions for agent-session JWT calls; no dedicated UI page yet.
-- `POST /api/agents` help body: updated with `capabilities`.
+- `POST /api/agents` help body: updated to show the visible web flow fields and keep `role: worker` only as a compatibility value.
 - Browser API transport: added same-origin `/api/proxy` first, with direct browser-host and baked URL as fallbacks.
-- Departments: added direct agent department assignment, no-department assignment, reports-to editing, and clickable org-canvas agent editing.
+- Departments: added direct agent department assignment, no-department assignment, reports-to editing, clickable O-Chart agent selection, and selected-agent property editing.
 - Projects: replaced the three-card layout with a unified Project Authority workbench and kept repo/path/project goals on the Projects page.
 - Cron: replaced scaffold-only rows with runnable `dispatch-heartbeat`, `daily-report`, and `health-check` jobs, each with company/runner metadata.
 - Kanban company filter: changed from multi-select list to a normal dropdown while preserving sort by company.
@@ -887,7 +937,7 @@ These DB surfaces are intentionally not presented as primary editable UI fields:
 - `api_events`: inspected through Logs/API lifecycle, not editable.
 - `cron_runs`: inspected through Logs/Cron heartbeat, not editable.
 - `activity_log`: inspected through Dashboard/Logs, not editable.
-- `adapter_sessions`: indirectly visible through task run adapter session/turn IDs; direct session management is via agent Reset Session.
+- `adapter_sessions`: indirectly visible through task run adapter session/turn IDs and adapter continuity logs; direct session controls are not part of the Agent management page.
 - `card_dependencies`: edited indirectly through card dependency controls/API.
 - `card_actions`: inspected through Kanban/API Help, not directly edited.
 - `machine_runners`: managed through API/CLI for now.
@@ -900,7 +950,7 @@ These DB surfaces are intentionally not presented as primary editable UI fields:
 
 These are not bugs, but they are likely places to simplify the future UI:
 
-- Agents still use a large `OrgChart` component. Split it into `AgentWizard`, `OrgLanes`, and `AgentDetailPanel` before the next major agent redesign.
+- Agents still share a large `OrgChart` implementation with Companies. Split the Agents table, Agent wizard, and Agent detail editor into dedicated components before the next major agent redesign.
 - Settings and Companies both edit company settings; decide whether Settings should remain operational config only, with company structure owned by Companies/Departments.
 - Admin and Settings both touch membership-related flows. Admin now owns global accounts/invites; Settings owns company membership maintenance.
 - Kanban detail drawer is now feature-complete but dense. A future redesign should split Details into task metadata, execution controls, review/escalation, and evidence/work product sections.

@@ -10,6 +10,7 @@ import { budgetOk, buildCompanyKanbanContext, buildExecutionAgent, getBudgetGuar
 import { publishLiveEvent } from './live.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
+import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -85,8 +86,6 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
     `Goal context:\n${goalContext}`,
     [
       `Agent name: ${agent.name}`,
-      `Identity label: ${agent.role}`,
-      agent.soul ? `Soul:\n${agent.soul.slice(0, 1200)}` : '',
       `Adapter: ${agent.adapterType}`,
     ].join('\n'),
     `Kanban context snapshot:\n${kanbanContext}`,
@@ -288,10 +287,21 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
           kind: 'chat',
         })
         : null;
-      const result = await adapter.dispatch(
-        await buildExecutionAgent(agent, adapterSession?.adapterSessionId ?? session.agentSessionId ?? null),
-        { id: `chat-${session.id}`, title: session.title, body: prompt, timeoutSeconds: 300, kind: 'chat' },
-      );
+      const executionAgent = await buildExecutionAgent(agent, adapterSession?.adapterSessionId ?? session.agentSessionId ?? null);
+      const chatTask = { id: `chat-${session.id}`, title: session.title, body: prompt, timeoutSeconds: 300, kind: 'chat' as const };
+      await recordPromptLog({
+        companyId: session.companyId,
+        agentId: agent.id,
+        projectId: session.projectId,
+        heartbeatRunId: run.id,
+        chatSessionId: session.id,
+        source: 'chat',
+        adapterType: agent.adapterType ?? 'hermes',
+        title: session.title,
+        prompt: promptSnapshotForAdapter(executionAgent, chatTask),
+        metadata: { adapterSessionId: adapterSession?.adapterSessionId ?? session.agentSessionId ?? null, userMessageId: userMessage.id, megacorpsPromptChars: prompt.length },
+      });
+      const result = await adapter.dispatch(executionAgent, chatTask);
       if (agent.adapterType === 'codex-app') {
         await rememberAdapterSession({
           companyId: session.companyId,

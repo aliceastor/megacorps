@@ -248,15 +248,13 @@ function waitForCompletedTurn(connection: RpcConnection, turnId: string | null, 
 }
 
 function buildCodexPrompt(agent: AgentLike, task: TaskContext): string {
-  const fallbackIdentity = [
+  const agentProfile = [
     `Name: ${agent.name ?? agent.hermesProfile ?? 'unknown'}`,
-    `Role: ${agent.role ?? 'agent'}`,
   ].filter(Boolean).join('\n');
-  const soul = configuredString(agent.soul) ?? fallbackIdentity;
   return [
-    'You are running through Codex app-server as a MegaCorps agent. MegaCorps is the source of truth for your identity, task scope, goals, and completion protocol.',
-    `=== Agent Soul ===\n${soul}`,
-    `=== Adapter Session ===\nCodex thread: ${agent.currentSessionId ?? 'new'}\nSession policy: Direct Chat uses one thread per chat session. Kanban uses one thread per card, agent, and dispatch/review kind. Every retry or continuation is a new turn in that thread.`,
+    'You are running through Codex app-server as a MegaCorps agent. MegaCorps is the source of truth for task scope, goals, position prompts, and completion protocol.',
+    `=== Agent ===\n${agentProfile}`,
+    `=== Adapter Thread ===\nCodex thread: ${agent.currentSessionId ?? 'new'}\nThread policy: Direct Chat uses one thread per chat session. Kanban uses one thread per card, agent, and dispatch/review kind. Every retry or continuation is a new turn in that thread.`,
     buildAgentPrompt({ ...agent, hermesProfile: agent.hermesProfile ?? agent.name ?? 'codex-agent' }, task),
   ].join('\n\n');
 }
