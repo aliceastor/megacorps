@@ -59,6 +59,15 @@ export const userInvites = pgTable('user_invites', {
 });
 
 export const departments = pgTable('departments', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), name: text('name').notNull(), slug: text('slug').notNull(), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
+export const positions = pgTable('positions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  name: text('name').notNull(),
+  slug: text('slug').notNull(),
+  prompt: text('prompt'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+}, (table) => ({ companySlugUnique: unique().on(table.companyId, table.slug) }));
 export const projects = pgTable('projects', {
   id: uuid('id').primaryKey().defaultRandom(),
   companyId: uuid('company_id').notNull().references(() => companies.id),
@@ -86,6 +95,7 @@ export const agents = pgTable('agents', {
   id: uuid('id').primaryKey().defaultRandom(),
   companyId: uuid('company_id').notNull().references(() => companies.id),
   departmentId: uuid('department_id').references(() => departments.id),
+  positionId: uuid('position_id').references(() => positions.id),
   slug: text('slug').notNull(),
   name: text('name').notNull(),
   role: text('role').notNull(),

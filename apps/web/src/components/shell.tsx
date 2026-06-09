@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, Building2, ChartGantt, CircleHelp, Clock3, FileClock, FolderGit2, FolderOpen, Kanban, LayoutDashboard, Languages, LogOut, Menu, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, User, Check, type LucideIcon } from 'lucide-react';
+import { BookOpen, BriefcaseBusiness, Building2, ChartGantt, CircleHelp, Clock3, FileClock, FolderGit2, FolderOpen, Kanban, LayoutDashboard, Languages, LogOut, Menu, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, User, Check, type LucideIcon } from 'lucide-react';
 import { useLocale, localeList, localeNames } from '@/lib/locale-context';
 import { api } from '@/lib/api';
 
@@ -14,6 +14,7 @@ const nav: NavItem[] = [
   { href: '/companies', labelKey: 'nav.companies', fallback: 'Companies', icon: Building2 },
   { href: '/departments', labelKey: 'nav.departments', fallback: 'Departments', icon: Network, exact: true },
   { href: '/departments/o-chart', labelKey: 'nav.oChart', fallback: 'O-Chart', icon: ChartGantt, level: 1 },
+  { href: '/positions', labelKey: 'nav.positions', fallback: 'Positions', icon: BriefcaseBusiness },
   { href: '/agents', labelKey: 'nav.agents', fallback: 'Agents', icon: Network },
   { href: '/projects', labelKey: 'nav.projects', fallback: 'Projects', icon: FolderGit2 },
   { href: '/workspaces', labelKey: 'nav.workspaces', fallback: 'Workspace', icon: FolderOpen },

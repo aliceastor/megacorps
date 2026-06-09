@@ -57,6 +57,11 @@ const cliHelp = {
     '  - company: default',
     '    name: Engineering',
     '    slug: engineering',
+    'positions:',
+    '  - company: default',
+    '    name: CTO',
+    '    slug: cto',
+    '    prompt: Own technical direction, architecture choices, and escalation boundaries.',
     'projects:',
     '  - company: default',
     '    name: Web App',
@@ -65,6 +70,7 @@ const cliHelp = {
     'agents:',
     '  - company: default',
     '    department: engineering',
+    '    position: cto',
     '    name: Builder',
     '    slug: builder',
     '    role: worker',
@@ -89,12 +95,12 @@ const cliHelp = {
     },
     {
       command: 'apply',
-      summary: 'Apply a YAML company template for companies, departments, projects, agents, goals, and cards.',
+      summary: 'Apply a YAML company template for companies, departments, positions, projects, agents, goals, and cards.',
       auth: 'session',
       flags: { '-f, --file': 'YAML manifest path.', '--session': 'Optional raw session cookie override.', '--api-url': 'Optional API URL override.' },
       env: ['MEGACORPS_API_URL', 'MEGACORPS_SESSION'],
       example: 'npm run dev -w packages/cli -- apply -f megacorps.yml --api-url http://localhost:4000',
-      lifecycle: ['Reads visible companies first.', 'Upserts companies/projects/agents/cards where supported.', 'Resolves card dependencies after all manifest cards are known.'],
+      lifecycle: ['Reads visible companies first.', 'Upserts companies, positions, projects, agents, and cards where supported.', 'Resolves department/position/agent/project references by slug/name/id.', 'Resolves card dependencies after all manifest cards are known.'],
     },
     {
       command: 'runner register',
@@ -151,6 +157,10 @@ const endpoints: ApiEndpoint[] = [
   { method: 'DELETE', path: '/api/company-memberships/:id', group: 'Companies', auth: 'session', requiredRole: 'admin', summary: 'Disable a company membership.', params: { id: 'Membership UUID.' } },
   { method: 'GET', path: '/api/departments', group: 'Departments', auth: 'session', summary: 'List departments visible to the current user.', query: { companyId: 'Optional company UUID.' } },
   { method: 'POST', path: '/api/departments', group: 'Departments', auth: 'session', summary: 'Create a department. Assign agents through PUT /api/agents/:id with departmentId and bossId.', body: { companyId: 'uuid', name: 'Engineering', slug: 'engineering' } },
+  { method: 'GET', path: '/api/positions', group: 'Positions', auth: 'session', summary: 'List reusable company positions visible to the current user. Position prompts are injected into Direct Chat and Kanban dispatch for assigned agents.', query: { companyId: 'Optional company UUID.' } },
+  { method: 'POST', path: '/api/positions', group: 'Positions', auth: 'session', summary: 'Create a company-scoped position prompt.', body: { companyId: 'uuid', name: 'CTO', slug: 'cto', prompt: 'Own technical direction, architecture decisions, escalation style, and limits.' } },
+  { method: 'PUT', path: '/api/positions/:id', group: 'Positions', auth: 'session', summary: 'Update a company-scoped position prompt. The company cannot be changed after creation.', params: { id: 'Position UUID.' }, body: { name: 'CTO', slug: 'cto', prompt: 'Updated role-specific prompt.' } },
+  { method: 'DELETE', path: '/api/positions/:id', group: 'Positions', auth: 'session', summary: 'Delete a position prompt and clear positionId from assigned agents.', params: { id: 'Position UUID.' } },
 
   { method: 'GET', path: '/api/cards', group: 'Kanban', auth: 'session', summary: 'List Kanban tasks visible to the current user.', query: { companyId: 'Optional company UUID.', status: `Optional. One of ${cardStatuses.join(', ')}. Legacy backlog maps to todo.`, assigneeId: 'Optional agent UUID.', projectId: 'Optional project UUID, or none for no-project tasks.', tag: 'Optional tag.', priority: 'urgent | high | normal | low.', limit: 'Default 100.', offset: 'Default 0.' } },
   { method: 'POST', path: '/api/cards', group: 'Kanban', auth: 'session', summary: 'Create a Kanban task. New tasks default to todo. departmentId/projectId/goalId determine the company, department, project, and selected-goal prompt context.', body: { companyId: 'uuid optional', departmentId: null, projectId: null, goalId: null, title: 'Task title', body: 'Full task detail', priority: 'normal', tags: ['backend'], assigneeId: null, reviewerId: null, requiresApproval: false } },
@@ -169,8 +179,8 @@ const endpoints: ApiEndpoint[] = [
   { method: 'POST', path: '/api/webhook/task-complete', group: 'Kanban', auth: 'none', summary: 'External agent callback to report task progress/completion. Send taskRunId for idempotent completion processing. status=needs_review means the assignee cannot finish and needs reviewer guidance; blocked with guidance/escalation wording is also promoted to help review when a reviewer exists.', body: { cardId: 'uuid', taskRunId: 'task-run uuid from prompt', status: 'done | blocked | needs_review | in_review | in_progress | todo | cancelled', summary: 'Short result or needs reviewer guidance', output: 'Full output/log with attempted methods, blocker, reviewer questions, partial output', costUsd: 0.05, workProducts: [{ type: 'pull_request', title: 'PR for task', pullRequestUrl: 'https://github.com/org/repo/pull/42', branch: 'megacorps/card-1234-alice', commitSha: 'abc123' }] } },
 
   { method: 'GET', path: '/api/agents', group: 'Agents', auth: 'session', summary: 'List agents visible to the current user.', query: { companyId: 'Optional company UUID.' } },
-  { method: 'POST', path: '/api/agents', group: 'Agents', auth: 'session', summary: 'Create an agent. soul is the platform-owned identity/work-style prompt used by adapters without native profiles, especially codex-app.', body: { companyId: 'uuid optional', departmentId: 'uuid optional', name: 'Builder', slug: 'builder', role: 'worker', title: 'Backend Engineer', soul: 'Careful backend builder. Escalates with concrete blocker notes.', capabilities: ['typescript', 'review', 'git'], adapterType: 'mock | hermes | hermes-ssh | hermes-gateway | codex-app | webhook | openclaw', runtimeId: 'uuid optional', bossId: null, budgetPerTask: 1, budgetMonthly: 20 } },
-  { method: 'PUT', path: '/api/agents/:id', group: 'Agents', auth: 'session', summary: 'Update an agent, adapter config, runtime, department assignment, and reporting line. Org-only updates can send just departmentId and/or bossId; runtime adapter validation only runs when runtimeId or adapterType is included.', params: { id: 'Agent UUID.' }, body: { name: 'optional', slug: 'optional', role: 'optional', departmentId: 'uuid | null', bossId: 'agent uuid | null', adapterType: 'optional adapter type', runtimeId: 'runtime uuid | null' }, notes: ['Use departmentId=null for no department and bossId=null for top-level agent.', 'Projects are not edited from Agents; use /api/projects for repo/work-path authority.'] },
+  { method: 'POST', path: '/api/agents', group: 'Agents', auth: 'session', summary: 'Create an agent. positionId attaches a reusable company position prompt; soul is the platform-owned identity/work-style prompt used by adapters without native profiles, especially codex-app.', body: { companyId: 'uuid optional', departmentId: 'uuid optional', positionId: 'uuid optional', name: 'Builder', slug: 'builder', role: 'worker', title: 'Backend Engineer', soul: 'Careful backend builder. Escalates with concrete blocker notes.', capabilities: ['typescript', 'review', 'git'], adapterType: 'mock | hermes | hermes-ssh | hermes-gateway | codex-app | webhook | openclaw', runtimeId: 'uuid optional', bossId: null, budgetPerTask: 1, budgetMonthly: 20 } },
+  { method: 'PUT', path: '/api/agents/:id', group: 'Agents', auth: 'session', summary: 'Update an agent, adapter config, runtime, department assignment, position prompt, and reporting line. Org-only updates can send just departmentId, positionId, and/or bossId; runtime adapter validation only runs when runtimeId or adapterType is included.', params: { id: 'Agent UUID.' }, body: { name: 'optional', slug: 'optional', role: 'optional', departmentId: 'uuid | null', positionId: 'position uuid | null', bossId: 'agent uuid | null', adapterType: 'optional adapter type', runtimeId: 'runtime uuid | null' }, notes: ['Use departmentId=null for no department, positionId=null for no position prompt, and bossId=null for top-level agent.', 'When positionId is set, Direct Chat and Kanban inject: You are <position> in <department> department of firm <company>, followed by the custom position prompt.', 'Projects are not edited from Agents; use /api/projects for repo/work-path authority.'] },
   { method: 'DELETE', path: '/api/agents/:id', group: 'Agents', auth: 'session', summary: 'Archive an agent and release current task assignments while preserving historical runs.', params: { id: 'Agent UUID.' } },
   { method: 'POST', path: '/api/agents/:id/pause', group: 'Agents', auth: 'session', summary: 'Pause an agent.', params: { id: 'Agent UUID.' } },
   { method: 'POST', path: '/api/agents/:id/resume', group: 'Agents', auth: 'session', summary: 'Resume an agent.', params: { id: 'Agent UUID.' } },
@@ -224,11 +234,12 @@ const endpoints: ApiEndpoint[] = [
 ];
 
 const currentArchitecture = {
-  model: 'MegaCorps is a company-scoped multi-agent control plane. A company owns departments, agents, projects, goals, knowledge, Kanban tasks, cron runs, budget records, and logs. Agents are configured in Agents, assigned and connected through Departments, and dispatched against tasks/projects through Kanban and Chat.',
+  model: 'MegaCorps is a company-scoped multi-agent control plane. A company owns departments, positions, agents, projects, goals, knowledge, Kanban tasks, cron runs, budget records, and logs. Agents are configured in Agents, assigned and connected through Departments, assigned reusable position prompts through Positions/Agents, and dispatched against tasks/projects through Kanban and Chat.',
   sourceOfTruth: [
     'Companies: company CRUD, memberships, dispatch interval, company goals.',
     'Departments: department membership, no-department assignment, bossId reporting lines, clickable org canvas, department goals.',
-    'Agents: identity, soul/persona, runtime preset, adapter config, budgets, pause/resume/fire/reset. Agents do not own project CRUD.',
+    'Positions: reusable company-scoped role prompts. Agents can reference a positionId, and Direct Chat/Kanban inject the position sentence plus the custom position prompt.',
+    'Agents: identity, position assignment, soul/persona, runtime preset, adapter config, budgets, pause/resume/fire/reset. Agents do not own project CRUD.',
     'Projects: Project Authority for repo provider, repoUrl, project workPath, branch policy, runtime services, setup/test commands, workspacePathHint, and project goals.',
     'Workspace: company folder manager and authoritative non-coding project-file location paths; runtime-local clone paths are not shared truth.',
     'Knowledge: company-scoped markdown docs by tag for prompt context.',
@@ -240,7 +251,8 @@ const currentArchitecture = {
     { name: 'Dashboard', route: '/dashboard', purpose: 'Operating overview, stage counts, recent task logs, recent API events.', primaryApi: ['/api/dashboard', '/api/activity', '/api/task-runs'] },
     { name: 'Companies', route: '/companies', purpose: 'Create/delete companies, memberships, dispatch interval, company goals.', primaryApi: ['/api/companies', '/api/company-memberships', '/api/goals'] },
     { name: 'Departments', route: '/departments', purpose: 'Assign agents to departments, set no-department state, edit reports-to lines, use clickable org canvas, manage department goals.', primaryApi: ['/api/departments', '/api/agents/:id', '/api/goals'] },
-    { name: 'Agents', route: '/agents', purpose: 'Create and configure agents, runtime presets, adapter overrides, budgets, direct reports, assigned work, review queue.', primaryApi: ['/api/agents', '/api/agent-runtimes', '/api/agent-runtimes/health'] },
+    { name: 'Positions', route: '/positions', purpose: 'Manage reusable company position prompts and see which agents inherit them.', primaryApi: ['/api/positions', '/api/agents/:id'] },
+    { name: 'Agents', route: '/agents', purpose: 'Create and configure agents, position assignment, runtime presets, adapter overrides, budgets, direct reports, assigned work, review queue.', primaryApi: ['/api/agents', '/api/positions', '/api/agent-runtimes', '/api/agent-runtimes/health'] },
     { name: 'Projects', route: '/projects', purpose: 'Dedicated Project Authority workbench for repo/work-path policy, runtime services, branch policy, commands, and project goals.', primaryApi: ['/api/projects', '/api/goals'] },
     { name: 'Workspace', route: '/workspaces', purpose: 'Company folder manager and authority path surface for non-coding project files.', primaryApi: ['/api/companies', '/api/projects'] },
     { name: 'Knowledge', route: '/knowledge', purpose: 'Company-scoped markdown knowledge documents injected by tag/context.', primaryApi: ['/api/knowledge-docs'] },
@@ -255,6 +267,7 @@ const currentArchitecture = {
   multiAgentNotes: [
     'Use project repoUrl and workPath as the shared coding authority; use runtime local roots only for machine-local clone/cache placement.',
     'Use company/department/project goals directly. There is no separate derived goal layer.',
+    'Use company Positions for reusable role-specific prompt injection. Assigned agents receive "You are <position> in <department> department of firm <company>." followed by the custom position prompt.',
     'Use work products with URLs, repo metadata, branches, commits, PRs, previews, reports, screenshots, or artifacts so reviewers can inspect output across machines.',
     'Use needs_review for reviewer guidance when an assignee cannot complete a task; use in_review for quality review after completion.',
     'Use machine runners when work must execute outside the API process. Runner API keys authenticate machines; runner-created agent sessions authenticate agents with Ed25519 JWTs.',
@@ -270,6 +283,7 @@ const currentArchitecture = {
 function entityFromEndpoint(endpoint: ApiEndpoint): string {
   if (endpoint.path.includes('/companies')) return 'company';
   if (endpoint.path.includes('/departments')) return 'department';
+  if (endpoint.path.includes('/positions')) return 'position';
   if (endpoint.path.includes('/work-products')) return 'workProduct';
   if (endpoint.path.includes('/machine-runners')) return 'machineRunner';
   if (endpoint.path.includes('/agent-sessions')) return 'agentSession';
@@ -361,6 +375,12 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
     const project = { id: 'project-uuid', companyId: 'company-uuid', name: 'Project name', repoProvider: 'github', repoUrl: 'https://github.com/org/repo', workPath: 'apps/server', defaultBranch: 'main', workBranchPattern: 'megacorps/card-{cardId}-{agentSlug}', workspacePathHint: 'optional runtime-local hint only' };
     if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: project }, responseExample: [project], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
     return { responseSchema: project, responseExample: project, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path.includes('/positions')) {
+    const position = { id: 'position-uuid', companyId: 'company-uuid', name: 'CTO', slug: 'cto', prompt: 'Own technical direction and escalation boundaries.', createdAt: '2026-06-09T00:00:00.000Z', updatedAt: '2026-06-09T00:00:00.000Z' };
+    if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: position }, responseExample: [position], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: position, responseExample: position, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path === '/api/agent-runtimes/health') {

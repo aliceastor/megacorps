@@ -12,6 +12,7 @@ MegaCorps uses bounded context budgets, so long fields are clipped rather than o
 - Company goals, department goals, project goals
 - Project repo binding and Git completion policy, when a project has a repository
 - Agent identity, title, soul/work style, reporting manager, direct reports
+- Agent position prompt when `agent.positionId` is set
 - Same-company Kanban snapshot with compact card lines
 - Focus card dependency state and recent card action/log history
 - Focus-agent assigned work and review queue
@@ -71,6 +72,19 @@ Session policy: Direct Chat uses one thread per chat session. Kanban uses one th
 
 This deliberately uses task-scoped sessions rather than project-scoped sessions. Project context comes from `projectId`, repo policy, goals, and work products; the Codex conversation thread is scoped to the actual chat or card work item so unrelated project tasks do not contaminate each other.
 
+## Agent Position Prompt
+
+Positions are company-scoped reusable role prompts. Operators create them from `Positions`, then assign one to an agent from the Agent create/edit flow.
+
+When an agent has a position, MegaCorps injects:
+
+```text
+You are <position name> in <department name | unassigned> department of firm <company name>.
+<custom position prompt>
+```
+
+The position prompt is injected for both Direct Chat and Kanban task dispatch. It is separate from `agent.soul`: `position` defines the reusable office/role contract, while `soul` defines that specific agent's personality, habits, and work style.
+
 ## Project Repository And Work Path Protocol
 
 Projects carry the shared repo/workspace policy. This is designed for multi-system agents: every agent runtime owns its own local folder or clone cache, while MegaCorps injects the shared Git repository, project-level work path, and required operating protocol.
@@ -128,6 +142,10 @@ Goal: <selected goal title>
 
 Assigned member: <agent name>
 Identity label: <agent role>
+Position: <position name | none>
+Position prompt:
+You are <position name> in <department name | unassigned> department of firm <company name>.
+<custom position prompt>
 Soul:
 <agent.soul, if configured>
 Reports to: <manager name | top-level>
@@ -212,6 +230,9 @@ Project repository URL: <repo URL | not configured>
 Project work path: <relative path | project root>
 Repository rule: use runtime-local clone, stay inside the project work path unless explicitly required, pull before repo work, push/PR finished changes, and report URLs rather than local-only paths.
 Department: <agent department | none>
+Position prompt:
+You are <position name> in <department name | unassigned> department of firm <company name>.
+<custom position prompt>
 Company goals:
 <company goals>
 Department goals:

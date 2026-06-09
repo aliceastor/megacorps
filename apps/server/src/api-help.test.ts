@@ -40,6 +40,10 @@ const registeredRoutes = [
   ['DELETE', '/api/company-memberships/:id'],
   ['GET', '/api/departments'],
   ['POST', '/api/departments'],
+  ['GET', '/api/positions'],
+  ['POST', '/api/positions'],
+  ['PUT', '/api/positions/:id'],
+  ['DELETE', '/api/positions/:id'],
   ['GET', '/api/cards'],
   ['POST', '/api/cards'],
   ['PUT', '/api/cards/:id'],
@@ -107,11 +111,14 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.ok(catalog.adapters.includes('hermes-ssh'));
   assert.match(catalog.architecture.model, /multi-agent control plane/i);
   assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Projects' && surface.purpose.includes('Project Authority')));
+  assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Positions' && surface.primaryApi.includes('/api/positions')));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/departments' && endpoint.group === 'Departments'));
+  assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/positions' && endpoint.group === 'Positions'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/auth/bootstrap'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/runner/task-runs/claim' && endpoint.auth === 'runner'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/agent/cards/:id/claim' && endpoint.auth === 'agent-session'));
   assert.ok(catalog.cli.commands.some((command) => command.command === 'apply' && command.auth === 'session'));
+  assert.match(catalog.cli.manifestExample, /positions:/);
   assert.match(catalog.cli.manifestExample, /dependencies/);
   for (const endpoint of catalog.endpoints) {
     assert.notEqual(endpoint.responseSchema, undefined, `${endpoint.method} ${endpoint.path} missing responseSchema`);

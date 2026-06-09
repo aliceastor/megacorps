@@ -12,6 +12,7 @@ Primary navigation:
 - Dashboard: `/dashboard`
 - Companies: `/companies`
 - Departments: `/departments`
+- Positions: `/positions`
 - Agents: `/agents`
 - Projects: `/projects`
 - Workspace: `/workspaces`
@@ -198,11 +199,22 @@ Component:
 - `OrgChart` with `surface="agents"`
 
 Data sources:
-- Same agent/company/runtime/card/approval sources as `/companies`
+- `GET /api/companies`
+- `GET /api/departments`
+- `GET /api/positions`
+- `GET /api/agents`
+- `GET /api/agent-runtimes`
+- `GET /api/agent-runtimes/health`
+- `GET /api/cards`
+- `GET /api/approvals`
+- `POST /api/agents`
+- `PUT /api/agents/:id`
+- Agent runtime/test/pause/resume/reset/delete endpoints
 
 Elements:
 - Company context selector with existing companies only; no New Company placeholder on the Agents page
 - Agent creation panel with New Agent button
+- Position assignment dropdown
 - Department org lanes
 - Unassigned department lane
 - Selected agent detail panel as described above
@@ -223,6 +235,7 @@ Step 1: Identity
 Step 2: Assignment
 - Company
 - Department
+- Position
 - Reports to
 - Profile
 
@@ -236,12 +249,45 @@ Selected-agent panel elements:
 - Effective adapter config summary, including runtime-inherited values and per-agent overrides
 - Name, slug, identity label, title, profile
 - Adapter and runtime preset selectors
-- Department and reports-to selectors
+- Department, position, and reports-to selectors
 - Capabilities, per-task budget, monthly budget
 - Soul textarea
 - Adapter override fields, adapter-type aware
 - Direct reports, assigned work, review queue
 - Save, Test, Pause/Resume, Reset Session, Fire
+
+## Positions
+
+Route:
+- `/positions`
+
+Component:
+- `PositionsPage`
+
+Data sources:
+- `GET /api/companies`
+- `GET /api/positions`
+- `GET /api/agents`
+- `POST /api/positions`
+- `PUT /api/positions/:id`
+- `DELETE /api/positions/:id`
+
+Elements:
+- Company selector
+- New Position button
+- Position list with assigned-agent count
+- Position editor:
+  - Position name
+  - Slug
+  - Position prompt textarea
+  - Prompt preview showing the injected `You are ...` sentence plus the custom prompt
+  - Save Position
+  - Delete Position
+- Assigned agents list
+
+Prompt behavior:
+- Agents assigned to a position receive `You are <position> in <department> department of firm <company>.`
+- The custom position prompt follows that sentence in Direct Chat and Kanban dispatch prompts.
 
 ## Direct Chat
 
@@ -704,7 +750,7 @@ Elements:
   - Search input
   - API stat cards
   - Current Architecture panel:
-    - Surface cards for Dashboard, Companies, Departments, Agents, Projects, Workspace, Knowledge, Kanban, Direct Chat, Cron, Logs, Admin, Settings, Help
+    - Surface cards for Dashboard, Companies, Departments, Positions, Agents, Projects, Workspace, Knowledge, Kanban, Direct Chat, Cron, Logs, Admin, Settings, Help
     - Source-of-truth notes
     - Multi-agent operating notes
     - Remaining production gaps
@@ -727,7 +773,7 @@ Elements:
 - CLI Commands tab:
   - Entrypoint copy row for `npm run dev -w packages/cli -- <command>`
   - Environment variable list
-  - YAML manifest example
+  - YAML manifest example, including positions and agent position references
   - Command cards for `login`, `apply`, `runner register`, and `runner daemon`
   - Each command card shows auth mode, flags, env vars, example command, and lifecycle notes
 

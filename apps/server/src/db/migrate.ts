@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS user_invites (id UUID PRIMARY KEY DEFAULT gen_random_
 CREATE INDEX IF NOT EXISTS user_invites_company_status_idx ON user_invites(company_id, status);
 CREATE INDEX IF NOT EXISTS user_invites_email_status_idx ON user_invites(email, status);
 CREATE TABLE IF NOT EXISTS departments (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, slug TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE IF NOT EXISTS positions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, slug TEXT NOT NULL, prompt TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now(), UNIQUE(company_id, slug));
+CREATE INDEX IF NOT EXISTS positions_company_created_at_idx ON positions(company_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS projects (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), name TEXT NOT NULL, description TEXT, repo_provider TEXT DEFAULT 'github', repo_url TEXT, work_path TEXT, default_branch TEXT DEFAULT 'main', protected_branches TEXT[] DEFAULT '{main,master}', work_branch_pattern TEXT DEFAULT 'megacorps/card-{cardId}-{agentSlug}', pull_before_run BOOLEAN DEFAULT true, push_after_run BOOLEAN DEFAULT true, completion_policy TEXT DEFAULT 'push_or_pr', setup_command TEXT, test_command TEXT, runtime_services JSONB DEFAULT '{}', workspace_path_hint TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS repo_provider TEXT DEFAULT 'github';
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS repo_url TEXT;
@@ -39,6 +41,7 @@ ALTER TABLE goals ADD COLUMN IF NOT EXISTS department_id UUID REFERENCES departm
 ALTER TABLE goals ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id);
 CREATE INDEX IF NOT EXISTS goals_company_scope_created_at_idx ON goals(company_id, department_id, project_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS agents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), department_id UUID REFERENCES departments(id), slug TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL, title TEXT, soul TEXT, adapter_type TEXT NOT NULL DEFAULT 'hermes', adapter_config JSONB DEFAULT '{}', runtime_id UUID, hermes_profile TEXT, boss_id UUID REFERENCES agents(id), budget_per_task NUMERIC(10,4), budget_monthly NUMERIC(10,4), spent_this_month NUMERIC(10,4) DEFAULT 0, capabilities TEXT[] DEFAULT '{}', is_busy BOOLEAN DEFAULT false, is_active BOOLEAN DEFAULT true, current_session_id TEXT, created_at TIMESTAMPTZ DEFAULT now(), UNIQUE(company_id, slug));
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS position_id UUID REFERENCES positions(id);
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS runtime_id UUID;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS soul TEXT;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;

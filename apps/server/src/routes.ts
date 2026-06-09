@@ -3,11 +3,11 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, ne, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema, validateCardTransition } from '@megacorps/shared';
+import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createPositionSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateCardSchema, updateCompanyMembershipSchema, validateCardTransition } from '@megacorps/shared';
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
-import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
+import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { buildExecutionAgent, cascadeParentStatus, decomposeCard, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
@@ -202,6 +202,7 @@ async function ensureVisibleCard(request: Parameters<typeof requireVisibleCompan
 
 type CompanyReferenceInput = {
   departmentId?: string | null;
+  positionId?: string | null;
   projectId?: string | null;
   goalId?: string | null;
   assigneeId?: string | null;
@@ -217,6 +218,10 @@ async function ensureCompanyReferences(companyId: string, input: CompanyReferenc
   if (input.departmentId) {
     const [row] = await db.select({ id: departments.id }).from(departments).where(and(eq(departments.id, input.departmentId), eq(departments.companyId, companyId))).limit(1);
     if (!row) throw new Error('department_company_mismatch');
+  }
+  if (input.positionId) {
+    const [row] = await db.select({ id: positions.id }).from(positions).where(and(eq(positions.id, input.positionId), eq(positions.companyId, companyId))).limit(1);
+    if (!row) throw new Error('position_company_mismatch');
   }
   if (input.projectId) {
     const [row] = await db.select({ id: projects.id }).from(projects).where(and(eq(projects.id, input.projectId), eq(projects.companyId, companyId))).limit(1);
@@ -730,6 +735,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!company) return reply.code(404).send({ error: 'company_not_found' });
     const [
       [departmentUsage],
+      [positionUsage],
       [projectUsage],
       [goalUsage],
       [runtimeUsage],
@@ -749,6 +755,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       [chatMessageUsage],
     ] = await Promise.all([
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(departments).where(eq(departments.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(positions).where(eq(positions.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(projects).where(eq(projects.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(goals).where(eq(goals.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(agentRuntimes).where(eq(agentRuntimes.companyId, id)),
@@ -769,6 +776,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     ]);
     const usage = {
       departments: departmentUsage?.count ?? 0,
+      positions: positionUsage?.count ?? 0,
       projects: projectUsage?.count ?? 0,
       goals: goalUsage?.count ?? 0,
       agentRuntimes: runtimeUsage?.count ?? 0,
@@ -869,6 +877,47 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireCompanyRole(request, reply, input.companyId, 'operator'); if (!user) return reply;
     const [department] = await db.insert(departments).values(input).returning();
     return reply.code(201).send(department);
+  });
+
+  app.get('/api/positions', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    const query = request.query as { companyId?: string };
+    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
+    return db.select().from(positions).where(query.companyId ? eq(positions.companyId, query.companyId) : inArray(positions.companyId, access.companyIds)).orderBy(desc(positions.createdAt));
+  });
+  app.post('/api/positions', async (request, reply) => {
+    const input = createPositionSchema.parse(request.body);
+    const user = await requireCompanyRole(request, reply, input.companyId, 'operator'); if (!user) return reply;
+    const [position] = await db.insert(positions).values({ ...input, prompt: optionalText(input.prompt) ?? null }).returning();
+    if (position) await db.insert(activityLog).values({ companyId: position.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'position.created', entityType: 'position', entityId: position.id, details: { name: position.name } });
+    return reply.code(201).send(position);
+  });
+  app.put('/api/positions/:id', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const input = createPositionSchema.partial().parse(request.body);
+    const [existing] = await db.select().from(positions).where(eq(positions.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'position_not_found' });
+    if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'position_company_immutable' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    const [position] = await db.update(positions).set({
+      name: input.name,
+      slug: input.slug,
+      prompt: input.prompt === undefined ? undefined : optionalText(input.prompt) ?? null,
+      updatedAt: new Date(),
+    }).where(eq(positions.id, id)).returning();
+    if (!position) return reply.code(404).send({ error: 'position_not_found' });
+    await db.insert(activityLog).values({ companyId: position.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'position.updated', entityType: 'position', entityId: position.id, details: { name: position.name } });
+    return position;
+  });
+  app.delete('/api/positions/:id', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const [position] = await db.select().from(positions).where(eq(positions.id, id)).limit(1);
+    if (!position) return reply.code(404).send({ error: 'position_not_found' });
+    const user = await requireCompanyRole(request, reply, position.companyId, 'operator'); if (!user) return reply;
+    await db.update(agents).set({ positionId: null }).where(eq(agents.positionId, id));
+    await db.delete(positions).where(eq(positions.id, id));
+    await db.insert(activityLog).values({ companyId: position.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'position.deleted', entityType: 'position', entityId: id, details: { name: position.name } });
+    return { ok: true };
   });
 
   app.get('/api/cards', async (request, reply) => {
@@ -1315,9 +1364,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = createAgentSchema.parse(request.body);
     const companyId = input.companyId ?? await defaultCompanyId();
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
-    try { await ensureCompanyReferences(companyId, { departmentId: input.departmentId, bossId: input.bossId, runtimeId: input.runtimeId, adapterType: input.adapterType }); }
+    try { await ensureCompanyReferences(companyId, { departmentId: input.departmentId, positionId: input.positionId, bossId: input.bossId, runtimeId: input.runtimeId, adapterType: input.adapterType }); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
-    const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, capabilities: input.capabilities ?? [], budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
+    const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, positionId: input.positionId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, capabilities: input.capabilities ?? [], budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
     if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
     return reply.code(201).send(agent ? redactAgent(agent) : agent);
   });
@@ -1376,7 +1425,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [existing] = await db.select().from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
     if (!existing) return reply.code(404).send({ error: 'agent_not_found' });
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
-    const referenceInput: CompanyReferenceInput = { departmentId: input.departmentId, bossId: input.bossId };
+    const referenceInput: CompanyReferenceInput = { departmentId: input.departmentId, positionId: input.positionId, bossId: input.bossId };
     if (input.adapterType !== undefined || input.runtimeId !== undefined) {
       referenceInput.adapterType = input.adapterType ?? existing.adapterType;
       referenceInput.runtimeId = input.runtimeId === undefined ? existing.runtimeId : input.runtimeId;
@@ -1391,6 +1440,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       title: input.title,
       soul: input.soul,
       departmentId: input.departmentId,
+      positionId: input.positionId,
       adapterType: input.adapterType,
       adapterConfig: nextAdapterConfig,
       runtimeId: input.runtimeId,

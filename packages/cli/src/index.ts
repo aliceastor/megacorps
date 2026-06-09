@@ -172,6 +172,7 @@ async function applyManifest(flags: Flags): Promise<void> {
   }
 
   const departmentsByCompany = new Map<string, Map<string, ApiObject>>();
+  const positionsByCompany = new Map<string, Map<string, ApiObject>>();
   const agentsByCompany = new Map<string, Map<string, ApiObject>>();
   const projectsByCompany = new Map<string, Map<string, ApiObject>>();
   const goalsByCompany = new Map<string, Map<string, ApiObject>>();
@@ -206,6 +207,18 @@ async function applyManifest(flags: Flags): Promise<void> {
     console.log(`created department ${row.name ?? row.slug ?? row.id}`);
   }
 
+  for (const item of records(manifest.positions)) {
+    const company = companyFor(item);
+    const index = await companyScopedIndex(positionsByCompany, company.id, '/api/positions');
+    const existing = keyFor(item).map((key) => index.get(key)).find(Boolean);
+    const payload = { ...withoutRefs(item, ['company', 'companySlug']), companyId: company.id };
+    const row = existing
+      ? await apiRequest<ApiObject>(options, `/api/positions/${existing.id}`, { method: 'PUT', body: JSON.stringify(payload) })
+      : await apiRequest<ApiObject>(options, '/api/positions', { method: 'POST', body: JSON.stringify(payload) });
+    for (const key of keyFor(row)) index.set(key, row);
+    console.log(`${existing ? 'updated' : 'created'} position ${row.name ?? row.slug ?? row.id}`);
+  }
+
   for (const item of records(manifest.projects)) {
     const company = companyFor(item);
     const index = await companyScopedIndex(projectsByCompany, company.id, '/api/projects');
@@ -221,14 +234,17 @@ async function applyManifest(flags: Flags): Promise<void> {
   for (const item of records(manifest.agents)) {
     const company = companyFor(item);
     const departments = await companyScopedIndex(departmentsByCompany, company.id, '/api/departments');
+    const positions = await companyScopedIndex(positionsByCompany, company.id, '/api/positions');
     const agents = await companyScopedIndex(agentsByCompany, company.id, '/api/agents');
     const existing = keyFor(item).map((key) => agents.get(key)).find(Boolean);
     const department = item.department ? byRef(departments, item.department, 'department') : null;
+    const position = item.position ? byRef(positions, item.position, 'position') : null;
     const boss = item.boss ? byRef(agents, item.boss, 'agent') : null;
     const payload = {
-      ...withoutRefs(item, ['company', 'companySlug', 'department', 'boss']),
+      ...withoutRefs(item, ['company', 'companySlug', 'department', 'position', 'boss']),
       companyId: company.id,
       departmentId: department?.id ?? item.departmentId,
+      positionId: position?.id ?? item.positionId,
       bossId: boss?.id ?? item.bossId,
     };
     const row = existing

@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { inferCardTransitionAction, normalizeCardStatus } from '@megacorps/shared';
 import { db, sql as rawSql } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, projects, taskLogs, taskRuns } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
@@ -11,6 +11,7 @@ import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.t
 import { recordStageAction } from './card-actions.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
 import { agentRuntimeAvailable } from './runner-availability.ts';
+import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -1386,9 +1387,10 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
   const budget = Math.max(8000, options.budgetChars ?? CONTEXT_CHAR_BUDGET);
   const state = { remaining: budget, sections: [] as string[], truncated: false };
   const [company] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
-  const [companyAgents, companyDepartments, companyProjects, companyGoals, companyCards, companyRuntimes, recentActivity, recentRuns] = await Promise.all([
+  const [companyAgents, companyDepartments, companyPositions, companyProjects, companyGoals, companyCards, companyRuntimes, recentActivity, recentRuns] = await Promise.all([
     db.select().from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.deletedAt))),
     db.select().from(departments).where(eq(departments.companyId, companyId)),
+    db.select().from(positions).where(eq(positions.companyId, companyId)),
     db.select().from(projects).where(eq(projects.companyId, companyId)),
     db.select().from(goals).where(eq(goals.companyId, companyId)),
     db.select().from(kanbanCards).where(and(eq(kanbanCards.companyId, companyId), isNull(kanbanCards.deletedAt))).orderBy(desc(kanbanCards.updatedAt)),
@@ -1399,6 +1401,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
   const agentById = new Map(companyAgents.map((agent) => [agent.id, agent]));
   const runtimeById = new Map(companyRuntimes.map((runtime) => [runtime.id, runtime]));
   const departmentById = new Map(companyDepartments.map((department) => [department.id, department]));
+  const positionById = new Map(companyPositions.map((position) => [position.id, position]));
   const projectById = new Map(companyProjects.map((project) => [project.id, project]));
   const goalById = new Map(companyGoals.map((goal) => [goal.id, goal]));
   const focusCard = options.focusCardId ? companyCards.find((card) => card.id === options.focusCardId) : undefined;
@@ -1410,6 +1413,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
     `Auto dispatch: ${company?.autoDispatchEnabled === false ? 'off' : 'on'}`,
     `Dispatch interval seconds: ${company?.dispatchIntervalSeconds ?? 10}`,
     `Departments: ${companyDepartments.map((department) => `${department.name} (${department.slug})`).join(', ') || 'none'}`,
+    `Positions: ${companyPositions.map((position) => `${position.name} (${position.slug})`).join(', ') || 'none'}`,
     `Projects: ${companyProjects.map((project) => project.name).join(', ') || 'none'}`,
     `Goals:\n${companyGoals.map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
   ].join('\n'), 2600);
@@ -1430,12 +1434,17 @@ export async function buildCompanyKanbanContext(companyId: string, options: { fo
   if (focusAgent) {
     const manager = focusAgent.bossId ? agentById.get(focusAgent.bossId) : undefined;
     const runtime = focusAgent.runtimeId ? runtimeById.get(focusAgent.runtimeId) : undefined;
+    const department = focusAgent.departmentId ? departmentById.get(focusAgent.departmentId) : undefined;
+    const position = focusAgent.positionId ? positionById.get(focusAgent.positionId) : undefined;
+    const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt });
     const reports = companyAgents.filter((agent) => agent.bossId === focusAgent.id);
     const assigned = companyCards.filter((card) => card.assigneeId === focusAgent.id && !['done', 'blocked', 'cancelled'].includes(card.columnStatus ?? 'todo')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
     const reviews = companyCards.filter((card) => card.reviewerId === focusAgent.id || reports.some((report) => report.id === card.assigneeId && ['in_review', 'needs_review'].includes(card.columnStatus ?? 'todo'))).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
     addContextSection(state, 'Invocation Agent Work Context', [
       `Agent: ${focusAgent.name}`,
       `Identity label: ${focusAgent.role}`,
+      `Position: ${position?.name ?? 'none'}`,
+      positionPrompt ? `Position prompt:\n${positionPrompt}` : '',
       focusAgent.soul ? `Soul:\n${clipText(focusAgent.soul, 1200)}` : '',
       `Runtime: ${runtime?.name ?? focusAgent.runtimeId ?? 'none'}`,
       ...runtimeLocalLines(runtime),
@@ -1518,6 +1527,7 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
   const [assignee] = card.assigneeId ? await db.select().from(agents).where(and(eq(agents.id, card.assigneeId), isNull(agents.deletedAt))).limit(1) : [];
   const [runtime] = assignee?.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, assignee.runtimeId)).limit(1) : [];
   const [manager] = assignee?.bossId ? await db.select().from(agents).where(and(eq(agents.id, assignee.bossId), isNull(agents.deletedAt))).limit(1) : [];
+  const [position] = assignee?.positionId ? await db.select().from(positions).where(and(eq(positions.id, assignee.positionId), eq(positions.companyId, card.companyId))).limit(1) : [];
   const reports = assignee ? await db.select().from(agents).where(eq(agents.bossId, assignee.id)) : [];
   const companyGoals = await db.select().from(goals).where(eq(goals.companyId, card.companyId)).orderBy(desc(goals.createdAt));
   const applicableGoalRows = applicableGoals(companyGoals, { departmentId: card.departmentId, projectId: card.projectId, selectedGoalId: card.goalId });
@@ -1527,6 +1537,7 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
     const tags = doc.tags ?? [];
     return tags.length === 0 || tags.some((tag) => (card.tags ?? []).includes(tag));
   }).slice(0, 5);
+  const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt });
   return [
     company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
     project ? `Project: ${project.name}\n${project.description ?? ''}\n${projectRepoLines(project, runtime).join('\n')}` : '',
@@ -1534,6 +1545,8 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
     assignee ? [
       `Assigned member: ${assignee.name}`,
       `Identity label: ${assignee.role}`,
+      `Position: ${position?.name ?? 'none'}`,
+      positionPrompt ? `Position prompt:\n${positionPrompt}` : '',
       assignee.soul ? `Soul:\n${clipText(assignee.soul, 1200)}` : '',
       `Reports to: ${manager?.name ?? 'top-level'}`,
       `Direct reports: ${reports.length ? reports.map((report) => `${report.name} (${report.role})`).join(', ') : 'none'}`,

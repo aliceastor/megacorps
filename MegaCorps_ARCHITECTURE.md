@@ -2,6 +2,20 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.16 - Company Positions And Role Prompt Injection
+
+Date: 2026-06-09
+
+Completed in this pass:
+
+- Added `positions` as a company-scoped table for reusable role/office prompts, plus `agents.position_id` so each agent can inherit one position.
+- Added `/api/positions` CRUD and same-company validation so an agent can only reference a position owned by its company.
+- Added the `Positions` sidebar page with company selector, position list, prompt editor, prompt preview, delete flow, and assigned-agent visibility.
+- Added position selection to Agent creation and Agent edit flows.
+- Injected assigned position prompts into Direct Chat and Kanban dispatch: `You are <position> in <department> department of firm <company>.` followed by the custom position prompt.
+- Extended CLI YAML `apply` so manifests can define `positions` and agents can reference them through `position`.
+- Updated `/api/help`, `/api/help?format=markdown`, README, UI flow docs, and prompt injection docs for the new position surface.
+
 ## Architecture Update v1.15 - API/CLI Help Parity And Runner Lifecycle Guard
 
 Date: 2026-06-09

@@ -52,7 +52,7 @@ CLI/API help:
 - `GET /api/help`: JSON catalog for every HTTP route plus CLI commands, auth mode, required roles, response examples, and rate-limit buckets.
 - `GET /api/help?format=markdown`: Markdown version of the same catalog for agents and operators.
 - `/help`: Web Help page with `API Catalog` and `CLI Commands` tabs.
-- `apply` supports companies, departments, projects, agents, goals, and cards. Card dependency references are resolved after all manifest cards are created or updated, so YAML cards can depend on cards defined later in the same file.
+- `apply` supports companies, departments, positions, projects, agents, goals, and cards. Agents can reference positions by slug/name/id through `position`. Card dependency references are resolved after all manifest cards are created or updated, so YAML cards can depend on cards defined later in the same file.
 
 Local red-team cleanup:
 
@@ -65,7 +65,10 @@ Get-Content scripts/cleanup-redteam-data.sql | docker exec -i megacorps-postgres
 MegaCorps now has two configuration layers:
 
 1. Open `Settings -> Agent runtimes` and create a reusable runtime preset.
-2. Open `Agents`, select an agent, then choose a runtime preset or fill the adapter override fields on that agent.
+2. Open `Positions` to define reusable company role prompts when an office/title should carry standing instructions.
+3. Open `Agents`, select an agent, then choose a position, runtime preset, or adapter override fields on that agent.
+
+When an agent has a position, Direct Chat and Kanban prompts include `You are <position> in <department> department of firm <company>.` followed by the custom position prompt. Use Positions for reusable office/role authority; use agent `soul` for that individual agent's personality, habits, and working style.
 
 Runtime presets can also define `localWorkspaceRoot` and `localScratchRoot`, the local folders used by agents attached to that runtime for repo clones/caches and temporary task files.
 Agent overrides win over runtime presets. When `.env` adapter fallback is enabled, runtime presets win over `.env` defaults.
@@ -122,7 +125,8 @@ Hermes suite operational notes:
 - `Dashboard`: operating overview, stage counts, recent task logs, recent API lifecycle events.
 - `Companies`: pure company CRUD plus company goals.
 - `Departments`: department management, direct agent membership assignment, reporting-line editing, clickable org canvas agent editing, and department goals.
-- `Agents`: member hierarchy, guided agent creation, pause/resume/fire/reset, runtime and adapter configuration.
+- `Positions`: reusable company role prompts, assigned-agent visibility, and prompt preview.
+- `Agents`: member hierarchy, guided agent creation, position assignment, pause/resume/fire/reset, runtime and adapter configuration.
 - `Projects`: unified project authority workbench for project CRUD, repo settings, branch policy, runtime services, work path, and project goals.
 - `Workspace`: company folder manager and authoritative workspace paths for non-coding project files.
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
@@ -158,12 +162,13 @@ Hermes suite operational notes:
 - Phase 18: repo-centric project workspace policy with project-level `repoUrl` and `workPath`, pull-before-run/push-after-run prompt protocol, and first-class task work products for PRs, commits, previews, reports, screenshots, and artifacts.
 - Phase 19: Codex app-server adapter, platform-owned agent `soul`, and durable adapter session records for direct chat and task-scoped Codex threads.
 - Phase 20: normalized card lifecycle actions, `card_dependencies` graph, machine runners with hashed API keys, runner heartbeat/claim/complete APIs, Ed25519 agent sessions, and MegaCorps CLI YAML apply/runner daemon scaffold.
+- Phase 21: reusable company positions, agent position assignment, Direct Chat/Kanban position prompt injection, and CLI/API help coverage.
 
 Reference-informed next phases:
 
-- Phase 21: company template export/import hardening with secret references.
-- Phase 22: runner PR provider integration, streaming progress, sandbox policy, and richer runtime liveness probes.
-- Phase 23: fine-grained service-account roles for non-runner integrations.
+- Phase 22: company template export/import hardening with secret references.
+- Phase 23: runner PR provider integration, streaming progress, sandbox policy, and richer runtime liveness probes.
+- Phase 24: fine-grained service-account roles for non-runner integrations.
 
 ## Paperclip-inspired loop
 
@@ -241,6 +246,7 @@ Every task dispatch, review, and direct chat invocation receives a bounded Kanba
 - focus task details,
 - parent/child/dependency task context,
 - focus agent open work and review queue,
+- focus agent position sentence and custom position prompt when configured,
 - focus agent soul/personality/work style when configured,
 - latest task message board entries,
 - latest task lifecycle logs,

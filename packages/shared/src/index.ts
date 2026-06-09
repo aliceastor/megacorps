@@ -178,6 +178,13 @@ export const createDepartmentSchema = z.object({
   slug: z.string().trim().regex(/^[a-z0-9-]+$/).max(80),
 });
 
+export const createPositionSchema = z.object({
+  companyId: z.string().uuid(),
+  name: z.string().trim().min(1).max(120),
+  slug: z.string().trim().regex(/^[a-z0-9-]+$/).max(80),
+  prompt: z.string().trim().max(8000).nullable().optional(),
+});
+
 export const updateCardSchema = createCardSchema.partial().extend({
   columnStatus: cardStatusSchema.optional(),
   updatedAt: z.string().datetime().optional(),
@@ -197,6 +204,7 @@ export const createAgentSchema = z.object({
   bossId: z.string().uuid().nullable().optional(),
   capabilities: z.array(z.string().trim().min(1).max(80)).default([]).optional(),
   departmentId: z.string().uuid().nullable().optional(),
+  positionId: z.string().uuid().nullable().optional(),
   budgetPerTask: z.number().nonnegative().optional(),
   budgetMonthly: z.number().nonnegative().optional(),
 });
@@ -390,6 +398,7 @@ export type CreateInviteInput = z.infer<typeof createInviteSchema>;
 export type AcceptInviteInput = z.infer<typeof acceptInviteSchema>;
 export type CreateCompanyInput = z.infer<typeof createCompanySchema>;
 export type CreateDepartmentInput = z.infer<typeof createDepartmentSchema>;
+export type CreatePositionInput = z.infer<typeof createPositionSchema>;
 export type CreateCardCommentInput = z.infer<typeof createCardCommentSchema>;
 export type CreateChatSessionInput = z.infer<typeof createChatSessionSchema>;
 export type CreateChatMessageInput = z.infer<typeof createChatMessageSchema>;

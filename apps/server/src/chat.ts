@@ -5,10 +5,11 @@ import { requireAuth } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole } from './access.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, projects } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, positions, projects } from './db/schema.ts';
 import { budgetOk, buildCompanyKanbanContext, buildExecutionAgent, getBudgetGuard } from './dispatch.ts';
 import { publishLiveEvent } from './live.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
+import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -59,15 +60,19 @@ function projectRepoContext(project: ProjectRow | null | undefined, runtime?: Ru
 }
 
 async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, projectId: string | null): Promise<string> {
+  const [company] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
   const [project] = projectId ? await db.select().from(projects).where(eq(projects.id, projectId)).limit(1) : [];
   const [runtime] = agent.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, agent.runtimeId)).limit(1) : [];
   const [department] = agent.departmentId ? await db.select().from(departments).where(eq(departments.id, agent.departmentId)).limit(1) : [];
+  const [position] = agent.positionId ? await db.select().from(positions).where(and(eq(positions.id, agent.positionId), eq(positions.companyId, companyId))).limit(1) : [];
   const companyGoals = await db.select().from(goals).where(eq(goals.companyId, companyId)).orderBy(desc(goals.createdAt));
+  const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt });
   return [
     `Project: ${project?.name ?? 'No project / general chat'}`,
     project?.description ? `Project description: ${project.description}` : '',
     projectRepoContext(project, runtime),
     `Department: ${department?.name ?? 'none'}`,
+    positionPrompt ? `Position prompt:\n${positionPrompt}` : '',
     `Company goals:\n${companyGoals.filter((goal) => !goal.departmentId && !goal.projectId).map(formatGoal).join('\n') || 'none'}`,
     `Department goals:\n${agent.departmentId ? companyGoals.filter((goal) => goal.departmentId === agent.departmentId).map(formatGoal).join('\n') || 'none' : 'none'}`,
     `Project goals:\n${projectId ? companyGoals.filter((goal) => goal.projectId === projectId).map(formatGoal).join('\n') || 'none' : 'none'}`,

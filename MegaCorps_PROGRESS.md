@@ -14,12 +14,12 @@ The current local stack runs with Docker:
 
 Latest verified baseline:
 
-- Phase 1-20 operational MVP flows are implemented.
-- Company registry page, company memberships, company-scoped RBAC, department setup, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, project-scoped direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention/escalation, lifecycle logs, normalized card dependencies, card action timeline, knowledge docs, company/department/project goal context, repo-centric project workspace policy with project-level repo URL and work path, work products, React Query browser cache, WebSocket live events, execution locks, stale-lock retry/block recovery, DB-backed task-run queue, idempotent task-complete webhooks, Codex app-server adapter sessions, machine runners, runner heartbeat/claim/complete APIs, Ed25519 agent sessions, CLI YAML apply, runner worktree scaffold, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
+- Phase 1-21 operational MVP flows are implemented.
+- Company registry page, company memberships, company-scoped RBAC, department setup, reusable company positions, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, project-scoped direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention/escalation, lifecycle logs, normalized card dependencies, card action timeline, knowledge docs, company/department/project goal context, repo-centric project workspace policy with project-level repo URL and work path, work products, React Query browser cache, WebSocket live events, execution locks, stale-lock retry/block recovery, DB-backed task-run queue, idempotent task-complete webhooks, Codex app-server adapter sessions, machine runners, runner heartbeat/claim/complete APIs, Ed25519 agent sessions, CLI YAML apply, runner worktree scaffold, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
 - Deployment is user-managed. Local-only Docker was used for QA in this pass; NAS/server deployment remains user-managed.
 - Browser/plugin QA previously verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text. Current UI IA route smoke also covers Departments, Projects, Workspace, Cron, Admin, and Settings.
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
-- June 2026 UI IA refactor is implemented: fixed independent sidebar, refined single-purpose navigation (`Companies`, `Departments`, `Agents`, `Projects`, `Workspace`, `Knowledge`, `Kanban`, `Direct Chat`, `Cron`, `Logs`), pure company CRUD plus context goals, dedicated department/org management, guided agent creation, tabbed Admin/Settings, unified Project Authority workbench split from Workspace, Workspace folder manager paths, Kanban company dropdown and sort filters, Ticket Thread timeline, Direct Chat optimistic dedupe, and longer Agent TEST timeout.
+- June 2026 UI IA refactor is implemented: fixed independent sidebar, refined single-purpose navigation (`Companies`, `Departments`, `Positions`, `Agents`, `Projects`, `Workspace`, `Knowledge`, `Kanban`, `Direct Chat`, `Cron`, `Logs`), pure company CRUD plus context goals, dedicated department/org management, reusable position prompt management, guided agent creation, tabbed Admin/Settings, unified Project Authority workbench split from Workspace, Workspace folder manager paths, Kanban company dropdown and sort filters, Ticket Thread timeline, Direct Chat optimistic dedupe, and longer Agent TEST timeout.
 - API discovery is available at `GET /api/help`, `GET /api/help?format=markdown`, and the Web UI Help page, with response schema examples, required roles, route-specific rate-limit notes, and a CLI command catalog.
 - The Web Help page now has separate `API Catalog` and `CLI Commands` tabs. CLI Help covers `login`, YAML `apply`, `runner register`, `runner daemon`, env vars, flags, command examples, lifecycle notes, and a manifest example.
 - API Help has a route coverage test against every registered Fastify route, so future API additions fail tests until Help is updated.
@@ -37,6 +37,7 @@ Latest verified baseline:
 - Round 5 adapter expansion is implemented: `codex-app` agents use MegaCorps `soul` identity, runtime-owned local roots/cwd/sandbox settings, and task-scoped Codex app-server threads instead of project-global sessions.
 - Round 6 runner/control-plane expansion is implemented: card dependency graph and action timeline, hashed machine runner keys, runner liveness/capacity/runtime health, runner task-run claim/complete, runner-created Ed25519 agent sessions, and `packages/cli` for YAML apply plus runner daemon scaffold.
 - Round 7 lifecycle audit is implemented: external runner dispatch claims now take task-run execution locks and move cards to `in_progress`, review claims wait for `in_review` or `needs_review`, runner review success approves to `done`, agent-session claim/review/release use the shared actor-aware transition guard, and CLI YAML card dependencies support forward references.
+- Round 8 role prompt expansion is implemented: company Positions can define reusable custom position prompts, Agents can assign a position, Direct Chat/Kanban inject `You are <position> in <department> department of firm <company>.` plus the custom prompt, and CLI YAML apply supports positions.
 - Current verification for this pass: `npm.cmd run typecheck`, `npm.cmd run test`, `npm.cmd run build`, `npm.cmd run dev -w packages/cli -- help`, `/api/help` CLI catalog smoke, and `/help` HTTP smoke all pass. Browser automation tools were not exposed in this session, so `/help` interaction was checked through build/typecheck/source assertions plus local HTTP/API smoke.
 
 ## Paperclip Research Summary
@@ -101,7 +102,7 @@ Paperclip is closer to the product MegaCorps should become. It is a company cont
 - Work products should be first-class: files, reports, links, screenshots, PRs, previews, and artifacts should attach to the task that produced them.
 - Company templates/import/export matter once the system can run more than one organization.
 
-MegaCorps already mirrors Paperclip in the high-level model: companies, departments, company memberships, company-scoped RBAC, O-chart, agents, goals, Kanban, budgets, approvals, logs, direct chat, runtime presets, task-run queue attempts, normalized card dependencies/action timeline, machine runners, repo-centric project workspace policy with project work paths, work products, React Query/WebSocket live updates, CLI apply, and Help/API discovery. The remaining Paperclip-style work is secret references, company template import/export, plugin architecture, richer dependency/blocker UX, and production-hardening the runner daemon into a full worker fleet.
+MegaCorps already mirrors Paperclip in the high-level model: companies, departments, positions, company memberships, company-scoped RBAC, O-chart, agents, goals, Kanban, budgets, approvals, logs, direct chat, runtime presets, task-run queue attempts, normalized card dependencies/action timeline, machine runners, repo-centric project workspace policy with project work paths, work products, React Query/WebSocket live updates, CLI apply, and Help/API discovery. The remaining Paperclip-style work is secret references, company template import/export, plugin architecture, richer dependency/blocker UX, and production-hardening the runner daemon into a full worker fleet.
 
 ### MegaCorps Direction After This Review
 
@@ -123,8 +124,9 @@ Recommended next phases:
 2. Phase 17: Chain-of-command delegation context and manager review/escalation loop.
 3. Phase 18: Repo-centric project workspace policy and first-class work products. Completed.
 4. Phase 20: Machine runner API, card action timeline, CLI apply, and runner daemon scaffold. Completed.
-5. Phase 21: Secret references plus company template import/export.
-6. Phase 22: Runner PR provider integration, streaming progress, sandbox policy, and deeper runtime liveness/recovery.
+5. Phase 21: Reusable company positions and role prompt injection. Completed.
+6. Phase 22: Secret references plus company template import/export.
+7. Phase 23: Runner PR provider integration, streaming progress, sandbox policy, and deeper runtime liveness/recovery.
 
 ## Current MegaCorps Implementation
 
