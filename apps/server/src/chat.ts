@@ -19,6 +19,10 @@ type GoalRow = typeof goals.$inferSelect;
 type ProjectRow = typeof projects.$inferSelect;
 type RuntimeRow = typeof agentRuntimes.$inferSelect;
 
+const DIRECT_CHAT_BOOTSTRAP_MESSAGE_LIMIT = 30;
+const DIRECT_CHAT_CONTINUATION_MESSAGE_LIMIT = 40;
+const DIRECT_CHAT_CONTINUATION_HISTORY_CHARS = 12_000;
+
 function titleFromMessage(body: string, agentName: string): string {
   const firstLine = body.replace(/\s+/g, ' ').trim().slice(0, 72);
   return firstLine || `Chat with ${agentName}`;
@@ -80,16 +84,41 @@ async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, pr
   ].filter(Boolean).join('\n');
 }
 
+function formatChatHistoryForPrompt(history: ChatMessageRow[], budgetChars?: number): string {
+  const lines = history.map((message) => {
+    const author = message.authorType === 'agent' ? 'agent' : message.authorType === 'system' ? 'system' : 'user';
+    return `[${author}] ${message.body}`;
+  });
+  if (!budgetChars || lines.join('\n\n').length <= budgetChars) return lines.join('\n\n');
+
+  const selected: string[] = [];
+  let size = 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? '';
+    const nextSize = size + line.length + (selected.length ? 2 : 0);
+    if (nextSize > budgetChars) break;
+    selected.unshift(line);
+    size = nextSize;
+  }
+  return [
+    `[system] Earlier Direct Chat messages were omitted to keep this continuation under ${budgetChars} characters. The remaining transcript is the most recent context and is authoritative.`,
+    ...selected,
+  ].join('\n\n');
+}
+
 function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string, continuation = false): string {
   if (continuation) {
     const latest = [...history].reverse().find((message) => message.authorType === 'user') ?? history[history.length - 1];
     return [
       'Continue the existing Direct Chat thread.',
-      'The company, goal, Kanban, and earlier conversation context were already provided in prior turns for this chat session. Do not ask the user to repeat them unless genuinely ambiguous.',
+      'Use the recent transcript below as authoritative memory for this chat session. If the user asks what was just said, answer from this transcript.',
+      'The company, goal, and Kanban context were already provided in prior turns for this chat session. Do not ask the user to repeat recent messages unless genuinely ambiguous.',
       [
         `Agent name: ${agent.name}`,
         `Adapter: ${agent.adapterType}`,
       ].join('\n'),
+      'Recent conversation transcript:',
+      formatChatHistoryForPrompt(history, DIRECT_CHAT_CONTINUATION_HISTORY_CHARS),
       'Latest user message:',
       latest ? latest.body : '',
     ].filter(Boolean).join('\n\n');
@@ -103,7 +132,7 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
     ].join('\n'),
     `Kanban context snapshot:\n${kanbanContext}`,
     'Conversation history:',
-    history.map((message) => `[${message.authorType}] ${message.body}`).join('\n\n'),
+    formatChatHistoryForPrompt(history),
   ].filter(Boolean).join('\n\n');
 }
 
@@ -298,7 +327,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         : null;
       const existingChatSessionId = adapterSession?.adapterSessionId ?? session.agentSessionId ?? null;
       const handOffContextToAdapter = Boolean(existingChatSessionId);
-      const recentLimit = handOffContextToAdapter ? 1 : 30;
+      const recentLimit = handOffContextToAdapter ? DIRECT_CHAT_CONTINUATION_MESSAGE_LIMIT : DIRECT_CHAT_BOOTSTRAP_MESSAGE_LIMIT;
       const recent = await db.select().from(chatMessages).where(eq(chatMessages.sessionId, session.id)).orderBy(desc(chatMessages.createdAt)).limit(recentLimit);
       const history = recent.reverse();
       const kanbanContext = handOffContextToAdapter ? '' : await buildCompanyKanbanContext(session.companyId, { focusAgentId: agent.id, projectId: session.projectId ?? null, budgetChars: 20_000 });
@@ -316,7 +345,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         adapterType: agent.adapterType ?? 'hermes',
         title: session.title,
         prompt: promptSnapshotForAdapter(executionAgent, chatTask),
-        metadata: { adapterSessionId: existingChatSessionId, userMessageId: userMessage.id, megacorpsPromptChars: prompt.length, contextMode: handOffContextToAdapter ? 'adapter_session_continuation' : 'full_bootstrap' },
+        metadata: { adapterSessionId: existingChatSessionId, userMessageId: userMessage.id, megacorpsPromptChars: prompt.length, contextMode: handOffContextToAdapter ? 'adapter_session_continuation' : 'full_bootstrap', chatHistoryMessages: history.length },
       });
       const result = await adapter.dispatch(executionAgent, chatTask);
       if (agent.adapterType === 'codex-app') {
@@ -399,3 +428,8 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 }
+
+export const chatInternals = {
+  buildChatPrompt,
+  formatChatHistoryForPrompt,
+};
