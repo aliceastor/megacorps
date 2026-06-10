@@ -1323,7 +1323,7 @@ select option {
   --mouse-shift-y: 0px;
   padding: 24px;
   background:
-    radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(53, 215, 230, 0.16), transparent 18rem),
+    radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(53, 215, 230, 0.07), transparent 36rem),
     radial-gradient(circle at 18% 18%, rgba(53, 215, 230, 0.22), transparent 25rem),
     radial-gradient(circle at 82% 10%, rgba(255, 255, 255, 0.78), transparent 24rem),
     linear-gradient(180deg, #fbfaf8 0%, #f4f2ef 46%, #e4e1dc 100%);
@@ -1335,14 +1335,15 @@ select option {
   left: var(--mouse-x);
   top: var(--mouse-y);
   z-index: -1;
-  width: 24rem;
-  height: 24rem;
+  width: 42rem;
+  height: 42rem;
   pointer-events: none;
   border-radius: 999px;
-  background: radial-gradient(circle, rgba(53, 215, 230, 0.18), rgba(53, 215, 230, 0.06) 38%, transparent 70%);
-  filter: blur(18px);
-  opacity: 0.85;
+  background: radial-gradient(circle, rgba(53, 215, 230, 0.1), rgba(53, 215, 230, 0.035) 42%, transparent 76%);
+  filter: blur(30px) hue-rotate(0deg);
+  opacity: 0.56;
   transform: translate(-50%, -50%);
+  animation: mc-cursor-bloom 34s ease-in-out infinite;
 }
 
 .mc-ref-window {
@@ -1499,7 +1500,7 @@ select option {
   border: 1px solid rgba(18, 18, 20, 0.16);
   border-radius: 10px;
   background:
-    radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(53, 215, 230, 0.12), transparent 20rem),
+    radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(53, 215, 230, 0.055), transparent 36rem),
     linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(232, 229, 224, 0.76)),
     radial-gradient(circle at 18% 0%, rgba(255, 255, 255, 0.92), transparent 22rem),
     radial-gradient(circle at 92% 28%, rgba(53, 215, 230, 0.18), transparent 20rem);
@@ -1629,7 +1630,7 @@ select option {
   border: 1px solid rgba(18, 18, 20, 0.22);
   border-radius: 10px;
   background:
-    radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(53, 215, 230, 0.09), transparent 16rem),
+    radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(53, 215, 230, 0.045), transparent 32rem),
     radial-gradient(circle at 74% 8%, rgba(53, 215, 230, 0.12), transparent 18rem),
     linear-gradient(180deg, #17171c, #0d0d10);
   box-shadow: 0 22px 68px rgba(13, 16, 13, 0.24);
@@ -1684,7 +1685,7 @@ select option {
   --ref-blue: #67e8f9;
   --ref-cyan: #a9b09e;
   background:
-    radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(53, 215, 230, 0.12), transparent 18rem),
+    radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(53, 215, 230, 0.055), transparent 38rem),
     radial-gradient(circle at 20% 14%, rgba(53, 215, 230, 0.12), transparent 28rem),
     radial-gradient(circle at 82% 10%, rgba(124, 118, 112, 0.12), transparent 24rem),
     linear-gradient(180deg, #09090b 0%, #111116 52%, #09090b 100%);
@@ -5687,14 +5688,14 @@ body {
   overflow-x: hidden;
   color: var(--foreground);
   background:
-    radial-gradient(circle at var(--mouse-x) var(--mouse-y), color-mix(in srgb, var(--primary) 14%, transparent), transparent 18rem),
+    radial-gradient(circle at var(--mouse-x) var(--mouse-y), color-mix(in srgb, var(--primary) 7%, transparent), transparent 38rem),
     radial-gradient(circle at 8% 0%, rgba(86, 225, 241, 0.08), transparent 24rem),
     linear-gradient(180deg, var(--background), color-mix(in srgb, var(--background) 88%, #15161b));
 }
 
 :root[data-theme="light"] .app-frame {
   background:
-    radial-gradient(circle at var(--mouse-x) var(--mouse-y), color-mix(in srgb, var(--primary) 19%, transparent), transparent 20rem),
+    radial-gradient(circle at var(--mouse-x) var(--mouse-y), color-mix(in srgb, var(--primary) 9%, transparent), transparent 40rem),
     radial-gradient(circle at 92% 0%, rgba(41, 213, 232, 0.12), transparent 22rem),
     linear-gradient(180deg, #ffffff 0%, var(--background) 54%, #edf1f5 100%);
 }
@@ -5719,16 +5720,32 @@ body {
 }
 
 .app-frame::after {
-  opacity: 0.74;
+  opacity: 0.42;
   background:
-    radial-gradient(circle at var(--mouse-x) var(--mouse-y), color-mix(in srgb, var(--primary) 18%, transparent), transparent 18rem),
+    radial-gradient(circle at var(--mouse-x) var(--mouse-y), color-mix(in srgb, var(--primary) 9%, transparent), transparent 38rem),
+    radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(125, 239, 255, 0.035), transparent 54rem),
     linear-gradient(90deg, rgba(255, 255, 255, 0.035), transparent 18%, rgba(255, 255, 255, 0.025), transparent 42%);
+  filter: hue-rotate(0deg) saturate(0.95);
   mix-blend-mode: screen;
+  animation: mc-cursor-bloom 36s ease-in-out infinite;
 }
 
 :root[data-theme="light"] .app-frame::after {
-  opacity: 0.48;
+  opacity: 0.34;
   mix-blend-mode: normal;
+}
+
+@keyframes mc-cursor-bloom {
+  0%,
+  100% {
+    filter: hue-rotate(0deg) saturate(0.92);
+  }
+  45% {
+    filter: hue-rotate(18deg) saturate(1.08);
+  }
+  72% {
+    filter: hue-rotate(10deg) saturate(1);
+  }
 }
 
 .app-frame > main {
@@ -6041,7 +6058,7 @@ button.card:hover {
 
 .chat-thread {
   background:
-    radial-gradient(circle at var(--mouse-x) var(--mouse-y), color-mix(in srgb, var(--primary) 8%, transparent), transparent 22rem),
+    radial-gradient(circle at var(--mouse-x) var(--mouse-y), color-mix(in srgb, var(--primary) 4%, transparent), transparent 36rem),
     color-mix(in srgb, var(--background) 66%, transparent);
 }
 
@@ -6121,5 +6138,10 @@ button.card:hover {
   .app-frame::before,
   .app-frame::after {
     transform: none;
+  }
+
+  .app-frame::after,
+  .mc-ref-shell::after {
+    animation: none;
   }
 }
