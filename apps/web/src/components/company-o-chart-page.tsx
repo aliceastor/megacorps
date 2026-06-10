@@ -61,7 +61,7 @@ function OChartNode({ agent, agents, departments, positions, selectedId, onSelec
         <span className="company-o-copy-text">
           <b>{agent.name}</b>
           <small>{assignment}</small>
-          <small>{agent.adapterType ?? 'mock'} | {agentStatusLabel(agent)}</small>
+          <small>{agent.adapterType ?? 'hermes-ssh'} | {agentStatusLabel(agent)}</small>
         </span>
       </span>
     </button>
@@ -121,7 +121,7 @@ export function CompanyOChartPage() {
   const selectedDepartment = selectedAgent ? companyDepartments.find((department) => department.id === selectedAgent.departmentId) : null;
   const selectedPosition = selectedAgent ? companyPositions.find((position) => position.id === selectedAgent.positionId) : null;
   const directReports = selectedAgent ? companyAgents.filter((agent) => agent.bossId === selectedAgent.id) : [];
-  const selectedAdapterType = String(agentDraft?.adapterType ?? selectedAgent?.adapterType ?? 'mock');
+  const selectedAdapterType = String(agentDraft?.adapterType ?? selectedAgent?.adapterType ?? 'hermes-ssh');
 
   useEffect(() => {
     if (!selectedAgent) {
@@ -134,7 +134,7 @@ export function CompanyOChartPage() {
       departmentId: selectedAgent.departmentId ?? '',
       positionId: selectedAgent.positionId ?? '',
       bossId: selectedAgent.bossId ?? '',
-      adapterType: selectedAgent.adapterType ?? 'mock',
+      adapterType: selectedAgent.adapterType ?? 'hermes-ssh',
       runtimeId: selectedAgent.runtimeId ?? '',
       hermesProfile: selectedAgent.hermesProfile ?? '',
       budgetPerTask: selectedAgent.budgetPerTask ?? '',
@@ -154,7 +154,7 @@ export function CompanyOChartPage() {
         role: selectedAgent.role || 'worker',
         soul: selectedAgent.soul ?? null,
         capabilities: [],
-        adapterType: String(agentDraft.adapterType ?? selectedAgent.adapterType ?? 'mock'),
+        adapterType: String(agentDraft.adapterType ?? selectedAgent.adapterType ?? 'hermes-ssh'),
         adapterConfig: selectedAgent.adapterConfig ?? {},
         runtimeId: agentDraft.runtimeId || null,
         hermesProfile: agentDraft.hermesProfile ? String(agentDraft.hermesProfile) : undefined,
@@ -221,7 +221,7 @@ export function CompanyOChartPage() {
         <span>Department <b>{selectedDepartment?.name ?? 'No department'}</b></span>
         <span>Reports to <b>{companyAgents.find((agent) => agent.id === selectedAgent.bossId)?.name ?? 'top-level'}</b></span>
         <span>Direct reports <b>{directReports.length}</b></span>
-        <span>Adapter <b>{selectedAgent.adapterType ?? 'mock'}</b></span>
+        <span>Adapter <b>{selectedAgent.adapterType ?? 'hermes-ssh'}</b></span>
       </div>
       <div className="form-grid">
         <label className="field-label">Name<input className="input" value={String(agentDraft.name ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, name: event.target.value })} /></label>
@@ -230,9 +230,7 @@ export function CompanyOChartPage() {
         <label className="field-label">Position<select className="input" value={String(agentDraft.positionId ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, positionId: event.target.value || null })}><option value="">No position</option>{companyPositions.map((position) => <option value={position.id} key={position.id}>{position.name}</option>)}</select></label>
         <label className="field-label">Reports to<select className="input" value={String(agentDraft.bossId ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, bossId: event.target.value || null })}><option value="">Top-level</option>{companyAgents.filter((agent) => agent.id !== selectedAgent.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
         <label className="field-label">Profile<input className="input" value={String(agentDraft.hermesProfile ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, hermesProfile: event.target.value })} /></label>
-        <label className="field-label">Adapter<select className="input" value={String(agentDraft.adapterType ?? 'mock')} onChange={(event) => setAgentDraft({ ...agentDraft, adapterType: event.target.value, runtimeId: '' })}>
-          <option value="mock">Mock</option>
-          <option value="hermes">Hermes Portainer</option>
+        <label className="field-label">Adapter<select className="input" value={String(agentDraft.adapterType ?? 'hermes-ssh')} onChange={(event) => setAgentDraft({ ...agentDraft, adapterType: event.target.value, runtimeId: '' })}>
           <option value="hermes-ssh">Hermes SSH</option>
           <option value="hermes-gateway">Hermes HTTP API</option>
           <option value="codex-app">Codex App Server</option>

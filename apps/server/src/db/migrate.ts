@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS goals (id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 ALTER TABLE goals ADD COLUMN IF NOT EXISTS department_id UUID REFERENCES departments(id);
 ALTER TABLE goals ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id);
 CREATE INDEX IF NOT EXISTS goals_company_scope_created_at_idx ON goals(company_id, department_id, project_id, created_at DESC);
-CREATE TABLE IF NOT EXISTS agents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), department_id UUID REFERENCES departments(id), slug TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL, title TEXT, soul TEXT, adapter_type TEXT NOT NULL DEFAULT 'hermes', adapter_config JSONB DEFAULT '{}', runtime_id UUID, hermes_profile TEXT, boss_id UUID REFERENCES agents(id), budget_per_task NUMERIC(10,4), budget_monthly NUMERIC(10,4), spent_this_month NUMERIC(10,4) DEFAULT 0, capabilities TEXT[] DEFAULT '{}', is_busy BOOLEAN DEFAULT false, is_active BOOLEAN DEFAULT true, current_session_id TEXT, created_at TIMESTAMPTZ DEFAULT now(), UNIQUE(company_id, slug));
+CREATE TABLE IF NOT EXISTS agents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), department_id UUID REFERENCES departments(id), slug TEXT NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL, title TEXT, soul TEXT, adapter_type TEXT NOT NULL DEFAULT 'hermes-ssh', adapter_config JSONB DEFAULT '{}', runtime_id UUID, hermes_profile TEXT, boss_id UUID REFERENCES agents(id), budget_per_task NUMERIC(10,4), budget_monthly NUMERIC(10,4), spent_this_month NUMERIC(10,4) DEFAULT 0, capabilities TEXT[] DEFAULT '{}', is_busy BOOLEAN DEFAULT false, is_active BOOLEAN DEFAULT true, current_session_id TEXT, created_at TIMESTAMPTZ DEFAULT now(), UNIQUE(company_id, slug));
+ALTER TABLE agents ALTER COLUMN adapter_type SET DEFAULT 'hermes-ssh';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS position_id UUID REFERENCES positions(id);
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS runtime_id UUID;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS soul TEXT;
@@ -190,8 +191,6 @@ WHERE NOT EXISTS (
   SELECT 1 FROM company_memberships cm WHERE cm.user_id = u.id
 )`;
     await sql`UPDATE agent_runtimes SET company_id = ${defaultCompanyId} WHERE company_id IS NULL`;
-    const runtimes = await sql`SELECT id FROM agent_runtimes WHERE name = 'Local Mock Runtime' LIMIT 1`;
-    if (runtimes.length === 0) await sql`INSERT INTO agent_runtimes (company_id, name, adapter_type, config, is_active) VALUES (${defaultCompanyId}, 'Local Mock Runtime', 'mock', '{}', true)`;
   }
   await sql`
 UPDATE positions p

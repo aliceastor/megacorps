@@ -528,7 +528,7 @@ async function claimNextTaskRun(): Promise<TaskRunRow | null> {
     if (!targetAgentId) continue;
     const [targetAgent] = await db.select().from(agents).where(and(eq(agents.id, targetAgentId), isNull(agents.deletedAt))).limit(1);
     if (!targetAgent || !targetAgent.isActive || targetAgent.isBusy) continue;
-    if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: targetAgent.runtimeId, adapterType: targetAgent.adapterType ?? 'mock' }))) continue;
+    if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: targetAgent.runtimeId, adapterType: targetAgent.adapterType ?? 'hermes-ssh' }))) continue;
     const [claimed] = await db.update(taskRuns).set({
       status: 'running',
       lockedBy: TASK_RUN_WORKER_ID,
@@ -646,7 +646,7 @@ function configuredAdapterOverrides(config: Record<string, unknown> | null | und
 }
 
 export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: string | null) {
-  const adapterType = agent.adapterType ?? 'hermes';
+  const adapterType = agent.adapterType ?? 'hermes-ssh';
   let runtimeConfig: Record<string, unknown> = {};
   if (adapterRequiresRuntime(adapterType) && !agent.runtimeId) throw new Error('agent_runtime_required');
   if (agent.runtimeId) {
@@ -680,7 +680,7 @@ export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: st
 }
 
 function supportsScopedKanbanAdapterSession(adapterType?: string | null): boolean {
-  return adapterType === 'codex-app' || adapterType === 'hermes' || adapterType === 'hermes-ssh';
+  return adapterType === 'codex-app' || adapterType === 'hermes-ssh';
 }
 
 async function scopedAdapterSession(card: CardRow, agent: AgentRow, kind: TaskRunKind): Promise<AdapterSessionRow | null> {
@@ -689,7 +689,7 @@ async function scopedAdapterSession(card: CardRow, agent: AgentRow, kind: TaskRu
     companyId: card.companyId,
     agentId: agent.id,
     runtimeId: agent.runtimeId,
-    adapterType: agent.adapterType ?? 'hermes',
+    adapterType: agent.adapterType ?? 'hermes-ssh',
     scopeType: 'card',
     scopeId: card.id,
     kind,
@@ -702,7 +702,7 @@ async function rememberTaskAdapterSession(card: CardRow, agent: AgentRow, kind: 
     companyId: card.companyId,
     agentId: agent.id,
     runtimeId: agent.runtimeId,
-    adapterType: agent.adapterType ?? 'hermes',
+    adapterType: agent.adapterType ?? 'hermes-ssh',
     scopeType: 'card',
     scopeId: card.id,
     kind,
@@ -729,7 +729,7 @@ async function selectBestAgent(card: CardRow): Promise<AgentRow | null> {
   for (const agent of rows) {
     if (!agent.isActive || agent.isBusy) continue;
     if (!(await budgetOk(agent))) continue;
-    if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'mock' }))) continue;
+    if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'hermes-ssh' }))) continue;
     available.push(agent);
   }
   const bossAgents = available.filter((agent) => agent.positionId && bossPositionIds.has(agent.positionId));
@@ -1002,7 +1002,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
   if (!agent) throw new Error('agent_not_found');
   if (!agent.isActive) throw new Error('agent_paused');
   if (agent.isBusy) throw new Error('agent_busy');
-  if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'mock' }))) throw new Error('agent_runtime_unavailable');
+  if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'hermes-ssh' }))) throw new Error('agent_runtime_unavailable');
   if (!(await budgetOk(agent))) {
     await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, agent.id));
     await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'budget', status: 'failed', message: `Agent ${agent.name} is over budget and was paused before dispatch.` });
@@ -1025,7 +1025,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
   }
 
   try {
-    const adapter = getAdapter(agent.adapterType ?? 'hermes');
+    const adapter = getAdapter(agent.adapterType ?? 'hermes-ssh');
     const adapterSession = await scopedAdapterSession(card, agent, 'dispatch');
     const adapterSessionId = adapterSession?.adapterSessionId ?? null;
     const executionAgent = await buildExecutionAgent(agent, adapterSessionId);
@@ -1040,15 +1040,15 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       heartbeatRunId: run.id,
       taskRunId: options.taskRunId ?? null,
       source: 'dispatch',
-      adapterType: agent.adapterType ?? 'hermes',
+      adapterType: agent.adapterType ?? 'hermes-ssh',
       title: card.title,
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { adapterSessionId, source, megacorpsPromptChars: taskPrompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
     const result = await adapter.dispatch(executionAgent, task);
-    await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && !latest.executionLockId && latest.activeHeartbeatRunId !== run.id) {
+      if (result.success) await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
       const status = terminalRunStatus(latest.columnStatus);
       await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
       await releaseExecutionLock(card.id, run.id, status);
@@ -1072,6 +1072,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       throw new Error(result.output || 'adapter_reported_failure');
     }
+    await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
     const delegatedRows = await createDelegatedSubtasks(card, agent, delegationItems(result.output));
     if (delegatedRows.length > 0) {
       const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
@@ -1262,14 +1263,14 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
   const [reviewer] = await db.select().from(agents).where(and(eq(agents.id, reviewerId), isNull(agents.deletedAt))).limit(1);
   if (!reviewer) throw new Error('reviewer_not_found');
   if (reviewer.isBusy) throw new Error('reviewer_busy');
-  if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: reviewer.runtimeId, adapterType: reviewer.adapterType ?? 'mock' }))) throw new Error('reviewer_runtime_unavailable');
+  if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: reviewer.runtimeId, adapterType: reviewer.adapterType ?? 'hermes-ssh' }))) throw new Error('reviewer_runtime_unavailable');
 
   const [busyReviewer] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, reviewer.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
   if (!busyReviewer) throw new Error('reviewer_busy');
   const run = await openHeartbeatRun(card, reviewer, 'review', options.taskRunId);
   await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'running', message: 'Review started.' });
   try {
-    const adapter = getAdapter(reviewer.adapterType ?? 'hermes');
+    const adapter = getAdapter(reviewer.adapterType ?? 'hermes-ssh');
     const promptCard = reviewerId === card.reviewerId ? card : { ...card, reviewerId };
     const adapterSession = await scopedAdapterSession(card, reviewer, 'review');
     const adapterSessionId = adapterSession?.adapterSessionId ?? null;
@@ -1285,15 +1286,15 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       heartbeatRunId: run.id,
       taskRunId: options.taskRunId ?? null,
       source: 'review',
-      adapterType: reviewer.adapterType ?? 'hermes',
+      adapterType: reviewer.adapterType ?? 'hermes-ssh',
       title: reviewTask.title,
       prompt: promptSnapshotForAdapter(executionAgent, reviewTask),
       metadata: { adapterSessionId, reviewMode, megacorpsPromptChars: reviewPrompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
     const result = await adapter.dispatch(executionAgent, reviewTask);
-    await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && latest.columnStatus !== card.columnStatus && latest.activeHeartbeatRunId !== run.id) {
+      if (result.success) await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
       const status = terminalRunStatus(latest.columnStatus);
       await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
       await db.update(heartbeatRuns).set({ status, completedAt: new Date(), durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
@@ -1315,6 +1316,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     }
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     if (!result.success) throw new Error(result.output || 'review_adapter_reported_failure');
+    await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
     const decision = reviewDecision(result.output, reviewMode);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
 

@@ -179,7 +179,7 @@ export function DepartmentsPage() {
               <thead><tr><th>Agent</th><th>Department</th><th>Reports to</th><th>Status</th></tr></thead>
               <tbody>
                 {companyAgents.map((agent) => <tr key={agent.id}>
-                  <td><button type="button" className="text-button agent-name-button" onClick={() => setSelectedAgentId(agent.id)}><b>{agent.name}</b><small>{agent.role} / {agent.adapterType ?? 'mock'}</small></button></td>
+                  <td><button type="button" className="text-button agent-name-button" onClick={() => setSelectedAgentId(agent.id)}><b>{agent.name}</b><small>{agent.role} / {agent.adapterType ?? 'hermes-ssh'}</small></button></td>
                   <td><select className="input compact" disabled={busyAgentId === agent.id} value={agent.departmentId ?? ''} onChange={(event) => void updateAgentOrg(agent, { departmentId: event.target.value || null })}>
                     <option value="">No department</option>
                     {companyDepartments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
@@ -200,7 +200,7 @@ export function DepartmentsPage() {
           <div className="panel-title"><div><h2><Pencil size={18} /> Agent Editor</h2><span className="status-pill">{selectedAgent.name}</span></div></div>
           <div className="agent-editor-summary">
             <b>{selectedAgent.role}</b>
-            <span>{selectedAgent.adapterType ?? 'mock'} / {selectedAgent.isBusy ? 'busy' : selectedAgent.isActive === false ? 'offline' : 'ready'}</span>
+            <span>{selectedAgent.adapterType ?? 'hermes-ssh'} / {selectedAgent.isBusy ? 'busy' : selectedAgent.isActive === false ? 'offline' : 'ready'}</span>
           </div>
           <div className="form-grid department-agent-edit-grid">
             <label className="field-label">Department<select className="input compact" disabled={busyAgentId === selectedAgent.id} value={selectedAgent.departmentId ?? ''} onChange={(event) => void updateAgentOrg(selectedAgent, { departmentId: event.target.value || null })}>

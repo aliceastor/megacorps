@@ -65,21 +65,23 @@ test('project workPath must stay relative to the project workspace', () => {
 
 test('agent runtime local roots are runtime-owned paths', () => {
   assert.equal(createAgentRuntimeSchema.safeParse({ name: 'SSH', adapterType: 'hermes-ssh', localWorkspaceRoot: '/home/alice/workspaces', localScratchRoot: '/tmp/megacorps' }).success, true);
-  assert.equal(createAgentRuntimeSchema.safeParse({ name: 'Windows', adapterType: 'mock', localWorkspaceRoot: 'C:\\Agents\\Alice\\workspaces', localScratchRoot: null }).success, true);
+  assert.equal(createAgentRuntimeSchema.safeParse({ name: 'Windows', adapterType: 'codex-app', localWorkspaceRoot: 'C:\\Agents\\Alice\\workspaces', localScratchRoot: null }).success, true);
+  assert.equal(createAgentRuntimeSchema.safeParse({ name: 'Legacy Mock', adapterType: 'mock' }).success, false);
 });
 
 test('machine runner schemas capture runtime capacity and heartbeat state', () => {
-  assert.equal(createMachineRunnerSchema.safeParse({ name: 'Build Runner', slug: 'build-runner', supportedRuntimes: ['codex-app', 'mock'], maxConcurrent: 2 }).success, true);
+  assert.equal(createMachineRunnerSchema.safeParse({ name: 'Build Runner', slug: 'build-runner', supportedRuntimes: ['codex-app', 'hermes-ssh'], maxConcurrent: 2 }).success, true);
   assert.equal(createMachineRunnerSchema.safeParse({ name: 'Bad Runner', slug: 'Bad Runner' }).success, false);
-  assert.equal(runnerHeartbeatSchema.safeParse({ supportedRuntimes: ['mock'], activeSlots: 0, runtimeStatuses: { mock: 'ready' } }).success, true);
-  assert.equal(runnerHeartbeatSchema.safeParse({ runtimeStatuses: { mock: 'strange' } }).success, false);
+  assert.equal(runnerHeartbeatSchema.safeParse({ supportedRuntimes: ['hermes-ssh'], activeSlots: 0, runtimeStatuses: { 'hermes-ssh': 'ready' } }).success, true);
+  assert.equal(runnerHeartbeatSchema.safeParse({ runtimeStatuses: { 'hermes-ssh': 'strange' } }).success, false);
 });
 
 test('accepts MVP agent adapter options', () => {
   assert.equal(createAgentSchema.safeParse({ name: 'Alice', slug: 'alice', role: 'worker', adapterType: 'hermes-gateway', hermesProfile: 'alice' }).success, true);
   assert.equal(createAgentSchema.safeParse({ name: 'SSH Alice', slug: 'ssh-alice', role: 'worker', adapterType: 'hermes-ssh', hermesProfile: 'alice' }).success, true);
   assert.equal(createAgentSchema.safeParse({ name: 'Codex Alice', slug: 'codex-alice', role: 'worker', adapterType: 'codex-app', soul: 'Careful code reviewer with a concise working style.' }).success, true);
-  assert.equal(createAgentSchema.safeParse({ name: 'Local', slug: 'local', role: 'worker', adapterType: 'mock', hermesProfile: 'local-debug' }).success, true);
+  assert.equal(createAgentSchema.safeParse({ name: 'Local', slug: 'local', role: 'worker', adapterType: 'mock', hermesProfile: 'local-debug' }).success, false);
+  assert.equal(createAgentSchema.safeParse({ name: 'Legacy Hermes', slug: 'legacy-hermes', role: 'worker', adapterType: 'hermes', hermesProfile: 'alice' }).success, false);
 });
 
 test('agent updates do not inherit create-time adapter defaults', () => {

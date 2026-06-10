@@ -72,7 +72,7 @@ const events = [
 const agents: Array<[string, string, string, 'Idle' | 'Busy' | 'Offline']> = [
   ['Alice Astor', 'CEO', 'hermes-ssh', 'Idle'],
   ['Ribel', 'Product Operator', 'codex-app', 'Busy'],
-  ['System Runner', 'Automation', 'mock', 'Offline'],
+  ['System Runner', 'Automation', 'codex-app', 'Offline'],
 ];
 
 export default function DesignDemoPage() {

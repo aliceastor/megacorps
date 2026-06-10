@@ -136,6 +136,10 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
   ].filter(Boolean).join('\n\n');
 }
 
+function supportsScopedDirectChatAdapterSession(adapterType?: string | null): boolean {
+  return adapterType === 'codex-app' || adapterType === 'hermes-ssh';
+}
+
 async function addChatActivity(input: {
   companyId: string;
   agentId: string;
@@ -313,8 +317,8 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         projectId: session.projectId,
         data: { agentId: agent.id, runId: run.id },
       });
-      const adapter = getAdapter(agent.adapterType ?? 'hermes');
-      const adapterSession = agent.adapterType === 'codex-app'
+      const adapter = getAdapter(agent.adapterType ?? 'hermes-ssh');
+      const adapterSession = supportsScopedDirectChatAdapterSession(agent.adapterType)
         ? await findAdapterSession({
           companyId: session.companyId,
           agentId: agent.id,
@@ -342,18 +346,19 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         heartbeatRunId: run.id,
         chatSessionId: session.id,
         source: 'chat',
-        adapterType: agent.adapterType ?? 'hermes',
+        adapterType: agent.adapterType ?? 'hermes-ssh',
         title: session.title,
         prompt: promptSnapshotForAdapter(executionAgent, chatTask),
         metadata: { adapterSessionId: existingChatSessionId, userMessageId: userMessage.id, megacorpsPromptChars: prompt.length, contextMode: handOffContextToAdapter ? 'adapter_session_continuation' : 'full_bootstrap', chatHistoryMessages: history.length },
       });
       const result = await adapter.dispatch(executionAgent, chatTask);
-      if (agent.adapterType === 'codex-app') {
+      if (!result.success) throw new Error(result.output || 'agent_chat_failed');
+      if (supportsScopedDirectChatAdapterSession(agent.adapterType)) {
         await rememberAdapterSession({
           companyId: session.companyId,
           agentId: agent.id,
           runtimeId: agent.runtimeId,
-          adapterType: agent.adapterType,
+          adapterType: agent.adapterType ?? 'hermes-ssh',
           scopeType: 'chat',
           scopeId: session.id,
           kind: 'chat',
@@ -362,7 +367,6 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
           metadata: { heartbeatRunId: run.id },
         });
       }
-      if (!result.success) throw new Error(result.output || 'agent_chat_failed');
 
       const guard = await getBudgetGuard(agent);
       const nextSpend = Number(agent.spentThisMonth ?? 0) + result.costUsd;

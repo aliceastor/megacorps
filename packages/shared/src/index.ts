@@ -4,7 +4,7 @@ export const cardStatuses = ['todo', 'in_progress', 'in_review', 'needs_review',
 export type CardStatus = (typeof cardStatuses)[number];
 export const legacyCardStatusAliases = { backlog: 'todo' } as const;
 const cardStatusInputs = ['backlog', ...cardStatuses] as const;
-export const agentAdapterTypes = ['hermes', 'hermes-ssh', 'hermes-gateway', 'codex-app', 'openclaw', 'webhook', 'mock'] as const;
+export const agentAdapterTypes = ['hermes-ssh', 'hermes-gateway', 'codex-app', 'openclaw', 'webhook'] as const;
 export type AgentAdapterType = (typeof agentAdapterTypes)[number];
 export const cardActorTypes = ['user', 'machine', 'system', 'agent:worker', 'agent:reviewer', 'agent:leader'] as const;
 export type CardActorType = (typeof cardActorTypes)[number];
@@ -219,7 +219,7 @@ export const createAgentSchema = z.object({
   companyId: z.string().uuid().optional(),
   title: z.string().trim().max(120).optional(),
   soul: z.string().trim().max(8000).nullable().optional(),
-  adapterType: z.enum(agentAdapterTypes).default('hermes'),
+  adapterType: z.enum(agentAdapterTypes).default('hermes-ssh'),
   adapterConfig: z.record(z.string(), z.unknown()).optional(),
   runtimeId: z.string().uuid().nullable().optional(),
   hermesProfile: z.string().trim().min(1).max(80).optional(),

@@ -409,7 +409,7 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
         }
       }
       if (run.kind === 'review' && !reviewCanRun(fromStatus)) continue;
-      if (!runnerSupports(runner, payload.runtime, payload.agent.adapterType ?? 'mock')) continue;
+      if (!runnerSupports(runner, payload.runtime, payload.agent.adapterType ?? 'hermes-ssh')) continue;
       const now = new Date();
       const [claimed] = await db.update(taskRuns).set({
         status: 'running',

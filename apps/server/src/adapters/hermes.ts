@@ -1,5 +1,3 @@
-import { getAdapterStringConfig } from './config.ts';
-
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
 export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat'; taskRunId?: string | null };
 export type TaskResult = { success: boolean; output: string; sessionId: string; turnId?: string | null; tokensUsed: number; costUsd: number; durationSeconds: number };
@@ -16,83 +14,26 @@ export type AgentLike = {
   adapterConfig?: Record<string, unknown> | null;
 };
 
-async function portainerFetch(agent: AgentLike | null, path: string, init: RequestInit = {}, token?: string): Promise<Response> {
-  const base = getAdapterStringConfig(agent ?? { hermesProfile: null, currentSessionId: null }, 'portainerUrl', 'PORTAINER_URL');
-  const headers = new Headers(init.headers);
-  headers.set('Content-Type', 'application/json');
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  return fetch(`${base}${path}`, { ...init, headers });
+export function isHermesSessionId(value: string | null | undefined): value is string {
+  return typeof value === 'string' && /^\d{8}_\d{6}_[a-zA-Z0-9_-]+$/.test(value);
 }
 
-export async function portainerLogin(agent: AgentLike | null, retries = 3): Promise<string> {
-  let lastError = 'unknown';
-  const configAgent = agent ?? { hermesProfile: null, currentSessionId: null };
-  for (let i = 0; i < retries; i += 1) {
-    const response = await portainerFetch(agent, '/api/auth', {
-      method: 'POST',
-      body: JSON.stringify({
-        username: getAdapterStringConfig(configAgent, 'portainerUser', 'PORTAINER_USER'),
-        password: getAdapterStringConfig(configAgent, 'portainerPass', 'PORTAINER_PASS'),
-      }),
-    });
-    if (response.ok) {
-      const data = await response.json() as { jwt?: string };
-      if (data.jwt) return data.jwt;
-    }
-    lastError = `${response.status} ${await response.text()}`;
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-  }
-  throw new Error(`Portainer auth failed: ${lastError}`);
+export function parseHermesSessionId(output: string): string | null {
+  const match = output.match(/(?:Session|session_id):\s*(\d{8}_\d{6}_[a-zA-Z0-9_-]+)/i);
+  return match?.[1] ?? null;
 }
 
-function decodeDockerMultiplexed(buffer: ArrayBuffer): { stdout: string; stderr: string } {
-  const bytes = new Uint8Array(buffer);
-  let offset = 0;
-  let stdout = '';
-  let stderr = '';
-  const decoder = new TextDecoder();
-  while (offset + 8 <= bytes.length) {
-    const stream = bytes[offset];
-    const length = ((bytes[offset + 4] ?? 0) << 24) | ((bytes[offset + 5] ?? 0) << 16) | ((bytes[offset + 6] ?? 0) << 8) | (bytes[offset + 7] ?? 0);
-    const chunk = decoder.decode(bytes.slice(offset + 8, offset + 8 + length));
-    if (stream === 1) stdout += chunk; else stderr += chunk;
-    offset += 8 + length;
-  }
-  if (offset < bytes.length && stdout === '' && stderr === '') stdout = decoder.decode(bytes);
-  return { stdout, stderr };
+export function extractSessionId(output: string, fallback?: string | null): string {
+  return parseHermesSessionId(output) ?? (isHermesSessionId(fallback) ? fallback : crypto.randomUUID());
 }
 
-export async function portainerExec(agent: AgentLike, cmd: string[], timeoutSec = 300): Promise<ExecResult> {
-  const started = Date.now();
-  const token = await portainerLogin(agent);
-  const endpoint = getAdapterStringConfig(agent, 'portainerEndpointId', 'PORTAINER_ENDPOINT_ID', '4');
-  const containerName = getAdapterStringConfig(agent, 'hermesContainer', 'HERMES_CONTAINER', 'hermes-suite');
-  const containersResponse = await portainerFetch(agent, `/api/endpoints/${endpoint}/docker/containers/json`, { method: 'GET' }, token);
-  if (!containersResponse.ok) throw new Error(`Portainer container query failed: ${containersResponse.status}`);
-  const containers = await containersResponse.json() as Array<{ Id: string; Names: string[]; State: string }>;
-  const container = containers.find((item) => item.Names.some((name) => name.replace(/^\//, '') === containerName) && item.State === 'running');
-  if (!container) throw new Error('Hermes container not found or not running');
-  const create = await portainerFetch(agent, `/api/endpoints/${endpoint}/docker/containers/${container.Id}/exec`, { method: 'POST', body: JSON.stringify({ AttachStdout: true, AttachStderr: true, Tty: false, Cmd: cmd }) }, token);
-  if (!create.ok) throw new Error(`Portainer exec create failed: ${create.status}`);
-  const { Id } = await create.json() as { Id: string };
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
-  try {
-    const start = await portainerFetch(agent, `/api/endpoints/${endpoint}/docker/exec/${Id}/start`, { method: 'POST', body: JSON.stringify({ Detach: false, Tty: false }), signal: controller.signal }, token);
-    const raw = await start.arrayBuffer();
-    const parsed = decodeDockerMultiplexed(raw);
-    return { ...parsed, exitCode: start.ok ? 0 : start.status, duration: Math.round((Date.now() - started) / 1000) };
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') throw new Error(`Task timed out after ${timeoutSec}s`);
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-export function extractSessionId(stdout: string): string {
-  const match = stdout.match(/Session:\s*(\d{8}_\d{6}_[a-zA-Z0-9_-]+)/);
-  return match?.[1] ?? crypto.randomUUID();
+export function stripHermesSessionMetadata(output: string): string {
+  return output
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*(?:Session|session_id):\s*\d{8}_\d{6}_[a-zA-Z0-9_-]+\s*$/i.test(line))
+    .filter((line) => !/^\s*Resume this session with:/i.test(line))
+    .join('\n')
+    .trim();
 }
 
 export function estimateTokens(text: string): number { return Math.ceil(text.length / 4); }
@@ -173,17 +114,59 @@ For full API documentation, fetch: GET ${apiUrl}/api/help
 `;
 }
 
-export function buildHermesCliCommand(agent: AgentLike, task: TaskContext): string[] {
-  if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
-  const prompt = buildAgentPrompt(agent, task);
-  return ['hermes', '-z', prompt, '--profile', agent.hermesProfile];
+function hermesModelOptions(agent: AgentLike): string[] {
+  const model = configuredString(agent.adapterConfig?.model) ?? configuredString(agent.adapterConfig?.hermesModel);
+  const provider = configuredString(agent.adapterConfig?.provider) ?? configuredString(agent.adapterConfig?.hermesProvider);
+  return [
+    ...(model ? ['--model', model] : []),
+    ...(provider ? ['--provider', provider] : []),
+  ];
 }
 
-export async function dispatchToHermes(agent: AgentLike, task: TaskContext): Promise<TaskResult> {
+function hermesSource(agent: AgentLike, task: TaskContext): string {
+  const configured = configuredString(agent.adapterConfig?.source) ?? configuredString(agent.adapterConfig?.hermesSource);
+  if (configured) return configured;
+  return task.kind === 'chat' ? 'megacorps-direct-chat' : 'megacorps-kanban';
+}
+
+export function buildHermesCliCommand(agent: AgentLike, task: TaskContext, hermesCommand = 'hermes'): string[] {
   if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
-  const cmd = buildHermesCliCommand(agent, task);
-  const result = await portainerExec(agent, cmd, task.timeoutSeconds ?? 300);
-  const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
+  const prompt = buildAgentPrompt(agent, task);
+  return [
+    hermesCommand,
+    '--profile',
+    agent.hermesProfile,
+    ...hermesModelOptions(agent),
+    ...(isHermesSessionId(agent.currentSessionId) ? ['--resume', agent.currentSessionId] : []),
+    'chat',
+    '-q',
+    prompt,
+    '-Q',
+    '--source',
+    hermesSource(agent, task),
+  ];
+}
+
+export function hermesTaskResult(agent: AgentLike, result: ExecResult): TaskResult {
+  const combinedOutput = [result.stdout, result.stderr].filter(Boolean).join('\n');
+  const sessionId = parseHermesSessionId(combinedOutput) ?? (isHermesSessionId(agent.currentSessionId) ? agent.currentSessionId : null);
+  const visibleStdout = stripHermesSessionMetadata(result.stdout);
+  const visibleStderr = stripHermesSessionMetadata(result.stderr);
+  const success = result.exitCode === 0 && Boolean(sessionId);
+  const output = success
+    ? visibleStdout || visibleStderr || '[Hermes completed without textual output.]'
+    : [
+      visibleStdout,
+      visibleStderr,
+      result.exitCode === 0 && !sessionId ? 'Hermes did not return a session_id; cannot safely resume this scoped MegaCorps session.' : '',
+    ].filter(Boolean).join('\n');
   const tokensUsed = estimateTokens(output);
-  return { success: result.exitCode === 0, output, sessionId: extractSessionId(output), tokensUsed, costUsd: estimateCost(tokensUsed), durationSeconds: result.duration };
+  return {
+    success,
+    output,
+    sessionId: sessionId ?? crypto.randomUUID(),
+    tokensUsed,
+    costUsd: estimateCost(tokensUsed),
+    durationSeconds: result.duration,
+  };
 }

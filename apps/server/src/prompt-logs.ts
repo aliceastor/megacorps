@@ -43,7 +43,7 @@ function redactedJson(value: unknown): string {
 
 export function promptSnapshotForAdapter(agent: AgentLike, task: TaskContext): string {
   if (agent.adapterType === 'codex-app') return codexAppInternals.buildCodexPrompt(agent, task);
-  if (agent.adapterType === 'hermes' || agent.adapterType === 'hermes-ssh' || agent.adapterType === 'hermes-gateway') return buildAgentPrompt(agent, task);
+  if (agent.adapterType === 'hermes-ssh' || agent.adapterType === 'hermes-gateway') return buildAgentPrompt(agent, task);
   return redactedJson({ agent, task });
 }
 

@@ -108,7 +108,7 @@ export const agents = pgTable('agents', {
   role: text('role').notNull(),
   title: text('title'),
   soul: text('soul'),
-  adapterType: text('adapter_type').notNull().default('hermes'),
+  adapterType: text('adapter_type').notNull().default('hermes-ssh'),
   adapterConfig: jsonb('adapter_config').default({}),
   runtimeId: uuid('runtime_id'),
   hermesProfile: text('hermes_profile'),

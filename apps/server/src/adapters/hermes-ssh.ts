@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { AgentLike, TaskContext, TaskResult } from './hermes.ts';
-import { buildAgentPrompt, estimateCost, estimateTokens, extractSessionId } from './hermes.ts';
-import { assertAdapterTargetAllowed, getAdapterNumberConfig, getAdapterOptionalStringConfig, getAdapterStringConfig } from './config.ts';
+import { buildHermesCliCommand, hermesTaskResult } from './hermes.ts';
+import { adapterEnvFallbackEnabled, assertAdapterTargetAllowed } from './config.ts';
 
 type SshRunResult = {
   stdout: string;
@@ -19,6 +19,49 @@ function splitExtraOptions(value: string | undefined): string[] {
   return value.split(/\s+/).map((item) => item.trim()).filter(Boolean);
 }
 
+function configuredString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function configuredEnv(envName: string | undefined): string | undefined {
+  return envName && adapterEnvFallbackEnabled() ? configuredString(process.env[envName]) : undefined;
+}
+
+function getStringConfigAliases(agent: AgentLike, keys: string[], envName?: string, fallback?: string): string {
+  const value = keys.map((key) => configuredString(agent.adapterConfig?.[key])).find(Boolean) ?? configuredEnv(envName) ?? fallback;
+  if (!value) throw new Error(`${keys[0]}${envName ? ` (${envName})` : ''} is required`);
+  return value;
+}
+
+function getOptionalStringConfigAliases(agent: AgentLike, keys: string[], envName?: string): string | undefined {
+  return keys.map((key) => configuredString(agent.adapterConfig?.[key])).find(Boolean) ?? configuredEnv(envName);
+}
+
+function getNumberConfigAliases(agent: AgentLike, keys: string[], envName: string | undefined, fallback: number): number {
+  const configured = keys.map((key) => agent.adapterConfig?.[key]).find((value) => value !== undefined && value !== null && value !== '');
+  const raw = typeof configured === 'number'
+    ? configured
+    : typeof configured === 'string' && configured.trim().length > 0
+      ? Number(configured)
+      : Number(configuredEnv(envName) ?? fallback);
+  return Number.isFinite(raw) && raw > 0 ? Math.round(raw) : fallback;
+}
+
+export function resolveHermesCommand(agent: AgentLike): string {
+  return getStringConfigAliases(agent, ['hermesCommand', 'command'], 'HERMES_SSH_COMMAND', 'hermes');
+}
+
+export function resolveHermesSshConnectionConfig(agent: AgentLike) {
+  return {
+    host: assertAdapterTargetAllowed(getStringConfigAliases(agent, ['sshHost', 'host'], 'HERMES_SSH_HOST'), 'HERMES_SSH_HOST'),
+    user: getOptionalStringConfigAliases(agent, ['sshUser', 'sshUsername', 'username', 'user'], 'HERMES_SSH_USER') ?? 'root',
+    port: getNumberConfigAliases(agent, ['sshPort', 'port'], 'HERMES_SSH_PORT', 22),
+    keyPath: getOptionalStringConfigAliases(agent, ['sshKeyPath', 'keyPath'], 'HERMES_SSH_KEY_PATH'),
+    sshBin: getOptionalStringConfigAliases(agent, ['sshBin'], 'HERMES_SSH_BIN') ?? 'ssh',
+    sshOptions: splitExtraOptions(getOptionalStringConfigAliases(agent, ['sshOptions'], 'HERMES_SSH_OPTIONS')),
+  };
+}
+
 function wrapWithContainerEnv(command: string[]): string {
   const script = [
     'if [ -r /proc/1/environ ]; then',
@@ -32,27 +75,13 @@ function wrapWithContainerEnv(command: string[]): string {
 }
 
 export function buildHermesSshRemoteCommand(agent: AgentLike, task: TaskContext): string {
-  if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
-  const prompt = buildAgentPrompt(agent, task);
-  const hermesCommand = getAdapterStringConfig(agent, 'hermesCommand', 'HERMES_SSH_COMMAND', 'hermes');
-  const command = [
-    hermesCommand,
-    '-z',
-    prompt,
-    '--profile',
-    agent.hermesProfile,
-  ];
-  return wrapWithContainerEnv(command);
+  const hermesCommand = resolveHermesCommand(agent);
+  return wrapWithContainerEnv(buildHermesCliCommand(agent, task, hermesCommand));
 }
 
 async function runSsh(agent: AgentLike, remoteCommand: string, timeoutSec: number): Promise<SshRunResult> {
   const started = Date.now();
-  const host = assertAdapterTargetAllowed(getAdapterStringConfig(agent, 'sshHost', 'HERMES_SSH_HOST'), 'HERMES_SSH_HOST');
-  const user = getAdapterOptionalStringConfig(agent, 'sshUser', 'HERMES_SSH_USER') ?? 'root';
-  const port = getAdapterNumberConfig(agent, 'sshPort', 'HERMES_SSH_PORT', 22);
-  const keyPath = getAdapterOptionalStringConfig(agent, 'sshKeyPath', 'HERMES_SSH_KEY_PATH');
-  const sshBin = getAdapterOptionalStringConfig(agent, 'sshBin', 'HERMES_SSH_BIN') ?? 'ssh';
-  const sshOptions = splitExtraOptions(getAdapterOptionalStringConfig(agent, 'sshOptions', 'HERMES_SSH_OPTIONS'));
+  const { host, user, port, keyPath, sshBin, sshOptions } = resolveHermesSshConnectionConfig(agent);
   const target = user ? `${user}@${host}` : host;
   const args = [
     '-p',
@@ -102,14 +131,5 @@ async function runSsh(agent: AgentLike, remoteCommand: string, timeoutSec: numbe
 export async function dispatchToHermesSsh(agent: AgentLike, task: TaskContext): Promise<TaskResult> {
   const remoteCommand = buildHermesSshRemoteCommand(agent, task);
   const result = await runSsh(agent, remoteCommand, task.timeoutSeconds ?? 300);
-  const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
-  const tokensUsed = estimateTokens(output);
-  return {
-    success: result.exitCode === 0,
-    output,
-    sessionId: extractSessionId(output),
-    tokensUsed,
-    costUsd: estimateCost(tokensUsed),
-    durationSeconds: result.duration,
-  };
+  return hermesTaskResult(agent, result);
 }

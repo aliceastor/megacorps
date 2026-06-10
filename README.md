@@ -11,7 +11,7 @@ Node.js + Fastify + Next.js 15 + Drizzle + PostgreSQL + Turborepo using npm work
 
 ## Run locally
 
-1. Copy `.env.example` to `.env` and set any adapter credentials such as `PORTAINER_PASS`.
+1. Copy `.env.example` to `.env` and set adapter credentials such as Hermes SSH keys or gateway tokens.
 2. Install dependencies with `npm install`.
 3. Start the full stack with `docker compose up -d --build`.
 4. Open `http://localhost:3000`.
@@ -43,7 +43,7 @@ CLI examples:
 npm run dev -w packages/cli -- login --api-url http://localhost:4000 --email admin@example.com --password "password"
 $env:MEGACORPS_SESSION="session-cookie-value-from-login"
 npm run dev -w packages/cli -- apply -f megacorps.yml --api-url http://localhost:4000
-npm run dev -w packages/cli -- runner register --name "Local Runner" --slug local-runner --supported-runtimes mock,codex-app
+npm run dev -w packages/cli -- runner register --name "Local Runner" --slug local-runner --supported-runtimes hermes-ssh,codex-app
 $env:MEGACORPS_RUNNER_KEY="mcr_..."
 npm run dev -w packages/cli -- runner daemon --once --workspace-root C:\megacorps-runner
 ```
@@ -73,7 +73,7 @@ When an agent has a position, Direct Chat and Kanban prompts include `You are <p
 
 Runtime presets can also define `localWorkspaceRoot` and `localScratchRoot`, the local folders used by agents attached to that runtime for repo clones/caches and temporary task files.
 Agent overrides win over runtime presets. When `.env` adapter fallback is enabled, runtime presets win over `.env` defaults.
-In production, external adapters (`hermes`, `hermes-ssh`, `hermes-gateway`, `codex-app`, `webhook`, `openclaw`) require a company-scoped runtime preset by default. `.env` adapter fallback is disabled unless `ADAPTER_ENV_FALLBACK_ENABLED=true`, which should be reserved for local development/debugging.
+In production, external adapters (`hermes-ssh`, `hermes-gateway`, `codex-app`, `webhook`, `openclaw`) require a company-scoped runtime preset by default. `.env` adapter fallback is disabled unless `ADAPTER_ENV_FALLBACK_ENABLED=true`, which should be reserved for local development/debugging.
 Signup is stored in DB setting `auth.signup_enabled` and defaults to enabled. Admins can turn it on/off in the Web UI `Admin` page.
 Adapter egress blocks localhost/link-local metadata targets by default. Set `ADAPTER_TARGET_ALLOWLIST` to comma-separated hostnames or wildcard domains such as `hermes.example.internal,*.agents.example.com` when production should restrict agent runtimes to known hosts.
 
@@ -92,8 +92,6 @@ Common login/onboarding errors:
 
 Supported runtime fields:
 
-- `mock`: no endpoint needed.
-- `hermes`: `portainerUrl`, `portainerUser`, `portainerPass`, `portainerEndpointId`, `hermesContainer`, `megacorpsApiUrl`.
 - `hermes-ssh`: `sshHost`, `sshUser`, `sshPort`, `sshKeyPath`, `sshOptions`, `hermesCommand`, `megacorpsApiUrl`.
 - `hermes-gateway`: `hermesGatewayUrl`, `hermesDashboardToken`, `megacorpsApiUrl`.
 - `codex-app`: `codexTransport`, `codexCommand`, `codexArgs`, `codexAppServerUrl`, `codexWsToken`, `codexModel`, `codexCwd`, `codexSandbox`, `codexExperimentalApi`.
@@ -101,8 +99,7 @@ Supported runtime fields:
 - `openclaw`: `openclawUrl`.
 
 `megacorpsApiUrl` is the MegaCorps API base URL agents use for task-complete callbacks. Legacy `publicApiUrl`, `callbackUrl`, and `webhookBaseUrl` config keys are still accepted for existing runtimes, but new presets should use `megacorpsApiUrl`.
-Hermes CLI adapters invoke one-shot prompts as `hermes -z "<prompt>" --profile <profile>`. They intentionally do not pass `--reasoning-effort`, `--max-turns`, or a bare prompt argument; Hermes v0.15.2 rejects unsupported flags and treats bare prompt text as unrecognized arguments. Configure provider/model reasoning behavior inside the Hermes profile/config instead.
-For Hermes Portainer, the agent still needs a `hermesProfile`; the runtime tells MegaCorps where to execute it.
+Hermes SSH invokes scoped chat sessions as `hermes --profile <profile> [--resume <session>] chat -q "<prompt>" -Q --source <megacorps-source>`. Configure provider/model reasoning behavior inside the Hermes profile/config instead.
 For Hermes SSH, create a runtime preset with `adapterType=hermes-ssh`, set `sshHost` to your Hermes host, set the SSH user/key path reachable inside the server container, and set each agent's `hermesProfile` to the Hermes profile name such as `alice`. The SSH user defaults to `root` and can be overridden. The deploy compose mounts persistent SSH keys at `/home/megacorps/.ssh`, with `/home/megacorps/.ssh/id_ed25519` as the default key path. SSH dispatch imports `/proc/1/environ` before running Hermes so container-level provider API keys remain visible to the SSH session.
 For Codex App Server, create a runtime preset with `adapterType=codex-app`. Stdio mode launches `codex app-server` by default; WebSocket mode uses `codexAppServerUrl` and should use a bearer token. Direct Chat keeps one Codex thread per chat session. Kanban keeps one Codex thread per card, agent, and dispatch/review kind; every retry or continuation is a new turn in that thread.
 For Hermes HTTP API and Webhook/OpenClaw, the URL lives in the runtime preset or the agent override panel.
@@ -146,7 +143,7 @@ Hermes suite operational notes:
 
 - Phase 1: auth endpoints, login/signup screens, shell, dashboard, theme toggle, locale string foundation.
 - Phase 2: card CRUD, status transition validation, board UI, detail panel, Run Now button.
-- Phase 3: agent CRUD, org chart, Portainer-backed Hermes adapter, assign/run storage.
+- Phase 3: agent CRUD, org chart, Hermes SSH adapter, assign/run storage.
 - Phase 4: dispatch loop, review loop, retries, stage history, sub-task decomposition, execution logs.
 - Phase 5: governance basics, agent pause/resume/fire, monthly budgets, API lifecycle logs.
 - Phase 6: card comments, send-comment-to-agent context, stop-agent/comment/continue-run flow, company and department setup.

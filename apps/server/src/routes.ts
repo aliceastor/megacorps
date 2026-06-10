@@ -826,10 +826,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(departments).where(eq(departments.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(projects).where(eq(projects.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(goals).where(eq(goals.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(agentRuntimes).where(and(
-        eq(agentRuntimes.companyId, id),
-        drizzleSql`NOT (${agentRuntimes.name} = 'Local Mock Runtime' AND ${agentRuntimes.adapterType} = 'mock')`,
-      )),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(agentRuntimes).where(eq(agentRuntimes.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(agents).where(eq(agents.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(kanbanCards).where(eq(kanbanCards.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(knowledgeDocs).where(eq(knowledgeDocs.companyId, id)),
@@ -870,11 +867,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await db.transaction(async (tx) => {
       await tx.delete(activityLog).where(eq(activityLog.companyId, id));
       await tx.delete(positions).where(eq(positions.companyId, id));
-      await tx.delete(agentRuntimes).where(and(
-        eq(agentRuntimes.companyId, id),
-        eq(agentRuntimes.name, 'Local Mock Runtime'),
-        eq(agentRuntimes.adapterType, 'mock'),
-      ));
       await tx.delete(companyMemberships).where(eq(companyMemberships.companyId, id));
       await tx.delete(companies).where(eq(companies.id, id));
     });
@@ -1673,15 +1665,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         lastError: run?.error ?? null,
         capabilities: runtime.adapterType === 'hermes-ssh'
           ? ['ssh', 'hermes-cli', 'stdout-capture']
-          : runtime.adapterType === 'hermes'
-            ? ['portainer-exec', 'hermes-cli']
-            : runtime.adapterType === 'hermes-gateway'
-              ? ['http-dispatch', 'polling']
-              : runtime.adapterType === 'codex-app'
-                ? ['codex-app-server', 'json-rpc', 'thread-turn-session']
-                : runtime.adapterType === 'mock'
-                  ? ['local-debug']
-                  : ['webhook'],
+          : runtime.adapterType === 'hermes-gateway'
+            ? ['http-dispatch', 'polling']
+            : runtime.adapterType === 'codex-app'
+              ? ['codex-app-server', 'json-rpc', 'thread-turn-session']
+              : ['webhook'],
       };
     });
   });
@@ -1733,14 +1721,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     const user = await requireCompanyRole(request, reply, agent.companyId, 'operator'); if (!user) return reply;
     try {
-      const adapter = getAdapter(agent.adapterType ?? 'hermes');
+      const adapter = getAdapter(agent.adapterType ?? 'hermes-ssh');
       const executionAgent = await buildExecutionAgent(agent);
       const task = { id: 'test', title: 'Connection test', body: 'Return OK.', timeoutSeconds: 300 };
       await recordPromptLog({
         companyId: agent.companyId,
         agentId: agent.id,
         source: 'test',
-        adapterType: agent.adapterType ?? 'hermes',
+        adapterType: agent.adapterType ?? 'hermes-ssh',
         title: task.title,
         prompt: promptSnapshotForAdapter(executionAgent, task),
         metadata: { requestedByUserId: user.id, megacorpsPromptChars: task.body.length },

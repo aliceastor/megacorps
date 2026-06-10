@@ -144,7 +144,7 @@ export function BudgetPage() {
             const budget = Number(agent.budgetMonthly ?? 0);
             const pct = budget ? Math.min(100, Math.round((spent / budget) * 100)) : 0;
             return <div className="list-row" key={agent.id}>
-              <b>{agent.name}</b><p>{agent.adapterType ?? 'mock'} / ${spent.toFixed(4)} {budget ? `/ $${budget.toFixed(2)} (${pct}%)` : '/ no monthly cap'} / {agent.isActive === false ? 'paused' : 'active'}</p>
+              <b>{agent.name}</b><p>{agent.adapterType ?? 'hermes-ssh'} / ${spent.toFixed(4)} {budget ? `/ $${budget.toFixed(2)} (${pct}%)` : '/ no monthly cap'} / {agent.isActive === false ? 'paused' : 'active'}</p>
               <div style={{ height: 8, borderRadius: 99, background: 'var(--border)', overflow: 'hidden' }}><div style={{ width: `${pct}%`, height: '100%', background: pct >= 100 ? 'var(--danger)' : pct >= 80 ? 'var(--accent)' : 'var(--primary)' }} /></div>
             </div>;
           })}

@@ -9,21 +9,13 @@ type Company = { id: string; name: string; slug: string; mission?: string | null
 type Department = { id: string; companyId: string; name: string; slug: string };
 type Membership = { id: string; companyId: string; userId: string; role: string; status: string; userEmail?: string; userName?: string };
 
-const adapterTypes = ['mock', 'hermes', 'hermes-ssh', 'hermes-gateway', 'codex-app', 'webhook', 'openclaw'];
+const adapterTypes = ['hermes-ssh', 'hermes-gateway', 'codex-app', 'webhook', 'openclaw'];
 
 type ConfigField = { key: string; label: string; description?: string; type?: 'text' | 'number' | 'password' };
 
 const megacorpsApiDescription = 'MegaCorps API base URL that agents use for task-complete callbacks.';
 
 function configFields(adapterType: string): ConfigField[] {
-  if (adapterType === 'hermes') return [
-    { key: 'portainerUrl', label: 'Portainer URL' },
-    { key: 'portainerUser', label: 'Portainer user' },
-    { key: 'portainerPass', label: 'Portainer password', type: 'password' },
-    { key: 'portainerEndpointId', label: 'Endpoint ID' },
-    { key: 'hermesContainer', label: 'Hermes container' },
-    { key: 'megacorpsApiUrl', label: 'MegaCorps callback URL', description: megacorpsApiDescription },
-  ];
   if (adapterType === 'hermes-gateway') return [
     { key: 'hermesGatewayUrl', label: 'Hermes HTTP API URL' },
     { key: 'hermesDashboardToken', label: 'Hermes dashboard token', type: 'password' },
@@ -93,8 +85,8 @@ export function SettingsPage() {
   const [memberships, setMemberships] = useState<Membership[]>([]);
   const [runtimeId, setRuntimeId] = useState('');
   const [runtimeCompanyId, setRuntimeCompanyId] = useState('');
-  const [runtimeName, setRuntimeName] = useState('Local Mock Runtime');
-  const [runtimeAdapter, setRuntimeAdapter] = useState('mock');
+  const [runtimeName, setRuntimeName] = useState('Hermes SSH Runtime');
+  const [runtimeAdapter, setRuntimeAdapter] = useState('hermes-ssh');
   const [runtimeLocalWorkspaceRoot, setRuntimeLocalWorkspaceRoot] = useState('');
   const [runtimeLocalScratchRoot, setRuntimeLocalScratchRoot] = useState('');
   const [runtimeActive, setRuntimeActive] = useState(true);
@@ -271,7 +263,7 @@ export function SettingsPage() {
     </div>
     {tab === 'runtimes' && <div className="data-grid">
       <section className="card section-card">
-        <div className="panel-title"><h2>Agent runtimes</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeCompanyId(companyId || companies[0]?.id || ''); setRuntimeName(''); setRuntimeAdapter('mock'); setRuntimeLocalWorkspaceRoot(''); setRuntimeLocalScratchRoot(''); setRuntimeConfigState({}); }}>New</button></div>
+        <div className="panel-title"><h2>Agent runtimes</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeCompanyId(companyId || companies[0]?.id || ''); setRuntimeName(''); setRuntimeAdapter('hermes-ssh'); setRuntimeLocalWorkspaceRoot(''); setRuntimeLocalScratchRoot(''); setRuntimeConfigState({}); }}>New</button></div>
         <div className="form-grid">
           <label className="field-label">Company<select className="input" value={runtimeCompanyId} onChange={(event) => setRuntimeCompanyId(event.target.value)}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
           <label className="field-label">Name<input className="input" value={runtimeName} onChange={(event) => setRuntimeName(event.target.value)} /></label>
