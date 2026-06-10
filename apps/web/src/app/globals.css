@@ -1341,9 +1341,10 @@ select option {
   border-radius: 999px;
   background: radial-gradient(circle, rgba(53, 215, 230, 0.1), rgba(53, 215, 230, 0.035) 42%, transparent 76%);
   filter: blur(30px) hue-rotate(0deg);
-  opacity: 0.56;
+  --cursor-point-opacity: 0.56;
+  opacity: var(--cursor-point-opacity);
   transform: translate(-50%, -50%);
-  animation: mc-cursor-bloom 34s ease-in-out infinite;
+  animation: mc-cursor-bloom 34s ease-in-out infinite, mc-cursor-point-breathe 7.4s ease-in-out infinite;
 }
 
 .mc-ref-window {
@@ -5700,15 +5701,22 @@ button.agent-node-card {
   --eyebrow: #7defff;
 }
 
+:root {
+  --app-mouse-x: 50%;
+  --app-mouse-y: 34%;
+  --app-mouse-shift-x: 0px;
+  --app-mouse-shift-y: 0px;
+}
+
 body {
   background: var(--background);
 }
 
 .app-frame {
-  --mouse-x: 50%;
-  --mouse-y: 34%;
-  --mouse-shift-x: 0px;
-  --mouse-shift-y: 0px;
+  --mouse-x: var(--app-mouse-x);
+  --mouse-y: var(--app-mouse-y);
+  --mouse-shift-x: var(--app-mouse-shift-x);
+  --mouse-shift-y: var(--app-mouse-shift-y);
   position: relative;
   isolation: isolate;
   overflow-x: hidden;
@@ -5746,18 +5754,21 @@ body {
 }
 
 .app-frame::after {
-  opacity: 0.42;
+  --cursor-bloom-opacity: 0.42;
+  opacity: var(--cursor-bloom-opacity);
   background:
     radial-gradient(circle at var(--mouse-x) var(--mouse-y), color-mix(in srgb, var(--primary) 9%, transparent), transparent 38rem),
     radial-gradient(circle at var(--mouse-x) var(--mouse-y), rgba(125, 239, 255, 0.035), transparent 54rem),
     linear-gradient(90deg, rgba(255, 255, 255, 0.035), transparent 18%, rgba(255, 255, 255, 0.025), transparent 42%);
   filter: hue-rotate(0deg) saturate(0.95);
   mix-blend-mode: screen;
-  animation: mc-cursor-bloom 36s ease-in-out infinite;
+  transform-origin: var(--mouse-x) var(--mouse-y);
+  will-change: filter, opacity, transform;
+  animation: mc-cursor-bloom 36s ease-in-out infinite, mc-cursor-breathe 7.4s ease-in-out infinite;
 }
 
 :root[data-theme="light"] .app-frame::after {
-  opacity: 0.34;
+  --cursor-bloom-opacity: 0.34;
   mix-blend-mode: normal;
 }
 
@@ -5771,6 +5782,30 @@ body {
   }
   72% {
     filter: hue-rotate(10deg) saturate(1);
+  }
+}
+
+@keyframes mc-cursor-breathe {
+  0%,
+  100% {
+    opacity: calc(var(--cursor-bloom-opacity) * 0.84);
+    transform: scale(0.996);
+  }
+  50% {
+    opacity: calc(var(--cursor-bloom-opacity) * 1.08);
+    transform: scale(1.026);
+  }
+}
+
+@keyframes mc-cursor-point-breathe {
+  0%,
+  100% {
+    opacity: calc(var(--cursor-point-opacity) * 0.84);
+    transform: translate(-50%, -50%) scale(0.985);
+  }
+  50% {
+    opacity: calc(var(--cursor-point-opacity) * 1.08);
+    transform: translate(-50%, -50%) scale(1.035);
   }
 }
 

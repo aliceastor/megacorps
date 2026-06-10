@@ -2,6 +2,16 @@
 
 import { useEffect } from 'react';
 
+function clampUnit(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(Math.max(value, 0), 1);
+}
+
+function parsePercent(value: string, fallback: number): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? clampUnit(parsed / 100) : fallback;
+}
+
 export function DesignDemoMouseMotion() {
   useEffect(() => {
     const shell = document.querySelector<HTMLElement>('.mc-ref-shell');
@@ -11,8 +21,9 @@ export function DesignDemoMouseMotion() {
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     if (reducedMotion.matches) return;
 
-    let targetX = 0.5;
-    let targetY = 0.34;
+    const styles = getComputedStyle(root);
+    let targetX = parsePercent(root.style.getPropertyValue('--mouse-x') || styles.getPropertyValue('--mouse-x'), 0.5);
+    let targetY = parsePercent(root.style.getPropertyValue('--mouse-y') || styles.getPropertyValue('--mouse-y'), 0.34);
     let currentX = targetX;
     let currentY = targetY;
     let frame = 0;
@@ -36,22 +47,16 @@ export function DesignDemoMouseMotion() {
     }
 
     function schedule(event: PointerEvent) {
-      targetX = event.clientX / Math.max(window.innerWidth, 1);
-      targetY = event.clientY / Math.max(window.innerHeight, 1);
-      if (!frame) frame = window.requestAnimationFrame(writeVars);
-    }
-
-    function reset() {
-      targetX = 0.5;
-      targetY = 0.34;
+      targetX = clampUnit(event.clientX / Math.max(window.innerWidth, 1));
+      targetY = clampUnit(event.clientY / Math.max(window.innerHeight, 1));
       if (!frame) frame = window.requestAnimationFrame(writeVars);
     }
 
     window.addEventListener('pointermove', schedule, { passive: true });
-    window.addEventListener('pointerleave', reset);
+    window.addEventListener('pointerdown', schedule, { passive: true });
     return () => {
       window.removeEventListener('pointermove', schedule);
-      window.removeEventListener('pointerleave', reset);
+      window.removeEventListener('pointerdown', schedule);
       if (frame) window.cancelAnimationFrame(frame);
     };
   }, []);
