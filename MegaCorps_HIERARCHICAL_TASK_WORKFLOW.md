@@ -2131,7 +2131,7 @@ Implemented in the current codebase:
 
 - Default company boss position: new companies create one `CEO` position with `isCompanyBoss=true`, and migrations backfill one active boss position per company.
 - Root assignment: unassigned root cards prefer an active idle agent assigned to the company boss position, then fall back to normal matching.
-- Recursive delegation foundation: explicit `DELEGATE:` output creates child cards for direct reports; each child records parent, assignee, and reviewer.
+- Recursive delegation foundation: explicit `DELEGATE:` output from adapter stdout or `/api/webhook/task-complete` creates child cards for direct reports; each child records parent, assignee, and reviewer.
 - Bottom-up completion: parent cards cascade to `done` when the configured child completion policy is satisfied.
 - Card lifecycle metadata: decision mode, rollup status, child policy, child requirement level, weight, duration, budget, and revision limits are stored and exposed through card APIs.
 - `waiting_on_external`: runner/webhook/manual wait flows release execution locks and record external waits; external events wake cards into review, rework, done, or blocked.

@@ -143,12 +143,10 @@ Respond to the user directly. Do not report task completion or call the Kanban w
   return `You are now working under PLATFORM MegaCorps at ${apiUrl}.
 
 === Common API Endpoints ===
-- GET  ${apiUrl}/api/cards              — List all kanban cards
-- POST ${apiUrl}/api/cards              — Create a new card
-- PUT  ${apiUrl}/api/cards/:id          — Update a card (status, body, assignee)
-- GET  ${apiUrl}/api/agents             — List all agents
-- POST ${apiUrl}/api/cards/:id/run      — Dispatch a card to its assigned agent
-- POST ${apiUrl}/api/webhook/task-complete — Report task completion
+- POST ${apiUrl}/api/webhook/task-complete -- Report task progress, delegation, or completion
+- GET  ${apiUrl}/api/help -- Read API documentation if network access is available
+
+Task runtimes usually do not have a browser session cookie. Do not call session-auth endpoints such as POST /api/cards for delegation. If the MegaCorps task prompt asks you to delegate, include the exact DELEGATE block in your output or webhook payload; the MegaCorps server will create child cards and assign direct reports.
 
 === Your Identity ===
 Agent: ${agent.hermesProfile ?? 'unknown'}
@@ -165,6 +163,7 @@ POST ${apiUrl}/api/webhook/task-complete
 ${taskWebhookSecret ? `Header: X-MegaCorps-Webhook-Secret: ${taskWebhookSecret}` : 'Webhook auth: no shared secret was provided in your runtime config.'}
 Body: ${webhookBodyExample}
 
+If you are delegating to direct reports, POST status "in_progress" and include a DELEGATE block in summary/output. Do not mark the parent card done and do not try to create child cards yourself.
 If the work is complete but needs QA, POST status "in_review" with the completed output.
 If you cannot solve the task, do not mark it done. POST status "needs_review" with attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs:
 Body: ${escalationBodyExample}

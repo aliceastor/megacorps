@@ -82,7 +82,7 @@ function assigneeNeedsReview(output: string | null | undefined): boolean {
   return /\b(needs[_ -]?review|needs[_ -]?guidance|needs[_ -]?reviewer|escalat(?:e|ed|ion)|cannot[_ -]?complete|unable[_ -]?to[_ -]?complete|stuck|blocked:)\b/i.test(text);
 }
 
-function delegationItems(output: string | null | undefined): string[] {
+export function delegationItems(output: string | null | undefined): string[] {
   const lines = (output ?? '').split(/\r?\n/);
   const start = lines.findIndex((line) => /^\s*(?:#{1,4}\s*)?(?:DELEGATE|DELEGATION|SUB-?TASKS?|TASKS FOR DIRECT REPORTS)\s*:?\s*$/i.test(line));
   if (start < 0) return [];
@@ -1177,9 +1177,9 @@ export async function decomposeCard(cardId: string): Promise<CardRow[]> {
   return rows;
 }
 
-async function createDelegatedSubtasks(parent: CardRow, leader: AgentRow, titles: string[]): Promise<CardRow[]> {
+export async function createDelegatedSubtasks(parent: CardRow, leader: AgentRow, titles: string[]): Promise<CardRow[]> {
   if (titles.length === 0) return [];
-  const directReports = await db.select().from(agents).where(and(eq(agents.bossId, leader.id), eq(agents.isActive, true), isNull(agents.deletedAt)));
+  const directReports = await db.select().from(agents).where(and(eq(agents.companyId, parent.companyId), eq(agents.bossId, leader.id), eq(agents.isActive, true), isNull(agents.deletedAt)));
   if (directReports.length === 0) return [];
   const rows = await db.insert(kanbanCards).values(titles.map((rawTitle, index) => {
     const explicitReport = directReports.find((report) => {
@@ -1747,6 +1747,7 @@ async function buildTaskPrompt(card: CardRow): Promise<string> {
       `DELEGATE:`,
       `- <sub-task title for a direct report>`,
       `- <another sub-task title for a direct report>`,
+      `Do not call POST /api/cards yourself for delegation. MegaCorps creates child cards from the DELEGATE block. If your runtime reports through the webhook, send status="in_progress" and include the same DELEGATE block in summary/output instead of marking the parent done.`,
       `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, report URL, screenshot URL, or artifact URL instead of local-only file paths.`,
       `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
       `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,

@@ -2,6 +2,16 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.18 - Webhook Delegation Callback Path
+
+Date: 2026-06-10
+
+Completed in this pass:
+
+- Fixed the external-adapter delegation path: `POST /api/webhook/task-complete` now parses strict `DELEGATE:` blocks in `summary`/`output`, creates child cards for active direct reports, keeps the parent card `in_progress`, releases the active run lock, and queues child dispatch runs.
+- Clarified Hermes task prompts so remote runtimes do not try to use session-auth `/api/cards` endpoints for delegation. Agents now report delegation through webhook output and let MegaCorps create child cards server-side.
+- Updated `/api/help`, README, progress notes, and delegation tests for webhook-carried delegation.
+
 ## Architecture Update v1.17 - Hierarchical Lifecycle Foundation
 
 Date: 2026-06-10
