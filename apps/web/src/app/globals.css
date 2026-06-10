@@ -1138,6 +1138,65 @@ button.card {
   color: var(--danger);
 }
 
+.dependency-picker {
+  display: grid;
+  gap: 8px;
+}
+
+.dependency-search {
+  min-height: 38px;
+}
+
+.dependency-list {
+  display: grid;
+  gap: 6px;
+  max-height: 190px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--card-strong) 48%, transparent);
+}
+
+.dependency-option {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  align-items: start;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.dependency-option:hover {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+
+.dependency-option input {
+  margin-top: 2px;
+}
+
+.dependency-option span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.dependency-option b {
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.dependency-option small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .config-json-editor {
   min-height: 180px;
   resize: vertical;

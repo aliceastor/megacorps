@@ -214,8 +214,60 @@ function parseCsv(value: string): string[] {
   return value.split(',').map((item) => item.trim()).filter(Boolean);
 }
 
-function selectedMultiValues(select: HTMLSelectElement): string[] {
-  return Array.from(select.selectedOptions).map((option) => option.value).filter(Boolean);
+function projectScopedDependencyCandidates(cards: Card[], input: { companyId?: string | null; projectId?: string | null; excludeCardId?: string | null; query?: string }) {
+  const needle = input.query?.trim().toLowerCase() ?? '';
+  return cards.filter((card) => {
+    if (input.excludeCardId && card.id === input.excludeCardId) return false;
+    if (input.companyId && card.companyId !== input.companyId) return false;
+    if ((input.projectId ?? null) !== (card.projectId ?? null)) return false;
+    if (!needle) return true;
+    return `${card.title} ${card.body} ${(card.tags ?? []).join(' ')}`.toLowerCase().includes(needle);
+  });
+}
+
+function DependencyPicker({
+  cards,
+  companyId,
+  projectId,
+  excludeCardId,
+  value,
+  onChange,
+}: {
+  cards: Card[];
+  companyId?: string | null;
+  projectId?: string | null;
+  excludeCardId?: string | null;
+  value: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const candidates = useMemo(() => projectScopedDependencyCandidates(cards, { companyId, projectId, excludeCardId, query }), [cards, companyId, projectId, excludeCardId, query]);
+  const selectedSet = useMemo(() => new Set(value), [value]);
+  const selectedCount = value.length;
+
+  function toggle(cardId: string, checked: boolean) {
+    if (checked) {
+      if (!selectedSet.has(cardId)) onChange([...value, cardId]);
+      return;
+    }
+    onChange(value.filter((id) => id !== cardId));
+  }
+
+  return <div className="dependency-picker">
+    <div className="input-wrap dependency-search"><Search size={14} /><input placeholder="Search same-project dependencies" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+    <div className="dependency-list">
+      {candidates.length === 0 ? <p className="field-hint">{projectId ? 'No cards in this project match.' : 'No no-project cards match.'}</p> : candidates.map((card) => (
+        <label className="dependency-option" key={card.id}>
+          <input type="checkbox" checked={selectedSet.has(card.id)} onChange={(event) => toggle(card.id, event.target.checked)} />
+          <span>
+            <b>{card.title}</b>
+            <small>{card.columnStatus} / {card.id.slice(0, 8)}</small>
+          </span>
+        </label>
+      ))}
+    </div>
+    <p className="field-hint">{selectedCount === 0 ? 'No dependencies selected.' : `${selectedCount} dependenc${selectedCount === 1 ? 'y' : 'ies'} selected.`}</p>
+  </div>;
 }
 
 async function fetchKanbanBoard() {
@@ -943,14 +995,14 @@ export function KanbanBoard() {
             <div className="form-grid">
               <select className="input" value={newCompany} onChange={(e) => { setNewCompany(e.target.value); setNewDepartment(''); setNewProject(''); setNewGoal(''); setNewAssignee(''); setNewReviewer(''); setNewDependencies([]); }}><option value="">Company</option>{companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}</select>
               <select className="input" value={newDepartment} onChange={(e) => { setNewDepartment(e.target.value); setNewGoal(''); }}><option value="">Department</option>{departments.filter((department) => !newCompany || department.companyId === newCompany).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select>
-              <select className="input" value={newProject} onChange={(e) => { setNewProject(e.target.value); setNewGoal(''); }}><option value="">Project</option>{projects.filter((project) => !newCompany || project.companyId === newCompany).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>
+              <select className="input" value={newProject} onChange={(e) => { setNewProject(e.target.value); setNewGoal(''); setNewDependencies([]); }}><option value="">Project</option>{projects.filter((project) => !newCompany || project.companyId === newCompany).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>
               <select className="input" value={newGoal} onChange={(e) => setNewGoal(e.target.value)}><option value="">Goal</option>{scopedGoalOptions(goals, { companyId: newCompany, departmentId: newDepartment, projectId: newProject }).map((goal) => <option value={goal.id} key={goal.id}>{goalScope(goal)} / {goal.title}</option>)}</select>
               <select className="input" value={newAssignee} onChange={(e) => setNewAssignee(e.target.value)}><option value="">Assignee</option>{agents.filter((agent) => !newCompany || agent.companyId === newCompany).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
               <select className="input" value={newReviewer} onChange={(e) => setNewReviewer(e.target.value)}><option value="">Reviewer</option>{agents.filter((agent) => !newCompany || agent.companyId === newCompany).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
               <select className="input" value={newPriority} onChange={(e) => setNewPriority(e.target.value as (typeof priorities)[number])}>{priorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select>
             </div>
             <label className="field-label">Tags<input className="input" value={newTags} onChange={(e) => setNewTags(e.target.value)} placeholder="bug, release, research" /></label>
-            <label className="field-label">Dependencies<select className="input" multiple size={4} value={newDependencies} onChange={(e) => setNewDependencies(selectedMultiValues(e.currentTarget))}>{cards.filter((card) => !newCompany || card.companyId === newCompany).map((card) => <option key={card.id} value={card.id}>{card.title}</option>)}</select></label>
+            <label className="field-label">Dependencies<DependencyPicker cards={cards} companyId={newCompany} projectId={newProject || null} value={newDependencies} onChange={setNewDependencies} /></label>
             <label className="check-row"><input type="checkbox" checked={requiresApproval} onChange={(e) => setRequiresApproval(e.target.checked)} /> Requires approval</label>
             <button className="btn btn-primary" disabled={busy} onClick={create}><Plus size={15} /> Create</button>
           </motion.div>
@@ -981,12 +1033,12 @@ export function KanbanBoard() {
               <label className="field-label">Assignee<select className="input" value={draft?.assigneeId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), assigneeId: e.target.value || null })}><option value="">Assignee</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
               <label className="field-label">Reviewer<select className="input" value={draft?.reviewerId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), reviewerId: e.target.value || null, requiresApproval: Boolean(e.target.value) })}><option value="">Reviewer</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
               <label className="field-label">Department<select className="input" value={draft?.departmentId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), departmentId: e.target.value || null, goalId: null })}><option value="">Department</option>{departments.filter((department) => !selected.companyId || department.companyId === selected.companyId).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
-              <label className="field-label">Project<select className="input" value={draft?.projectId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), projectId: e.target.value || null, goalId: null })}><option value="">Project</option>{projects.filter((project) => !selected.companyId || project.companyId === selected.companyId).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label>
+              <label className="field-label">Project<select className="input" value={draft?.projectId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), projectId: e.target.value || null, goalId: null, dependencyCardIds: [] })}><option value="">Project</option>{projects.filter((project) => !selected.companyId || project.companyId === selected.companyId).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label>
               <label className="field-label">Goal<select className="input" value={draft?.goalId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), goalId: e.target.value || null })}><option value="">Goal</option>{scopedGoalOptions(goals, { companyId: selected.companyId, departmentId: draft?.departmentId ?? selected.departmentId, projectId: draft?.projectId ?? selected.projectId }).map((goal) => <option value={goal.id} key={goal.id}>{goalScope(goal)} / {goal.title}</option>)}</select></label>
               <label className="field-label">Priority<select className="input" value={priorityValue(priorityNumber(draft?.priority ?? selected.priority))} onChange={(e) => setDraft({ ...(draft ?? {}), priority: priorityNumber(e.target.value) })}>{priorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
             </div>
             <label className="field-label">Tags<input className="input" value={(draft?.tags ?? []).join(', ')} onChange={(e) => setDraft({ ...(draft ?? {}), tags: parseCsv(e.target.value) })} /></label>
-            <label className="field-label">Dependencies<select className="input" multiple size={4} value={draft?.dependencyCardIds ?? []} onChange={(e) => setDraft({ ...(draft ?? {}), dependencyCardIds: selectedMultiValues(e.currentTarget) })}>{cards.filter((card) => card.id !== selected.id && (!selected.companyId || card.companyId === selected.companyId)).map((card) => <option key={card.id} value={card.id}>{card.title}</option>)}</select></label>
+            <label className="field-label">Dependencies<DependencyPicker cards={cards} companyId={selected.companyId} projectId={(draft?.projectId ?? selected.projectId) || null} excludeCardId={selected.id} value={draft?.dependencyCardIds ?? []} onChange={(next) => setDraft({ ...(draft ?? {}), dependencyCardIds: next })} /></label>
             <div className="form-grid">
               <label className="field-label">Max retries<input className="input" type="number" min={1} max={10} value={Number(draft?.maxRetries ?? 3)} onChange={(e) => setDraft({ ...(draft ?? {}), maxRetries: Number(e.target.value) })} /></label>
               <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={Boolean(draft?.requiresApproval)} onChange={(e) => setDraft({ ...(draft ?? {}), requiresApproval: e.target.checked })} /> Requires approval</label>
