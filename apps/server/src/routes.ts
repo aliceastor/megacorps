@@ -10,7 +10,7 @@ import { db } from './db/client.ts';
 import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
-import { buildExecutionAgent, cascadeParentStatus, createDelegatedSubtasks, decomposeCard, delegationItems, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
+import { buildExecutionAgent, cascadeParentStatus, completionStatusForQualityGate, createDelegatedSubtasks, createPendingApproval, decomposeCard, delegationItems, enqueueTaskRun, getTaskLogs } from './dispatch.ts';
 import { registerChatRoutes } from './chat.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
@@ -1882,13 +1882,22 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const delegatedRows = actorAgent ? await createDelegatedSubtasks(card, actorAgent, requestedDelegation) : [];
     const delegatedViaWebhook = delegatedRows.length > 0;
     const delegationFailed = requestedDelegation.length > 0 && !delegatedViaWebhook;
-    const nextStatus = delegatedViaWebhook ? 'in_progress' : delegationFailed ? 'blocked' : escalation ? escalationReviewerId ? 'needs_review' : 'done' : requestedStatus;
+    const qualityReviewerId = !delegatedViaWebhook && !delegationFailed && !escalation && (requestedStatus === 'done' || requestedStatus === 'in_review')
+      ? await resolveIndependentReviewerForCard(card, actorAgentId)
+      : null;
+    const nextStatus = delegatedViaWebhook
+      ? 'in_progress'
+      : delegationFailed
+        ? 'blocked'
+        : escalation
+          ? escalationReviewerId ? 'needs_review' : 'done'
+          : completionStatusForQualityGate(requestedStatus, qualityReviewerId);
     const completesRun = delegatedViaWebhook || delegationFailed || nextStatus !== 'in_progress';
     const webhookAction = delegatedViaWebhook ? 'webhook.task_delegated' : delegationFailed ? 'webhook.delegation_failed' : `webhook.task_${nextStatus}`;
-    await db.update(kanbanCards).set({
+    const [updatedCard] = await db.update(kanbanCards).set({
       columnStatus: nextStatus,
       executionLog,
-      reviewerId: escalation ? escalationReviewerId : undefined,
+      reviewerId: escalation ? escalationReviewerId : qualityReviewerId ?? undefined,
       costUsd: completesRun ? body.costUsd?.toString() : undefined,
       completedAt: nextStatus === 'done' ? new Date() : completesRun ? null : undefined,
       retryCount: nextStatus === 'done' || delegatedViaWebhook ? 0 : undefined,
@@ -1900,7 +1909,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       executionLockExpiresAt: completesRun ? null : undefined,
       activeHeartbeatRunId: completesRun ? null : undefined,
       updatedAt: new Date(),
-    }).where(eq(kanbanCards.id, body.cardId));
+    }).where(eq(kanbanCards.id, body.cardId)).returning();
     let externalWaitId: string | null = null;
     if (nextStatus === 'waiting_on_external') {
       const externalProduct = body.workProducts.find((product) => product.pullRequestUrl || product.url || product.commitSha || product.branch);
@@ -1930,7 +1939,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         logStatus: nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : 'success',
       });
     }
-    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: delegatedViaWebhook || delegationFailed ? 'decomposition' : escalation ? 'escalation' : 'webhook', status: nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : nextStatus === 'needs_review' ? 'queued' : 'success', message: delegatedViaWebhook ? `Webhook delegation plan accepted; ${delegatedRows.length} sub-task(s) queued for direct reports.` : delegationFailed ? 'Webhook delegation plan could not create child cards because the actor has no active direct reports.' : escalation ? (nextStatus === 'needs_review' ? 'Webhook requested reviewer guidance; help review queued.' : 'Webhook requested guidance but no reviewer is available; output accepted as final and card marked done.') : body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
+    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: card.assigneeId, type: delegatedViaWebhook || delegationFailed ? 'decomposition' : escalation ? 'escalation' : 'webhook', status: nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : nextStatus === 'needs_review' || nextStatus === 'in_review' ? 'queued' : 'success', message: delegatedViaWebhook ? `Webhook delegation plan accepted; ${delegatedRows.length} sub-task(s) queued for direct reports.` : delegationFailed ? 'Webhook delegation plan could not create child cards because the actor has no active direct reports.' : escalation ? (nextStatus === 'needs_review' ? 'Webhook requested reviewer guidance; help review queued.' : 'Webhook requested guidance but no reviewer is available; output accepted as final and card marked done.') : qualityReviewerId ? 'Webhook reported completion; quality review queued.' : body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
     const [webhookComment] = await db.insert(cardComments).values({
       cardId: body.cardId,
       agentId: card.assigneeId,
@@ -1977,10 +1986,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await db.update(taskRuns).set({ status: runStatus, completedAt: new Date(), lockedBy: null, lockedAt: null, error, output: executionLog, costUsd: body.costUsd?.toString(), updatedAt: new Date() }).where(eq(taskRuns.heartbeatRunId, heartbeatRunId));
       }
     }
-    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: webhookAction, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId, requestedStatus, escalation, reviewerId: escalationReviewerId, topLevelGuidanceAccepted, externalWaitId, delegatedViaWebhook, delegationFailed, childCount: delegatedRows.length } });
+    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: card.assigneeId, action: webhookAction, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId, requestedStatus, escalation, reviewerId: escalationReviewerId ?? qualityReviewerId, topLevelGuidanceAccepted, externalWaitId, delegatedViaWebhook, delegationFailed, childCount: delegatedRows.length } });
     if (delegatedViaWebhook) for (const child of delegatedRows) await enqueueTaskRun(child.id, 'dispatch', 'queue');
+    if (nextStatus === 'in_review' && qualityReviewerId) {
+      await createPendingApproval(updatedCard ?? { ...card, columnStatus: nextStatus, reviewerId: qualityReviewerId }, actorAgentId ?? card.assigneeId, 'Webhook completion requires quality review.');
+      await enqueueTaskRun(card.id, 'review', 'queue');
+    }
     if (nextStatus === 'needs_review') await enqueueTaskRun(card.id, 'review', 'queue');
     if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
-    return { ok: true, cardId: body.cardId, taskRunId, requestedStatus, newStatus: nextStatus, reviewerId: escalationReviewerId, delegated: delegatedViaWebhook, delegationFailed, childCount: delegatedRows.length };
+    return { ok: true, cardId: body.cardId, taskRunId, requestedStatus, newStatus: nextStatus, reviewerId: escalationReviewerId ?? qualityReviewerId, delegated: delegatedViaWebhook, delegationFailed, childCount: delegatedRows.length };
   });
 }

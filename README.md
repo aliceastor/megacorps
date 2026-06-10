@@ -114,7 +114,7 @@ Machine runners:
 - Runner processes authenticate with `Authorization: Bearer MEGACORPS_RUNNER_KEY` or `X-MegaCorps-Runner-Key`, send `/api/runner/heartbeat`, claim `/api/runner/task-runs/claim`, and complete `/api/runner/task-runs/:id/complete`.
 - Runner-created agent sessions store an Ed25519 public key. Agent-session APIs require a JWT signed by that private key with `sub=<sessionId>` and `aid=<agentId>`. If the session was created with a `cardId`, card claim/review/release calls are restricted to that card.
 - The CLI runner daemon is a scaffold-capable foundation: it heartbeats, claims queued work, prepares Git worktrees from project `repoUrl` / branch policy, writes `.megacorps/task-*.json`, and can complete the run as `needs_review` by default.
-- Dispatch runner claims take a task-run execution lock and move the card to `in_progress`. Review runner claims wait until the card is in `in_review` or `needs_review`; review `success` moves the card to `done`.
+- Dispatch runner claims take a task-run execution lock and move the card to `in_progress`. Dispatch `success`/`done` does not skip a distinct reviewer: it moves the card to `in_review` and queues review. Review runner claims wait until the card is in `in_review` or `needs_review`; review `success` moves the card to `done`.
 - Runner or webhook completion can now return `waiting_on_external` for PR/CI/deploy/approval waits. MegaCorps releases execution locks, records an external wait, and later `/api/external-events` can wake the card into review, rework, done, or blocked.
 
 Hermes suite operational notes:
@@ -132,7 +132,7 @@ Hermes suite operational notes:
 - `Projects`: unified project authority workbench for project CRUD, repo settings, branch policy, runtime services, work path, and project goals.
 - `Workspace`: company folder manager and authoritative workspace paths for non-coding project files.
 - `Knowledge`: company-scoped Markdown docs injected into agent prompts by tag.
-- `Kanban`: task UUIDs, stage columns including `waiting_on_external`, company dropdown/project/assignee filters, sort by company/date/priority, ticket thread, work products, sub-tasks, rollup/context APIs, external waits/events, required deterministic tools, integrations, logs, run/review/decompose/delete.
+- `Kanban`: task UUIDs, stage columns including `waiting_on_external`, company dropdown/project/assignee filters, sort by company/date/priority, ticket thread, work products, sub-tasks, rollup/context APIs, external waits/events, required deterministic tools, integrations, task logs, normalized action timeline, run/review/decompose/delete.
 - `Direct Chat`: company -> project/no-project -> agent -> session direct messaging with resumable adapter sessions.
 - `Cron`: dispatch heartbeat status, company intervals, job/company/runner-scoped manual runs, daily-report/health-check run records, and run history.
 - `Logs`: outbound prompt snapshots, prompt/context inspection, cron heartbeat status, heartbeat runs, activity, and full API lifecycle log with request, response, status, duration, and errors.
@@ -165,13 +165,14 @@ Hermes suite operational notes:
 - Phase 19: Codex app-server adapter and durable adapter session records for direct chat and task-scoped Codex threads.
 - Phase 20: normalized card lifecycle actions, `card_dependencies` graph, machine runners with hashed API keys, runner heartbeat/claim/complete APIs, Ed25519 agent sessions, and MegaCorps CLI YAML apply/runner daemon scaffold.
 - Phase 21: reusable company positions, agent position assignment, Direct Chat/Kanban position prompt injection, and CLI/API help coverage.
-- Phase 22: hierarchical lifecycle foundation: explicit boss-position authority, card lifecycle metadata, required child policy, context snapshots, rollup/context APIs, external waits/events with `waiting_on_external`, deterministic tool registry, card required tools, parent integrations, and updated API Help/docs.
+- Phase 22: hierarchical lifecycle foundation: explicit boss-position authority, card lifecycle metadata, required child policy, context snapshots, rollup/context APIs, external waits/events with `waiting_on_external`, deterministic tool registry, card required tools, parent integrations, review-gated parent aggregation, and updated API Help/docs.
+- Phase 23: lifecycle hardening: parent cards queue integration review instead of auto-completing after children, webhook/runner completion respects quality reviewers, task-run worker claims one eligible idle runtime at a time by default, backpressure requeues without wasting retries, uncaught dispatch failures increment `retry_count`, cancelled cards can be manually accepted as done, and Kanban Logs exposes the normalized action timeline.
 
 Reference-informed next phases:
 
-- Phase 23: company template export/import hardening with secret references.
-- Phase 24: runner PR provider integration, streaming progress, sandbox policy, and richer runtime liveness probes.
-- Phase 25: fine-grained service-account roles for non-runner integrations.
+- Phase 24: company template export/import hardening with secret references.
+- Phase 25: runner PR provider integration, streaming progress, sandbox policy, and richer runtime liveness probes.
+- Phase 26: fine-grained service-account roles for non-runner integrations.
 
 ## Paperclip-inspired loop
 
@@ -183,12 +184,12 @@ The dispatch engine runs on a heartbeat. The global tick defaults to 10 seconds 
 - auto-assign unassigned tasks to an active idle agent, preferring department and tag/capability matches,
 - enqueue dispatch task-run attempts,
 - enqueue review task-run attempts when a reviewer is configured,
-- let the task-run worker claim queued work up to `TASK_RUN_WORKER_BATCH_SIZE`, move assigned work into `in_progress`, run the configured adapter, create delegated child tasks when an agent returns an explicit `DELEGATE:` plan through stdout or webhook output, and move completed work to `in_review`, `needs_review`, `done`, or `blocked`,
+- let the task-run worker claim eligible queued work up to `TASK_RUN_WORKER_BATCH_SIZE` (default `1` for backpressure), skip busy agents or unavailable runtimes without consuming a retry, move assigned work into `in_progress`, run the configured adapter, create delegated child tasks when an agent returns an explicit `DELEGATE:` plan through stdout or webhook output, and move completed work to `in_review`, `needs_review`, `done`, or `blocked`,
 - move PR/CI/deploy/approval waits to `waiting_on_external` without holding execution locks; external events wake the card into review, rework, done, or blocked,
 - hold review task-runs while their card is still `in_progress`, so long-running dispatches do not block unrelated queued work but reviewers do not judge unfinished output,
-- distinguish quality review (`in_review`) from help/escalation review (`needs_review`). If an assignee cannot complete a task, the required output is attempted methods, blocker/root cause, reviewer questions, and partial output/logs. MegaCorps queues review when a distinct reviewer/manager exists; dispatch-side top-level guidance requests are accepted as `done` with the output preserved,
-- recover expired execution locks; expired `in_progress` work increments `retry_count`, returns to `todo` with backoff, or moves to `blocked` after `max_retries`,
-- cascade parent tasks when all sub-tasks are complete.
+- distinguish quality review (`in_review`) from help/escalation review (`needs_review`). If completed work has a distinct reviewer, dispatch, webhook, and runner completion queue review instead of marking the card done. If an assignee cannot complete a task, the required output is attempted methods, blocker/root cause, reviewer questions, and partial output/logs. MegaCorps queues help review when a distinct reviewer/manager exists; dispatch-side top-level guidance requests are accepted as `done` with the output preserved,
+- recover expired execution locks and uncaught dispatch failures; retryable failures increment `retry_count`, return to `todo` with backoff, or move to `blocked` after `max_retries`,
+- queue parent tasks for integration review when the required child policy is satisfied. The parent is marked `done` only after the integration/review path accepts the aggregated child outputs.
 
 Cron/debug endpoints:
 
@@ -231,7 +232,7 @@ Open a task and use the Message Board tab:
 - `Continue run with comment`: reactivate the assignee and move the task back to `todo`.
 
 Dispatch/review/webhook completions now also create agent-authored messages on the task board, so task discussion is not hidden only in logs.
-Kanban task detail tabs use React Query plus a short-lived browser session cache for message board, task logs, work products, and filtered API lifecycle rows. Selecting a task renders details immediately, then prefetches cached tab data in the background; live events invalidate only the affected card caches.
+Kanban task detail tabs use React Query plus a short-lived browser session cache for message board, task logs, normalized card actions, work products, and filtered API lifecycle rows. Selecting a task renders details immediately, then prefetches cached tab data in the background; live events invalidate only the affected card caches. The Logs tab includes an action timeline so operators can see who moved, cancelled, resumed, or completed a card separately from raw agent logs.
 
 ## Projects, workspace paths, and work products
 
@@ -288,7 +289,7 @@ MegaCorps stores two complementary log streams:
 - `card_comments`: per-task message board entries from users, agents, system/webhook completions, and intervention actions.
 - `work_products`: reviewable deliverables by card/project/agent/task-run, including repo URLs, branches, commits, PRs, previews, reports, screenshots, artifacts, and external URLs.
 - `card_dependencies`: normalized prerequisite graph for cards; the legacy `kanban_cards.dependency_card_ids` array is synchronized for old clients.
-- `card_actions`: normalized card lifecycle/action timeline with actor type, from/to status, runner/session ids, and metadata.
+- `card_actions`: normalized card lifecycle/action timeline with actor type/id, from/to status, detail text, runner/session ids, and metadata.
 - `machine_runners`: external runner machines with hashed API keys, heartbeat/capacity/runtime health, and local workspace roots.
 - `agent_sessions`: runner-created agent sessions with Ed25519 public key material for signed agent-session JWTs.
 
@@ -301,7 +302,8 @@ Phase 8/9 safety behavior:
 - Tasks requiring approval create pending approval records and can be approved/rejected from the Budget page.
 - Member hierarchy is based on `bossId`: position and department carry the human-facing assignment meaning, while the legacy agent `role` field remains only for compatibility.
 - Decomposed sub-tasks are delegated to direct reports when the parent task is assigned to a member with subordinates. Agents can also trigger delegation by returning a strict `DELEGATE:` bullet list or by sending that block through `/api/webhook/task-complete`; MegaCorps creates child cards for direct reports and sets the parent as in progress while children run.
-- Work completed by a subordinate moves to `in_review` for a distinct configured reviewer or reporting manager. Self-review is not treated as a real review gate; if no distinct reviewer is available, successful dispatch goes directly to `done`.
+- Work completed by a subordinate moves to `in_review` for a distinct configured reviewer or reporting manager. Self-review is not treated as a real leaf review gate; if no distinct reviewer is available, successful leaf dispatch goes directly to `done`. Parent cards with accepted children are different: they queue integration review for the parent assignee/reviewer and include child work products in the review prompt before the parent can become `done`.
+- Cancelled cards preserve output and history. Operators can manually move a cancelled card to `done` through the shared lifecycle guard when the preserved output should be accepted.
 - Work the assignee cannot solve moves to `needs_review` for a help/escalation review when an independent reviewer or manager exists. Without a higher reviewer/manager, dispatch and webhook guidance requests are accepted as `done` so top-level agents do not block after providing a final answer. Reviewers can finish directly (`done`), return guidance (`todo`), or escalate to their manager. If a top-level reviewer cannot resolve a review, the card becomes `blocked`.
 - In-app IP rate limiting is enabled by default. Tune `RATE_LIMIT_*` env vars or set `RATE_LIMIT_ENABLED=false` for local stress tests.
 - Mutation/manual execution routes require operator/admin roles. Viewer role can read authenticated UI data.

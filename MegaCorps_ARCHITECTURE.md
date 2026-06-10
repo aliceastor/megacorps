@@ -2,6 +2,19 @@
 
 > Current clear-text progress, Paperclip research notes, gap analysis, and next-phase plan are maintained in [MegaCorps_PROGRESS.md](./MegaCorps_PROGRESS.md).
 
+## Architecture Update v1.19 - Hierarchical Review Gate Hardening
+
+Date: 2026-06-10
+
+Completed in this pass:
+
+- Fixed parent aggregation so a parent card is not auto-marked `done` when all children finish. Satisfied child policy now moves the parent to `in_review`, sets rollup status to `ready_for_review`, queues an integration review run, and includes child work products in the review prompt.
+- Fixed webhook and runner completion paths so `done`/`success` with a distinct reviewer moves to `in_review` and queues review instead of bypassing the reviewer.
+- Added manual lifecycle recovery from `cancelled` to `done` for accepted preserved output.
+- Reduced default task-run worker batch size to 1 and added claim-time backpressure checks for busy agents, unavailable runtimes, future `nextRunAt`, dependencies, and review readiness.
+- Added retry accounting for uncaught dispatch failures so `retry_count` advances and `max_retries` can block instead of silently wasting attempts.
+- Exposed normalized `card_actions` in the Kanban Logs tab and updated API Help response schemas with `detail` and review-gate behavior.
+
 ## Architecture Update v1.18 - Webhook Delegation Callback Path
 
 Date: 2026-06-10
@@ -374,7 +387,7 @@ The older phase checklist later in this document is kept as historical design no
 - [x] Retry and block handling.
 - [x] Review loop with `in_review`, reviewer output, approval records, and rejection back to `todo`.
 - [x] Task decomposition into sub-tasks.
-- [x] Parent cascade to `done` when children complete.
+- [x] Parent cascade to integration review when child policy is satisfied.
 - [x] Prompt/context construction for company/project/goal/knowledge/task context.
 - [x] Execution log, cost, duration, stage, and activity recording.
 - [x] Manual `Run Now`, `Review`, and `Split into Sub-tasks` buttons.
@@ -1102,7 +1115,7 @@ Request 進入
    pass → done / fail → back to todo
   │
   ▼
-7. Cascade（sub-cards 全 done → parent done → 通知）
+7. Cascade（sub-cards accepted → parent integration review → parent done only after accepted aggregation）
 ```
 
 ---
@@ -2099,8 +2112,8 @@ Phase 6 ──▶ Phase 7 ──▶ Phase 8 ──▶ Phase 9
 - [ ] CEO Decomposition
   - 大任務 card → 派給 CEO agent → 拆成 N 張 sub-cards
   - parent_card_id 關聯
-  - Sub-cards 全部 done → parent card done
-- [ ] Cascade Logic（sub-tasks 完成 → parent 完成 → 通知）
+  - Sub-cards accepted → parent integration review
+- [ ] Cascade Logic（sub-tasks accepted → parent integration review → parent completion after accepted aggregation）
 - [ ] Prompt 模板系統（buildTaskPrompt：注入 project context + goal + previous work）
 
 **Frontend:**
@@ -2693,10 +2706,10 @@ On each eligible company heartbeat, MegaCorps:
 3. Prefers same department, then tag/capability/role match.
 4. Moves assigned work to `todo`, then `in_progress`.
 5. Runs the agent adapter.
-6. Moves completed work to `in_review` when approval/reviewer is required, otherwise `done`.
-7. Moves cannot-complete/escalated work to `needs_review` when an independent reviewer/manager exists, otherwise `blocked`.
+6. Moves completed leaf work to `in_review` when a distinct reviewer is required, otherwise `done`.
+7. Moves cannot-complete/escalated work to `needs_review` when an independent reviewer/manager exists; top-level dispatch guidance with output can be accepted as `done`.
 8. Reviews `in_review` and `needs_review` cards automatically when a reviewer is configured.
-8. Cascades parent cards to `done` when all sub-tasks are done.
+9. Queues parent cards for integration review when their child completion policy is satisfied; parent cards become `done` only after the integration/review path accepts the aggregated output.
 
 ### Task Comments
 
@@ -2717,6 +2730,8 @@ The dispatch prompt now includes recent comments so a continued run can act on n
 - dispatch/review/decomposition
 - retries and cascade
 - comments and user interventions
+
+`card_actions` records the normalized audit timeline with actor type/id, action, from/to status, human-readable detail, and metadata. The Kanban Logs tab shows this action timeline beside raw task logs.
 
 `api_events` records request/response/error lifecycle:
 

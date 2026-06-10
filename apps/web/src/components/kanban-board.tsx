@@ -80,6 +80,7 @@ type TaskLog = { id: string; type: string; status: string; message: string; outp
 type TaskRun = { id: string; cardId: string; kind: string; status: string };
 type ApiEvent = { id: string; method: string; path: string; statusCode?: number; requestBody?: unknown; responseBody?: unknown; error?: string | null; durationMs?: number; createdAt?: string };
 type CardComment = { id: string; body: string; action: string; authorType: string; agentId?: string | null; authorId?: string | null; createdAt?: string };
+type CardAction = { id: string; actorType: string; actorId: string; action: string; fromStatus?: string | null; toStatus?: string | null; detail?: string | null; metadata?: unknown; createdAt?: string };
 type WorkProduct = { id: string; cardId?: string | null; projectId?: string | null; agentId?: string | null; type: string; title: string; summary?: string | null; url?: string | null; repoProvider?: string | null; repoUrl?: string | null; branch?: string | null; commitSha?: string | null; pullRequestUrl?: string | null; createdAt?: string };
 type CardUpdatePayload = Omit<Partial<Card>, 'priority'> & { priority?: (typeof priorities)[number] };
 type LiveEvent = { type: string; cardId?: string | null; entityId?: string; projectId?: string | null };
@@ -87,6 +88,7 @@ type CachedRows<T> = { rows: T[]; cachedAt: number };
 type CardTabCache = {
   comments?: CachedRows<CardComment>;
   logs?: CachedRows<TaskLog>;
+  actions?: CachedRows<CardAction>;
   apiLogs?: CachedRows<ApiEvent>;
   workProducts?: CachedRows<WorkProduct>;
 };
@@ -121,7 +123,7 @@ function writeCardTabCache(cache: Record<string, CardTabCache>): void {
 }
 
 function newestCacheTime(cache: CardTabCache): number {
-  return Math.max(cache.comments?.cachedAt ?? 0, cache.logs?.cachedAt ?? 0, cache.apiLogs?.cachedAt ?? 0, cache.workProducts?.cachedAt ?? 0);
+  return Math.max(cache.comments?.cachedAt ?? 0, cache.logs?.cachedAt ?? 0, cache.actions?.cachedAt ?? 0, cache.apiLogs?.cachedAt ?? 0, cache.workProducts?.cachedAt ?? 0);
 }
 
 function pruneCardTabCache(cache: Record<string, CardTabCache>): Record<string, CardTabCache> {
@@ -316,11 +318,12 @@ export function KanbanBoard() {
   const [selected, setSelected] = useState<Card | null>(null);
   const [draft, setDraft] = useState<Partial<Card> | null>(null);
   const [logs, setLogs] = useState<TaskLog[]>([]);
+  const [actions, setActions] = useState<CardAction[]>([]);
   const [apiLogs, setApiLogs] = useState<ApiEvent[]>([]);
   const [comments, setComments] = useState<CardComment[]>([]);
   const [workProducts, setWorkProducts] = useState<WorkProduct[]>([]);
   const [cardTabCache, setCardTabCache] = useState<Record<string, CardTabCache>>(() => readCardTabCache());
-  const [tabLoading, setTabLoading] = useState<Record<CardTabKey, boolean>>({ comments: false, logs: false, apiLogs: false, workProducts: false });
+  const [tabLoading, setTabLoading] = useState<Record<CardTabKey, boolean>>({ comments: false, logs: false, actions: false, apiLogs: false, workProducts: false });
   const [tab, setTab] = useState<'details' | 'comments' | 'logs' | 'workProducts' | 'subtasks'>('details');
   const [commentBody, setCommentBody] = useState('');
   const [commentAction, setCommentAction] = useState<'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run' | 'escalate_to_reviewer'>('comment');
@@ -442,6 +445,27 @@ export function KanbanBoard() {
     }
   }
 
+  async function loadCardActions(card: Card, force = false): Promise<CardAction[]> {
+    const cached = cardTabCache[card.id]?.actions;
+    if (!force && isFresh(cached)) {
+      if (selectedIdRef.current === card.id) setActions(cached?.rows ?? []);
+      return cached?.rows ?? [];
+    }
+    if (!cached) setLoadingKey('actions', true);
+    try {
+      if (force) await queryClient.invalidateQueries({ queryKey: ['cardActions', card.id] });
+      const rows = await queryClient.fetchQuery({ queryKey: ['cardActions', card.id], queryFn: () => api<CardAction[]>(`/api/cards/${card.id}/actions`) });
+      saveCardTabCache(card.id, { actions: { rows, cachedAt: Date.now() } });
+      if (selectedIdRef.current === card.id) setActions(rows);
+      return rows;
+    } catch {
+      if (selectedIdRef.current === card.id && !cached) setActions([]);
+      return cached?.rows ?? [];
+    } finally {
+      setLoadingKey('actions', false);
+    }
+  }
+
   async function loadCardApiLogs(card: Card, force = false): Promise<ApiEvent[]> {
     const cached = cardTabCache[card.id]?.apiLogs;
     if (!force && isFresh(cached)) {
@@ -494,6 +518,7 @@ export function KanbanBoard() {
     if (next === 'comments') void loadCardComments(selected);
     if (next === 'logs') {
       void loadCardLogs(selected);
+      void loadCardActions(selected);
       void loadCardApiLogs(selected);
     }
     if (next === 'workProducts') void loadCardWorkProducts(selected);
@@ -531,6 +556,7 @@ export function KanbanBoard() {
       if (!selected || detail.cardId !== selected.id) return;
       if (detail.type === 'card.comment.created') void loadCardComments(selected, true);
       if (detail.type === 'task_log.created') void loadCardLogs(selected, true);
+      if (detail.type === 'card.action.created') void loadCardActions(selected, true);
       if (detail.type === 'work_product.created') void loadCardWorkProducts(selected, true);
     }
     window.addEventListener('megacorps-live', onLive);
@@ -541,6 +567,7 @@ export function KanbanBoard() {
     if (!selected) {
       setDraft(null);
       setLogs([]);
+      setActions([]);
       setApiLogs([]);
       setComments([]);
       setWorkProducts([]);
@@ -564,11 +591,13 @@ export function KanbanBoard() {
     const cached = cardTabCache[selected.id] ?? {};
     setComments(cached.comments?.rows ?? []);
     setLogs(cached.logs?.rows ?? []);
+    setActions(cached.actions?.rows ?? []);
     setApiLogs(cached.apiLogs?.rows ?? []);
     setWorkProducts(cached.workProducts?.rows ?? []);
     const timer = window.setTimeout(() => {
       void loadCardComments(selected);
       void loadCardLogs(selected);
+      void loadCardActions(selected);
       void loadCardApiLogs(selected);
       void loadCardWorkProducts(selected);
     }, 150);
@@ -616,6 +645,15 @@ export function KanbanBoard() {
       tone: log.status === 'failed' ? 'error' : 'system',
       body: [log.message, log.output].filter(Boolean).join('\n\n'),
       meta: [log.createdAt ? new Date(log.createdAt).toLocaleString() : '', log.costUsd ? `$${log.costUsd}` : '', log.durationSeconds !== undefined ? `${log.durationSeconds}s` : ''].filter(Boolean).join(' / '),
+    })),
+    ...actions.map((action) => ({
+      id: `action-${action.id}`,
+      createdAt: action.createdAt,
+      type: action.action,
+      actor: action.actorType === 'user' ? `User ${action.actorId}` : action.actorType === 'system' ? 'System' : action.actorId,
+      tone: action.action.includes('block') || action.toStatus === 'blocked' ? 'error' : 'system',
+      body: action.detail ?? `${action.fromStatus ?? 'none'} -> ${action.toStatus ?? 'none'}`,
+      meta: [action.createdAt ? new Date(action.createdAt).toLocaleString() : '', `${action.actorType}:${action.actorId}`, action.fromStatus || action.toStatus ? `${action.fromStatus ?? 'none'} -> ${action.toStatus ?? 'none'}` : ''].filter(Boolean).join(' / '),
     })),
     ...workProducts.map((product) => ({
       id: `product-${product.id}`,
@@ -691,6 +729,7 @@ export function KanbanBoard() {
       maxRetries: updated.maxRetries ?? 3,
     });
     void loadCardLogs(updated, true);
+    void loadCardActions(updated, true);
     void loadCardApiLogs(updated, true);
     void queryClient.invalidateQueries({ queryKey: ['kanbanBoard'] });
     return updated;
@@ -771,7 +810,7 @@ export function KanbanBoard() {
         setToast({ message, type: 'success' });
       }
       void queryClient.invalidateQueries({ queryKey: ['kanbanBoard'] });
-      if (selected) await Promise.all([loadCardLogs(selected, true), loadCardApiLogs(selected, true)]);
+      if (selected) await Promise.all([loadCardLogs(selected, true), loadCardActions(selected, true), loadCardApiLogs(selected, true)]);
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : 'Action failed', type: 'error' });
     } finally {
@@ -809,10 +848,11 @@ export function KanbanBoard() {
       saveCardTabCache(selected.id, { comments: { rows: nextComments, cachedAt: Date.now() } });
       void queryClient.invalidateQueries({ queryKey: ['cardComments', selected.id] });
       void queryClient.invalidateQueries({ queryKey: ['kanbanBoard'] });
+      void loadCardActions(selected, true);
       setCommentBody('');
       setToast({ message: effectiveAction === 'pause_agent' ? 'Agent paused and task blocked' : effectiveAction === 'continue_run' ? 'Task queued to continue' : effectiveAction === 'escalate_to_reviewer' ? 'Task escalated for review' : 'Message added', type: 'success' });
       await refresh();
-      await Promise.all([loadCardLogs(selected, true), loadCardApiLogs(selected, true)]);
+      await Promise.all([loadCardLogs(selected, true), loadCardActions(selected, true), loadCardApiLogs(selected, true)]);
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : 'Failed to add comment', type: 'error' });
     } finally {
@@ -1013,12 +1053,22 @@ export function KanbanBoard() {
             <button className="btn btn-primary" disabled={busy || !commentBody.trim()} onClick={addComment}><MessageSquare size={15} /> Add Message</button>
           </div>}
           {tab === 'logs' && <div style={{ display: 'grid', gap: 10 }}>
-            {(tabLoading.logs || tabLoading.apiLogs) && <p style={{ opacity: 0.6 }}>Refreshing cached logs...</p>}
+            {(tabLoading.logs || tabLoading.actions || tabLoading.apiLogs) && <p style={{ opacity: 0.6 }}>Refreshing cached logs...</p>}
             {selected.executionLog && <article className="log-item">
               <b>latest execution / output</b>
               <span>{selected.completedAt ? new Date(selected.completedAt).toLocaleString() : selected.updatedAt ? new Date(selected.updatedAt).toLocaleString() : ''}</span>
               <pre className="log-block">{selected.executionLog}</pre>
             </article>}
+            <article className="log-item">
+              <b>Action timeline</b>
+              <span>{actions.length} normalized actions{tabLoading.actions ? ' / refreshing' : ''}</span>
+              {tabLoading.actions && actions.length === 0 ? <p>Loading card actions...</p> : actions.length === 0 ? <p>No normalized actions yet.</p> : actions.map((action) => <div className="log-item" key={action.id} style={{ marginTop: 8 }}>
+                <b>{action.action}</b>
+                <span>{action.createdAt ? new Date(action.createdAt).toLocaleString() : ''} / {action.actorType}:{action.actorId} / {action.fromStatus ?? 'none'} {'->'} {action.toStatus ?? 'none'}</span>
+                {action.detail && <p>{action.detail}</p>}
+                {action.metadata != null && <pre className="log-block">{JSON.stringify(action.metadata, null, 2)}</pre>}
+              </div>)}
+            </article>
             {tabLoading.logs && logs.length === 0 ? <p style={{ opacity: 0.6 }}>Loading task logs...</p> : logs.length === 0 ? <p style={{ opacity: 0.6 }}>No logs yet.</p> : logs.map((log) => <article className="log-item" key={log.id}>
               <b>{log.type} / {log.status}</b>
               <span>{log.createdAt ? new Date(log.createdAt).toLocaleString() : ''}</span>

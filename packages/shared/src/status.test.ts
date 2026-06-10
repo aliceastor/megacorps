@@ -11,6 +11,7 @@ test('allows the canonical card status path and blocks invalid skips', () => {
   assert.equal(canTransitionCard('waiting_on_external', 'in_review'), true);
   assert.equal(canTransitionCard('waiting_on_external', 'in_progress'), true);
   assert.equal(canTransitionCard('needs_review', 'todo'), true);
+  assert.equal(canTransitionCard('cancelled', 'done'), true);
   assert.equal(canTransitionCard('todo', 'done'), false);
   assert.equal(canTransitionCard('in_progress', 'cancelled'), true);
 });
@@ -30,6 +31,7 @@ test('actor-aware card transitions distinguish worker, reviewer, leader, and mac
   assert.equal(validateCardTransition('reject', 'in_review', 'agent:reviewer'), null);
   assert.equal(validateCardTransition('reopen', 'done', 'agent:leader'), null);
   assert.equal(validateCardTransition('complete', 'in_progress', 'machine'), null);
+  assert.equal(validateCardTransition('complete', 'cancelled', 'user'), null);
   assert.equal(validateCardTransition('cancel', 'todo', 'agent:worker')?.code, 'FORBIDDEN');
   assert.equal(validateCardTransition('release', 'in_progress', 'machine'), null);
   assert.equal(validateCardTransition('release', 'in_progress', 'agent:worker'), null);
@@ -43,6 +45,7 @@ test('infers card lifecycle actions from status movement', () => {
   assert.equal(inferCardTransitionAction('waiting_on_external', 'in_review'), 'external_success');
   assert.equal(inferCardTransitionAction('waiting_on_external', 'in_progress'), 'external_failure');
   assert.equal(inferCardTransitionAction('needs_review', 'done'), 'approve');
+  assert.equal(inferCardTransitionAction('cancelled', 'done'), 'complete');
   assert.equal(inferCardTransitionAction('blocked', 'todo'), 'resume');
   assert.equal(inferCardTransitionAction('todo', 'done'), null);
 });

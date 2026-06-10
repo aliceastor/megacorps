@@ -464,6 +464,9 @@ Message board tab elements:
 - Add Message button
 
 Logs tab elements:
+- Action timeline from `GET /api/cards/:id/actions`, including actor type/id, action, from/to status, detail, and metadata.
+- Raw task logs from `GET /api/cards/:id/logs`.
+- Filtered API lifecycle rows for the selected card.
 - Latest execution output
 - Cached task logs
 - Normalized card action timeline
@@ -920,7 +923,7 @@ The following backend-supported fields or actions were missing or incomplete in 
 - `POST /api/cards/:id/work-products`: added Work Products form in Kanban detail drawer.
 - `task_runs.adapter_session_id`, `adapter_turn_id`: added to Logs task run cards.
 - `card_dependencies`: added as normalized dependency graph while Kanban still hydrates `dependencyCardIds` for existing UI flows.
-- `card_actions`: added normalized action timeline endpoint at `/api/cards/:id/actions`.
+- `card_actions`: added normalized action timeline endpoint at `/api/cards/:id/actions` and surfaced it inside the Kanban Logs tab.
 - `machine_runners`: added runner registry/heartbeat/claim/complete APIs and CLI management; no dedicated UI page yet.
 - `agent_sessions`: added runner-created Ed25519 public-key sessions for agent-session JWT calls; no dedicated UI page yet.
 - `POST /api/agents` help body: updated to show the visible web flow fields and keep `role: worker` only as a compatibility value.
@@ -932,7 +935,8 @@ The following backend-supported fields or actions were missing or incomplete in 
 - I18N: rebuilt corrupted zh-TW/en/ja locale dictionaries and wired sidebar/topbar labels to locale keys.
 - Help: added `API Catalog` and `CLI Commands` tabs backed by `GET /api/help`, with command docs for `login`, `apply`, `runner register`, and `runner daemon`.
 - API Help: added method+path coverage tests for every registered route and explicit runner/agent-session auth coverage.
-- Runner lifecycle: external runner dispatch claims now take execution locks and move cards to `in_progress`; review claims wait for reviewable card states; runner review success approves to `done`.
+- Runner lifecycle: external runner dispatch claims now take execution locks and move cards to `in_progress`; dispatch completion queues quality review when a distinct reviewer exists; review claims wait for reviewable card states; runner review success approves to `done`.
+- Hierarchical lifecycle hardening: child aggregation now queues parent integration review instead of auto-completing the parent, and manual recovery can move accepted `cancelled` output to `done`.
 - Agent Session API: claim/review/release now use the shared card lifecycle guard, cannot release another agent's card, and card-bound sessions cannot operate on other cards.
 - CLI apply: card dependency references are resolved after all manifest cards are known, so forward references in YAML are supported.
 

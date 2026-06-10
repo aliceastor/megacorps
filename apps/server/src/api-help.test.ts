@@ -146,6 +146,12 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/auth/bootstrap'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/runner/task-runs/claim' && endpoint.auth === 'runner'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/agent/cards/:id/claim' && endpoint.auth === 'agent-session'));
+  const actionEndpoint = catalog.endpoints.find((endpoint) => endpoint.path === '/api/cards/:id/actions');
+  assert.match(JSON.stringify(actionEndpoint?.responseSchema), /detail/);
+  const webhookEndpoint = catalog.endpoints.find((endpoint) => endpoint.path === '/api/webhook/task-complete');
+  assert.match(webhookEndpoint?.summary ?? '', /queues quality review/i);
+  const runnerCompleteEndpoint = catalog.endpoints.find((endpoint) => endpoint.path === '/api/runner/task-runs/:id/complete');
+  assert.match(runnerCompleteEndpoint?.summary ?? '', /quality review/i);
   assert.ok(catalog.cli.commands.some((command) => command.command === 'apply' && command.auth === 'session'));
   assert.match(catalog.cli.manifestExample, /positions:/);
   assert.match(catalog.cli.manifestExample, /dependencies/);
@@ -178,4 +184,5 @@ test('api help markdown exposes response schema and rate limit sections', () => 
   assert.match(markdown, /TaskContextPackage/);
   assert.match(markdown, /context requests/i);
   assert.match(markdown, /deterministic tool/i);
+  assert.match(markdown, /queues quality review/i);
 });

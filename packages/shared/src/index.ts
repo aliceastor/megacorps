@@ -26,7 +26,7 @@ const cardTransitionDefs: Record<CardTransitionAction, CardTransitionDef> = {
   external_failure: { from: ['waiting_on_external'], to: 'in_progress', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
   approve: { from: ['in_review', 'needs_review'], to: 'done', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
   reject: { from: ['in_review', 'needs_review'], to: 'todo', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
-  complete: { from: ['in_progress', 'in_review', 'needs_review', 'waiting_on_external'], to: 'done', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
+  complete: { from: ['in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'cancelled'], to: 'done', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
   block: { from: ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external'], to: 'blocked', allow: ['machine', 'system', 'agent:worker', 'agent:reviewer', 'agent:leader', 'user'] },
   cancel: { from: ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'blocked'], to: 'cancelled', allow: ['machine', 'system', 'agent:leader', 'user'] },
   release: { from: ['in_progress'], to: 'todo', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
@@ -43,7 +43,7 @@ const allowedTransitions: Record<CardStatus, CardStatus[]> = {
   waiting_on_external: ['in_review', 'in_progress', 'done', 'todo', 'blocked', 'cancelled'],
   done: ['todo'],
   blocked: ['todo', 'cancelled'],
-  cancelled: ['todo'],
+  cancelled: ['todo', 'done'],
 };
 
 export function canTransitionCard(from: CardStatus, to: CardStatus): boolean {

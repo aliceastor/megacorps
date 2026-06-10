@@ -86,7 +86,7 @@ Expected behavior:
 
 - Do the work directly.
 - Produce final output and work products.
-- Complete as `done` if no reviewer exists, or `in_review` if a reviewer exists.
+- Complete leaf work as `done` if no reviewer exists, or `in_review` if a reviewer exists. Parent cards with children do not use this shortcut; they wait for child aggregation and integration review.
 
 ### DELEGATE
 
@@ -217,7 +217,7 @@ These can be derived instead of adding a new column at first.
 - `integrating`: all required children are accepted, parent is merging outputs.
 - `waiting_on_dependencies`: dependencies are not done.
 - `waiting_on_children`: children are running or in review.
-- `ready_for_parent_review`: parent integration output is ready.
+- `ready_for_review`: parent integration output is ready.
 
 Suggested implementation:
 
@@ -283,12 +283,13 @@ Default:
 
 - Child `reviewerId = parent.assigneeId`.
 - Parent output `reviewerId = parent owner's bossId`, if present.
-- Root output has no reviewer above the top-level owner, so top-level final output can mark root done.
+- Root leaf output has no reviewer above the top-level owner, so top-level final output can mark the root leaf task done. A root parent task still requires its child outputs to be aggregated and accepted by the top-level integrator.
 
 Self-review rule:
 
 - If reviewer equals assignee, replace reviewer with assignee boss when possible.
-- If no independent reviewer exists, successful dispatch can go done.
+- If no independent reviewer exists, successful leaf dispatch can go done.
+- Parent integration is allowed to use the parent assignee as the integrator/reviewer when children are complete; this is not treated as leaf self-review bypass.
 
 ## Decomposition Contract
 
@@ -597,7 +598,7 @@ Leaf agent submits:
 Then the card moves to:
 
 - `in_review` if reviewer exists.
-- `done` if no reviewer exists and output is acceptable by lifecycle rules.
+- `done` if no reviewer exists, the card is a leaf, and output is acceptable by lifecycle rules.
 - `needs_review` if the leaf cannot finish and has a reviewer/manager.
 
 ### Manager Review
@@ -645,11 +646,12 @@ Each child should have a requirement level:
 
 When policy is satisfied:
 
-1. Parent agent receives a synthesized child-output packet.
-2. Parent resolves conflicts.
-3. Parent may edit, summarize, merge, or delete child output.
-4. Parent creates an integration output.
-5. Parent submits upward.
+1. Parent card moves to `in_review` with rollup status `ready_for_review`.
+2. Parent agent receives a synthesized child-output packet, including child logs and work products.
+3. Parent resolves conflicts.
+4. Parent may edit, summarize, merge, or delete child output.
+5. Parent creates an integration output.
+6. Parent submits upward or, for the root integrator, accepts the final aggregation as done.
 
 If a child is blocked, the parent can:
 
@@ -2132,7 +2134,7 @@ Implemented in the current codebase:
 - Default company boss position: new companies create one `CEO` position with `isCompanyBoss=true`, and migrations backfill one active boss position per company.
 - Root assignment: unassigned root cards prefer an active idle agent assigned to the company boss position, then fall back to normal matching.
 - Recursive delegation foundation: explicit `DELEGATE:` output from adapter stdout or `/api/webhook/task-complete` creates child cards for direct reports; each child records parent, assignee, and reviewer.
-- Bottom-up completion: parent cards cascade to `done` when the configured child completion policy is satisfied.
+- Bottom-up aggregation: parent cards move to `in_review`/`ready_for_review` and queue integration review when the configured child completion policy is satisfied; they become `done` only after integrated child output is accepted.
 - Card lifecycle metadata: decision mode, rollup status, child policy, child requirement level, weight, duration, budget, and revision limits are stored and exposed through card APIs.
 - `waiting_on_external`: runner/webhook/manual wait flows release execution locks and record external waits; external events wake cards into review, rework, done, or blocked.
 - TaskContextPackage: `/api/cards/:id/context` returns root mission, parent chain, flow map, main cast, message/log/action digests, context requests, and rollup.
@@ -2140,9 +2142,10 @@ Implemented in the current codebase:
 - Deterministic tool registry foundation: tools can be registered, marked required-eligible, and attached to cards as required tools.
 - Parent integrations: parent cards can record accepted/dropped child outputs and conflict notes.
 - API discovery: `/api/help`, `/api/help?format=markdown`, and Web Help cover all registered routes, with route-coverage tests.
-- Normalized lifecycle audit: human, runner, external event, and webhook stage changes write normalized card actions where applicable.
+- Normalized lifecycle audit: human, runner, external event, webhook, and lifecycle stage changes write normalized card actions where applicable, and the Kanban Logs tab exposes those actions.
+- Lifecycle hardening: webhook/runner completion respects the quality review gate, queue backpressure avoids claiming work for busy/unavailable agents, uncaught dispatch failures increment `retry_count`, and manual `cancelled -> done` recovery is allowed for accepted preserved output.
 
-Still future / Phase 23+ hardening:
+Still future / Phase 24+ hardening:
 
 - Full deterministic tool invocation runner, schema-validated tool outputs, and hard enforcement that an agent cannot skip a required tool.
 - Branch-per-agent isolation, automatic PR creation/provider integration, and automatic merge-conflict resolution beyond recorded parent integration/conflict notes.

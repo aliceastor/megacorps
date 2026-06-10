@@ -15,6 +15,19 @@ test('guidance requests still queue review when a reviewer exists', () => {
   assert.equal(decision.topLevelGuidanceAccepted, false);
 });
 
+test('normal dispatch completion enters quality review when a reviewer exists', () => {
+  const decision = dispatchInternals.dispatchCompletionDecision('Completed the requested implementation.', 'reviewer-1');
+  assert.equal(decision.needsHelpReview, false);
+  assert.equal(decision.nextStatus, 'in_review');
+});
+
+test('external completion reports respect the quality review gate', () => {
+  assert.equal(dispatchInternals.completionStatusForQualityGate('done', 'reviewer-1'), 'in_review');
+  assert.equal(dispatchInternals.completionStatusForQualityGate('success', 'reviewer-1'), 'in_review');
+  assert.equal(dispatchInternals.completionStatusForQualityGate('in_review', null), 'done');
+  assert.equal(dispatchInternals.completionStatusForQualityGate('done', null), 'done');
+});
+
 test('delegation parser only accepts explicit delegation blocks', () => {
   assert.deepEqual(dispatchInternals.delegationItems('IDEA 1: Build a music app\n- not a company task'), []);
   assert.deepEqual(dispatchInternals.delegationItems('DELEGATE:\n- Build the UI shell\n- Wire the backend API\n\nSTATUS:\nwaiting'), ['Build the UI shell', 'Wire the backend API']);

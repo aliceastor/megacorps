@@ -14,8 +14,8 @@ The current local stack runs with Docker:
 
 Latest verified baseline:
 
-- Phase 1-22 operational MVP flows are implemented.
-- Company registry page, company memberships, company-scoped RBAC, department setup, reusable company positions, boss-position authority, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, project-scoped direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention/escalation, lifecycle logs, normalized card dependencies, card action timeline, hierarchical lifecycle metadata, rollup/context snapshots, external waits/events, deterministic tool registry, card integrations, knowledge docs, company/department/project goal context, repo-centric project workspace policy with project-level repo URL and work path, work products, React Query browser cache, WebSocket live events, execution locks, stale-lock retry/block recovery, DB-backed task-run queue, idempotent task-complete webhooks, Codex app-server adapter sessions, machine runners, runner heartbeat/claim/complete APIs, Ed25519 agent sessions, CLI YAML apply, runner worktree scaffold, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, and automatic dispatch heartbeat are implemented.
+- Phase 1-23 operational MVP flows are implemented.
+- Company registry page, company memberships, company-scoped RBAC, department setup, reusable company positions, boss-position authority, real top-down O-chart tree canvas, company-scoped runtime presets, runtime health summaries, adapter endpoint configuration, project-scoped direct agent chat, per-task agent/user message boards, bounded Kanban context injection, task intervention/escalation, lifecycle logs, normalized card dependencies, card action timeline, hierarchical lifecycle metadata, rollup/context snapshots, external waits/events, deterministic tool registry, card integrations, knowledge docs, company/department/project goal context, repo-centric project workspace policy with project-level repo URL and work path, work products, React Query browser cache, WebSocket live events, execution locks, stale-lock retry/block recovery, DB-backed task-run queue, idempotent task-complete webhooks, Codex app-server adapter sessions, machine runners, runner heartbeat/claim/complete APIs, Ed25519 agent sessions, CLI YAML apply, runner worktree scaffold, heartbeat runs, cron run history, budget policies, monthly budget reset, approvals, review-gated parent aggregation, queued integration review, queue backpressure, manual cancelled-output acceptance, and automatic dispatch heartbeat are implemented.
 - Deployment is user-managed. Local-only Docker was used for QA in this pass; NAS/server deployment remains user-managed.
 - Browser/plugin QA previously verified signup/login, readable validation errors, Dashboard, Companies, Agents, Kanban, Direct Chat, Logs, Settings, task drawer, task message board comments, mobile narrow layout, and dark-mode agent card text. Current UI IA route smoke also covers Departments, Projects, Workspace, Cron, Admin, and Settings.
 - Kanban now uses one incoming-work stage, `todo`; legacy `backlog` input is normalized to `todo`.
@@ -39,7 +39,8 @@ Latest verified baseline:
 - Round 7 lifecycle audit is implemented: external runner dispatch claims now take task-run execution locks and move cards to `in_progress`, review claims wait for `in_review` or `needs_review`, runner review success approves to `done`, agent-session claim/review/release use the shared actor-aware transition guard, and CLI YAML card dependencies support forward references.
 - Round 8 role prompt expansion is implemented: company Positions can define reusable custom position prompts, Agents can assign a position, Direct Chat/Kanban inject `You are <position> in <department> department of firm <company>.` plus the custom prompt, and CLI YAML apply supports positions.
 - Round 9 hierarchical lifecycle foundation is implemented: new companies default to a single boss `CEO` position, Positions expose rank/company-boss/cross-department authority, root task assignment prefers the boss position, cards store decision mode, rollup status, required child policy, child requirement level, estimated weight/duration, task budget, revision limits, required deterministic tools, context snapshots, context requests, external waits/events with `waiting_on_external`, normalized webhook stage actions, webhook-carried `DELEGATE:` child-card creation, and parent integration records.
-- Current verification for this pass: `npm.cmd run typecheck -w @megacorps/shared`, `npm.cmd test -w @megacorps/shared`, `npm.cmd run typecheck -w @megacorps/server`, `npm.cmd test -w @megacorps/server`, `npm.cmd run typecheck -w apps/web`, `npm.cmd run build -w @megacorps/shared`, `npm.cmd run build -w @megacorps/server`, `npm.cmd run build -w apps/web`, `npm.cmd run dev -w packages/cli -- help`, and `git diff --check` pass. API Help route coverage now includes context requests and webhook delegation semantics. The Next build still logs the known Windows SWC native-module warning, then falls back and completes successfully.
+- Round 10 lifecycle hardening is implemented: parent cards queue integration review instead of auto-completing after child aggregation, webhook/runner completion respects distinct quality reviewers, default worker batch size is 1 with busy/runtime/dependency/readiness backpressure, uncaught dispatch failures increment `retry_count`, cancelled cards can be manually accepted as `done`, and Kanban Logs displays normalized `card_actions`.
+- Current verification for this pass: `npm.cmd run typecheck -w @megacorps/shared`, `npm.cmd test -w @megacorps/shared`, `npm.cmd run typecheck -w @megacorps/server`, `npm.cmd test -w @megacorps/server`, `npm.cmd run typecheck -w @megacorps/web`, `npm.cmd run build -w @megacorps/shared`, `npm.cmd run build -w @megacorps/server`, `npm.cmd run build -w @megacorps/web`, `npm.cmd run dev -w packages/cli -- help`, and `git diff --check` pass. API Help route coverage now includes context requests, webhook delegation semantics, review-gate behavior, and card action detail schema. The Next build still logs the known Windows SWC native-module warning, then falls back and completes successfully.
 
 ## Paperclip Research Summary
 
@@ -126,8 +127,8 @@ Recommended next phases:
 3. Phase 18: Repo-centric project workspace policy and first-class work products. Completed.
 4. Phase 20: Machine runner API, card action timeline, CLI apply, and runner daemon scaffold. Completed.
 5. Phase 21: Reusable company positions and role prompt injection. Completed.
-6. Phase 23: Secret references plus company template import/export.
-7. Phase 24: Runner PR provider integration, streaming progress, sandbox policy, and deeper runtime liveness/recovery.
+6. Phase 24: Secret references plus company template import/export.
+7. Phase 25: Runner PR provider integration, streaming progress, sandbox policy, and deeper runtime liveness/recovery.
 
 ## Current MegaCorps Implementation
 
@@ -272,13 +273,13 @@ Implemented:
 - `task_runs` table records queued/running/success/failed/cancelled task-run attempts.
 - Manual `Run Now` and `Review` enqueue `task_runs` and return `202` with the task-run row.
 - Cron heartbeat scans eligible `todo`, `in_review`, and `needs_review` cards and enqueues dispatch/review task runs instead of executing Hermes work directly inside the heartbeat scan.
-- In-process task-run worker claims queued rows, marks them running, calls `dispatchCard` or `reviewCard`, links the resulting `heartbeat_runs` row, and records outcome, error, output, cost, and duration.
+- In-process task-run worker claims eligible queued rows, marks them running, calls `dispatchCard` or `reviewCard`, links the resulting `heartbeat_runs` row, and records outcome, error, output, cost, and duration.
 - Existing `heartbeat_runs` remains the adapter execution record; `task_runs` is the queue/job attempt record.
 - Logs page shows task runs separately from heartbeat runs.
 - Worker tuning env vars:
   - `TASK_RUN_WORKER_ENABLED`
   - `TASK_RUN_WORKER_INTERVAL_MS`
-  - `TASK_RUN_WORKER_BATCH_SIZE`
+  - `TASK_RUN_WORKER_BATCH_SIZE` (default `1` for sequential backpressure)
   - `TASK_RUN_WORKER_ID`
 
 Known remaining queue work:
@@ -324,8 +325,8 @@ Hierarchy lifecycle:
 - `Split into Sub-tasks` delegates child tasks to direct reports when they exist.
 - Child tasks review back to the parent member by default.
 - Subordinate work moves upward through `in_review`, approval records, and parent-card cascade.
-- Work the assignee cannot solve moves upward through `needs_review`; if no independent reviewer/manager exists, the task becomes `blocked`.
-- Parent tasks close when all child tasks are completed, preserving a top-down delegation and bottom-up reporting loop.
+- Work the assignee cannot solve moves upward through `needs_review`; if no independent reviewer/manager exists, dispatch-side top-level guidance with useful output is accepted as `done`.
+- Parent tasks do not close merely because children are done. When their child completion policy is satisfied, they queue integration review for the parent assignee/reviewer; only accepted integrated output closes the parent.
 
 ### Direct Agent Chat
 
@@ -388,10 +389,10 @@ On each eligible company heartbeat:
 6. Move assigned cards to `todo`.
 7. Dispatch cards to `in_progress`.
 8. Run the selected adapter.
-9. Move completed cards to `in_review` if approval/reviewer exists, otherwise `done`.
-10. Move explicit cannot-complete output or webhook `status=needs_review` to help review when an independent reviewer/manager exists, otherwise `blocked`.
+9. Move completed leaf cards to `in_review` if a distinct reviewer exists, otherwise `done`; webhook/runner `done` and runner `success` follow the same gate.
+10. Move explicit cannot-complete output or webhook `status=needs_review` to help review when an independent reviewer/manager exists, otherwise accept top-level dispatch guidance as `done` when output is present.
 11. Auto-review `in_review` and `needs_review` cards when a reviewer is configured.
-12. Cascade parent cards to `done` when all sub-tasks are done.
+12. Queue parent integration review when all required sub-tasks are accepted; mark parent `done` only after review/integration accepts the aggregation.
 
 ### Cron System
 
@@ -564,6 +565,7 @@ Implemented:
   - cascade
   - comments
   - user interventions
+- `card_actions` for normalized actor/action/from-status/to-status/detail/metadata history, visible in the Kanban Logs tab.
 - `api_events` for API lifecycle:
   - user id
   - method
@@ -650,7 +652,7 @@ Implemented or partially implemented:
 - Pause/resume/fire governance.
 - Task comments and intervention.
 - Task and API logs.
-- Sub-task creation and parent cascade.
+- Sub-task creation and parent integration-review cascade.
 - Company/project/goal ancestry in prompts.
 - Repo-centric project workspace policy with pull-before-run and push/PR completion protocol.
 - Work products for PRs, commits, previews, reports, screenshots, artifacts, and external URLs.

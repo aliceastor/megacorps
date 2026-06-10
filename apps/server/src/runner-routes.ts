@@ -10,6 +10,7 @@ import { activityLog, agentRuntimes, agentSessions, agents, cardComments, compan
 import { publishLiveEvent } from './live.ts';
 import { generateRunnerApiKey, hashRunnerApiKey, requireAgentSessionAuth, requireRunnerAuth } from './runner-auth.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
+import { cascadeParentStatus, completionStatusForQualityGate, createPendingApproval, enqueueTaskRun } from './dispatch.ts';
 
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
@@ -110,13 +111,14 @@ async function createRunnerTaskCompletion(input: {
     : input.body.status === 'cancelled'
       ? 'cancelled'
       : 'success';
+  const qualityReviewerId = input.run.kind === 'dispatch' && (input.body.status === 'success' || input.body.status === 'done') && card.reviewerId && card.reviewerId !== card.assigneeId
+    ? card.reviewerId
+    : null;
   const nextStatus: CardStatus = input.body.status === 'failed'
     ? 'blocked'
     : input.body.status === 'success'
-      ? input.run.kind === 'review' ? 'done' : card.reviewerId ? 'in_review' : 'done'
-      : input.body.status === 'done'
-        ? 'done'
-        : input.body.status;
+      ? input.run.kind === 'review' ? 'done' : completionStatusForQualityGate('success', qualityReviewerId)
+      : completionStatusForQualityGate(input.body.status, qualityReviewerId);
   const fromStatus = cardStatus(card.columnStatus);
   assertStatusMove(fromStatus, nextStatus, 'machine');
   const now = new Date();
@@ -224,6 +226,11 @@ async function createRunnerTaskCompletion(input: {
     details: { taskRunId: input.run.id, runnerId: input.runner.id, status: input.body.status, costUsd: input.body.costUsd, externalWaitId },
   });
   if (comment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: comment.id, cardId: card.id, projectId: card.projectId, action: comment.action });
+  if (nextStatus === 'in_review' && qualityReviewerId && updated) {
+    await createPendingApproval(updated, card.assigneeId, 'Runner completion requires quality review.');
+    await enqueueTaskRun(card.id, 'review', 'queue');
+  }
+  if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
   return updated ?? card;
 }
 
