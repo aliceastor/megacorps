@@ -105,6 +105,7 @@ async function createRunnerTaskCompletion(input: {
 }) {
   const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, input.run.cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
+  const runAgentId = input.run.agentId ?? card.assigneeId;
   const output = [input.body.summary, input.body.output].filter(Boolean).join('\n\n');
   const runStatus = input.body.status === 'failed' || input.body.status === 'blocked'
     ? 'failed'
@@ -156,13 +157,13 @@ async function createRunnerTaskCompletion(input: {
     activeHeartbeatRunId: null,
     updatedAt: now,
   }).where(eq(kanbanCards.id, card.id)).returning();
-  if (card.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, card.assigneeId));
+  if (runAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, runAgentId));
   if (input.body.workProducts.length > 0) {
     await db.insert(workProducts).values(input.body.workProducts.map((product) => ({
       companyId: card.companyId,
       cardId: card.id,
       projectId: card.projectId,
-      agentId: card.assigneeId,
+      agentId: runAgentId,
       taskRunId: input.run.id,
       type: product.type,
       title: product.title,
@@ -194,7 +195,7 @@ async function createRunnerTaskCompletion(input: {
   if (nextStatus !== fromStatus) {
     await recordStageAction({
       cardId: card.id,
-      agentId: card.assigneeId,
+      agentId: runAgentId,
       actor: { type: 'machine', id: input.runner.id, machineRunnerId: input.runner.id },
       fromStatus,
       toStatus: nextStatus,
@@ -205,8 +206,8 @@ async function createRunnerTaskCompletion(input: {
   }
   await db.insert(taskLogs).values({
     cardId: card.id,
-    agentId: card.assigneeId,
-    type: childBlock ? 'children' : 'runner',
+    agentId: runAgentId,
+    type: childBlock ? 'children' : input.run.kind === 'review' ? 'review' : 'runner',
     status: childBlock ? 'queued' : runStatus === 'failed' ? 'failed' : runStatus === 'cancelled' ? 'warning' : 'success',
     message: childBlock ? childBlock.message : input.body.summary ?? `Runner completed task run as ${runStatus}.`,
     output: input.body.output,
@@ -214,16 +215,16 @@ async function createRunnerTaskCompletion(input: {
   });
   const [comment] = await db.insert(cardComments).values({
     cardId: card.id,
-    agentId: card.assigneeId,
-    authorType: 'system',
-    action: `runner_${nextStatus}`,
+    agentId: runAgentId,
+    authorType: runAgentId ? 'agent' : 'system',
+    action: input.run.kind === 'review' ? 'review_note' : `runner_${nextStatus}`,
     body: childBlock ? [childBlock.message, output].filter(Boolean).join('\n\n') : output || `Runner completed task run as ${runStatus}.`,
   }).returning();
   await db.insert(activityLog).values({
     companyId: card.companyId,
     actorType: 'system',
     actorId: input.runner.id,
-    agentId: card.assigneeId,
+    agentId: runAgentId,
     action: `runner.task_${nextStatus}`,
     entityType: 'card',
     entityId: card.id,
@@ -231,7 +232,7 @@ async function createRunnerTaskCompletion(input: {
   });
   if (comment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: comment.id, cardId: card.id, projectId: card.projectId, action: comment.action });
   if (nextStatus === 'in_review' && qualityReviewerId && updated) {
-    await createPendingApproval(updated, card.assigneeId, 'Runner completion requires quality review.');
+    await createPendingApproval(updated, runAgentId, 'Runner completion requires quality review.');
     await enqueueTaskRun(card.id, 'review', 'queue');
   }
   if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
