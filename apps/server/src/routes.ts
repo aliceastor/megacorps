@@ -25,8 +25,10 @@ import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
-  if (!company) throw new Error('Default company missing. Run migrations.');
-  return company.id;
+  if (company) return company.id;
+  const [fallback] = await db.select({ id: companies.id }).from(companies).orderBy(desc(companies.createdAt)).limit(1);
+  if (!fallback) throw new Error('No company exists. Create a company first.');
+  return fallback.id;
 }
 
 function priorityToNumber(priority: string | undefined): number { return priority === 'urgent' ? 3 : priority === 'high' ? 2 : priority === 'low' ? -1 : 0; }
@@ -318,8 +320,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await tx.execute(drizzleSql`SELECT pg_advisory_xact_lock(7042024060602)`);
       const [adminRow] = await tx.select({ id: users.id }).from(users).where(and(eq(users.role, 'admin'), eq(users.status, 'active'))).limit(1);
       if (adminRow) return { blocked: true as const };
-      const [company] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
-      if (!company) throw new Error('Default company missing. Run migrations.');
+      const [defaultCompany] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
+      const [company] = defaultCompany ? [defaultCompany] : await tx.select({ id: companies.id }).from(companies).orderBy(desc(companies.createdAt)).limit(1);
+      if (!company) throw new Error('No company exists. Run migrations or create a company first.');
       const [existingUser] = await tx.select().from(users).where(eq(users.email, input.email)).limit(1);
       const [user] = existingUser
         ? await tx.update(users).set({ name: input.name, passwordHash, role: 'admin', status: 'active', updatedAt: now }).where(eq(users.id, existingUser.id)).returning()
@@ -357,8 +360,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const nextSignupAdmin = !adminRow;
       const role = nextSignupAdmin ? 'admin' : 'viewer';
       const companyRole = nextSignupAdmin ? 'admin' : 'viewer';
-      const [company] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
-      if (!company) throw new Error('Default company missing. Run migrations.');
+      const [defaultCompany] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
+      const [company] = defaultCompany ? [defaultCompany] : await tx.select({ id: companies.id }).from(companies).orderBy(desc(companies.createdAt)).limit(1);
+      if (!company) throw new Error('No company exists. Run migrations or create a company first.');
       const [created] = await tx.insert(users).values({ email: input.email, name: input.name, passwordHash, role, status: 'active' }).returning();
       if (!created) throw new Error('signup_failed');
       const [membership] = await tx.insert(companyMemberships).values({ companyId: company.id, userId: created.id, role: companyRole, status: 'active' }).onConflictDoNothing().returning();
@@ -801,7 +805,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!company) return reply.code(404).send({ error: 'company_not_found' });
     const [
       [departmentUsage],
-      [positionUsage],
       [projectUsage],
       [goalUsage],
       [runtimeUsage],
@@ -811,7 +814,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       [budgetUsage],
       [approvalUsage],
       [inviteUsage],
-      [activityUsage],
       [costUsage],
       [heartbeatUsage],
       [taskRunUsage],
@@ -822,17 +824,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       [promptLogUsage],
     ] = await Promise.all([
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(departments).where(eq(departments.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(positions).where(eq(positions.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(projects).where(eq(projects.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(goals).where(eq(goals.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(agentRuntimes).where(eq(agentRuntimes.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(agentRuntimes).where(and(
+        eq(agentRuntimes.companyId, id),
+        drizzleSql`NOT (${agentRuntimes.name} = 'Local Mock Runtime' AND ${agentRuntimes.adapterType} = 'mock')`,
+      )),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(agents).where(eq(agents.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(kanbanCards).where(eq(kanbanCards.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(knowledgeDocs).where(eq(knowledgeDocs.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(budgetPolicies).where(eq(budgetPolicies.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(approvals).where(eq(approvals.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(userInvites).where(eq(userInvites.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(activityLog).where(eq(activityLog.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(costEvents).where(eq(costEvents.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(heartbeatRuns).where(eq(heartbeatRuns.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(taskRuns).where(eq(taskRuns.companyId, id)),
@@ -844,7 +847,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     ]);
     const usage = {
       departments: departmentUsage?.count ?? 0,
-      positions: positionUsage?.count ?? 0,
       projects: projectUsage?.count ?? 0,
       goals: goalUsage?.count ?? 0,
       agentRuntimes: runtimeUsage?.count ?? 0,
@@ -854,7 +856,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       budgetPolicies: budgetUsage?.count ?? 0,
       approvals: approvalUsage?.count ?? 0,
       invites: inviteUsage?.count ?? 0,
-      activity: activityUsage?.count ?? 0,
       costEvents: costUsage?.count ?? 0,
       heartbeatRuns: heartbeatUsage?.count ?? 0,
       taskRuns: taskRunUsage?.count ?? 0,
@@ -867,6 +868,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const blocking = Object.entries(usage ?? {}).filter(([, count]) => Number(count) > 0);
     if (blocking.length > 0) return reply.code(409).send({ error: 'company_not_empty', blocking: Object.fromEntries(blocking) });
     await db.transaction(async (tx) => {
+      await tx.delete(activityLog).where(eq(activityLog.companyId, id));
+      await tx.delete(positions).where(eq(positions.companyId, id));
+      await tx.delete(agentRuntimes).where(and(
+        eq(agentRuntimes.companyId, id),
+        eq(agentRuntimes.name, 'Local Mock Runtime'),
+        eq(agentRuntimes.adapterType, 'mock'),
+      ));
       await tx.delete(companyMemberships).where(eq(companyMemberships.companyId, id));
       await tx.delete(companies).where(eq(companies.id, id));
     });

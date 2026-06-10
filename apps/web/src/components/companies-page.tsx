@@ -154,7 +154,7 @@ export function CompaniesPage() {
 
   async function deleteCompany() {
     if (!selectedCompany) return;
-    if (!window.confirm(`Delete company "${selectedCompany.name}"? This only succeeds for an empty company.`)) return;
+    if (!window.confirm(`Delete company "${selectedCompany.name}"? Memberships and scaffold records will be removed, but real company content still blocks deletion.`)) return;
     setBusy(true);
     setError('');
     try {

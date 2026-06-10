@@ -172,17 +172,27 @@ INSERT INTO task_logs (card_id, type, status, message, created_at)
 SELECT kc.id, 'stage', 'success', 'Initial stage recorded: ' || kc.column_status, kc.created_at
 FROM kanban_cards kc
 WHERE NOT EXISTS (SELECT 1 FROM task_logs tl WHERE tl.card_id = kc.id AND tl.type = 'stage');`);
-const companies = await sql`SELECT id FROM companies WHERE slug = 'default' LIMIT 1`;
-  if (companies.length === 0) await sql`INSERT INTO companies (name, slug) VALUES ('Default Company', 'default')`;
-  await sql`INSERT INTO company_memberships (company_id, user_id, role, status)
-SELECT (SELECT id FROM companies WHERE slug = 'default' LIMIT 1), u.id, CASE WHEN u.role IN ('admin', 'operator') THEN u.role ELSE 'viewer' END, 'active'
+  let defaultCompanies = await sql`SELECT id FROM companies WHERE slug = 'default' LIMIT 1`;
+  if (defaultCompanies.length === 0) {
+    const anyCompanies = await sql`SELECT id FROM companies LIMIT 1`;
+    if (anyCompanies.length === 0) {
+      await sql`INSERT INTO companies (name, slug) VALUES ('Default Company', 'default')`;
+      defaultCompanies = await sql`SELECT id FROM companies WHERE slug = 'default' LIMIT 1`;
+    }
+  }
+  const [defaultCompany] = defaultCompanies;
+  if (defaultCompany) {
+    const defaultCompanyId = defaultCompany.id;
+    await sql`INSERT INTO company_memberships (company_id, user_id, role, status)
+SELECT ${defaultCompanyId}, u.id, CASE WHEN u.role IN ('admin', 'operator') THEN u.role ELSE 'viewer' END, 'active'
 FROM users u
 WHERE NOT EXISTS (
   SELECT 1 FROM company_memberships cm WHERE cm.user_id = u.id
 )`;
-  await sql`UPDATE agent_runtimes SET company_id = (SELECT id FROM companies WHERE slug = 'default' LIMIT 1) WHERE company_id IS NULL`;
-  const runtimes = await sql`SELECT id FROM agent_runtimes WHERE name = 'Local Mock Runtime' LIMIT 1`;
-  if (runtimes.length === 0) await sql`INSERT INTO agent_runtimes (company_id, name, adapter_type, config, is_active) VALUES ((SELECT id FROM companies WHERE slug = 'default' LIMIT 1), 'Local Mock Runtime', 'mock', '{}', true)`;
+    await sql`UPDATE agent_runtimes SET company_id = ${defaultCompanyId} WHERE company_id IS NULL`;
+    const runtimes = await sql`SELECT id FROM agent_runtimes WHERE name = 'Local Mock Runtime' LIMIT 1`;
+    if (runtimes.length === 0) await sql`INSERT INTO agent_runtimes (company_id, name, adapter_type, config, is_active) VALUES (${defaultCompanyId}, 'Local Mock Runtime', 'mock', '{}', true)`;
+  }
   await sql`
 UPDATE positions p
 SET is_company_boss = true,
