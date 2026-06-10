@@ -3912,6 +3912,28 @@ button.card {
   flex-wrap: wrap;
 }
 
+.kanban-create-modal {
+  width: min(580px, calc(100vw - 40px));
+  max-height: calc(100dvh - 40px);
+  overflow: hidden;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.kanban-create-modal-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+  display: grid;
+  gap: 12px;
+}
+
+.kanban-create-modal-footer {
+  padding-top: 2px;
+  display: grid;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
 .kanban-columns {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
@@ -5592,6 +5614,10 @@ button.agent-node-card {
   .kanban-detail-overlay {
     padding: 12px;
     align-items: stretch;
+  }
+  .kanban-create-modal {
+    width: 100%;
+    max-height: calc(100dvh - 24px);
   }
   .page-head { flex-direction: column; }
   .page-head h1 { font-size: 24px; }
