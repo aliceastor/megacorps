@@ -164,6 +164,7 @@ export const runnerTaskCompleteSchema = z.object({
   output: z.string().max(100_000).optional(),
   error: z.string().trim().max(4000).nullable().optional(),
   costUsd: z.number().nonnegative().optional(),
+  pollIntervalSeconds: z.number().int().min(30).max(86_400).nullable().optional(),
   workProducts: z.array(z.object({
     type: z.enum(['report', 'file', 'preview_url', 'pull_request', 'commit', 'screenshot', 'artifact', 'external']).default('external'),
     title: z.string().trim().min(1).max(200),
@@ -344,6 +345,7 @@ export const createExternalWaitSchema = z.object({
   externalId: z.string().trim().max(200).nullable().optional(),
   externalUrl: z.string().trim().max(2000).nullable().optional(),
   timeoutAt: z.string().datetime().nullable().optional(),
+  pollIntervalSeconds: z.number().int().min(30).max(86_400).nullable().optional(),
 });
 
 export const createExternalEventSchema = z.object({

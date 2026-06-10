@@ -183,6 +183,7 @@ async function createRunnerTaskCompletion(input: {
       provider: externalProduct?.repoProvider ?? (externalProduct?.pullRequestUrl ? 'git' : 'external'),
       externalId: externalProduct?.commitSha ?? externalProduct?.branch ?? null,
       externalUrl: externalProduct?.pullRequestUrl ?? externalProduct?.url ?? null,
+      pollIntervalSeconds: input.body.pollIntervalSeconds ?? null,
       status: 'waiting',
     }).returning();
     externalWaitId = wait?.id ?? null;
@@ -223,7 +224,7 @@ async function createRunnerTaskCompletion(input: {
     action: `runner.task_${nextStatus}`,
     entityType: 'card',
     entityId: card.id,
-    details: { taskRunId: input.run.id, runnerId: input.runner.id, status: input.body.status, costUsd: input.body.costUsd, externalWaitId },
+    details: { taskRunId: input.run.id, runnerId: input.runner.id, status: input.body.status, costUsd: input.body.costUsd, externalWaitId, pollIntervalSeconds: input.body.pollIntervalSeconds ?? null },
   });
   if (comment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: comment.id, cardId: card.id, projectId: card.projectId, action: comment.action });
   if (nextStatus === 'in_review' && qualityReviewerId && updated) {

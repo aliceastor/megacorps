@@ -324,6 +324,7 @@ export async function registerLifecycleRoutes(app: FastifyInstance): Promise<voi
       externalId: input.externalId ?? null,
       externalUrl: input.externalUrl ?? null,
       timeoutAt: input.timeoutAt ? new Date(input.timeoutAt) : null,
+      pollIntervalSeconds: input.pollIntervalSeconds ?? null,
       status: 'waiting',
     }).returning();
     const [updated] = await db.update(kanbanCards).set({
@@ -337,7 +338,7 @@ export async function registerLifecycleRoutes(app: FastifyInstance): Promise<voi
     }).where(eq(kanbanCards.id, access.card.id)).returning();
     await db.update(taskRuns).set({ status: 'success', completedAt: now, lockedBy: null, lockedAt: null, output: `Waiting on external ${input.provider}: ${input.waitingFor}`, updatedAt: now }).where(and(eq(taskRuns.cardId, access.card.id), eq(taskRuns.status, 'running')));
     if (access.card.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, access.card.assigneeId));
-    await recordStageAction({ cardId: access.card.id, agentId: access.card.assigneeId, actor: { type: 'user', id: access.user.id, userId: access.user.id }, fromStatus, toStatus: 'waiting_on_external', action: 'wait_external', detail: `Waiting on ${input.provider}: ${input.waitingFor}.`, metadata: { externalWaitId: wait?.id } });
+    await recordStageAction({ cardId: access.card.id, agentId: access.card.assigneeId, actor: { type: 'user', id: access.user.id, userId: access.user.id }, fromStatus, toStatus: 'waiting_on_external', action: 'wait_external', detail: `Waiting on ${input.provider}: ${input.waitingFor}.`, metadata: { externalWaitId: wait?.id, pollIntervalSeconds: input.pollIntervalSeconds ?? null } });
     await db.insert(taskLogs).values({ cardId: access.card.id, agentId: access.card.assigneeId, type: 'webhook', status: 'queued', message: `Waiting on external ${input.provider}: ${input.waitingFor}` });
     publishLiveEvent({ type: 'card.updated', companyId: access.card.companyId, entityType: 'card', entityId: access.card.id, cardId: access.card.id, projectId: access.card.projectId, action: 'card.waiting_on_external' });
     return reply.code(201).send({ wait, card: updated });

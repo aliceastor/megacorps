@@ -3,9 +3,10 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, BriefcaseBusiness, Building2, ChartGantt, CircleHelp, Clock3, FileClock, FolderGit2, FolderOpen, Kanban, LayoutDashboard, Languages, LogOut, Menu, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, User, Check, type LucideIcon } from 'lucide-react';
+import { BookOpen, BriefcaseBusiness, Building2, ChartGantt, CircleHelp, Clock3, FileClock, FolderGit2, FolderOpen, Kanban, LayoutDashboard, Languages, LogOut, PanelLeftClose, PanelLeftOpen, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, User, Check, type LucideIcon } from 'lucide-react';
 import { useLocale, localeList, localeNames } from '@/lib/locale-context';
 import { api } from '@/lib/api';
+import { AppMouseMotion } from '@/components/app-mouse-motion';
 
 type NavItem = { href: string; labelKey: string; fallback: string; icon: LucideIcon; level?: number; exact?: boolean };
 
@@ -32,10 +33,16 @@ const utilityNav: NavItem[] = [
 const adminNav = { href: '/admin', labelKey: 'nav.admin', fallback: 'Admin', icon: ShieldCheck };
 const USER_EMAIL_STORAGE_KEY = 'megacorps.userEmail';
 const USER_ROLE_STORAGE_KEY = 'megacorps.userRole';
+const SIDEBAR_OPEN_STORAGE_KEY = 'megacorps.sidebarOpen';
 
 function readBrowserStorage(key: string): string {
   if (typeof window === 'undefined') return '';
   return window.localStorage.getItem(key) ?? '';
+}
+
+function readSidebarOpen(): boolean {
+  if (typeof window === 'undefined') return true;
+  return window.localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY) !== 'false';
 }
 
 function Dropdown({ open, onClose, children, style }: { open: boolean; onClose: () => void; children: React.ReactNode; style?: React.CSSProperties }) {
@@ -74,7 +81,7 @@ function titleKey(title: string): string {
 }
 
 export function AppShell({ title, children }: { title: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(readSidebarOpen);
   const [userOpen, setUserOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const [isDark, setIsDark] = useState(true);
@@ -105,6 +112,14 @@ export function AppShell({ title, children }: { title: string; children: React.R
     setIsDark(!isDark);
   }
 
+  function toggleSidebar() {
+    setOpen((current) => {
+      const next = !current;
+      window.localStorage.setItem(SIDEBAR_OPEN_STORAGE_KEY, String(next));
+      return next;
+    });
+  }
+
   async function handleLogout() {
     try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
     localStorage.removeItem(USER_EMAIL_STORAGE_KEY);
@@ -113,13 +128,14 @@ export function AppShell({ title, children }: { title: string; children: React.R
   }
 
   return <div className={`app-frame ${open ? 'sidebar-open' : 'sidebar-compact'}`}>
+    <AppMouseMotion />
     <aside className="sidebar">
       <div className="sidebar-head">
-        <button className="btn icon-btn sidebar-toggle" aria-label="Toggle sidebar" onClick={() => setOpen(!open)}><Menu size={18} /></button>
         <Link href="/dashboard" className="brand-lockup" title="MegaCorps Dashboard">
           <span className="brand-mark">MC</span>
           {open && <div><b>MegaCorps</b><span>Agent Company OS</span></div>}
         </Link>
+        <button className="btn icon-btn sidebar-toggle" aria-label="Toggle sidebar" title={open ? 'Collapse sidebar' : 'Expand sidebar'} onClick={toggleSidebar}>{open ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}</button>
       </div>
       <div className="sidebar-body">
         <nav className="nav-list" aria-label="Primary">

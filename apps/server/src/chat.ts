@@ -80,7 +80,20 @@ async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, pr
   ].filter(Boolean).join('\n');
 }
 
-function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string): string {
+function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string, continuation = false): string {
+  if (continuation) {
+    const latest = [...history].reverse().find((message) => message.authorType === 'user') ?? history[history.length - 1];
+    return [
+      'Continue the existing Direct Chat thread.',
+      'The company, goal, Kanban, and earlier conversation context were already provided in prior turns for this chat session. Do not ask the user to repeat them unless genuinely ambiguous.',
+      [
+        `Agent name: ${agent.name}`,
+        `Adapter: ${agent.adapterType}`,
+      ].join('\n'),
+      'Latest user message:',
+      latest ? latest.body : '',
+    ].filter(Boolean).join('\n\n');
+  }
   return [
     company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
     `Goal context:\n${goalContext}`,
@@ -271,10 +284,6 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         projectId: session.projectId,
         data: { agentId: agent.id, runId: run.id },
       });
-      const recent = await db.select().from(chatMessages).where(eq(chatMessages.sessionId, session.id)).orderBy(desc(chatMessages.createdAt)).limit(30);
-      const kanbanContext = await buildCompanyKanbanContext(session.companyId, { focusAgentId: agent.id, projectId: session.projectId ?? null, budgetChars: 20_000 });
-      const goalContext = await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
-      const prompt = buildChatPrompt(company, agent, recent.reverse(), kanbanContext, goalContext);
       const adapter = getAdapter(agent.adapterType ?? 'hermes');
       const adapterSession = agent.adapterType === 'codex-app'
         ? await findAdapterSession({
@@ -287,7 +296,15 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
           kind: 'chat',
         })
         : null;
-      const executionAgent = await buildExecutionAgent(agent, adapterSession?.adapterSessionId ?? session.agentSessionId ?? null);
+      const existingChatSessionId = adapterSession?.adapterSessionId ?? session.agentSessionId ?? null;
+      const handOffContextToAdapter = Boolean(existingChatSessionId);
+      const recentLimit = handOffContextToAdapter ? 1 : 30;
+      const recent = await db.select().from(chatMessages).where(eq(chatMessages.sessionId, session.id)).orderBy(desc(chatMessages.createdAt)).limit(recentLimit);
+      const history = recent.reverse();
+      const kanbanContext = handOffContextToAdapter ? '' : await buildCompanyKanbanContext(session.companyId, { focusAgentId: agent.id, projectId: session.projectId ?? null, budgetChars: 20_000 });
+      const goalContext = handOffContextToAdapter ? '' : await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
+      const prompt = buildChatPrompt(company, agent, history, kanbanContext, goalContext, handOffContextToAdapter);
+      const executionAgent = await buildExecutionAgent(agent, existingChatSessionId);
       const chatTask = { id: `chat-${session.id}`, title: session.title, body: prompt, timeoutSeconds: 300, kind: 'chat' as const };
       await recordPromptLog({
         companyId: session.companyId,
@@ -299,7 +316,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         adapterType: agent.adapterType ?? 'hermes',
         title: session.title,
         prompt: promptSnapshotForAdapter(executionAgent, chatTask),
-        metadata: { adapterSessionId: adapterSession?.adapterSessionId ?? session.agentSessionId ?? null, userMessageId: userMessage.id, megacorpsPromptChars: prompt.length },
+        metadata: { adapterSessionId: existingChatSessionId, userMessageId: userMessage.id, megacorpsPromptChars: prompt.length, contextMode: handOffContextToAdapter ? 'adapter_session_continuation' : 'full_bootstrap' },
       });
       const result = await adapter.dispatch(executionAgent, chatTask);
       if (agent.adapterType === 'codex-app') {

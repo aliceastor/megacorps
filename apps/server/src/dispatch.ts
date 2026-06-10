@@ -21,7 +21,9 @@ type ProjectRow = typeof projects.$inferSelect;
 type RuntimeRow = typeof agentRuntimes.$inferSelect;
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
+type AdapterSessionRow = NonNullable<Awaited<ReturnType<typeof findAdapterSession>>>;
 type KanbanContextOptions = { focusCardId?: string; focusAgentId?: string | null; budgetChars?: number; projectId?: string | null };
+type PromptBuildOptions = { continuation?: boolean; since?: Date | null; kind?: TaskRunKind };
 type LogStatus = 'queued' | 'running' | 'success' | 'warning' | 'failed';
 type TaskRunKind = 'dispatch' | 'review';
 type TaskRunSource = 'manual' | 'loop' | 'startup' | 'queue';
@@ -187,6 +189,7 @@ function projectGitProtocol(project: ProjectRow | null | undefined, card: CardRo
     project.testCommand ? `7. Validate with: ${project.testCommand}` : '7. Run the most relevant tests/checks available in the repo/work path.',
     project.pushAfterRun === false ? '8. Push-after-run is disabled; report the local result and blocker clearly.' : `8. Commit and push your branch when work is complete. Prefer a pull request when policy is ${project.completionPolicy ?? 'push_or_pr'}.`,
     '9. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, or external metadata as applicable. Never use runtime-local file paths as the final artifact reference unless the user explicitly asked for local-only work.',
+    '10. If you report status=waiting_on_external, include pollIntervalSeconds when polling is appropriate. Choose the interval yourself based on the external system, minimum 30 seconds.',
   ].join('\n');
 }
 
@@ -574,27 +577,30 @@ export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: st
   };
 }
 
-async function scopedAdapterSessionId(card: CardRow, agent: AgentRow, kind: TaskRunKind): Promise<string | null> {
-  if (agent.adapterType !== 'codex-app') return null;
-  const session = await findAdapterSession({
+function supportsScopedKanbanAdapterSession(adapterType?: string | null): boolean {
+  return adapterType === 'codex-app' || adapterType === 'hermes' || adapterType === 'hermes-ssh';
+}
+
+async function scopedAdapterSession(card: CardRow, agent: AgentRow, kind: TaskRunKind): Promise<AdapterSessionRow | null> {
+  if (!supportsScopedKanbanAdapterSession(agent.adapterType)) return null;
+  return findAdapterSession({
     companyId: card.companyId,
     agentId: agent.id,
     runtimeId: agent.runtimeId,
-    adapterType: agent.adapterType,
+    adapterType: agent.adapterType ?? 'hermes',
     scopeType: 'card',
     scopeId: card.id,
     kind,
   });
-  return session?.adapterSessionId ?? null;
 }
 
 async function rememberTaskAdapterSession(card: CardRow, agent: AgentRow, kind: TaskRunKind, result: { sessionId: string; turnId?: string | null }, taskRunId?: string | null): Promise<void> {
-  if (agent.adapterType !== 'codex-app') return;
+  if (!supportsScopedKanbanAdapterSession(agent.adapterType)) return;
   await rememberAdapterSession({
     companyId: card.companyId,
     agentId: agent.id,
     runtimeId: agent.runtimeId,
-    adapterType: agent.adapterType,
+    adapterType: agent.adapterType ?? 'hermes',
     scopeType: 'card',
     scopeId: card.id,
     kind,
@@ -925,9 +931,10 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
 
   try {
     const adapter = getAdapter(agent.adapterType ?? 'hermes');
-    const adapterSessionId = await scopedAdapterSessionId(card, agent, 'dispatch');
-    const executionAgent = await buildExecutionAgent(agent, agent.adapterType === 'codex-app' ? adapterSessionId : undefined);
-    const taskPrompt = await buildTaskPrompt(card);
+    const adapterSession = await scopedAdapterSession(card, agent, 'dispatch');
+    const adapterSessionId = adapterSession?.adapterSessionId ?? null;
+    const executionAgent = await buildExecutionAgent(agent, adapterSessionId);
+    const taskPrompt = await buildTaskPrompt(card, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'dispatch' });
     const task = { id: card.id, title: card.title, body: taskPrompt, timeoutSeconds: 300, taskRunId: options.taskRunId };
     await recordPromptLog({
       companyId: card.companyId,
@@ -941,7 +948,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       adapterType: agent.adapterType ?? 'hermes',
       title: card.title,
       prompt: promptSnapshotForAdapter(executionAgent, task),
-      metadata: { adapterSessionId, source, megacorpsPromptChars: taskPrompt.length },
+      metadata: { adapterSessionId, source, megacorpsPromptChars: taskPrompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
     const result = await adapter.dispatch(executionAgent, task);
     await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
@@ -1007,6 +1014,14 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       for (const child of delegatedRows) await enqueueTaskRun(child.id, 'dispatch', 'queue');
       if (!updated) throw new Error('card_update_failed');
       return updated;
+    }
+    if (collaborationModeRequiresDelegation(card)) {
+      const directReports = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, card.companyId), eq(agents.bossId, agent.id), eq(agents.isActive, true), isNull(agents.deletedAt))).limit(1);
+      if (directReports.length > 0) {
+        await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+        await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
+        return handleDispatchFailure(card, agent, new Error('collaboration_mode_requires_delegation: return a DELEGATE: block for direct reports instead of completing this card directly.'), run.id, options.taskRunId);
+      }
     }
     const effectiveReviewerId = resolveEffectiveReviewerId(card, agent);
     const { needsHelpReview, nextStatus, topLevelGuidanceAccepted } = dispatchCompletionDecision(result.output, effectiveReviewerId);
@@ -1133,9 +1148,10 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
   try {
     const adapter = getAdapter(reviewer.adapterType ?? 'hermes');
     const promptCard = reviewerId === card.reviewerId ? card : { ...card, reviewerId };
-    const adapterSessionId = await scopedAdapterSessionId(card, reviewer, 'review');
-    const executionAgent = await buildExecutionAgent(reviewer, reviewer.adapterType === 'codex-app' ? adapterSessionId : undefined);
-    const reviewPrompt = await buildReviewPrompt(promptCard);
+    const adapterSession = await scopedAdapterSession(card, reviewer, 'review');
+    const adapterSessionId = adapterSession?.adapterSessionId ?? null;
+    const executionAgent = await buildExecutionAgent(reviewer, adapterSessionId);
+    const reviewPrompt = await buildReviewPrompt(promptCard, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'review' });
     const reviewTask = { id: card.id, title: `Review: ${card.title}`, body: reviewPrompt, timeoutSeconds: 180, taskRunId: options.taskRunId };
     await recordPromptLog({
       companyId: card.companyId,
@@ -1149,7 +1165,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       adapterType: reviewer.adapterType ?? 'hermes',
       title: reviewTask.title,
       prompt: promptSnapshotForAdapter(executionAgent, reviewTask),
-      metadata: { adapterSessionId, reviewMode, megacorpsPromptChars: reviewPrompt.length },
+      metadata: { adapterSessionId, reviewMode, megacorpsPromptChars: reviewPrompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
     const result = await adapter.dispatch(executionAgent, reviewTask);
     await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
@@ -1292,6 +1308,9 @@ export async function decomposeCard(cardId: string): Promise<CardRow[]> {
       assigneeId: delegate?.id ?? parent.assigneeId,
       reviewerId: delegate ? parent.assigneeId : parent.reviewerId,
       requiresApproval: parent.requiresApproval || Boolean(delegate),
+      decisionMode: parent.decisionMode,
+      requiredChildPolicy: parent.requiredChildPolicy,
+      childRequirementLevel: parent.childRequirementLevel,
       createdBy: parent.createdBy,
     };
   })).returning();
@@ -1328,6 +1347,9 @@ export async function createDelegatedSubtasks(parent: CardRow, leader: AgentRow,
       assigneeId: delegate.id,
       reviewerId: leader.id,
       requiresApproval: true,
+      decisionMode: parent.decisionMode,
+      requiredChildPolicy: parent.requiredChildPolicy,
+      childRequirementLevel: parent.childRequirementLevel,
       createdBy: parent.createdBy,
       maxRetries: parent.maxRetries,
     };
@@ -1643,6 +1665,25 @@ function compactCardLine(card: CardRow, agentById: Map<string, AgentRow>): strin
   ].join(' | ');
 }
 
+function ancestorChain(card: CardRow, companyCards: CardRow[]): CardRow[] {
+  const byId = new Map(companyCards.map((row) => [row.id, row]));
+  const ancestors: CardRow[] = [];
+  const seen = new Set<string>();
+  let current: CardRow | undefined = card;
+  while (current?.parentCardId && !seen.has(current.parentCardId)) {
+    seen.add(current.parentCardId);
+    const parent = byId.get(current.parentCardId);
+    if (!parent) break;
+    ancestors.unshift(parent);
+    current = parent;
+  }
+  return ancestors;
+}
+
+function collaborationModeRequiresDelegation(card: CardRow): boolean {
+  return card.decisionMode === 'delegate';
+}
+
 function hasProjectScope(options: KanbanContextOptions): boolean {
   return Object.prototype.hasOwnProperty.call(options, 'projectId');
 }
@@ -1735,6 +1776,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
 
   if (focusCard) {
     const parent = focusCard.parentCardId ? companyCards.find((card) => card.id === focusCard.parentCardId) : undefined;
+    const ancestors = ancestorChain(focusCard, companyCards);
     const children = companyCards.filter((card) => card.parentCardId === focusCard.id);
     const deps = (focusCard.dependencyCardIds ?? []).map((id) => companyCards.find((card) => card.id === id)).filter((card): card is CardRow => Boolean(card));
     const focusAssignee = focusCard.assigneeId ? agentById.get(focusCard.assigneeId) : undefined;
@@ -1778,6 +1820,23 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
       focusCard.executionLog ? `Latest execution output:\n${clipText(focusCard.executionLog, 6000)}` : '',
     ].filter(Boolean).join('\n'), 14000);
 
+    if (ancestors.length > 0) {
+      addContextSection(state, 'Upstream Task Chain Full Context', [
+        `Path: ${[...ancestors, focusCard].map((card) => card.title).join(' > ')}`,
+        ...ancestors.map((ancestor, index) => [
+          `## Ancestor ${index + 1}: ${ancestor.title}`,
+          `ID: ${ancestor.id}`,
+          `Stage: ${ancestor.columnStatus ?? 'todo'}`,
+          `Decision mode: ${ancestor.decisionMode ?? 'not set'}`,
+          `Assignee: ${ancestor.assigneeId ? agentById.get(ancestor.assigneeId)?.name ?? ancestor.assigneeId : 'unassigned'}`,
+          `Reviewer: ${ancestor.reviewerId ? agentById.get(ancestor.reviewerId)?.name ?? ancestor.reviewerId : 'none'}`,
+          `Body:\n${clipText(ancestor.body, 5000)}`,
+          ancestor.executionLog ? `Latest execution output:\n${clipText(ancestor.executionLog, 4000)}` : '',
+          ancestor.reviewFeedback ? `Review feedback:\n${clipText(ancestor.reviewFeedback, 2500)}` : '',
+        ].filter(Boolean).join('\n')),
+      ].join('\n\n'), 16000);
+    }
+
     const [messages, actions, logs] = await Promise.all([
       db.select().from(cardComments).where(eq(cardComments.cardId, focusCard.id)).orderBy(desc(cardComments.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
       db.select().from(cardActions).where(eq(cardActions.cardId, focusCard.id)).orderBy(desc(cardActions.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
@@ -1815,72 +1874,136 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
   return state.sections.join('\n\n');
 }
 
-async function buildTaskPrompt(card: CardRow): Promise<string> {
-  const [company] = await db.select().from(companies).where(eq(companies.id, card.companyId)).limit(1);
+function afterPromptSince(value: Date | string | null | undefined, since?: Date | null): boolean {
+  if (!since || !value) return true;
+  return new Date(value).getTime() > since.getTime();
+}
+
+function completionProtocol(card: CardRow): string {
+  return [
+    `If the task is simple enough for you to finish directly, complete it yourself and post the final answer back through the MegaCorps webhook with status="done".`,
+    card.decisionMode === 'delegate'
+      ? `Collaboration Mode is ON. You must delegate meaningful sub-tasks to your direct reports with a DELEGATE: block. Do not mark this card done directly unless there are no active direct reports or the task is already a child card that cannot be decomposed further.`
+      : `Collaboration Mode is OFF. You may decide whether to complete directly or delegate.`,
+    `If you have direct reports and the task should move through the company hierarchy, do not execute every part yourself. Return a delegation plan with this exact heading and bullet format so MegaCorps can create child cards:`,
+    `DELEGATE:`,
+    `- <sub-task title for a direct report>`,
+    `- <another sub-task title for a direct report>`,
+    `Do not call POST /api/cards yourself for delegation. MegaCorps creates child cards from the DELEGATE block. If your runtime reports through the webhook, send status="in_progress" and include the same DELEGATE block in summary/output instead of marking the parent done.`,
+    `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, report URL, screenshot URL, or artifact URL instead of local-only file paths.`,
+    `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
+    `If you are waiting on CI/CD, deploy, external approval, or another external system, use status="waiting_on_external" and include pollIntervalSeconds based on how often that system should be checked.`,
+    `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
+    `If no reviewer/manager exists above you, provide the best final answer instead of escalating; MegaCorps will accept top-level guidance requests as done.`,
+  ].join('\n');
+}
+
+async function buildKanbanDeltaContext(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+  const since = options.since ?? null;
+  const [companyAgents, companyCards, messages, actions, logs, products] = await Promise.all([
+    db.select().from(agents).where(and(eq(agents.companyId, card.companyId), isNull(agents.deletedAt))),
+    db.select().from(kanbanCards).where(and(eq(kanbanCards.companyId, card.companyId), isNull(kanbanCards.deletedAt))),
+    db.select().from(cardComments).where(eq(cardComments.cardId, card.id)).orderBy(desc(cardComments.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
+    db.select().from(cardActions).where(eq(cardActions.cardId, card.id)).orderBy(desc(cardActions.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
+    db.select().from(taskLogs).where(eq(taskLogs.cardId, card.id)).orderBy(desc(taskLogs.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
+    db.select().from(workProducts).where(eq(workProducts.cardId, card.id)).orderBy(desc(workProducts.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
+  ]);
+  const agentById = new Map(companyAgents.map((agent) => [agent.id, agent]));
+  const ancestors = ancestorChain(card, companyCards);
+  const children = companyCards.filter((item) => item.parentCardId === card.id);
+  const deps = (card.dependencyCardIds ?? []).map((id) => companyCards.find((item) => item.id === id)).filter((item): item is CardRow => Boolean(item));
+  const recentMessages = messages.filter((message) => afterPromptSince(message.createdAt, since)).reverse();
+  const recentActions = actions.filter((action) => afterPromptSince(action.createdAt, since)).reverse();
+  const recentLogs = logs.filter((log) => afterPromptSince(log.createdAt, since)).reverse();
+  const recentProducts = products.filter((product) => afterPromptSince(product.createdAt, since)).reverse();
+  return [
+    `Delta since: ${since ? since.toISOString() : 'last adapter turn unknown'}`,
+    `Current task: ${compactCardLine(card, agentById)}`,
+    `Updated at: ${card.updatedAt ? formatDate(card.updatedAt) : 'unknown'}`,
+    `Decision mode: ${card.decisionMode ?? 'not set'}`,
+    `Required child policy: ${card.requiredChildPolicy ?? 'all_required_accepted'}`,
+    `Last error: ${card.lastError ?? 'none'}`,
+    card.reviewFeedback ? `Current review feedback:\n${clipText(card.reviewFeedback, 2500)}` : 'Current review feedback: none',
+    `Parent chain:\n${ancestors.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
+    `Children now:\n${children.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
+    `Dependencies now:\n${deps.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
+    `New message board entries:\n${recentMessages.map((message) => {
+      const author = message.agentId ? agentById.get(message.agentId)?.name ?? message.agentId : message.authorType;
+      return `- ${formatDate(message.createdAt)} | ${author} | ${message.action}: ${clipText(message.body, 900)}`;
+    }).join('\n') || 'none'}`,
+    `New action timeline entries:\n${recentActions.map((action) => [
+      `- ${formatDate(action.createdAt)} | ${action.actorType}:${action.actorId} | ${action.action} | ${action.fromStatus ?? 'none'} -> ${action.toStatus ?? 'none'}`,
+      action.detail ? `  detail: ${clipText(action.detail, 700)}` : '',
+    ].filter(Boolean).join('\n')).join('\n') || 'none'}`,
+    `New lifecycle log entries:\n${recentLogs.map((log) => [
+      `- ${formatDate(log.createdAt)} | ${log.type}/${log.status}: ${clipText(log.message, 700)}`,
+      log.output ? `  output: ${clipText(log.output, 900)}` : '',
+    ].filter(Boolean).join('\n')).join('\n') || 'none'}`,
+    `New work products:\n${recentProducts.map((product) => `- ${product.type}: ${product.title}${product.url ? ` (${product.url})` : product.pullRequestUrl ? ` (${product.pullRequestUrl})` : ''}${product.summary ? ` -- ${clipText(product.summary, 500)}` : ''}`).join('\n') || 'none'}`,
+    'If your adapter session has lost the original task context, do not guess. Use status="needs_review" and say that the session context was lost so a full context retry is needed.',
+  ].join('\n');
+}
+
+async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+  if (options.continuation) {
+    return [
+      'Continue this existing Kanban adapter session.',
+      'Do not rely on stale stage, child, dependency, or review state from memory. Treat the fresh DB delta below as the source of truth for anything that changed since your last turn.',
+      'Fresh Kanban delta:',
+      await buildKanbanDeltaContext(card, options),
+      'Completion protocol:',
+      completionProtocol(card),
+    ].join('\n\n');
+  }
   const [department] = card.departmentId ? await db.select().from(departments).where(eq(departments.id, card.departmentId)).limit(1) : [];
   const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
   const [goal] = card.goalId ? await db.select().from(goals).where(eq(goals.id, card.goalId)).limit(1) : [];
   const [assignee] = card.assigneeId ? await db.select().from(agents).where(and(eq(agents.id, card.assigneeId), isNull(agents.deletedAt))).limit(1) : [];
   const [runtime] = assignee?.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, assignee.runtimeId)).limit(1) : [];
-  const [manager] = assignee?.bossId ? await db.select().from(agents).where(and(eq(agents.id, assignee.bossId), isNull(agents.deletedAt))).limit(1) : [];
-  const [position] = assignee?.positionId ? await db.select().from(positions).where(and(eq(positions.id, assignee.positionId), eq(positions.companyId, card.companyId))).limit(1) : [];
   const reports = assignee ? await db.select().from(agents).where(eq(agents.bossId, assignee.id)) : [];
-  const companyGoals = await db.select().from(goals).where(eq(goals.companyId, card.companyId)).orderBy(desc(goals.createdAt));
-  const applicableGoalRows = applicableGoals(companyGoals, { departmentId: card.departmentId, projectId: card.projectId, selectedGoalId: card.goalId });
   const docs = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.companyId, card.companyId)).orderBy(desc(knowledgeDocs.updatedAt)).limit(10);
   const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.assigneeId });
   const matchingDocs = docs.filter((doc) => {
     const tags = doc.tags ?? [];
     return tags.length === 0 || tags.some((tag) => (card.tags ?? []).includes(tag));
   }).slice(0, 5);
-  const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt });
   return [
-    company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
-    project ? `Project: ${project.name}\n${project.description ?? ''}\n${projectRepoLines(project, runtime).join('\n')}` : '',
-    goal ? `Goal: ${goal.title}\n${goal.body ?? ''}` : '',
-    assignee ? [
-      `Assigned member: ${assignee.name}`,
-      `Position: ${position?.name ?? 'none'}`,
-      positionPrompt ? `Position prompt:\n${positionPrompt}` : '',
-      `Reports to: ${manager?.name ?? 'top-level'}`,
-      `Direct reports: ${reports.length ? reports.map((report) => report.name).join(', ') : 'none'}`,
-    ].join('\n') : '',
     [
-      'Goal context:',
-      `Company goals:\n${companyGoals.filter((row) => !row.departmentId && !row.projectId).map((row) => formatGoal(row)).join('\n') || 'none'}`,
+      'Current assignment:',
+      `Card ID: ${card.id}`,
+      `Title: ${card.title}`,
+      `Stage: ${card.columnStatus ?? 'todo'}`,
+      `Assignee: ${assignee?.name ?? card.assigneeId ?? 'unassigned'}`,
       `Department: ${department?.name ?? 'none'}`,
-      `Department goals:\n${card.departmentId ? companyGoals.filter((row) => row.departmentId === card.departmentId).map((row) => formatGoal(row)).join('\n') || 'none' : 'none'}`,
       `Project: ${project?.name ?? 'none'}`,
-      `Project goals:\n${card.projectId ? companyGoals.filter((row) => row.projectId === card.projectId).map((row) => formatGoal(row)).join('\n') || 'none' : 'none'}`,
-      `Selected card goal:\n${goal ? formatGoal(goal) : 'none'}`,
-      `Applicable goals:\n${applicableGoalRows.map((row) => formatGoal(row)).join('\n') || 'none'}`,
+      `Selected goal: ${goal?.title ?? 'none'}`,
+      `Direct reports: ${reports.length ? reports.map((report) => report.name).join(', ') : 'none'}`,
+      'Use the Kanban context snapshot below as the source of truth for full task details, goals, parent chain, dependencies, message board, lifecycle logs, and prior output.',
     ].join('\n'),
-    `Card: ${card.title}`,
-    `Status: ${card.columnStatus}`,
-    `Priority: ${card.priority ?? 0}`,
-    card.reviewFeedback ? `Previous review feedback:\n${card.reviewFeedback}` : '',
     kanbanContext ? `Kanban context snapshot:\n${kanbanContext}` : '',
     matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
     `Repository protocol:\n${projectGitProtocol(project, card, assignee, runtime)}`,
-    'Task body:',
-    clipText(card.body, TASK_BODY_CHAR_LIMIT),
     'Completion protocol:',
-    [
-      `If the task is simple enough for you to finish directly, complete it yourself and post the final answer back through the MegaCorps webhook with status="done".`,
-      `If you have direct reports and the task should move through the company hierarchy, do not execute every part yourself. Return a delegation plan with this exact heading and bullet format so MegaCorps can create child cards:`,
-      `DELEGATE:`,
-      `- <sub-task title for a direct report>`,
-      `- <another sub-task title for a direct report>`,
-      `Do not call POST /api/cards yourself for delegation. MegaCorps creates child cards from the DELEGATE block. If your runtime reports through the webhook, send status="in_progress" and include the same DELEGATE block in summary/output instead of marking the parent done.`,
-      `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, report URL, screenshot URL, or artifact URL instead of local-only file paths.`,
-      `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
-      `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
-      `If no reviewer/manager exists above you, provide the best final answer instead of escalating; MegaCorps will accept top-level guidance requests as done.`,
-    ].join('\n'),
+    completionProtocol(card),
   ].filter(Boolean).join('\n\n');
 }
 
-async function buildReviewPrompt(card: CardRow): Promise<string> {
+async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+  if (options.continuation) {
+    const helpReview = card.columnStatus === 'needs_review';
+    return [
+      'Continue this existing Kanban review adapter session.',
+      helpReview
+        ? `Help-review the escalated card ${card.id}: ${card.title}.`
+        : `Quality-review or integrate the current card ${card.id}: ${card.title}.`,
+      'Use your existing adapter session memory for the original full context. Treat the fresh DB delta below as source of truth for current stage, messages, child/dependency states, and new work products.',
+      'Fresh Kanban delta:',
+      await buildKanbanDeltaContext(card, options),
+      helpReview
+        ? 'Decision options: APPROVE/DONE if you can finish it directly, REVISION_REQUESTED with concrete guidance if the assignee should retry, or ESCALATE if your manager must decide.'
+        : 'Decision options: PASS/APPROVED if acceptable, REJECT/REVISION_REQUESTED with concrete feedback if it needs more work, or ESCALATE only if your manager must decide.',
+    ].join('\n\n');
+  }
   const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.reviewerId });
   const helpReview = card.columnStatus === 'needs_review';
   const childRows = await db.select().from(kanbanCards).where(and(eq(kanbanCards.parentCardId, card.id), isNull(kanbanCards.deletedAt))).orderBy(kanbanCards.createdAt);
@@ -1920,9 +2043,5 @@ async function buildReviewPrompt(card: CardRow): Promise<string> {
     kanbanContext,
     childRows.length > 0 ? 'Child results and work products:' : '',
     childRows.length > 0 ? childResultSummary || 'No child result details captured.' : '',
-    'Original task:',
-    clipText(card.body, TASK_BODY_CHAR_LIMIT),
-    'Execution output:',
-    clipText(card.executionLog ?? 'No execution log was captured.', 12_000),
   ].join('\n\n');
 }

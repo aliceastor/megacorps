@@ -34,6 +34,12 @@ function agentStatus(agent: Agent): string {
   return 'active';
 }
 
+function agentStatusLabel(agent: Agent): string {
+  if (agent.isBusy) return 'Busy';
+  if (agent.isActive === false) return 'Offline';
+  return 'Idle';
+}
+
 function OChartNode({ agent, agents, departments, positions, selectedId, onSelect, lineage = new Set<string>() }: {
   agent: Agent;
   agents: Agent[];
@@ -51,9 +57,12 @@ function OChartNode({ agent, agents, departments, positions, selectedId, onSelec
   return <div className={`company-o-node${children.length ? ' has-children' : ''}`}>
     <button type="button" className={`company-o-card ${selectedId === agent.id ? 'active' : ''}`} onClick={() => onSelect(agent)}>
       <span className="company-o-copy">
-        <b><span className={`org-agent-dot ${agentStatus(agent)}`} /> {agent.name}</b>
-        <small>{assignment}</small>
-        <small>{agent.adapterType ?? 'mock'}</small>
+        <span className={`org-agent-dot ${agentStatus(agent)}`} />
+        <span className="company-o-copy-text">
+          <b>{agent.name}</b>
+          <small>{assignment}</small>
+          <small>{agent.adapterType ?? 'mock'} | {agentStatusLabel(agent)}</small>
+        </span>
       </span>
     </button>
     {children.length > 0 && <div className="company-o-children">

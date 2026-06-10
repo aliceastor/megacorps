@@ -21,7 +21,7 @@ function usage(): string {
     '  megacorps login --email <email> --password <password> [--api-url <url>]',
     '  megacorps apply -f megacorps.yml [--api-url <url>] [--session <session-cookie-value>]',
     '  megacorps runner register --name <name> --slug <slug> [--company-id <uuid>] [--supported-runtimes mock,codex-app] [--max-concurrent 2] [--workspace-root <path>] [--scratch-root <path>] [--api-url <url>] [--session <session-cookie-value>]',
-    '  megacorps runner daemon --runner-key <key> [--workspace-root <path>] [--supported-runtimes mock,codex-app] [--interval-ms 5000] [--scaffold-status needs_review] [--api-url <url>] [--once] [--no-complete]',
+    '  megacorps runner daemon --runner-key <key> [--workspace-root <path>] [--supported-runtimes mock,codex-app,hermes,hermes-ssh] [--interval-ms 5000] [--scaffold-status needs_review] [--scaffold-poll-interval-seconds 300] [--api-url <url>] [--once] [--no-complete]',
     '',
     'Env:',
     '  MEGACORPS_API_URL, MEGACORPS_SESSION, MEGACORPS_RUNNER_KEY, MEGACORPS_RUNNER_WORKSPACE_ROOT',
@@ -407,10 +407,12 @@ async function runnerDaemon(flags: Flags): Promise<void> {
     console.log(`claimed task run ${taskRun.id}${worktree?.worktreePath ? ` at ${worktree.worktreePath}` : ''}`);
     if (!flagBoolean(flags, 'no-complete')) {
       const status = flagString(flags, 'scaffold-status', 'needs_review');
+      const pollIntervalSeconds = Number(flagString(flags, 'scaffold-poll-interval-seconds', '0'));
       await apiRequest(options, `/api/runner/task-runs/${taskRun.id}/complete`, {
         method: 'POST',
         body: JSON.stringify({
           status,
+          ...(status === 'waiting_on_external' && pollIntervalSeconds >= 30 ? { pollIntervalSeconds } : {}),
           summary: worktree?.worktreePath
             ? `Runner scaffold prepared ${worktree.branch} at ${worktree.worktreePath}.`
             : 'Runner scaffold claimed the task. No repository is configured for this project.',

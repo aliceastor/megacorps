@@ -23,13 +23,12 @@ const statusLabels: Record<CardStatus, LocaleLabels> = {
   blocked: { 'zh-TW': '受阻', en: 'Blocked', ja: 'ブロック' },
   cancelled: { 'zh-TW': '已取消', en: 'Cancelled', ja: 'キャンセル' },
 };
-type StatusGroupId = 'todo' | 'in_progress' | 'review' | 'external_wait' | 'done' | 'blocked_cancelled';
+type StatusGroupId = 'todo' | 'in_progress' | 'review' | 'done' | 'blocked_cancelled';
 type StatusGroup = { id: StatusGroupId; statuses: readonly CardStatus[]; dropStatus: CardStatus };
 const statusGroups: readonly StatusGroup[] = [
   { id: 'todo', statuses: ['todo'], dropStatus: 'todo' },
   { id: 'in_progress', statuses: ['in_progress'], dropStatus: 'in_progress' },
-  { id: 'review', statuses: ['in_review', 'needs_review'], dropStatus: 'in_review' },
-  { id: 'external_wait', statuses: ['waiting_on_external'], dropStatus: 'waiting_on_external' },
+  { id: 'review', statuses: ['in_review', 'needs_review', 'waiting_on_external'], dropStatus: 'in_review' },
   { id: 'done', statuses: ['done'], dropStatus: 'done' },
   { id: 'blocked_cancelled', statuses: ['blocked', 'cancelled'], dropStatus: 'blocked' },
 ] as const;
@@ -37,7 +36,6 @@ const statusGroupLabels: Record<StatusGroupId, LocaleLabels> = {
   todo: statusLabels.todo,
   in_progress: statusLabels.in_progress,
   review: { 'zh-TW': '審核中 / 求助審核', en: 'In Review / Needs Review', ja: 'レビュー中 / 支援レビュー' },
-  external_wait: statusLabels.waiting_on_external,
   done: statusLabels.done,
   blocked_cancelled: { 'zh-TW': '受阻 / 已取消', en: 'Blocked / Cancelled', ja: 'ブロック / キャンセル' },
 };
@@ -57,6 +55,7 @@ type Card = {
   goalId?: string | null;
   parentCardId?: string | null;
   dependencyCardIds?: string[];
+  decisionMode?: string | null;
   requiresApproval?: boolean;
   retryCount?: number;
   maxRetries?: number;
@@ -152,7 +151,6 @@ function statusColor(status: string) {
 
 function statusGroupColor(groupId: StatusGroupId) {
   if (groupId === 'review') return statusColor('in_review');
-  if (groupId === 'external_wait') return statusColor('waiting_on_external');
   if (groupId === 'blocked_cancelled') return statusColor('blocked');
   return statusColor(groupId);
 }
@@ -282,7 +280,23 @@ async function fetchKanbanBoard() {
   return { cards, agents, companies, departments, projects, goals };
 }
 
-function Column({ group, cards, companies, onSelect }: { group: StatusGroup; cards: Card[]; companies: Company[]; onSelect: (card: Card) => void }) {
+function Column({
+  group,
+  cards,
+  companies,
+  childCardsByParent,
+  expandedParentIds,
+  onSelect,
+  onToggleSubtasks,
+}: {
+  group: StatusGroup;
+  cards: Card[];
+  companies: Company[];
+  childCardsByParent: Map<string, Card[]>;
+  expandedParentIds: Set<string>;
+  onSelect: (card: Card) => void;
+  onToggleSubtasks: (cardId: string) => void;
+}) {
   const { locale } = useLocale();
   const { setNodeRef, isOver } = useDroppable({ id: group.id });
   return <section className="kanban-column">
@@ -292,28 +306,44 @@ function Column({ group, cards, companies, onSelect }: { group: StatusGroup; car
       <span style={{ background: 'var(--border)', borderRadius: 99, padding: '2px 8px', fontSize: 12 }}>{cards.length}</span>
     </h3>
     <div ref={setNodeRef} className={`card kanban-column-dropzone ${cards.length === 0 ? 'is-empty' : ''}`} style={{ outline: isOver ? '2px solid var(--primary)' : 'none', transition: 'outline 150ms' }}>
-      <AnimatePresence>
-        {cards.map((card) => <DraggableCard key={card.id} card={card} companyName={companies.find((company) => company.id === card.companyId)?.name} onSelect={onSelect} />)}
-      </AnimatePresence>
+      {cards.map((card) => <DraggableCard
+        key={card.id}
+        card={card}
+        childCards={childCardsByParent.get(card.id) ?? []}
+        subtasksExpanded={expandedParentIds.has(card.id)}
+        companyName={companies.find((company) => company.id === card.companyId)?.name}
+        onSelect={onSelect}
+        onToggleSubtasks={onToggleSubtasks}
+      />)}
     </div>
   </section>;
 }
 
-function DraggableCard({ card, companyName, onSelect }: { card: Card; companyName?: string; onSelect: (card: Card) => void }) {
+function DraggableCard({
+  card,
+  childCards,
+  subtasksExpanded,
+  companyName,
+  onSelect,
+  onToggleSubtasks,
+}: {
+  card: Card;
+  childCards: Card[];
+  subtasksExpanded: boolean;
+  companyName?: string;
+  onSelect: (card: Card) => void;
+  onToggleSubtasks: (cardId: string) => void;
+}) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: card.id });
-  return <motion.article
+  return <article
     ref={setNodeRef}
     data-card-id={card.id}
     tabIndex={0}
     aria-label={`Open task ${card.title}`}
-    layout
-    initial={{ opacity: 0, scale: 0.96, y: 8 }}
-    animate={{ opacity: isDragging ? 0.65 : 1, scale: 1, y: 0 }}
-    exit={{ opacity: 0, scale: 0.94 }}
-    transition={{ duration: 0.2 }}
     className="card kanban-card"
     style={{
       transform: CSS.Translate.toString(transform),
+      opacity: isDragging ? 0.65 : 1,
       borderLeft: `4px solid ${card.priority >= 3 ? '#ef4444' : card.priority >= 2 ? '#f97316' : card.priority <= -1 ? '#60a5fa' : statusColor(card.columnStatus)}`,
     }}
     onClick={() => onSelect(card)}
@@ -347,7 +377,36 @@ function DraggableCard({ card, companyName, onSelect }: { card: Card; companyNam
       {card.costUsd && <span className="badge">${card.costUsd}</span>}
       {card.tags?.map((tag) => <span className="badge" key={tag}>{tag}</span>)}
     </div>
-  </motion.article>;
+    {childCards.length > 0 && <div className="kanban-subtasks">
+      <button
+        type="button"
+        className="kanban-subtask-toggle"
+        aria-expanded={subtasksExpanded}
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggleSubtasks(card.id);
+        }}
+      >
+        <GitBranch size={13} />
+        <span>{subtasksExpanded ? 'Hide subtasks' : 'Subtasks'}</span>
+        <b>{childCards.length}</b>
+      </button>
+      {subtasksExpanded && <div className="kanban-subtask-list">
+        {childCards.map((child) => <button
+          type="button"
+          className="kanban-subtask-chip"
+          key={child.id}
+          onClick={(event) => {
+            event.stopPropagation();
+            onSelect(child);
+          }}
+        >
+          <span>{child.title}</span>
+          <b>{child.columnStatus}</b>
+        </button>)}
+      </div>}
+    </div>}
+  </article>;
 }
 
 function Toast({ message, type, onClose }: { message: string; type: 'success' | 'error'; onClose: () => void }) {
@@ -376,7 +435,7 @@ export function KanbanBoard() {
   const [workProducts, setWorkProducts] = useState<WorkProduct[]>([]);
   const [cardTabCache, setCardTabCache] = useState<Record<string, CardTabCache>>(() => readCardTabCache());
   const [tabLoading, setTabLoading] = useState<Record<CardTabKey, boolean>>({ comments: false, logs: false, actions: false, apiLogs: false, workProducts: false });
-  const [tab, setTab] = useState<'details' | 'comments' | 'logs' | 'workProducts' | 'subtasks'>('details');
+  const [tab, setTab] = useState<'details' | 'comments' | 'thread' | 'logs' | 'workProducts' | 'subtasks'>('details');
   const [commentBody, setCommentBody] = useState('');
   const [commentAction, setCommentAction] = useState<'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run' | 'escalate_to_reviewer'>('comment');
   const [commentAgentId, setCommentAgentId] = useState('');
@@ -392,6 +451,7 @@ export function KanbanBoard() {
   const [newPriority, setNewPriority] = useState<(typeof priorities)[number]>('normal');
   const [newTags, setNewTags] = useState('');
   const [newDependencies, setNewDependencies] = useState<string[]>([]);
+  const [newDecisionMode, setNewDecisionMode] = useState<'agent_decides' | 'collaboration'>('agent_decides');
   const [workProductType, setWorkProductType] = useState<(typeof workProductTypes)[number]>('external');
   const [workProductTitle, setWorkProductTitle] = useState('');
   const [workProductSummary, setWorkProductSummary] = useState('');
@@ -407,6 +467,7 @@ export function KanbanBoard() {
   const [filterProject, setFilterProject] = useState('');
   const [sortMode, setSortMode] = useState<'priority' | 'company' | 'created_desc' | 'created_asc' | 'updated_desc'>('priority');
   const [query, setQuery] = useState('');
+  const [expandedParentIds, setExpandedParentIds] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -568,6 +629,11 @@ export function KanbanBoard() {
     setTab(next);
     if (!selected) return;
     if (next === 'comments') void loadCardComments(selected);
+    if (next === 'thread') {
+      void loadCardLogs(selected);
+      void loadCardActions(selected);
+      void loadCardWorkProducts(selected);
+    }
     if (next === 'logs') {
       void loadCardLogs(selected);
       void loadCardActions(selected);
@@ -637,6 +703,7 @@ export function KanbanBoard() {
       priority: selected.priority,
       tags: selected.tags ?? [],
       dependencyCardIds: selected.dependencyCardIds ?? [],
+      decisionMode: selected.decisionMode ?? null,
       requiresApproval: selected.requiresApproval ?? false,
       maxRetries: selected.maxRetries ?? 3,
     });
@@ -675,20 +742,20 @@ export function KanbanBoard() {
     if (sortMode === 'updated_desc') return Date.parse(b.updatedAt ?? '') - Date.parse(a.updatedAt ?? '');
     return b.priority - a.priority;
   }), [cards, companyNameById, filterAssignee, filterCompany, filterProject, query, sortMode]);
+  const cardIds = useMemo(() => new Set(cards.map((card) => card.id)), [cards]);
+  const boardCards = useMemo(() => visibleCards.filter((card) => !card.parentCardId || !cardIds.has(card.parentCardId)), [cardIds, visibleCards]);
+  const childCardsByParent = useMemo(() => {
+    const next = new Map<string, Card[]>();
+    for (const card of cards) {
+      if (!card.parentCardId || !cardIds.has(card.parentCardId)) continue;
+      const rows = next.get(card.parentCardId) ?? [];
+      rows.push(card);
+      next.set(card.parentCardId, rows);
+    }
+    return next;
+  }, [cardIds, cards]);
   const subtasks = selected ? cards.filter((card) => card.parentCardId === selected.id) : [];
   const ticketThreadEntries = selected ? [
-    ...comments.map((comment) => {
-      const authorAgent = comment.agentId ? agents.find((agent) => agent.id === comment.agentId) : undefined;
-      return {
-        id: `comment-${comment.id}`,
-        createdAt: comment.createdAt,
-        type: comment.action === 'comment' ? 'user_comment' : comment.action,
-        actor: authorAgent?.name ?? (comment.authorType === 'system' ? 'System' : comment.authorType === 'agent' ? 'Agent' : 'User'),
-        tone: comment.authorType === 'system' ? 'system' : comment.authorType === 'agent' || comment.agentId ? 'agent' : 'user',
-        body: comment.body,
-        meta: comment.createdAt ? new Date(comment.createdAt).toLocaleString() : '',
-      };
-    }),
     ...logs.map((log) => ({
       id: `log-${log.id}`,
       createdAt: log.createdAt,
@@ -736,6 +803,7 @@ export function KanbanBoard() {
           assigneeId: newAssignee || null,
           reviewerId: newReviewer || null,
           dependencyCardIds: newDependencies,
+          decisionMode: newDecisionMode === 'collaboration' ? 'delegate' : null,
           requiresApproval,
         }),
       });
@@ -750,6 +818,7 @@ export function KanbanBoard() {
       setNewPriority('normal');
       setNewTags('');
       setNewDependencies([]);
+      setNewDecisionMode('agent_decides');
       setRequiresApproval(false);
       setModalOpen(false);
       void queryClient.invalidateQueries({ queryKey: ['kanbanBoard'] });
@@ -777,6 +846,7 @@ export function KanbanBoard() {
       priority: updated.priority,
       tags: updated.tags ?? [],
       dependencyCardIds: updated.dependencyCardIds ?? [],
+      decisionMode: updated.decisionMode ?? null,
       requiresApproval: updated.requiresApproval ?? false,
       maxRetries: updated.maxRetries ?? 3,
     });
@@ -803,6 +873,7 @@ export function KanbanBoard() {
         priority: priorityValue(priorityNumber(draft.priority ?? selected.priority)),
         tags: draft.tags ?? [],
         dependencyCardIds: draft.dependencyCardIds ?? [],
+        decisionMode: draft.decisionMode ?? null,
         requiresApproval: Boolean(draft.requiresApproval),
         maxRetries: Number(draft.maxRetries ?? selected.maxRetries ?? 3),
       });
@@ -828,6 +899,7 @@ export function KanbanBoard() {
       priority: selected.priority,
       tags: selected.tags ?? [],
       dependencyCardIds: selected.dependencyCardIds ?? [],
+      decisionMode: selected.decisionMode ?? null,
       requiresApproval: selected.requiresApproval ?? false,
       maxRetries: selected.maxRetries ?? 3,
     });
@@ -842,6 +914,15 @@ export function KanbanBoard() {
     if (!card || !nextStatus || card.columnStatus === nextStatus || group?.statuses.includes(card.columnStatus as CardStatus)) return;
     try { await updateCard(card, { columnStatus: nextStatus }); }
     catch (err) { setToast({ message: err instanceof Error ? err.message : 'Failed to move card', type: 'error' }); }
+  }
+
+  function toggleSubtasks(cardId: string) {
+    setExpandedParentIds((current) => {
+      const next = new Set(current);
+      if (next.has(cardId)) next.delete(cardId);
+      else next.add(cardId);
+      return next;
+    });
   }
 
   async function action(path: string, message: string) {
@@ -980,7 +1061,16 @@ export function KanbanBoard() {
     {loading ? <p style={{ textAlign: 'center', opacity: 0.55 }}>Loading...</p> : (
       <DndContext onDragEnd={onDragEnd}>
         <div className="kanban-columns">
-          {statusGroups.map((group) => <Column key={group.id} group={group} companies={companies} cards={cardsForStatusGroup(visibleCards, group)} onSelect={(card) => { setSelected(card); setTab('details'); }} />)}
+          {statusGroups.map((group) => <Column
+            key={group.id}
+            group={group}
+            companies={companies}
+            cards={cardsForStatusGroup(boardCards, group)}
+            childCardsByParent={childCardsByParent}
+            expandedParentIds={expandedParentIds}
+            onSelect={(card) => { setSelected(card); setTab('details'); }}
+            onToggleSubtasks={toggleSubtasks}
+          />)}
         </div>
       </DndContext>
     )}
@@ -1002,6 +1092,12 @@ export function KanbanBoard() {
               <select className="input" value={newPriority} onChange={(e) => setNewPriority(e.target.value as (typeof priorities)[number])}>{priorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select>
             </div>
             <label className="field-label">Tags<input className="input" value={newTags} onChange={(e) => setNewTags(e.target.value)} placeholder="bug, release, research" /></label>
+            <label className="field-label">Collaboration
+              <select className="input" value={newDecisionMode} onChange={(e) => setNewDecisionMode(e.target.value as typeof newDecisionMode)}>
+                <option value="agent_decides">Agent decides</option>
+                <option value="collaboration">Collaboration Mode</option>
+              </select>
+            </label>
             <label className="field-label">Dependencies<DependencyPicker cards={cards} companyId={newCompany} projectId={newProject || null} value={newDependencies} onChange={setNewDependencies} /></label>
             <label className="check-row"><input type="checkbox" checked={requiresApproval} onChange={(e) => setRequiresApproval(e.target.checked)} /> Requires approval</label>
             <button className="btn btn-primary" disabled={busy} onClick={create}><Plus size={15} /> Create</button>
@@ -1012,14 +1108,15 @@ export function KanbanBoard() {
 
     <AnimatePresence>
       {selected && (
-        <motion.aside initial={{ x: 440 }} animate={{ x: 0 }} exit={{ x: 440 }} transition={{ type: 'spring', damping: 25 }}
-          className="card detail-panel">
+        <motion.div className="overlay kanban-detail-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelected(null)}>
+        <motion.aside initial={{ scale: 0.97, y: 16 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.97, y: 16 }} transition={{ duration: 0.16 }}
+          className="card detail-panel" onClick={(event) => event.stopPropagation()}>
           <div className="panel-title">
             <div><h2>{selected.title}</h2><span className="status-pill" style={{ borderColor: statusColor(selected.columnStatus) }}>{selected.columnStatus}</span></div>
             <button className="btn" onClick={() => setSelected(null)}><X size={16} /></button>
           </div>
           <div className="tab-row">
-            {(['details', 'comments', 'logs', 'workProducts', 'subtasks'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => selectTab(next)}>{next === 'comments' ? 'message board' : next === 'workProducts' ? 'work products' : next}</button>)}
+            {(['details', 'comments', 'thread', 'logs', 'workProducts', 'subtasks'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => selectTab(next)}>{next === 'comments' ? 'message board' : next === 'thread' ? 'ticket thread' : next === 'workProducts' ? 'work products' : next}</button>)}
           </div>
           {tab === 'details' && <div style={{ display: 'grid', gap: 12 }}>
             <label className="field-label">Title<input className="input" value={String(draft?.title ?? '')} onChange={(e) => setDraft({ ...(draft ?? {}), title: e.target.value })} /></label>
@@ -1038,6 +1135,12 @@ export function KanbanBoard() {
               <label className="field-label">Priority<select className="input" value={priorityValue(priorityNumber(draft?.priority ?? selected.priority))} onChange={(e) => setDraft({ ...(draft ?? {}), priority: priorityNumber(e.target.value) })}>{priorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
             </div>
             <label className="field-label">Tags<input className="input" value={(draft?.tags ?? []).join(', ')} onChange={(e) => setDraft({ ...(draft ?? {}), tags: parseCsv(e.target.value) })} /></label>
+            <label className="field-label">Collaboration
+              <select className="input" value={draft?.decisionMode === 'delegate' ? 'collaboration' : 'agent_decides'} onChange={(e) => setDraft({ ...(draft ?? {}), decisionMode: e.target.value === 'collaboration' ? 'delegate' : null })}>
+                <option value="agent_decides">Agent decides</option>
+                <option value="collaboration">Collaboration Mode</option>
+              </select>
+            </label>
             <label className="field-label">Dependencies<DependencyPicker cards={cards} companyId={selected.companyId} projectId={(draft?.projectId ?? selected.projectId) || null} excludeCardId={selected.id} value={draft?.dependencyCardIds ?? []} onChange={(next) => setDraft({ ...(draft ?? {}), dependencyCardIds: next })} /></label>
             <div className="form-grid">
               <label className="field-label">Max retries<input className="input" type="number" min={1} max={10} value={Number(draft?.maxRetries ?? 3)} onChange={(e) => setDraft({ ...(draft ?? {}), maxRetries: Number(e.target.value) })} /></label>
@@ -1067,16 +1170,17 @@ export function KanbanBoard() {
           </div>}
           {tab === 'comments' && <div style={{ display: 'grid', gap: 12 }}>
             <div className="panel-title">
-              <div><h2>Ticket Thread</h2><span className="status-pill">{ticketThreadEntries.length} traced entries{tabLoading.comments ? ' / refreshing' : ''}</span></div>
+              <div><h2>Message Board</h2><span className="status-pill">{comments.length} messages{tabLoading.comments ? ' / refreshing' : ''}</span></div>
             </div>
-            <div className="ticket-thread">
-              {ticketThreadEntries.length === 0 && !tabLoading.comments ? <p style={{ opacity: 0.6 }}>No thread entries yet.</p> : ticketThreadEntries.map((entry) => <article className={`ticket-entry ${entry.tone}`} key={entry.id}>
-                <div className="ticket-entry-rail"><span /></div>
-                <div className="ticket-entry-body">
-                  <div className="ticket-entry-head"><b>{entry.actor}</b><span>{entry.type} / {entry.meta}</span></div>
-                  <p>{entry.body}</p>
-                </div>
-              </article>)}
+            <div className="message-board-list">
+              {comments.length === 0 && !tabLoading.comments ? <p style={{ opacity: 0.6 }}>No messages yet.</p> : comments.map((comment) => {
+                const authorAgent = comment.agentId ? agents.find((agent) => agent.id === comment.agentId) : undefined;
+                const author = authorAgent?.name ?? (comment.authorType === 'system' ? 'System' : comment.authorType === 'agent' ? 'Agent' : 'You');
+                return <article className="message-board-entry" key={comment.id}>
+                  <div className="message-board-entry-head"><b>{author}</b><span>{comment.action} / {comment.createdAt ? new Date(comment.createdAt).toLocaleString() : ''}</span></div>
+                  <p>{comment.body}</p>
+                </article>;
+              })}
             </div>
             <div className="form-grid">
               <label className="field-label">Author
@@ -1103,6 +1207,20 @@ export function KanbanBoard() {
               <textarea className="input" rows={5} value={commentBody} onChange={(event) => setCommentBody(event.target.value)} placeholder="Write the instruction, blocker, correction, or context for this task." />
             </label>
             <button className="btn btn-primary" disabled={busy || !commentBody.trim()} onClick={addComment}><MessageSquare size={15} /> Add Message</button>
+          </div>}
+          {tab === 'thread' && <div style={{ display: 'grid', gap: 12 }}>
+            <div className="panel-title">
+              <div><h2>Ticket Thread</h2><span className="status-pill">{ticketThreadEntries.length} traced entries{tabLoading.comments || tabLoading.logs || tabLoading.actions || tabLoading.workProducts ? ' / refreshing' : ''}</span></div>
+            </div>
+            <div className="ticket-thread">
+              {ticketThreadEntries.length === 0 ? <p style={{ opacity: 0.6 }}>No thread entries yet.</p> : ticketThreadEntries.map((entry) => <article className={`ticket-entry ${entry.tone}`} key={entry.id}>
+                <div className="ticket-entry-rail"><span /></div>
+                <div className="ticket-entry-body">
+                  <div className="ticket-entry-head"><b>{entry.actor}</b><span>{entry.type} / {entry.meta}</span></div>
+                  <p>{entry.body}</p>
+                </div>
+              </article>)}
+            </div>
           </div>}
           {tab === 'logs' && <div style={{ display: 'grid', gap: 10 }}>
             {(tabLoading.logs || tabLoading.actions || tabLoading.apiLogs) && <p style={{ opacity: 0.6 }}>Refreshing cached logs...</p>}
@@ -1181,6 +1299,7 @@ export function KanbanBoard() {
             </button>)}
           </div>}
         </motion.aside>
+        </motion.div>
       )}
     </AnimatePresence>
 

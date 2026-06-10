@@ -400,6 +400,7 @@ export const externalWaits = pgTable('external_waits', {
   externalId: text('external_id'),
   externalUrl: text('external_url'),
   timeoutAt: timestamp('timeout_at', { withTimezone: true }),
+  pollIntervalSeconds: integer('poll_interval_seconds'),
   status: text('status').notNull().default('waiting'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
