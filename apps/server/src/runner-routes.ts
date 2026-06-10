@@ -10,7 +10,7 @@ import { activityLog, agentRuntimes, agentSessions, agents, cardComments, compan
 import { publishLiveEvent } from './live.ts';
 import { generateRunnerApiKey, hashRunnerApiKey, requireAgentSessionAuth, requireRunnerAuth } from './runner-auth.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
-import { cascadeParentStatus, completionStatusForQualityGate, createPendingApproval, enqueueTaskRun } from './dispatch.ts';
+import { cascadeParentStatus, completionBlockedByChildren, completionStatusForQualityGate, createPendingApproval, enqueueTaskRun } from './dispatch.ts';
 
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
@@ -114,11 +114,13 @@ async function createRunnerTaskCompletion(input: {
   const qualityReviewerId = input.run.kind === 'dispatch' && (input.body.status === 'success' || input.body.status === 'done') && card.reviewerId && card.reviewerId !== card.assigneeId
     ? card.reviewerId
     : null;
-  const nextStatus: CardStatus = input.body.status === 'failed'
+  const requestedNextStatus: CardStatus = input.body.status === 'failed'
     ? 'blocked'
     : input.body.status === 'success'
       ? input.run.kind === 'review' ? 'done' : completionStatusForQualityGate('success', qualityReviewerId)
       : completionStatusForQualityGate(input.body.status, qualityReviewerId);
+  const childBlock = await completionBlockedByChildren(card, requestedNextStatus);
+  const nextStatus: CardStatus = childBlock ? 'in_progress' : requestedNextStatus;
   const fromStatus = cardStatus(card.columnStatus);
   assertStatusMove(fromStatus, nextStatus, 'machine');
   const now = new Date();
@@ -142,6 +144,7 @@ async function createRunnerTaskCompletion(input: {
   }
   const [updated] = await db.update(kanbanCards).set({
     columnStatus: nextStatus,
+    rollupStatus: childBlock ? 'waiting_on_children' : nextStatus === 'done' ? 'done' : undefined,
     executionLog: output || undefined,
     costUsd: input.body.costUsd?.toString(),
     completedAt: nextStatus === 'done' ? now : nextStatus === 'blocked' || nextStatus === 'cancelled' ? null : undefined,
@@ -203,9 +206,9 @@ async function createRunnerTaskCompletion(input: {
   await db.insert(taskLogs).values({
     cardId: card.id,
     agentId: card.assigneeId,
-    type: 'runner',
-    status: runStatus === 'failed' ? 'failed' : runStatus === 'cancelled' ? 'warning' : 'success',
-    message: input.body.summary ?? `Runner completed task run as ${runStatus}.`,
+    type: childBlock ? 'children' : 'runner',
+    status: childBlock ? 'queued' : runStatus === 'failed' ? 'failed' : runStatus === 'cancelled' ? 'warning' : 'success',
+    message: childBlock ? childBlock.message : input.body.summary ?? `Runner completed task run as ${runStatus}.`,
     output: input.body.output,
     costUsd: input.body.costUsd?.toString(),
   });
@@ -214,7 +217,7 @@ async function createRunnerTaskCompletion(input: {
     agentId: card.assigneeId,
     authorType: 'system',
     action: `runner_${nextStatus}`,
-    body: output || `Runner completed task run as ${runStatus}.`,
+    body: childBlock ? [childBlock.message, output].filter(Boolean).join('\n\n') : output || `Runner completed task run as ${runStatus}.`,
   }).returning();
   await db.insert(activityLog).values({
     companyId: card.companyId,
@@ -224,7 +227,7 @@ async function createRunnerTaskCompletion(input: {
     action: `runner.task_${nextStatus}`,
     entityType: 'card',
     entityId: card.id,
-    details: { taskRunId: input.run.id, runnerId: input.runner.id, status: input.body.status, costUsd: input.body.costUsd, externalWaitId, pollIntervalSeconds: input.body.pollIntervalSeconds ?? null },
+    details: { taskRunId: input.run.id, runnerId: input.runner.id, status: input.body.status, requestedNextStatus, nextStatus, costUsd: input.body.costUsd, externalWaitId, pollIntervalSeconds: input.body.pollIntervalSeconds ?? null, childBlock },
   });
   if (comment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: comment.id, cardId: card.id, projectId: card.projectId, action: comment.action });
   if (nextStatus === 'in_review' && qualityReviewerId && updated) {
@@ -504,6 +507,16 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
     if (!card || card.companyId !== ctx.agent.companyId) return reply.code(404).send({ error: 'card_not_found' });
     if (card.assigneeId && card.assigneeId !== ctx.agent.id) return reply.code(409).send({ error: 'card_assigned_to_other_agent' });
     const nextStatus = body.needsHelp ? 'needs_review' : 'in_review';
+    const childBlock = await completionBlockedByChildren(card, nextStatus);
+    if (childBlock) {
+      return reply.code(409).send({
+        error: 'parent_children_incomplete',
+        message: childBlock.message,
+        childCount: childBlock.childCount,
+        incompleteCount: childBlock.incompleteCount,
+        incompleteTitles: childBlock.incompleteTitles,
+      });
+    }
     const fromStatus = cardStatus(card.columnStatus);
     assertStatusMove(fromStatus, nextStatus, 'agent:worker');
     const [updated] = await db.update(kanbanCards).set({ columnStatus: nextStatus, executionLog: [body.summary, body.output].filter(Boolean).join('\n\n'), updatedAt: new Date() }).where(eq(kanbanCards.id, id)).returning();

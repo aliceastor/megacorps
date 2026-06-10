@@ -28,6 +28,47 @@ test('external completion reports respect the quality review gate', () => {
   assert.equal(dispatchInternals.completionStatusForQualityGate('done', null), 'done');
 });
 
+test('parent completion policy blocks incomplete required child cards', () => {
+  assert.equal(dispatchInternals.childCompletionPolicySatisfied(
+    { requiredChildPolicy: 'all_required_accepted' },
+    [
+      { columnStatus: 'done', childRequirementLevel: 'required', estimatedWeight: null },
+      { columnStatus: 'in_progress', childRequirementLevel: 'required', estimatedWeight: null },
+    ],
+  ), false);
+  assert.equal(dispatchInternals.childCompletionPolicySatisfied(
+    { requiredChildPolicy: 'all_required_accepted' },
+    [
+      { columnStatus: 'done', childRequirementLevel: 'required', estimatedWeight: null },
+      { columnStatus: 'todo', childRequirementLevel: 'optional', estimatedWeight: null },
+    ],
+  ), true);
+});
+
+test('parent completion policy supports non-cancelled and threshold rules', () => {
+  assert.equal(dispatchInternals.childCompletionPolicySatisfied(
+    { requiredChildPolicy: 'all_non_cancelled_accepted' },
+    [
+      { columnStatus: 'done', childRequirementLevel: 'required', estimatedWeight: null },
+      { columnStatus: 'cancelled', childRequirementLevel: 'required', estimatedWeight: null },
+    ],
+  ), true);
+  assert.equal(dispatchInternals.childCompletionPolicySatisfied(
+    { requiredChildPolicy: 'threshold' },
+    [
+      { columnStatus: 'done', childRequirementLevel: 'required', estimatedWeight: '8' },
+      { columnStatus: 'todo', childRequirementLevel: 'required', estimatedWeight: '2' },
+    ],
+  ), true);
+  assert.equal(dispatchInternals.childCompletionPolicySatisfied(
+    { requiredChildPolicy: 'threshold' },
+    [
+      { columnStatus: 'done', childRequirementLevel: 'required', estimatedWeight: '7' },
+      { columnStatus: 'todo', childRequirementLevel: 'required', estimatedWeight: '3' },
+    ],
+  ), false);
+});
+
 test('delegation parser only accepts explicit delegation blocks', () => {
   assert.deepEqual(dispatchInternals.delegationItems('IDEA 1: Build a music app\n- not a company task'), []);
   assert.deepEqual(dispatchInternals.delegationItems('DELEGATE:\n- Build the UI shell\n- Wire the backend API\n\nSTATUS:\nwaiting'), ['Build the UI shell', 'Wire the backend API']);

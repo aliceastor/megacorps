@@ -33,7 +33,7 @@ import {
   toolRegistry,
   workProducts,
 } from './db/schema.ts';
-import { buildCompanyKanbanContext, cascadeParentStatus, enqueueTaskRun } from './dispatch.ts';
+import { buildCompanyKanbanContext, cascadeParentStatus, completionBlockedByChildren, enqueueTaskRun } from './dispatch.ts';
 import { publishLiveEvent } from './live.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
@@ -387,9 +387,13 @@ export async function registerLifecycleRoutes(app: FastifyInstance): Promise<voi
     if (input.status === 'timeout') nextStatus = 'blocked';
     if (nextStatus !== card.columnStatus && nextStatus) {
       const fromStatus = normalizeCardStatus(card.columnStatus) ?? 'todo';
-      const toStatus = normalizeCardStatus(nextStatus) ?? fromStatus;
+      const requestedToStatus = normalizeCardStatus(nextStatus) ?? fromStatus;
+      const childBlock = await completionBlockedByChildren(card, requestedToStatus);
+      const toStatus = childBlock ? 'in_progress' : requestedToStatus;
+      nextStatus = toStatus;
       await db.update(kanbanCards).set({
         columnStatus: toStatus,
+        rollupStatus: childBlock ? 'waiting_on_children' : toStatus === 'done' ? 'done' : undefined,
         lastError: toStatus === 'blocked' ? input.payloadSummary ?? `${input.provider} ${input.eventType} ${input.status}` : null,
         completedAt: toStatus === 'done' ? now : null,
         updatedAt: now,
@@ -401,7 +405,8 @@ export async function registerLifecycleRoutes(app: FastifyInstance): Promise<voi
           : toStatus === 'blocked'
             ? 'block'
             : 'manual_move';
-      await recordStageAction({ cardId: card.id, agentId: card.assigneeId, actor: { type: 'user', id: user.id, userId: user.id }, fromStatus, toStatus, action, detail: `External ${input.provider}/${input.eventType} reported ${input.status}.`, metadata: { externalEventId: event?.id } });
+      await recordStageAction({ cardId: card.id, agentId: card.assigneeId, actor: { type: 'user', id: user.id, userId: user.id }, fromStatus, toStatus, action, detail: childBlock ? `External ${input.provider}/${input.eventType} reported ${input.status}; ${childBlock.message}` : `External ${input.provider}/${input.eventType} reported ${input.status}.`, metadata: { externalEventId: event?.id, requestedToStatus, childBlock } });
+      if (childBlock) await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'children', status: 'queued', message: childBlock.message });
       if (toStatus === 'in_review') await enqueueTaskRun(card.id, 'review', 'queue');
       if (toStatus === 'done') await cascadeParentStatus(card.parentCardId);
     }

@@ -104,7 +104,7 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function dispatchCompletionDecision(output: string | null | undefined, effectiveReviewerId: string | null) {
+function dispatchCompletionDecision(output: string | null | undefined, effectiveReviewerId: string | null): { needsHelpReview: boolean; nextStatus: CardStatus; topLevelGuidanceAccepted: boolean } {
   const needsHelpReview = assigneeNeedsReview(output);
   const nextStatus = needsHelpReview
     ? effectiveReviewerId ? 'needs_review' : 'done'
@@ -117,6 +117,74 @@ export function completionStatusForQualityGate(requestedStatus: CardStatus | 'su
   if (requestedStatus === 'in_review') return qualityReviewerId ? 'in_review' : 'done';
   if (requestedStatus === 'success') return 'done';
   return requestedStatus;
+}
+
+type ChildPolicyCard = Pick<CardRow, 'requiredChildPolicy'>;
+type ChildPolicyRow = Pick<CardRow, 'columnStatus' | 'childRequirementLevel' | 'estimatedWeight'>;
+type ChildBlockRow = ChildPolicyRow & Pick<CardRow, 'title'>;
+
+export type ChildCompletionBlock = {
+  blocked: true;
+  targetStatus: 'done' | 'in_review';
+  childCount: number;
+  incompleteCount: number;
+  incompleteTitles: string[];
+  message: string;
+};
+
+function childWeight(child: Pick<CardRow, 'estimatedWeight'>): number {
+  const weight = Number(child.estimatedWeight ?? 1);
+  return Number.isFinite(weight) && weight > 0 ? weight : 1;
+}
+
+function childIsDone(child: Pick<CardRow, 'columnStatus'>): boolean {
+  return child.columnStatus === 'done';
+}
+
+function childCanBeIgnored(child: Pick<CardRow, 'columnStatus'>): boolean {
+  return child.columnStatus === 'cancelled';
+}
+
+export function childCompletionPolicySatisfied(parent: ChildPolicyCard, children: ChildPolicyRow[]): boolean {
+  if (children.length === 0) return true;
+  const required = children.filter((child) => (child.childRequirementLevel ?? 'required') === 'required');
+  const policy = parent.requiredChildPolicy ?? 'all_required_accepted';
+  if (policy === 'all_non_cancelled_accepted') return children.filter((child) => !childCanBeIgnored(child)).every(childIsDone);
+  if (policy === 'threshold') {
+    const totalWeight = children.reduce((sum, child) => sum + childWeight(child), 0);
+    const doneWeight = children.reduce((sum, child) => sum + (childIsDone(child) ? childWeight(child) : 0), 0);
+    return doneWeight >= totalWeight * 0.8;
+  }
+  if (required.length > 0) return required.every(childIsDone);
+  return children.every((child) => childIsDone(child) || childCanBeIgnored(child));
+}
+
+function blockingChildrenForPolicy(parent: ChildPolicyCard, children: ChildBlockRow[]): ChildBlockRow[] {
+  if (childCompletionPolicySatisfied(parent, children)) return [];
+  const required = children.filter((child) => (child.childRequirementLevel ?? 'required') === 'required');
+  const policy = parent.requiredChildPolicy ?? 'all_required_accepted';
+  if (policy === 'all_non_cancelled_accepted') return children.filter((child) => !childCanBeIgnored(child) && !childIsDone(child));
+  if (policy === 'threshold') return children.filter((child) => !childIsDone(child));
+  if (required.length > 0) return required.filter((child) => !childIsDone(child));
+  return children.filter((child) => !childIsDone(child) && !childCanBeIgnored(child));
+}
+
+export async function completionBlockedByChildren(card: CardRow, targetStatus: CardStatus | string | null | undefined): Promise<ChildCompletionBlock | null> {
+  const normalizedTarget = normalizeCardStatus(targetStatus);
+  if (normalizedTarget !== 'done' && normalizedTarget !== 'in_review') return null;
+  const children = await db.select().from(kanbanCards).where(and(eq(kanbanCards.parentCardId, card.id), isNull(kanbanCards.deletedAt)));
+  if (children.length === 0 || childCompletionPolicySatisfied(card, children)) return null;
+  const blockingChildren = blockingChildrenForPolicy(card, children);
+  const incompleteTitles = blockingChildren.slice(0, 5).map((child) => `${child.title} (${child.columnStatus ?? 'todo'})`);
+  const suffix = blockingChildren.length > incompleteTitles.length ? `, +${blockingChildren.length - incompleteTitles.length} more` : '';
+  return {
+    blocked: true,
+    targetStatus: normalizedTarget,
+    childCount: children.length,
+    incompleteCount: blockingChildren.length,
+    incompleteTitles,
+    message: `Parent cannot move to ${normalizedTarget}; waiting for ${blockingChildren.length}/${children.length} child card(s): ${incompleteTitles.join(', ')}${suffix}.`,
+  };
 }
 
 type ReviewDecision = 'approved' | 'revision_requested' | 'escalate';
@@ -283,6 +351,40 @@ async function addActivity(input: {
     details: input.details ?? {},
   }).returning();
   if (event) publishLiveEvent({ type: 'activity.created', companyId: input.companyId, entityType: input.entityType, entityId: input.entityId, action: input.action, data: { activityId: event.id } });
+}
+
+export async function ensureParentWaitingOnChildren(parentCardId: string | null | undefined, input: {
+  childCount: number;
+  actor: 'decomposition' | 'delegation' | 'webhook' | 'user' | 'system';
+  agentId?: string | null;
+  message?: string;
+}): Promise<CardRow | null> {
+  if (!parentCardId || input.childCount <= 0) return null;
+  const [parent] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, parentCardId), isNull(kanbanCards.deletedAt))).limit(1);
+  if (!parent || parent.columnStatus === 'cancelled') return parent ?? null;
+  const fromStatus = normalizeCardStatus(parent.columnStatus) ?? 'todo';
+  const shouldReopen = fromStatus === 'done' || fromStatus === 'in_review' || fromStatus === 'needs_review';
+  const nextStatus: CardStatus = shouldReopen ? 'in_progress' : fromStatus;
+  const message = input.message ?? `Parent is waiting on ${input.childCount} child card(s) before it can be completed.`;
+  const [updated] = await db.update(kanbanCards).set({
+    columnStatus: shouldReopen ? nextStatus : undefined,
+    rollupStatus: 'waiting_on_children',
+    completedAt: null,
+    updatedAt: new Date(),
+  }).where(eq(kanbanCards.id, parent.id)).returning();
+  if (shouldReopen) await addStageLog(parent.id, input.agentId ?? parent.assigneeId, parent.columnStatus, nextStatus, input.actor);
+  await addTaskLog({ cardId: parent.id, agentId: input.agentId ?? parent.assigneeId, type: 'children', status: 'queued', message });
+  await addActivity({
+    companyId: parent.companyId,
+    actorType: input.agentId ? 'agent' : 'system',
+    actorId: input.agentId ?? input.actor,
+    agentId: input.agentId ?? null,
+    action: shouldReopen ? 'parent.reopened_for_children' : 'parent.waiting_on_children',
+    entityType: 'card',
+    entityId: parent.id,
+    details: { childCount: input.childCount, actor: input.actor },
+  });
+  return updated ?? parent;
 }
 
 async function addTaskRunLog(run: TaskRunRow, status: LogStatus, message: string, output?: string) {
@@ -789,15 +891,8 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
   if (parent.requiredChildPolicy === 'manual') return;
   const children = await db.select().from(kanbanCards).where(and(eq(kanbanCards.parentCardId, parentCardId), isNull(kanbanCards.deletedAt)));
   if (children.length === 0) return;
-  const required = children.filter((child) => (child.childRequirementLevel ?? 'required') === 'required');
   const policy = parent.requiredChildPolicy ?? 'all_required_accepted';
-  const ready = policy === 'all_non_cancelled_accepted'
-    ? children.filter((child) => child.columnStatus !== 'cancelled').every((child) => child.columnStatus === 'done')
-    : policy === 'threshold'
-      ? children.reduce((sum, child) => sum + (child.columnStatus === 'done' ? Number(child.estimatedWeight ?? 1) || 1 : 0), 0) >= children.reduce((sum, child) => sum + (Number(child.estimatedWeight ?? 1) || 1), 0) * 0.8
-      : required.length > 0
-        ? required.every((child) => child.columnStatus === 'done')
-        : children.every((child) => child.columnStatus === 'done' || child.columnStatus === 'cancelled');
+  const ready = childCompletionPolicySatisfied(parent, children);
   if (!ready) return;
   const integrationReviewerId = parent.reviewerId && parent.reviewerId !== parent.assigneeId
     ? parent.reviewerId
@@ -983,6 +1078,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
       const [updated] = await db.update(kanbanCards).set({
         columnStatus: 'in_progress',
+        rollupStatus: 'waiting_on_children',
         executionLog: result.output,
         sessionId: result.sessionId,
         costUsd: result.costUsd.toString(),
@@ -1025,17 +1121,20 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     }
     const effectiveReviewerId = resolveEffectiveReviewerId(card, agent);
     const { needsHelpReview, nextStatus, topLevelGuidanceAccepted } = dispatchCompletionDecision(result.output, effectiveReviewerId);
+    const childBlock = await completionBlockedByChildren(card, nextStatus);
+    const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : nextStatus;
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
     const [updated] = await db.update(kanbanCards).set({
-      columnStatus: nextStatus,
+      columnStatus: effectiveNextStatus,
+      rollupStatus: childBlock ? 'waiting_on_children' : effectiveNextStatus === 'done' ? 'done' : undefined,
       executionLog: result.output,
       sessionId: result.sessionId,
       costUsd: result.costUsd.toString(),
       reviewerId: effectiveReviewerId,
       retryCount: 0,
       nextRunAt: null,
-      completedAt: nextStatus === 'done' ? new Date() : null,
+      completedAt: effectiveNextStatus === 'done' ? new Date() : null,
       lastError: null,
       executionLockId: null,
       executionLockedByAgentId: null,
@@ -1045,13 +1144,13 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, card.id)).returning();
     await releaseExecutionLock(card.id, run.id, result.success ? 'success' : 'failed', result.success ? null : result.output, result.costUsd, result.durationSeconds);
-    await addStageLog(card.id, agent.id, 'in_progress', nextStatus, 'dispatch');
+    if (effectiveNextStatus !== 'in_progress') await addStageLog(card.id, agent.id, 'in_progress', effectiveNextStatus, 'dispatch');
     await addTaskLog({
       cardId: card.id,
       agentId: agent.id,
-      type: needsHelpReview ? 'escalation' : 'dispatch',
-      status: 'success',
-      message: needsHelpReview
+      type: childBlock ? 'children' : needsHelpReview ? 'escalation' : 'dispatch',
+      status: childBlock ? 'queued' : 'success',
+      message: childBlock ? childBlock.message : needsHelpReview
         ? nextStatus === 'needs_review'
           ? 'Assignee requested reviewer guidance; help review queued.'
           : 'Assignee requested guidance but has no reviewer or manager; output accepted as final and card marked done.'
@@ -1063,18 +1162,18 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       durationSeconds: result.durationSeconds,
     });
     await addCardMessage({ cardId: card.id, agentId: agent.id, action: needsHelpReview && nextStatus === 'needs_review' ? 'agent_escalated' : 'agent_update', body: result.output });
-    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: needsHelpReview && nextStatus === 'needs_review' ? 'dispatch.needs_review' : 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, nextStatus, costUsd: result.costUsd, budgetPaused, reviewerId: effectiveReviewerId, escalation: needsHelpReview, topLevelGuidanceAccepted } });
+    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: childBlock ? 'dispatch.waiting_on_children' : needsHelpReview && nextStatus === 'needs_review' ? 'dispatch.needs_review' : 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, requestedStatus: nextStatus, nextStatus: effectiveNextStatus, costUsd: result.costUsd, budgetPaused, reviewerId: effectiveReviewerId, escalation: needsHelpReview, topLevelGuidanceAccepted, childBlock } });
     await completeTaskRun(options.taskRunId, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
-    if (nextStatus === 'in_review') {
+    if (effectiveNextStatus === 'in_review') {
       await createPendingApproval(updated, agent.id, card.reviewerId === effectiveReviewerId ? 'Reviewer approval required' : 'Reports-to review required');
       await enqueueTaskRun(updated.id, 'review', 'queue');
     }
-    if (nextStatus === 'needs_review') {
+    if (effectiveNextStatus === 'needs_review') {
       await createPendingApproval(updated, agent.id, 'Assignee needs reviewer guidance');
       await enqueueTaskRun(updated.id, 'review', 'queue');
     }
-    if (nextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
+    if (effectiveNextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
     return updated;
   } catch (error) {
     return handleDispatchFailure(lockedCard, agent, error, run.id, options.taskRunId);
@@ -1114,8 +1213,32 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     const reason = reviewMode === 'help'
       ? 'Escalation requested but no reviewer or manager is available; output accepted as final.'
       : 'Review requested but no independent reviewer or manager is available; output accepted as final.';
+    const childBlock = await completionBlockedByChildren(card, 'done');
+    if (childBlock) {
+      const [updated] = await db.update(kanbanCards).set({
+        columnStatus: 'in_progress',
+        rollupStatus: 'waiting_on_children',
+        lastError: null,
+        completedAt: null,
+        executionLockId: null,
+        executionLockedByAgentId: null,
+        executionLockedAt: null,
+        executionLockExpiresAt: null,
+        activeHeartbeatRunId: null,
+        updatedAt: new Date(),
+      }).where(eq(kanbanCards.id, card.id)).returning();
+      await addStageLog(card.id, null, card.columnStatus, 'in_progress', 'review');
+      await addTaskLog({ cardId: card.id, type: 'children', status: 'queued', message: childBlock.message });
+      await addCardMessage({ cardId: card.id, authorType: 'system', action: 'review_waiting_on_children', body: childBlock.message });
+      await resolvePendingApproval(card, 'cancelled', childBlock.message);
+      await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'review', action: 'review.waiting_on_children', entityType: 'card', entityId: card.id, details: { reason, mode: reviewMode, childBlock } });
+      await completeTaskRun(options.taskRunId, { status: 'success', output: childBlock.message });
+      if (!updated) throw new Error('card_update_failed');
+      return updated;
+    }
     const [updated] = await db.update(kanbanCards).set({
       columnStatus: 'done',
+      rollupStatus: 'done',
       lastError: null,
       completedAt: new Date(),
       executionLockId: null,
@@ -1243,32 +1366,36 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     }
 
     const rejected = decision === 'revision_requested';
+    const targetStatus: CardStatus = rejected ? 'todo' : 'done';
+    const childBlock = rejected ? null : await completionBlockedByChildren(card, targetStatus);
+    const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : targetStatus;
     const [updated] = await db.update(kanbanCards).set({
-      columnStatus: rejected ? 'todo' : 'done',
+      columnStatus: effectiveNextStatus,
+      rollupStatus: childBlock ? 'waiting_on_children' : effectiveNextStatus === 'done' ? 'done' : undefined,
       reviewFeedback: result.output,
-      completedAt: rejected ? null : new Date(),
+      completedAt: effectiveNextStatus === 'done' ? new Date() : null,
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, card.id)).returning();
-    await addStageLog(card.id, reviewer.id, card.columnStatus, rejected ? 'todo' : 'done', 'review');
+    await addStageLog(card.id, reviewer.id, card.columnStatus, effectiveNextStatus, 'review');
     await addTaskLog({
       cardId: card.id,
       agentId: reviewer.id,
-      type: 'review',
-      status: result.success ? 'success' : 'failed',
-      message: rejected
+      type: childBlock ? 'children' : 'review',
+      status: childBlock ? 'queued' : result.success ? 'success' : 'failed',
+      message: childBlock ? childBlock.message : rejected
         ? reviewMode === 'help' ? 'Reviewer provided guidance; card returned to todo for rework.' : 'Review rejected; card returned to todo.'
         : reviewMode === 'help' ? 'Reviewer resolved the escalated task; card marked done.' : 'Review passed; card marked done.',
       output: result.output,
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
     });
-    await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: rejected ? (reviewMode === 'help' ? 'review_guidance' : 'review_rejected') : 'review_note', body: result.output });
+    await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: childBlock ? 'review_waiting_on_children' : rejected ? (reviewMode === 'help' ? 'review_guidance' : 'review_rejected') : 'review_note', body: childBlock ? `${childBlock.message}\n\n${result.output}` : result.output });
     await db.update(heartbeatRuns).set({ status: result.success ? 'success' : 'failed', completedAt: new Date(), durationSeconds: result.durationSeconds, error: result.success ? null : result.output }).where(eq(heartbeatRuns.id, run.id));
-    await resolvePendingApproval(card, rejected ? (reviewMode === 'help' ? 'revision_requested' : 'rejected') : 'approved', rejected ? result.output : 'Reviewer approved task.', reviewer.id);
-    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: rejected ? (reviewMode === 'help' ? 'review.revision_requested' : 'review.rejected') : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, mode: reviewMode } });
-    await completeTaskRun(options.taskRunId, { status: rejected ? 'failed' : 'success', error: rejected ? result.output : null, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+    await resolvePendingApproval(card, childBlock ? 'cancelled' : rejected ? (reviewMode === 'help' ? 'revision_requested' : 'rejected') : 'approved', childBlock ? childBlock.message : rejected ? result.output : 'Reviewer approved task.', reviewer.id);
+    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: childBlock ? 'review.waiting_on_children' : rejected ? (reviewMode === 'help' ? 'review.revision_requested' : 'review.rejected') : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, mode: reviewMode, childBlock } });
+    await completeTaskRun(options.taskRunId, { status: rejected ? 'failed' : 'success', error: rejected ? result.output : null, output: childBlock ? childBlock.message : result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
-    if (!rejected) await cascadeParentStatus(updated.parentCardId);
+    if (!rejected && !childBlock) await cascadeParentStatus(updated.parentCardId);
     return updated;
   } catch (error) {
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
@@ -1314,6 +1441,14 @@ export async function decomposeCard(cardId: string): Promise<CardRow[]> {
       createdBy: parent.createdBy,
     };
   })).returning();
+  await ensureParentWaitingOnChildren(parent.id, {
+    childCount: rows.length,
+    actor: 'decomposition',
+    agentId: parent.assigneeId,
+    message: directReports.length
+      ? `Parent is waiting on ${rows.length} delegated sub-task(s) before integration.`
+      : `Parent is waiting on ${rows.length} sub-task(s) before completion.`,
+  });
   await addTaskLog({ cardId: parent.id, type: 'decomposition', status: 'success', message: directReports.length ? `Created ${rows.length} sub-task(s) and delegated them to direct reports.` : `Created ${rows.length} sub-task(s).` });
   await addActivity({ companyId: parent.companyId, actorType: 'system', actorId: 'decomposition', agentId: parent.assigneeId, action: 'card.decomposed', entityType: 'card', entityId: parent.id, details: { childCount: rows.length, delegatedToReports: directReports.length > 0 } });
   return rows;
@@ -1354,6 +1489,12 @@ export async function createDelegatedSubtasks(parent: CardRow, leader: AgentRow,
       maxRetries: parent.maxRetries,
     };
   })).returning();
+  await ensureParentWaitingOnChildren(parent.id, {
+    childCount: rows.length,
+    actor: 'delegation',
+    agentId: leader.id,
+    message: `Parent is waiting on ${rows.length} delegated sub-task(s) before integration.`,
+  });
   await addTaskLog({ cardId: parent.id, agentId: leader.id, type: 'decomposition', status: 'success', message: `Created ${rows.length} delegated sub-task(s) for direct reports.` });
   await addActivity({ companyId: parent.companyId, actorType: 'agent', actorId: leader.id, agentId: leader.id, action: 'card.delegated_to_reports', entityType: 'card', entityId: parent.id, details: { childCount: rows.length, delegatedToReports: true } });
   return rows;
@@ -1635,6 +1776,7 @@ export function startDispatchLoop(app: FastifyInstance): void {
 }
 
 export const dispatchInternals = {
+  childCompletionPolicySatisfied,
   completionStatusForQualityGate,
   delegationItems,
   dispatchCompletionDecision,
