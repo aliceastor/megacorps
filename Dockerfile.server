@@ -10,7 +10,7 @@ COPY package.json package-lock.json turbo.json tsconfig.base.json ./
 COPY apps/server/package.json ./apps/server/package.json
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
-RUN npm ci
+RUN npm ci || (echo "npm ci failed, retrying..." && sleep 10 && npm ci)
 
 FROM deps AS builder
 ENV NODE_ENV=production
@@ -32,6 +32,7 @@ COPY package.json package-lock.json ./
 COPY apps/server/package.json ./apps/server/package.json
 COPY --from=builder /app/packages/shared/package.json ./packages/shared/package.json
 RUN npm ci --omit=dev --workspace=@megacorps/server --workspace=@megacorps/shared \
+  || (echo "npm ci failed, retrying..." && sleep 10 && npm ci --omit=dev --workspace=@megacorps/server --workspace=@megacorps/shared) \
   && npm cache clean --force
 COPY --from=builder /app/apps/server/dist ./apps/server/dist
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
