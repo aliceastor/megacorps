@@ -5731,8 +5731,7 @@ body {
   mix-blend-mode: normal;
 }
 
-.app-frame > main,
-.sidebar {
+.app-frame > main {
   position: relative;
 }
 
@@ -5741,6 +5740,7 @@ body {
 }
 
 .sidebar {
+  position: fixed;
   border-right-color: var(--border);
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--card) 90%, transparent), color-mix(in srgb, var(--background) 82%, transparent));
