@@ -8,11 +8,19 @@ const Ctx = createContext<LocaleCtx>({ locale: 'zh-TW', setLocale: () => {}, t: 
 export const localeNames: Record<Locale, string> = { 'zh-TW': '繁體中文', en: 'English', ja: '日本語' };
 export const localeList: Locale[] = ['zh-TW', 'en', 'ja'];
 
+function detectBrowserLocale(): Locale {
+  const language = navigator.language?.toLowerCase() ?? '';
+  if (language.startsWith('zh')) return 'zh-TW';
+  if (language.startsWith('ja')) return 'ja';
+  return 'en';
+}
+
 export function LocaleProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>('zh-TW');
   useEffect(() => {
     const saved = localStorage.getItem('locale') as Locale | null;
     if (saved && localeList.includes(saved)) setLocaleState(saved);
+    else setLocaleState(detectBrowserLocale());
   }, []);
 
   function setLocale(l: Locale) {

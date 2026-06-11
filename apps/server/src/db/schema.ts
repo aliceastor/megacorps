@@ -117,6 +117,7 @@ export const agents = pgTable('agents', {
   budgetMonthly: numeric('budget_monthly', { precision: 10, scale: 4 }),
   spentThisMonth: numeric('spent_this_month', { precision: 10, scale: 4 }).default('0'),
   capabilities: text('capabilities').array().default([]),
+  maxConcurrent: integer('max_concurrent').default(1),
   isBusy: boolean('is_busy').default(false),
   isActive: boolean('is_active').default(true),
   currentSessionId: text('current_session_id'),
@@ -187,6 +188,11 @@ export const kanbanCards = pgTable('kanban_cards', {
   maxRevisions: integer('max_revisions').default(3),
   retryCount: integer('retry_count').default(0),
   maxRetries: integer('max_retries').default(3),
+  timeoutSeconds: integer('timeout_seconds'),
+  scheduleAt: timestamp('schedule_at', { withTimezone: true }),
+  recurEveryMinutes: integer('recur_every_minutes'),
+  recurNextAt: timestamp('recur_next_at', { withTimezone: true }),
+  scheduledFromCardId: uuid('scheduled_from_card_id'),
   nextRunAt: timestamp('next_run_at', { withTimezone: true }),
   startedAt: timestamp('started_at', { withTimezone: true }),
   completedAt: timestamp('completed_at', { withTimezone: true }),
@@ -606,3 +612,22 @@ export const knowledgeDocs = pgTable('knowledge_docs', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
+
+export const notifications = pgTable('notifications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  type: text('type').notNull(),
+  title: text('title').notNull(),
+  body: text('body'),
+  entityType: text('entity_type'),
+  entityId: uuid('entity_id'),
+  cardId: uuid('card_id').references(() => kanbanCards.id),
+  agentId: uuid('agent_id').references(() => agents.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+export const notificationReads = pgTable('notification_reads', {
+  notificationId: uuid('notification_id').notNull().references(() => notifications.id),
+  userId: uuid('user_id').notNull().references(() => users.id),
+  readAt: timestamp('read_at', { withTimezone: true }).defaultNow(),
+}, (table) => ({ pk: primaryKey({ columns: [table.notificationId, table.userId] }) }));

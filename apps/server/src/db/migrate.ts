@@ -1,6 +1,69 @@
 import { sql } from './client.ts';
 
+type Migration = { version: number; name: string; run: () => Promise<void> };
+
+// Serializes concurrent migrators (multi-replica startup) on one advisory lock key.
+const MIGRATION_LOCK_KEY = 727274001;
+
+// Versioned migrations. Each runs at most once per database and is recorded in
+// schema_migrations. Keep every statement idempotent anyway: existing deployments
+// created before the version table will re-run v1 exactly once to get recorded.
+// Never edit an applied migration's statements — add the change as a new version.
+const migrations: Migration[] = [
+  { version: 1, name: 'bootstrap', run: runBootstrap },
+  { version: 2, name: 'scheduling-and-notifications', run: runSchedulingAndNotifications },
+];
+
+async function runSchedulingAndNotifications(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS schedule_at TIMESTAMPTZ;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS recur_every_minutes INTEGER;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS recur_next_at TIMESTAMPTZ;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS scheduled_from_card_id UUID;
+CREATE INDEX IF NOT EXISTS kanban_cards_recur_next_at_idx ON kanban_cards(recur_next_at) WHERE recur_every_minutes IS NOT NULL AND deleted_at IS NULL;
+CREATE TABLE IF NOT EXISTS notifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id UUID NOT NULL REFERENCES companies(id),
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT,
+  entity_type TEXT,
+  entity_id UUID,
+  card_id UUID REFERENCES kanban_cards(id),
+  agent_id UUID REFERENCES agents(id),
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS notifications_company_created_at_idx ON notifications(company_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS notification_reads (
+  notification_id UUID NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  read_at TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (notification_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS notification_reads_user_idx ON notification_reads(user_id, read_at DESC);`);
+}
+
 export async function migrate(): Promise<void> {
+  await sql.unsafe(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMPTZ DEFAULT now());`);
+  await sql`SELECT pg_advisory_lock(${MIGRATION_LOCK_KEY})`;
+  try {
+    const appliedRows = await sql`SELECT version FROM schema_migrations`;
+    const applied = new Set(appliedRows.map((row) => Number(row.version)));
+    for (const migration of [...migrations].sort((a, b) => a.version - b.version)) {
+      if (applied.has(migration.version)) continue;
+      await migration.run();
+      await sql`INSERT INTO schema_migrations (version, name) VALUES (${migration.version}, ${migration.name}) ON CONFLICT (version) DO NOTHING`;
+    }
+  } finally {
+    await sql`SELECT pg_advisory_unlock(${MIGRATION_LOCK_KEY})`;
+  }
+}
+
+export async function appliedMigrations(): Promise<Array<{ version: number; name: string; appliedAt: string | null }>> {
+  const rows = await sql`SELECT version, name, applied_at FROM schema_migrations ORDER BY version ASC`;
+  return rows.map((row) => ({ version: Number(row.version), name: String(row.name), appliedAt: row.applied_at ? new Date(row.applied_at).toISOString() : null }));
+}
+
+async function runBootstrap(): Promise<void> {
   await sql.unsafe(`CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE TABLE IF NOT EXISTS users (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT, avatar_url TEXT, role TEXT DEFAULT 'viewer', status TEXT NOT NULL DEFAULT 'active', locale TEXT DEFAULT 'zh-TW', theme TEXT DEFAULT 'system', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
 ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
@@ -54,6 +117,7 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS position_id UUID REFERENCES position
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS runtime_id UUID;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS soul TEXT;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS max_concurrent INTEGER DEFAULT 1;
 CREATE INDEX IF NOT EXISTS agents_company_deleted_at_idx ON agents(company_id, deleted_at);
 CREATE TABLE IF NOT EXISTS agent_runtimes (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID REFERENCES companies(id), name TEXT NOT NULL, adapter_type TEXT NOT NULL, local_workspace_root TEXT, local_scratch_root TEXT, config JSONB DEFAULT '{}', is_active BOOLEAN DEFAULT true, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
 ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS company_id UUID REFERENCES companies(id);
@@ -87,8 +151,10 @@ ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS execution_locked_at TIMESTAMPT
 ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS execution_lock_expires_at TIMESTAMPTZ;
 ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS active_heartbeat_run_id UUID;
 ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS timeout_seconds INTEGER;
 CREATE INDEX IF NOT EXISTS kanban_cards_execution_lock_expires_at_idx ON kanban_cards(execution_lock_expires_at);
 CREATE INDEX IF NOT EXISTS kanban_cards_company_deleted_at_idx ON kanban_cards(company_id, deleted_at);
+CREATE INDEX IF NOT EXISTS kanban_cards_company_status_idx ON kanban_cards(company_id, column_status) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS card_dependencies (card_id UUID NOT NULL REFERENCES kanban_cards(id), depends_on_card_id UUID NOT NULL REFERENCES kanban_cards(id), created_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY(card_id, depends_on_card_id));
 CREATE INDEX IF NOT EXISTS card_dependencies_depends_on_idx ON card_dependencies(depends_on_card_id);
 INSERT INTO card_dependencies (card_id, depends_on_card_id)
@@ -106,6 +172,12 @@ ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS adapter_turn_id TEXT;
 CREATE INDEX IF NOT EXISTS task_runs_company_created_at_idx ON task_runs(company_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS task_runs_card_created_at_idx ON task_runs(card_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS task_runs_status_created_at_idx ON task_runs(status, created_at ASC);
+CREATE INDEX IF NOT EXISTS task_runs_status_priority_created_at_idx ON task_runs(status, priority DESC, created_at ASC);
+UPDATE task_runs SET status = 'failed', error = 'duplicate_active_run_superseded', completed_at = now(), updated_at = now()
+WHERE status IN ('queued','running') AND id NOT IN (
+  SELECT DISTINCT ON (card_id, kind) id FROM task_runs WHERE status IN ('queued','running') ORDER BY card_id, kind, created_at DESC
+);
+CREATE UNIQUE INDEX IF NOT EXISTS task_runs_active_card_kind_uidx ON task_runs(card_id, kind) WHERE status IN ('queued','running');
 CREATE TABLE IF NOT EXISTS agent_sessions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID NOT NULL REFERENCES companies(id), agent_id UUID NOT NULL REFERENCES agents(id), machine_runner_id UUID REFERENCES machine_runners(id), card_id UUID REFERENCES kanban_cards(id), task_run_id UUID REFERENCES task_runs(id), session_kind TEXT NOT NULL DEFAULT 'task', status TEXT NOT NULL DEFAULT 'active', public_key_jwk JSONB, public_key TEXT, fingerprint TEXT, metadata JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT now(), closed_at TIMESTAMPTZ, updated_at TIMESTAMPTZ DEFAULT now());
 CREATE INDEX IF NOT EXISTS agent_sessions_company_status_idx ON agent_sessions(company_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS agent_sessions_agent_status_idx ON agent_sessions(agent_id, status, created_at DESC);

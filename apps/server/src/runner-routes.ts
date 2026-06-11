@@ -476,6 +476,11 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
     const body = runnerTaskCompleteSchema.parse(request.body ?? {});
     const [run] = await db.select().from(taskRuns).where(and(eq(taskRuns.id, id), eq(taskRuns.companyId, runner.companyId))).limit(1);
     if (!run) return reply.code(404).send({ error: 'task_run_not_found' });
+    // Idempotent ack: a retried completion for a run this runner already finished must
+    // not 409 (the retry would loop) and must not re-run completion side effects.
+    if (run.lockedBy === runner.id && run.status !== 'running' && run.status !== 'queued') {
+      return { ok: true, duplicate: true, taskRunId: run.id, status: run.status };
+    }
     if (run.status !== 'running' || run.lockedBy !== runner.id) return reply.code(409).send({ error: 'task_run_not_claimed_by_runner' });
     return createRunnerTaskCompletion({ runner, run, body });
   });

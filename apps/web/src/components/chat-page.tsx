@@ -3,6 +3,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { BriefcaseBusiness, Building2, Circle, Loader2, MessageSquare, Plus, Send } from 'lucide-react';
 import { ApiError, api } from '@/lib/api';
+import { useLocale } from '@/lib/locale-context';
+import { Markdown } from './markdown';
 
 type Company = { id: string; name: string; slug: string };
 type Project = { id: string; companyId: string; name: string; description?: string | null };
@@ -50,6 +52,7 @@ type ChatSendResult = {
 type LiveEvent = {
   type: string;
   sessionId?: string | null;
+  data?: Record<string, unknown>;
 };
 
 function pendingUserMessage(session: ChatSession, body: string): ChatMessage {
@@ -88,13 +91,16 @@ function agentStatus(agent?: Agent | null): { label: string; color: string } {
   return { label: 'Idle', color: 'var(--primary)' };
 }
 
-async function fetchChatBase(): Promise<{ companies: Company[]; agents: Agent[]; projects: Project[] }> {
-  const [companies, agents, projects] = await Promise.all([
-    api<Company[]>('/api/companies'),
-    api<Agent[]>('/api/agents'),
-    api<Project[]>('/api/projects'),
-  ]);
-  return { companies, agents, projects };
+function fetchCompanies(): Promise<Company[]> {
+  return api<Company[]>('/api/companies');
+}
+
+function fetchAgents(): Promise<Agent[]> {
+  return api<Agent[]>('/api/agents');
+}
+
+function fetchProjects(): Promise<Project[]> {
+  return api<Project[]>('/api/projects');
 }
 
 async function fetchChatSessions(companyId: string, agentId: string, projectFilter: string): Promise<ChatSession[]> {
@@ -108,6 +114,7 @@ async function fetchChatMessages(sessionId: string): Promise<ChatMessage[]> {
 
 export function ChatPage() {
   const queryClient = useQueryClient();
+  const { t } = useLocale();
   const [companies, setCompanies] = useState<Company[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -121,9 +128,12 @@ export function ChatPage() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [replyingSessionId, setReplyingSessionId] = useState<string | null>(null);
+  const [partialReply, setPartialReply] = useState('');
   const [error, setError] = useState('');
   const messageEndRef = useRef<HTMLDivElement>(null);
-  const baseQuery = useQuery({ queryKey: ['chatBase'], queryFn: fetchChatBase });
+  const companiesQuery = useQuery({ queryKey: ['companies'], queryFn: fetchCompanies });
+  const agentsQuery = useQuery({ queryKey: ['agents'], queryFn: fetchAgents });
+  const projectsQuery = useQuery({ queryKey: ['projects'], queryFn: fetchProjects });
   const sessionsQuery = useQuery({
     queryKey: ['chatSessions', companyId, agentId, projectFilter],
     queryFn: () => fetchChatSessions(companyId, agentId, projectFilter),
@@ -147,7 +157,11 @@ export function ChatPage() {
     setLoading(true);
     setError('');
     try {
-      const { companies: companyRows, agents: agentRows, projects: projectRows } = await queryClient.fetchQuery({ queryKey: ['chatBase'], queryFn: fetchChatBase });
+      const [companyRows, agentRows, projectRows] = await Promise.all([
+        queryClient.fetchQuery({ queryKey: ['companies'], queryFn: fetchCompanies }),
+        queryClient.fetchQuery({ queryKey: ['agents'], queryFn: fetchAgents }),
+        queryClient.fetchQuery({ queryKey: ['projects'], queryFn: fetchProjects }),
+      ]);
       setCompanies(companyRows);
       setProjects(projectRows);
       setAgents(agentRows);
@@ -192,22 +206,25 @@ export function ChatPage() {
   }
 
   useEffect(() => {
-    if (!baseQuery.data) return;
-    setCompanies(baseQuery.data.companies);
-    setProjects(baseQuery.data.projects);
-    setAgents(baseQuery.data.agents);
-    const nextCompany = baseQuery.data.companies.find((company) => company.id === companyId) ?? baseQuery.data.companies[0];
-    const nextAgent = nextCompany ? baseQuery.data.agents.find((agent) => agent.companyId === nextCompany.id && agent.id === agentId) ?? baseQuery.data.agents.find((agent) => agent.companyId === nextCompany.id) : undefined;
+    if (!companiesQuery.data || !agentsQuery.data || !projectsQuery.data) return;
+    const companyRows = companiesQuery.data;
+    const agentRows = agentsQuery.data;
+    setCompanies(companyRows);
+    setProjects(projectsQuery.data);
+    setAgents(agentRows);
+    const nextCompany = companyRows.find((company) => company.id === companyId) ?? companyRows[0];
+    const nextAgent = nextCompany ? agentRows.find((agent) => agent.companyId === nextCompany.id && agent.id === agentId) ?? agentRows.find((agent) => agent.companyId === nextCompany.id) : undefined;
     setCompanyId(nextCompany?.id ?? '');
     setAgentId(nextAgent?.id ?? '');
     setLoading(false);
-  }, [baseQuery.data]);
+  }, [companiesQuery.data, agentsQuery.data, projectsQuery.data]);
   useEffect(() => {
-    if (baseQuery.error) {
-      setError(baseQuery.error instanceof Error ? baseQuery.error.message : 'Failed to load chat data');
+    const baseError = companiesQuery.error ?? agentsQuery.error ?? projectsQuery.error;
+    if (baseError) {
+      setError(baseError instanceof Error ? baseError.message : 'Failed to load chat data');
       setLoading(false);
     }
-  }, [baseQuery.error]);
+  }, [companiesQuery.error, agentsQuery.error, projectsQuery.error]);
   useEffect(() => {
     if (!sessionsQuery.data) return;
     setSessions(sessionsQuery.data);
@@ -242,8 +259,14 @@ export function ChatPage() {
     function onLive(event: Event) {
       const detail = (event as CustomEvent<LiveEvent>).detail;
       if (!detail?.type.startsWith('chat.')) return;
-      if (detail.type === 'chat.reply.started' && detail.sessionId === sessionId) setReplyingSessionId(sessionId);
-      if (detail.type === 'chat.reply.finished' && detail.sessionId === sessionId) setReplyingSessionId(null);
+      if (detail.type === 'chat.reply.started' && detail.sessionId === sessionId) { setReplyingSessionId(sessionId); setPartialReply(''); }
+      if (detail.type === 'chat.reply.partial' && detail.sessionId === sessionId) {
+        const text = typeof detail.data?.text === 'string' ? detail.data.text : '';
+        if (text) setPartialReply(text);
+        return;
+      }
+      if (detail.type === 'chat.reply.finished' && detail.sessionId === sessionId) { setReplyingSessionId(null); setPartialReply(''); }
+      if (detail.type === 'chat.message.created' && detail.sessionId === sessionId) setPartialReply('');
       if (detail.sessionId === sessionId) void loadMessages(detail.sessionId);
       void loadSessions(agentId, companyId, projectFilter);
     }
@@ -341,7 +364,7 @@ export function ChatPage() {
               <Circle size={10} fill={itemStatus.color} color={itemStatus.color} />
             </button>;
           })}
-          {!companyAgents.length && <p className="chat-empty">No agents</p>}
+          {!companyAgents.length && <p className="chat-empty">{t('chat.noAgents')}</p>}
         </div>
       </aside>
 
@@ -360,7 +383,7 @@ export function ChatPage() {
             <b>{session.title}</b>
             <span>{shortTime(session.updatedAt)} / {session.projectId ? projects.find((project) => project.id === session.projectId)?.name ?? 'project' : 'no project'} / {session.agentSessionId ? 'resumable' : 'new'}</span>
           </button>)}
-          {!sessions.length && <p className="chat-empty">No sessions</p>}
+          {!sessions.length && <p className="chat-empty">{t('chat.noSessions')}</p>}
         </div>
       </aside>
 
@@ -368,20 +391,21 @@ export function ChatPage() {
         <header className="chat-thread-head">
           <div className="chat-agent-card compact-card">
             <span className="chat-avatar">{selectedAgent?.name.slice(0, 2).toUpperCase() ?? '--'}</span>
-            <div><b>{selectedAgent?.name ?? 'Select an agent'}</b><span>{selectedSession?.title ?? 'New session'}</span></div>
+            <div><b>{selectedAgent?.name ?? t('chat.selectAgent')}</b><span>{selectedSession?.title ?? t('chat.newSession')}</span></div>
           </div>
           <span className="status-pill" style={{ color: status.color }}>{status.label}</span>
         </header>
         <div className="chat-messages">
           {messages.map((message) => <article className={`chat-bubble ${message.authorType}`} key={message.id}>
-            <div>{message.body}</div>
+            {message.authorType === 'user' ? <div>{message.body}</div> : <Markdown text={message.body} />}
             <span>{message.authorType} / {message.metadata?.pending ? 'sending' : shortTime(message.createdAt)}{message.costUsd ? ` / $${message.costUsd}` : ''}</span>
           </article>)}
           {replyingSessionId === sessionId && <article className="chat-bubble agent typing-bubble" aria-live="polite">
-            <div className="typing-dots" aria-label={`${selectedAgent?.name ?? 'Agent'} is replying`}>
+            {partialReply && <div className="chat-partial-text"><Markdown text={partialReply} /></div>}
+            <div className="typing-dots" aria-label={`${selectedAgent?.name ?? 'Agent'} ${t('chat.replying')}`}>
               <i /><i /><i />
             </div>
-            <span>{selectedAgent?.name ?? 'Agent'} is replying</span>
+            <span>{selectedAgent?.name ?? 'Agent'} {t('chat.replying')}</span>
           </article>}
           {!messages.length && replyingSessionId !== sessionId && <div className="chat-empty-state">
             <MessageSquare size={24} />
@@ -393,7 +417,7 @@ export function ChatPage() {
         <footer className="chat-composer">
           <textarea className="input" rows={2} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
             if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') void sendMessage();
-          }} placeholder="Message" />
+          }} placeholder={t('chat.messagePlaceholder')} />
           <button className="btn btn-primary icon-btn" aria-label="Send message" onClick={() => void sendMessage()} disabled={sending || !draft.trim() || !agentId}>
             {sending ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
           </button>

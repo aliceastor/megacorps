@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { requireAuth } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole } from './access.ts';
 import { getAdapter } from './adapters/registry.ts';
+import { stripHermesSessionMetadata } from './adapters/hermes.ts';
 import { db } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, positions, projects } from './db/schema.ts';
 import { budgetOk, buildCompanyKanbanContext, buildExecutionAgent, getBudgetGuard } from './dispatch.ts';
@@ -351,7 +352,29 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         prompt: promptSnapshotForAdapter(executionAgent, chatTask),
         metadata: { adapterSessionId: existingChatSessionId, userMessageId: userMessage.id, megacorpsPromptChars: prompt.length, contextMode: handOffContextToAdapter ? 'adapter_session_continuation' : 'full_bootstrap', chatHistoryMessages: history.length },
       });
-      const result = await adapter.dispatch(executionAgent, chatTask);
+      // Stream partial output to the requesting user only (targeted live event);
+      // throttled so a chatty adapter cannot flood the socket.
+      let partialBuffer = '';
+      let lastPartialSentAt = 0;
+      const PARTIAL_THROTTLE_MS = 700;
+      const PARTIAL_MAX_CHARS = 12_000;
+      const publishPartial = (chunk: string) => {
+        partialBuffer = `${partialBuffer}${chunk}`.slice(-PARTIAL_MAX_CHARS);
+        const now = Date.now();
+        if (now - lastPartialSentAt < PARTIAL_THROTTLE_MS) return;
+        lastPartialSentAt = now;
+        publishLiveEvent({
+          type: 'chat.reply.partial',
+          companyId: session.companyId,
+          userId: user.id,
+          entityType: 'chat_session',
+          entityId: session.id,
+          sessionId: session.id,
+          projectId: session.projectId,
+          data: { agentId: agent.id, runId: run.id, text: stripHermesSessionMetadata(partialBuffer) },
+        });
+      };
+      const result = await adapter.dispatch(executionAgent, chatTask, { onOutput: publishPartial });
       if (!result.success) throw new Error(result.output || 'agent_chat_failed');
       if (supportsScopedDirectChatAdapterSession(agent.adapterType)) {
         await rememberAdapterSession({

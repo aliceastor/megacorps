@@ -112,6 +112,9 @@ export const createCardSchema = z.object({
   revisionCount: z.number().int().nonnegative().default(0),
   maxRevisions: z.number().int().min(1).max(20).default(3),
   requiredToolIds: z.array(z.string().uuid()).default([]),
+  timeoutSeconds: z.number().int().min(30).max(14_400).nullable().optional(),
+  scheduleAt: z.coerce.date().nullable().optional(),
+  recurEveryMinutes: z.number().int().min(5).max(43_200).nullable().optional(),
 });
 
 export const createMachineRunnerSchema = z.object({
@@ -229,6 +232,7 @@ export const createAgentSchema = z.object({
   positionId: z.string().uuid().nullable().optional(),
   budgetPerTask: z.number().nonnegative().optional(),
   budgetMonthly: z.number().nonnegative().optional(),
+  maxConcurrent: z.number().int().min(1).max(16).optional(),
 });
 
 export const updateAgentSchema = createAgentSchema.omit({ adapterType: true, capabilities: true }).partial().extend({

@@ -79,7 +79,7 @@ export function buildHermesSshRemoteCommand(agent: AgentLike, task: TaskContext)
   return wrapWithContainerEnv(buildHermesCliCommand(agent, task, hermesCommand));
 }
 
-async function runSsh(agent: AgentLike, remoteCommand: string, timeoutSec: number): Promise<SshRunResult> {
+async function runSsh(agent: AgentLike, remoteCommand: string, timeoutSec: number, onOutput?: (chunk: string) => void): Promise<SshRunResult> {
   const started = Date.now();
   const { host, user, port, keyPath, sshBin, sshOptions } = resolveHermesSshConnectionConfig(agent);
   const target = user ? `${user}@${host}` : host;
@@ -102,22 +102,35 @@ async function runSsh(agent: AgentLike, remoteCommand: string, timeoutSec: numbe
 
   return new Promise((resolve, reject) => {
     const child = spawn(sshBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let killTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
       child.kill('SIGTERM');
+      // If the ssh client ignores SIGTERM (e.g. wedged connection), force-kill so
+      // timed-out dispatches cannot accumulate orphaned ssh processes.
+      killTimer = setTimeout(() => {
+        if (child.exitCode === null && !child.killed) child.kill('SIGKILL');
+      }, 5_000);
       reject(new Error(`Hermes SSH task timed out after ${timeoutSec}s`));
     }, timeoutSec * 1000);
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (onOutput) {
+        try { onOutput(String(chunk)); } catch { /* streaming is best effort */ }
+      }
+    });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.on('error', (error) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       reject(new Error(`Hermes SSH failed to start ${sshBin}: ${error.message}`));
     });
     child.on('close', (exitCode) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       resolve({
         stdout,
         stderr,
@@ -128,8 +141,8 @@ async function runSsh(agent: AgentLike, remoteCommand: string, timeoutSec: numbe
   });
 }
 
-export async function dispatchToHermesSsh(agent: AgentLike, task: TaskContext): Promise<TaskResult> {
+export async function dispatchToHermesSsh(agent: AgentLike, task: TaskContext, hooks?: { onOutput?: (chunk: string) => void }): Promise<TaskResult> {
   const remoteCommand = buildHermesSshRemoteCommand(agent, task);
-  const result = await runSsh(agent, remoteCommand, task.timeoutSeconds ?? 300);
+  const result = await runSsh(agent, remoteCommand, task.timeoutSeconds ?? 300, hooks?.onOutput);
   return hermesTaskResult(agent, result);
 }

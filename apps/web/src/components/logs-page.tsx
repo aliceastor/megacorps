@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { Activity as ActivityIcon, Clock, FileText, Loader2, Play, Server } from 'lucide-react';
 import { api } from '@/lib/api';
+import { useLocale } from '@/lib/locale-context';
 
 type ApiEvent = { id: string; method: string; path: string; statusCode?: number; error?: string | null; durationMs?: number; requestBody?: unknown; responseBody?: unknown; createdAt?: string };
 type ActivityEvent = { id: string; action: string; entityType: string; entityId: string; actorType: string; actorId: string; details?: unknown; createdAt?: string };
@@ -13,6 +14,7 @@ type PromptLog = { id: string; companyId: string; agentId?: string | null; cardI
 type LogTab = 'prompts' | 'runs' | 'activity' | 'api';
 
 export function LogsPage() {
+  const { t } = useLocale();
   const [promptLogs, setPromptLogs] = useState<PromptLog[]>([]);
   const [logs, setLogs] = useState<ApiEvent[]>([]);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
@@ -69,15 +71,15 @@ export function LogsPage() {
   const visibleTaskRuns = taskRuns.filter((run) => !needle || `${run.kind} ${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(needle));
   const visibleCronRuns = (cron?.recentRuns ?? []).filter((run) => !needle || `${run.name} ${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(needle));
   const tabs: Array<{ id: LogTab; label: string; count: number; icon: typeof FileText }> = [
-    { id: 'prompts', label: 'Prompts', count: promptLogs.length, icon: FileText },
-    { id: 'runs', label: 'Runs', count: runs.length + taskRuns.length + (cron?.recentRuns.length ?? 0), icon: Clock },
-    { id: 'activity', label: 'Activity', count: activity.length, icon: ActivityIcon },
+    { id: 'prompts', label: t('logs.prompts'), count: promptLogs.length, icon: FileText },
+    { id: 'runs', label: t('logs.runs'), count: runs.length + taskRuns.length + (cron?.recentRuns.length ?? 0), icon: Clock },
+    { id: 'activity', label: t('logs.activity'), count: activity.length, icon: ActivityIcon },
     { id: 'api', label: 'API', count: logs.length, icon: Server },
   ];
 
   return <div className="page-stack logs-page">
-    <div className="page-head"><div><h1>Logs</h1><p>Outbound prompts, API lifecycle, product activity, heartbeat runs, locks, costs, and errors.</p></div></div>
-    <div className="input-wrap"><input placeholder="Filter logs" value={filter} onChange={(event) => setFilter(event.target.value)} /></div>
+    <div className="page-head"><div><h1>{t('title.logs')}</h1><p>{t('logs.subtitle')}</p></div></div>
+    <div className="input-wrap"><input placeholder={t('logs.filterPlaceholder')} value={filter} onChange={(event) => setFilter(event.target.value)} /></div>
     <div className="tab-row page-tabs">
       {tabs.map((item) => {
         const Icon = item.icon;
@@ -85,9 +87,9 @@ export function LogsPage() {
       })}
     </div>
     {tab === 'prompts' && <section className="card section-card">
-      <h2>Outbound prompts</h2>
+      <h2>{t('logs.outboundPrompts')}</h2>
       <div className="table-list">
-        {visiblePrompts.length === 0 ? <p className="field-hint">No prompt logs yet.</p> : visiblePrompts.map((log) => <article className="list-row prompt-log-row" key={log.id}>
+        {visiblePrompts.length === 0 ? <p className="field-hint">{t('logs.noPrompts')}</p> : visiblePrompts.map((log) => <article className="list-row prompt-log-row" key={log.id}>
           <div className="prompt-log-head">
             <b><FileText size={14} /> {log.source} / {log.adapterType}</b>
             <span>{log.createdAt ? new Date(log.createdAt).toLocaleString() : ''}</span>
@@ -112,14 +114,14 @@ export function LogsPage() {
     {tab === 'runs' && <div className="logs-grid">
       <section className="card section-card">
         <div className="panel-title">
-          <div><h2>Cron heartbeat</h2><span className="status-pill">{cron?.enabled === false ? 'disabled' : cron?.running ? 'running' : cron?.lastStatus ?? 'unknown'}</span></div>
-          <button className="btn" onClick={() => void runCronNow()} disabled={cronRunning}>{cronRunning ? <Loader2 size={14} className="spin" /> : <Play size={14} />} Run now</button>
+          <div><h2>{t('logs.cronHeartbeat')}</h2><span className="status-pill">{cron?.enabled === false ? 'disabled' : cron?.running ? 'running' : cron?.lastStatus ?? 'unknown'}</span></div>
+          <button className="btn" onClick={() => void runCronNow()} disabled={cronRunning}>{cronRunning ? <Loader2 size={14} className="spin" /> : <Play size={14} />} {t('common.runNow')}</button>
         </div>
         <div className="meta-grid">
-          <span>Interval <b>{cron ? `${Math.round(cron.intervalMs / 1000)}s` : '-'}</b></span>
-          <span>Last started <b>{cron?.lastStartedAt ? new Date(cron.lastStartedAt).toLocaleString() : '-'}</b></span>
-          <span>Last completed <b>{cron?.lastCompletedAt ? new Date(cron.lastCompletedAt).toLocaleString() : '-'}</b></span>
-          <span>Error <b>{cron?.lastError ?? 'none'}</b></span>
+          <span>{t('logs.interval')} <b>{cron ? `${Math.round(cron.intervalMs / 1000)}s` : '-'}</b></span>
+          <span>{t('logs.lastStarted')} <b>{cron?.lastStartedAt ? new Date(cron.lastStartedAt).toLocaleString() : '-'}</b></span>
+          <span>{t('logs.lastCompleted')} <b>{cron?.lastCompletedAt ? new Date(cron.lastCompletedAt).toLocaleString() : '-'}</b></span>
+          <span>{t('common.errorLabel')} <b>{cron?.lastError ?? 'none'}</b></span>
         </div>
         <div className="table-list">
           {visibleCronRuns.map((run) => <article className="list-row" key={run.id}>
@@ -131,7 +133,7 @@ export function LogsPage() {
         </div>
       </section>
       <section className="card section-card">
-        <h2>Task runs</h2>
+        <h2>{t('logs.taskRuns')}</h2>
         <div className="table-list">
           {visibleTaskRuns.map((run) => <article className="list-row" key={run.id}>
             <b>{run.kind} / {run.status}</b>
@@ -143,7 +145,7 @@ export function LogsPage() {
         </div>
       </section>
       <section className="card section-card">
-        <h2>Heartbeat runs</h2>
+        <h2>{t('logs.heartbeatRuns')}</h2>
         <div className="table-list">
           {visibleRuns.map((run) => <article className="list-row" key={run.id}>
             <b>{run.source} / {run.status}</b>
@@ -154,7 +156,7 @@ export function LogsPage() {
       </section>
     </div>}
     {tab === 'activity' && <section className="card section-card">
-      <h2>Activity</h2>
+      <h2>{t('logs.activity')}</h2>
       <div className="table-list">
         {visibleActivity.map((event) => <article className="list-row" key={event.id}>
           <b>{event.action}</b>
@@ -164,7 +166,7 @@ export function LogsPage() {
       </div>
     </section>}
     {tab === 'api' && <section className="card section-card">
-      <h2>API lifecycle</h2>
+      <h2>{t('logs.apiLifecycle')}</h2>
       <div className="table-list">
         {visible.map((log) => <article className="list-row" key={log.id}>
           <b>{log.method} {log.path}</b>

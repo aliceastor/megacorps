@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Clock3, Play, RefreshCw, Save } from 'lucide-react';
 import { api } from '@/lib/api';
+import { useLocale } from '@/lib/locale-context';
 
 type CronJob = 'dispatch-heartbeat' | 'daily-report' | 'health-check';
 type CronRun = {
@@ -36,6 +37,7 @@ const jobs: Array<{ id: CronJob; name: string; schedule: string; note: string }>
 ];
 
 export function CronPage() {
+  const { t } = useLocale();
   const [status, setStatus] = useState<CronStatus | null>(null);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -79,7 +81,7 @@ export function CronPage() {
         setCompanyAutoDispatch(activeCompany.autoDispatchEnabled !== false);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load cron status');
+      setError(err instanceof Error ? err.message : t('cron.loadFailed'));
     }
   }
 
@@ -108,10 +110,10 @@ export function CronPage() {
           },
         }),
       });
-      setToast(`${jobs.find((item) => item.id === job)?.name ?? 'Cron job'} run recorded`);
+      setToast(`${jobs.find((item) => item.id === job)?.name ?? 'Cron job'} ${t('cron.runRecorded')}`);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Cron run failed');
+      setError(err instanceof Error ? err.message : t('cron.runFailed'));
     } finally {
       setBusy(false);
     }
@@ -129,10 +131,10 @@ export function CronPage() {
           autoDispatchEnabled: companyAutoDispatch,
         }),
       });
-      setToast(`${selectedCompany.name} cron settings saved`);
+      setToast(`${selectedCompany.name} ${t('cron.settingsSaved')}`);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Company cron save failed');
+      setError(err instanceof Error ? err.message : t('cron.saveFailed'));
     } finally {
       setBusy(false);
     }
@@ -140,22 +142,22 @@ export function CronPage() {
 
   return <div className="page-stack cron-page">
     <div className="page-head">
-      <div><h1>Cron</h1><p>Scheduled dispatch heartbeat, company intervals, job runner scope, and cron run history.</p></div>
-      <button className="btn" onClick={() => void refresh()}><RefreshCw size={15} /> Refresh</button>
+      <div><h1>{t('title.cron')}</h1><p>{t('cron.subtitle')}</p></div>
+      <button className="btn" onClick={() => void refresh()}><RefreshCw size={15} /> {t('common.refresh')}</button>
     </div>
     {toast && <p className="status-pill">{toast}</p>}
     {error && <p className="form-error">{error}</p>}
 
     <section className="stat-grid">
-      <div className="card stat-card"><span>Loop status</span><b>{status?.enabled ? 'On' : 'Off'}</b></div>
-      <div className="card stat-card"><span>Base interval</span><b>{Math.round((status?.intervalMs ?? 0) / 1000)}s</b></div>
-      <div className="card stat-card"><span>Running now</span><b>{status?.running ? 'Yes' : 'No'}</b></div>
-      <div className="card stat-card"><span>Last status</span><b>{status?.lastStatus ?? 'idle'}</b></div>
+      <div className="card stat-card"><span>{t('cron.loopStatus')}</span><b>{status?.enabled ? t('common.on') : t('common.off')}</b></div>
+      <div className="card stat-card"><span>{t('cron.baseInterval')}</span><b>{Math.round((status?.intervalMs ?? 0) / 1000)}s</b></div>
+      <div className="card stat-card"><span>{t('cron.runningNow')}</span><b>{status?.running ? t('common.yes') : t('common.no')}</b></div>
+      <div className="card stat-card"><span>{t('cron.lastStatus')}</span><b>{status?.lastStatus ?? 'idle'}</b></div>
     </section>
 
     <section className="card cron-workbench">
       <aside className="cron-job-list">
-        <div className="panel-title"><div><h2><Clock3 size={18} /> Jobs</h2><span className="status-pill">{jobs.length} configured</span></div></div>
+        <div className="panel-title"><div><h2><Clock3 size={18} /> {t('cron.jobs')}</h2><span className="status-pill">{jobs.length} {t('cron.configured')}</span></div></div>
         <div className="table-list">
           {jobs.map((job) => <button className={`list-row selectable-row ${selectedJob === job.id ? 'active' : ''}`} key={job.id} onClick={() => setSelectedJob(job.id)}>
             <b>{job.name}</b>
@@ -166,56 +168,56 @@ export function CronPage() {
 
       <main className="cron-job-detail">
         <div className="project-editor-head">
-          <div><h2>{selectedJobMeta.name}</h2><span className="status-pill">{selectedCompany?.name ?? 'All visible companies'}</span></div>
-          <button className="btn btn-primary" disabled={busy} onClick={() => void runNow()}><Play size={15} /> Run now</button>
+          <div><h2>{selectedJobMeta.name}</h2><span className="status-pill">{selectedCompany?.name ?? t('cron.allVisibleCompanies')}</span></div>
+          <button className="btn btn-primary" disabled={busy} onClick={() => void runNow()}><Play size={15} /> {t('common.runNow')}</button>
         </div>
 
         <section className="project-section">
-          <h3>Run Scope</h3>
+          <h3>{t('cron.runScope')}</h3>
           <div className="form-grid">
-            <label className="field-label">Company<select className="input" value={companyId} onChange={(event) => { setCompanyId(event.target.value); setRunnerAgentId(''); }}>
-              <option value="">All visible companies</option>
+            <label className="field-label">{t('common.company')}<select className="input" value={companyId} onChange={(event) => { setCompanyId(event.target.value); setRunnerAgentId(''); }}>
+              <option value="">{t('cron.allVisibleCompanies')}</option>
               {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
             </select></label>
-            <label className="field-label">Runner<select className="input" value={runnerAgentId} onChange={(event) => setRunnerAgentId(event.target.value)}>
-              <option value="">Current operator</option>
+            <label className="field-label">{t('cron.runner')}<select className="input" value={runnerAgentId} onChange={(event) => setRunnerAgentId(event.target.value)}>
+              <option value="">{t('cron.currentOperator')}</option>
               {scopedAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}{agent.role ? ` / ${agent.role}` : ''}</option>)}
             </select></label>
           </div>
         </section>
 
         <section className="project-section">
-          <h3>Schedule</h3>
+          <h3>{t('cron.schedule')}</h3>
           <div className="form-grid">
-            <label className="field-label">Schedule type<select className="input" value={scheduleType} onChange={(event) => setScheduleType(event.target.value as typeof scheduleType)}>
+            <label className="field-label">{t('cron.scheduleType')}<select className="input" value={scheduleType} onChange={(event) => setScheduleType(event.target.value as typeof scheduleType)}>
               <option value="every">every</option>
               <option value="cron">cron</option>
               <option value="at">at</option>
             </select></label>
-            <label className="field-label">Interval seconds<input className="input" value={interval} onChange={(event) => setInterval(event.target.value)} /></label>
-            <label className="field-label">Cron expression<input className="input" value={cronExpr} onChange={(event) => setCronExpr(event.target.value)} /></label>
+            <label className="field-label">{t('cron.intervalSeconds')}<input className="input" value={interval} onChange={(event) => setInterval(event.target.value)} /></label>
+            <label className="field-label">{t('cron.cronExpression')}<input className="input" value={cronExpr} onChange={(event) => setCronExpr(event.target.value)} /></label>
           </div>
         </section>
 
         <section className="project-section">
-          <h3>Company Dispatch Interval</h3>
+          <h3>{t('cron.companyDispatchInterval')}</h3>
           <div className="form-grid">
-            <label className="field-label">Company interval seconds<input className="input" value={companyInterval} onChange={(event) => setCompanyInterval(event.target.value)} disabled={!selectedCompany} /></label>
-            <label className="check-row"><input type="checkbox" checked={companyAutoDispatch} onChange={(event) => setCompanyAutoDispatch(event.target.checked)} disabled={!selectedCompany} /> Auto-dispatch enabled</label>
+            <label className="field-label">{t('cron.companyIntervalSeconds')}<input className="input" value={companyInterval} onChange={(event) => setCompanyInterval(event.target.value)} disabled={!selectedCompany} /></label>
+            <label className="check-row"><input type="checkbox" checked={companyAutoDispatch} onChange={(event) => setCompanyAutoDispatch(event.target.checked)} disabled={!selectedCompany} /> {t('cron.autoDispatchEnabled')}</label>
           </div>
-          <button className="btn" disabled={busy || !selectedCompany} onClick={saveCompanySchedule}><Save size={15} /> Save company interval</button>
+          <button className="btn" disabled={busy || !selectedCompany} onClick={saveCompanySchedule}><Save size={15} /> {t('cron.saveCompanyInterval')}</button>
         </section>
       </main>
     </section>
 
     <section className="card section-card">
-      <div className="panel-title"><h2>Company Heartbeat</h2><span className="status-pill">{companies.length} companies</span></div>
+      <div className="panel-title"><h2>{t('cron.companyHeartbeat')}</h2><span className="status-pill">{companies.length} {t('cron.companiesCount')}</span></div>
       <div className="table-list">
         {companies.map((company) => {
           const tick = status?.companyTicks.find((item) => item.companyId === company.id);
           return <div className="list-row heartbeat-row" key={company.id}>
-            <div><b>{company.name}</b><p>{company.autoDispatchEnabled === false ? 'dispatch paused' : `dispatch ${company.dispatchIntervalSeconds ?? 10}s`} / last tick {tick ? new Date(tick.lastTickMs).toLocaleString() : 'none'}</p></div>
-            <button className="btn" onClick={() => { setCompanyId(company.id); setSelectedJob('dispatch-heartbeat'); }}>Use</button>
+            <div><b>{company.name}</b><p>{company.autoDispatchEnabled === false ? t('cron.dispatchPaused') : `${t('cron.dispatchPrefix')} ${company.dispatchIntervalSeconds ?? 10}s`} / {t('cron.lastTick')} {tick ? new Date(tick.lastTickMs).toLocaleString() : 'none'}</p></div>
+            <button className="btn" onClick={() => { setCompanyId(company.id); setSelectedJob('dispatch-heartbeat'); }}>{t('cron.use')}</button>
           </div>;
         })}
       </div>
@@ -223,7 +225,7 @@ export function CronPage() {
 
     <div className="data-grid">
       <section className="card section-card">
-        <div className="panel-title"><h2>Run History</h2><span className="status-pill">{runs.length} runs</span></div>
+        <div className="panel-title"><h2>{t('cron.runHistory')}</h2><span className="status-pill">{runs.length} {t('cron.runsCount')}</span></div>
         <div className="table-list">
           {runs.map((run) => <button className="list-row selectable-row" key={run.id} style={{ borderColor: run.id === selectedRun?.id ? 'var(--primary)' : 'var(--border)' }} onClick={() => setSelectedRunId(run.id)}>
             <b>{run.name} / {run.status}</b>
@@ -233,12 +235,12 @@ export function CronPage() {
       </section>
 
       {selectedRun && <section className="card section-card">
-        <div className="panel-title"><h2>Selected Run</h2><span className="status-pill">{selectedRun.status}</span></div>
+        <div className="panel-title"><h2>{t('cron.selectedRun')}</h2><span className="status-pill">{selectedRun.status}</span></div>
         <div className="meta-grid">
-          <span>Name <b>{selectedRun.name}</b></span>
-          <span>Source <b>{selectedRun.source}</b></span>
-          <span>Started <b>{selectedRun.startedAt ? new Date(selectedRun.startedAt).toLocaleString() : 'none'}</b></span>
-          <span>Completed <b>{selectedRun.completedAt ? new Date(selectedRun.completedAt).toLocaleString() : 'none'}</b></span>
+          <span>{t('common.name')} <b>{selectedRun.name}</b></span>
+          <span>{t('cron.source')} <b>{selectedRun.source}</b></span>
+          <span>{t('cron.started')} <b>{selectedRun.startedAt ? new Date(selectedRun.startedAt).toLocaleString() : 'none'}</b></span>
+          <span>{t('cron.completed')} <b>{selectedRun.completedAt ? new Date(selectedRun.completedAt).toLocaleString() : 'none'}</b></span>
         </div>
         {selectedRun.error && <p className="form-error">{selectedRun.error}</p>}
         <pre className="log-block">{JSON.stringify(selectedRun.details ?? {}, null, 2)}</pre>

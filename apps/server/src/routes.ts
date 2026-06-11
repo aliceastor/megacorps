@@ -22,6 +22,8 @@ import { resetAdapterSessionsForAgent } from './adapter-sessions.ts';
 import { getCardActions, recordCardAction, recordStageAction } from './card-actions.ts';
 import { hydrateCardDependencyState, setCardDependencies } from './card-dependencies.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
+import { listNotifications, markAllNotificationsRead, markNotificationRead, notify, unreadNotificationCount } from './notifications.ts';
+import { notifications } from './db/schema.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
@@ -106,7 +108,7 @@ function sessionCookieSecure(): boolean {
 }
 
 function setSessionCookie(reply: FastifyReply, token: string): void {
-  reply.setCookie('session', token, { httpOnly: true, sameSite: 'lax', path: '/', secure: sessionCookieSecure() });
+  reply.setCookie('session', token, { httpOnly: true, sameSite: 'strict', path: '/', secure: sessionCookieSecure() });
 }
 
 function safeSecretEqual(provided: string | undefined, expected: string): boolean {
@@ -280,7 +282,15 @@ async function ensureCompanyReferences(companyId: string, input: CompanyReferenc
 }
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/health', async () => ({ ok: true }));
+  app.get('/health', async (request, reply) => {
+    try {
+      await db.execute(drizzleSql`select 1`);
+      return { ok: true, database: 'up' };
+    } catch (error) {
+      request.log.error({ error }, 'health check database probe failed');
+      return reply.code(503).send({ ok: false, database: 'down' });
+    }
+  });
   await registerChatRoutes(app);
   await registerCronRoutes(app);
   await registerRunnerRoutes(app);
@@ -704,51 +714,183 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (access.companyIds.length === 0) {
       return { stats: { companies: 0, tasks: 0, openTasks: 0, completedTasks: 0, blockedTasks: 0, cancelledTasks: 0, agents: 0, activeAgents: 0, busyAgents: 0, activeRuns: 0, pendingApprovals: 0, budgetPolicies: 0, monthlyCost: 0 }, stages: {}, recentTaskLogs: [], recentApiEvents: [], recentActivity: [], recentRuns: [], pendingApprovals: [] };
     }
-    const [cards, agentRows, companyRows, recentTaskLogs, recentApiEvents, recentActivity, recentRuns, pendingApprovals, policyRows] = await Promise.all([
-      db.select().from(kanbanCards).where(inArray(kanbanCards.companyId, access.companyIds)),
-      db.select().from(agents).where(inArray(agents.companyId, access.companyIds)),
-      db.select().from(companies).where(inArray(companies.id, access.companyIds)),
+    const [cardStatRows, agentStatRows, companyStatRows, recentTaskLogs, recentApiEvents, recentActivity, recentRuns, pendingApprovals, policyStatRows] = await Promise.all([
+      db.select({
+        status: kanbanCards.columnStatus,
+        count: drizzleSql<number>`count(*)::int`,
+        costUsd: drizzleSql<number>`coalesce(sum(${kanbanCards.costUsd}), 0)::float`,
+      }).from(kanbanCards).where(inArray(kanbanCards.companyId, access.companyIds)).groupBy(kanbanCards.columnStatus),
+      db.select({
+        total: drizzleSql<number>`count(*)::int`,
+        active: drizzleSql<number>`count(*) filter (where ${agents.isActive} is distinct from false)::int`,
+        busy: drizzleSql<number>`count(*) filter (where ${agents.isBusy})::int`,
+      }).from(agents).where(inArray(agents.companyId, access.companyIds)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(companies).where(inArray(companies.id, access.companyIds)),
       db.select().from(taskLogs).innerJoin(kanbanCards, eq(taskLogs.cardId, kanbanCards.id)).where(inArray(kanbanCards.companyId, access.companyIds)).orderBy(desc(taskLogs.createdAt)).limit(20),
       db.select().from(apiEvents).where(eq(apiEvents.userId, access.user.id)).orderBy(desc(apiEvents.createdAt)).limit(20),
       db.select().from(activityLog).where(inArray(activityLog.companyId, access.companyIds)).orderBy(desc(activityLog.createdAt)).limit(20),
       db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.companyId, access.companyIds)).orderBy(desc(heartbeatRuns.createdAt)).limit(20),
       db.select().from(approvals).where(and(inArray(approvals.companyId, access.companyIds), eq(approvals.status, 'pending'))).orderBy(desc(approvals.createdAt)).limit(50),
-      db.select().from(budgetPolicies).where(and(inArray(budgetPolicies.companyId, access.companyIds), eq(budgetPolicies.isActive, true))),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(budgetPolicies).where(and(inArray(budgetPolicies.companyId, access.companyIds), eq(budgetPolicies.isActive, true))),
     ]);
-    const openCards = cards.filter((card) => !['done', 'blocked', 'cancelled'].includes(card.columnStatus ?? 'todo'));
-    const completedCards = cards.filter((card) => card.columnStatus === 'done');
-    const blockedCards = cards.filter((card) => card.columnStatus === 'blocked');
-    const cancelledCards = cards.filter((card) => card.columnStatus === 'cancelled');
-    const activeAgents = agentRows.filter((agent) => agent.isActive !== false);
-    const busyAgents = agentRows.filter((agent) => agent.isBusy);
-    const monthlyCost = cards.reduce((sum, card) => sum + Number(card.costUsd ?? 0), 0);
+    const stages: Record<string, number> = {};
+    let totalTasks = 0;
+    let completedTasks = 0;
+    let blockedTasks = 0;
+    let cancelledTasks = 0;
+    let monthlyCost = 0;
+    for (const row of cardStatRows) {
+      const key = row.status ?? 'todo';
+      stages[key] = (stages[key] ?? 0) + row.count;
+      totalTasks += row.count;
+      monthlyCost += row.costUsd;
+      if (key === 'done') completedTasks += row.count;
+      if (key === 'blocked') blockedTasks += row.count;
+      if (key === 'cancelled') cancelledTasks += row.count;
+    }
+    const agentStats = agentStatRows[0] ?? { total: 0, active: 0, busy: 0 };
     return {
       stats: {
-        companies: companyRows.length,
-        tasks: cards.length,
-        openTasks: openCards.length,
-        completedTasks: completedCards.length,
-        blockedTasks: blockedCards.length,
-        cancelledTasks: cancelledCards.length,
-        agents: agentRows.length,
-        activeAgents: activeAgents.length,
-        busyAgents: busyAgents.length,
+        companies: companyStatRows[0]?.count ?? 0,
+        tasks: totalTasks,
+        openTasks: totalTasks - completedTasks - blockedTasks - cancelledTasks,
+        completedTasks,
+        blockedTasks,
+        cancelledTasks,
+        agents: agentStats.total,
+        activeAgents: agentStats.active,
+        busyAgents: agentStats.busy,
         activeRuns: recentRuns.filter((run) => run.status === 'running').length,
         pendingApprovals: pendingApprovals.length,
-        budgetPolicies: policyRows.length,
+        budgetPolicies: policyStatRows[0]?.count ?? 0,
         monthlyCost: Number(monthlyCost.toFixed(4)),
       },
-      stages: cards.reduce<Record<string, number>>((acc, card) => {
-        const key = card.columnStatus ?? 'todo';
-        acc[key] = (acc[key] ?? 0) + 1;
-        return acc;
-      }, {}),
+      stages,
       recentTaskLogs: recentTaskLogs.map((row) => row.task_logs),
       recentApiEvents,
       recentActivity,
       recentRuns,
       pendingApprovals,
     };
+  });
+
+  app.get('/api/search', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    const query = request.query as { q?: string; companyId?: string; limit?: string };
+    const q = (query.q ?? '').trim();
+    if (q.length < 2) return { query: q, cards: [], agents: [], projects: [], companies: [], chatSessions: [], knowledgeDocs: [] };
+    const companyIds = query.companyId
+      ? access.companyIds.filter((id) => id === query.companyId)
+      : access.companyIds;
+    if (companyIds.length === 0) return { query: q, cards: [], agents: [], projects: [], companies: [], chatSessions: [], knowledgeDocs: [] };
+    const limit = Math.min(Math.max(Number(query.limit ?? 8), 1), 25);
+    const pattern = `%${q.replace(/([\\%_])/g, '\\$1')}%`;
+    const [cardRows, agentRows, projectRows, companyRows, sessionRows, docRows] = await Promise.all([
+      db.select({ id: kanbanCards.id, title: kanbanCards.title, columnStatus: kanbanCards.columnStatus, companyId: kanbanCards.companyId, projectId: kanbanCards.projectId })
+        .from(kanbanCards)
+        .where(and(inArray(kanbanCards.companyId, companyIds), isNull(kanbanCards.deletedAt), drizzleSql`${kanbanCards.title} ILIKE ${pattern}`))
+        .orderBy(desc(kanbanCards.updatedAt)).limit(limit),
+      db.select({ id: agents.id, name: agents.name, role: agents.role, companyId: agents.companyId, isActive: agents.isActive })
+        .from(agents)
+        .where(and(inArray(agents.companyId, companyIds), isNull(agents.deletedAt), drizzleSql`(${agents.name} ILIKE ${pattern} OR ${agents.role} ILIKE ${pattern})`))
+        .limit(limit),
+      db.select({ id: projects.id, name: projects.name, companyId: projects.companyId })
+        .from(projects)
+        .where(and(inArray(projects.companyId, companyIds), drizzleSql`${projects.name} ILIKE ${pattern}`))
+        .limit(limit),
+      db.select({ id: companies.id, name: companies.name, slug: companies.slug })
+        .from(companies)
+        .where(and(inArray(companies.id, companyIds), drizzleSql`${companies.name} ILIKE ${pattern}`))
+        .limit(limit),
+      db.select({ id: chatSessions.id, title: chatSessions.title, companyId: chatSessions.companyId, agentId: chatSessions.agentId })
+        .from(chatSessions)
+        .where(and(inArray(chatSessions.companyId, companyIds), drizzleSql`${chatSessions.title} ILIKE ${pattern}`))
+        .orderBy(desc(chatSessions.updatedAt)).limit(limit),
+      db.select({ id: knowledgeDocs.id, title: knowledgeDocs.title, companyId: knowledgeDocs.companyId })
+        .from(knowledgeDocs)
+        .where(and(inArray(knowledgeDocs.companyId, companyIds), drizzleSql`${knowledgeDocs.title} ILIKE ${pattern}`))
+        .limit(limit),
+    ]);
+    return { query: q, cards: cardRows, agents: agentRows, projects: projectRows, companies: companyRows, chatSessions: sessionRows, knowledgeDocs: docRows };
+  });
+
+  app.get('/api/dashboard/timeseries', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    const query = request.query as { days?: string; companyId?: string };
+    const companyIds = query.companyId
+      ? access.companyIds.filter((id) => id === query.companyId)
+      : access.companyIds;
+    const days = Math.min(Math.max(Number(query.days ?? 30), 7), 180);
+    if (companyIds.length === 0) return { days, points: [] };
+    const [costRows, doneRows, runRows] = await Promise.all([
+      db.select({
+        day: drizzleSql<string>`to_char(date_trunc('day', ${costEvents.occurredAt}), 'YYYY-MM-DD')`,
+        costUsd: drizzleSql<number>`coalesce(sum(${costEvents.costUsd}), 0)::float`,
+      }).from(costEvents)
+        .where(and(inArray(costEvents.companyId, companyIds), drizzleSql`${costEvents.occurredAt} > now() - interval '${drizzleSql.raw(String(days))} days'`))
+        .groupBy(drizzleSql`1`),
+      db.select({
+        day: drizzleSql<string>`to_char(date_trunc('day', ${kanbanCards.completedAt}), 'YYYY-MM-DD')`,
+        completed: drizzleSql<number>`count(*)::int`,
+      }).from(kanbanCards)
+        .where(and(inArray(kanbanCards.companyId, companyIds), isNull(kanbanCards.deletedAt), drizzleSql`${kanbanCards.completedAt} > now() - interval '${drizzleSql.raw(String(days))} days'`))
+        .groupBy(drizzleSql`1`),
+      db.select({
+        day: drizzleSql<string>`to_char(date_trunc('day', ${heartbeatRuns.createdAt}), 'YYYY-MM-DD')`,
+        runs: drizzleSql<number>`count(*)::int`,
+        failedRuns: drizzleSql<number>`count(*) filter (where ${heartbeatRuns.status} = 'failed')::int`,
+      }).from(heartbeatRuns)
+        .where(and(inArray(heartbeatRuns.companyId, companyIds), drizzleSql`${heartbeatRuns.createdAt} > now() - interval '${drizzleSql.raw(String(days))} days'`))
+        .groupBy(drizzleSql`1`),
+    ]);
+    const byDay = new Map<string, { day: string; costUsd: number; completed: number; runs: number; failedRuns: number }>();
+    const point = (day: string) => {
+      const existing = byDay.get(day);
+      if (existing) return existing;
+      const created = { day, costUsd: 0, completed: 0, runs: 0, failedRuns: 0 };
+      byDay.set(day, created);
+      return created;
+    };
+    const today = new Date();
+    for (let offset = days - 1; offset >= 0; offset -= 1) {
+      const date = new Date(today.getTime() - offset * 24 * 60 * 60 * 1000);
+      point(date.toISOString().slice(0, 10));
+    }
+    for (const row of costRows) point(row.day).costUsd = Number(row.costUsd.toFixed(4));
+    for (const row of doneRows) point(row.day).completed = row.completed;
+    for (const row of runRows) { const entry = point(row.day); entry.runs = row.runs; entry.failedRuns = row.failedRuns; }
+    return { days, points: [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day)) };
+  });
+
+  app.get('/api/notifications', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    const query = request.query as { companyId?: string; limit?: string };
+    const companyIds = query.companyId
+      ? access.companyIds.filter((id) => id === query.companyId)
+      : access.companyIds;
+    const limit = Math.min(Math.max(Number(query.limit ?? 50), 1), 200);
+    const [rows, unread] = await Promise.all([
+      listNotifications(access.user.id, companyIds, limit),
+      unreadNotificationCount(access.user.id, companyIds),
+    ]);
+    return { notifications: rows, unreadCount: unread };
+  });
+  app.post('/api/notifications/:id/read', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    const id = (request.params as { id: string }).id;
+    const [row] = await db.select({ companyId: notifications.companyId }).from(notifications).where(eq(notifications.id, id)).limit(1);
+    if (!row || !access.companyIds.includes(row.companyId)) return reply.code(404).send({ error: 'notification_not_found' });
+    await markNotificationRead(access.user.id, id);
+    return { ok: true };
+  });
+  app.post('/api/notifications/read-all', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    const query = request.query as { companyId?: string };
+    const companyIds = query.companyId
+      ? access.companyIds.filter((id) => id === query.companyId)
+      : access.companyIds;
+    const marked = await markAllNotificationsRead(access.user.id, companyIds);
+    return { ok: true, marked };
   });
 
   app.get('/api/companies', async (request, reply) => {
@@ -1107,6 +1249,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       revisionCount: input.revisionCount,
       maxRevisions: input.maxRevisions,
       maxRetries: input.maxRetries,
+      timeoutSeconds: input.timeoutSeconds ?? null,
+      scheduleAt: input.scheduleAt ?? null,
+      recurEveryMinutes: input.recurEveryMinutes ?? null,
+      recurNextAt: input.recurEveryMinutes
+        ? input.scheduleAt ?? new Date(Date.now() + input.recurEveryMinutes * 60_000)
+        : null,
       createdBy: user.id,
     }).returning();
     if (card) {
@@ -1218,9 +1366,30 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       revisionCount: input.revisionCount,
       maxRevisions: input.maxRevisions,
       maxRetries: input.maxRetries,
+      timeoutSeconds: input.timeoutSeconds === undefined ? undefined : input.timeoutSeconds ?? null,
+      scheduleAt: input.scheduleAt === undefined ? undefined : input.scheduleAt ?? null,
+      recurEveryMinutes: input.recurEveryMinutes === undefined ? undefined : input.recurEveryMinutes ?? null,
+      recurNextAt: input.recurEveryMinutes === undefined
+        ? undefined
+        : input.recurEveryMinutes
+          ? (input.scheduleAt ?? existing.recurNextAt ?? new Date(Date.now() + input.recurEveryMinutes * 60_000))
+          : null,
       completedAt: input.columnStatus === 'done' ? new Date() : input.columnStatus ? null : undefined,
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, id)).returning();
+    if (card && nextAssigneeId !== existing.assigneeId) {
+      await db.insert(activityLog).values({
+        companyId: card.companyId,
+        actorType: 'user',
+        actorId: user.id,
+        userId: user.id,
+        agentId: nextAssigneeId,
+        action: 'card.assignee_changed',
+        entityType: 'card',
+        entityId: card.id,
+        details: { fromAssigneeId: existing.assigneeId, toAssigneeId: nextAssigneeId },
+      });
+    }
     if (card && transitionAction && toStatus) {
       await recordStageAction({
         cardId: card.id,
@@ -1521,6 +1690,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     try { return reply.code(201).send(await decomposeCard(card.id)); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'decompose_failed' }); }
   });
+  app.get('/api/cards/:id/assignment-history', async (request, reply) => {
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    const query = request.query as { limit?: string };
+    const limit = Math.min(Math.max(Number(query.limit ?? 100), 1), 500);
+    return db.select().from(activityLog).where(and(
+      eq(activityLog.entityType, 'card'),
+      eq(activityLog.entityId, card.id),
+      inArray(activityLog.action, ['card.assignee_changed', 'card.auto_assigned']),
+    )).orderBy(desc(activityLog.createdAt)).limit(limit);
+  });
 
   app.get('/api/agents', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
@@ -1539,7 +1719,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     try { await ensureCompanyReferences(companyId, { departmentId: input.departmentId, positionId: input.positionId, bossId: input.bossId, runtimeId: input.runtimeId, adapterType: input.adapterType }); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
-    const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, positionId: input.positionId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, capabilities: input.capabilities ?? [], budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
+    const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, positionId: input.positionId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, capabilities: input.capabilities ?? [], maxConcurrent: input.maxConcurrent ?? 1, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
     if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
     return reply.code(201).send(agent ? redactAgent(agent) : agent);
   });
@@ -1568,7 +1748,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [agent] = await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.paused', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
-    return agent;
+    return redactAgent(agent);
   });
   app.post('/api/agents/:id/resume', async (request, reply) => {
     const id = (request.params as { id: string }).id;
@@ -1578,7 +1758,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [agent] = await db.update(agents).set({ isActive: true }).where(eq(agents.id, id)).returning();
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.resumed', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
-    return agent;
+    return redactAgent(agent);
   });
   app.post('/api/agents/:id/reset-session', async (request, reply) => {
     const id = (request.params as { id: string }).id;
@@ -1590,7 +1770,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await resetAdapterSessionsForAgent(id);
     await db.update(chatSessions).set({ agentSessionId: null, updatedAt: new Date() }).where(eq(chatSessions.agentId, id));
     await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.session_reset', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
-    return agent;
+    return redactAgent(agent);
   });
   app.put('/api/agents/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
@@ -1620,6 +1800,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       hermesProfile: input.hermesProfile,
       bossId: input.bossId,
       capabilities: input.capabilities,
+      maxConcurrent: input.maxConcurrent,
       budgetPerTask: input.budgetPerTask?.toString(),
       budgetMonthly: input.budgetMonthly?.toString(),
     }).where(eq(agents.id, id)).returning();

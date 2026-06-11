@@ -4,7 +4,12 @@ import { dispatchToHermesGateway } from './hermes-gateway.ts';
 import { dispatchToHermesSsh } from './hermes-ssh.ts';
 import { dispatchToOpenClaw, dispatchToWebhook } from './webhook.ts';
 
-export type AgentAdapter = { dispatch: (agent: AgentLike, task: TaskContext) => Promise<TaskResult> };
+export type AdapterDispatchHooks = {
+  // Incremental stdout/text chunks while the adapter run is still in flight.
+  // Adapters that cannot stream simply never call it.
+  onOutput?: (chunk: string) => void;
+};
+export type AgentAdapter = { dispatch: (agent: AgentLike, task: TaskContext, hooks?: AdapterDispatchHooks) => Promise<TaskResult> };
 const registry = new Map<string, AgentAdapter>();
 registry.set('hermes-gateway', { dispatch: dispatchToHermesGateway });
 registry.set('hermes-ssh', { dispatch: dispatchToHermesSsh });

@@ -30,6 +30,9 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
   headers.delete('host');
   headers.delete('x-forwarded-host');
   headers.delete('x-forwarded-proto');
+  // Always overwrite: the API's CSRF origin check compares the browser Origin
+  // against the host the browser actually used to reach this web app.
+  headers.set('x-megacorps-web-host', request.nextUrl.host);
 
   const body = ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer();
   const tried: string[] = [];

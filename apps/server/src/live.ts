@@ -15,6 +15,8 @@ type LiveSocket = {
 export type LiveEvent = {
   type: string;
   companyId?: string | null;
+  // When set, the event is delivered only to this user's sockets (still company-gated).
+  userId?: string | null;
   entityType?: string;
   entityId?: string;
   cardId?: string | null;
@@ -27,6 +29,7 @@ export type LiveEvent = {
 
 type LiveClient = {
   socket: LiveSocket;
+  userId: string;
   companyIds: Set<string>;
 };
 
@@ -34,6 +37,7 @@ const clients = new Set<LiveClient>();
 const OPEN = 1;
 
 function canReceive(client: LiveClient, event: LiveEvent): boolean {
+  if (event.userId && client.userId !== event.userId) return false;
   return !event.companyId || client.companyIds.has(event.companyId);
 }
 
@@ -71,7 +75,7 @@ export async function registerLiveRoutes(app: FastifyInstance): Promise<void> {
       eq(companyMemberships.userId, user.id),
       eq(companyMemberships.status, 'active'),
     ));
-    const client: LiveClient = { socket, companyIds: new Set(memberships.map((row) => row.companyId)) };
+    const client: LiveClient = { socket, userId: user.id, companyIds: new Set(memberships.map((row) => row.companyId)) };
     clients.add(client);
     socket.send(JSON.stringify({ type: 'live.connected', data: { companies: client.companyIds.size }, createdAt: new Date().toISOString() }));
     socket.on('message', (message: unknown) => {

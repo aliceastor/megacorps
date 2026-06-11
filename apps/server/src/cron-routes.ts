@@ -5,8 +5,9 @@ import { requireRole } from './auth.ts';
 import { db } from './db/client.ts';
 import { activityLog, agents, companies, cronRuns } from './db/schema.ts';
 import { getDispatchCronStatus, runDispatchCronTick } from './dispatch.ts';
+import { runLogRetentionOnce } from './retention.ts';
 
-const cronJobSchema = z.enum(['dispatch-heartbeat', 'daily-report', 'health-check']);
+const cronJobSchema = z.enum(['dispatch-heartbeat', 'daily-report', 'health-check', 'log-retention']);
 const runCronSchema = z.object({
   job: cronJobSchema.default('dispatch-heartbeat'),
   companyId: z.string().uuid().nullable().optional(),
@@ -21,6 +22,7 @@ const runCronSchema = z.object({
 function jobLabel(job: z.infer<typeof cronJobSchema>): string {
   if (job === 'daily-report') return 'daily-report';
   if (job === 'health-check') return 'health-check';
+  if (job === 'log-retention') return 'log-retention';
   return 'dispatch-heartbeat';
 }
 
@@ -68,6 +70,12 @@ export async function registerCronRoutes(app: FastifyInstance): Promise<void> {
       const result = await runDispatchCronTick(app, 'manual', { companyId: scope.companyId, runnerAgentId: scope.runnerId, jobName: jobLabel(input.job) });
       if (result.status === 'failed') return reply.code(500).send(result);
       if (result.status === 'skipped') return reply.code(409).send(result);
+      return result;
+    }
+
+    if (input.job === 'log-retention') {
+      const result = await runLogRetentionOnce('manual');
+      if (result.status === 'failed') return reply.code(500).send(result);
       return result;
     }
 

@@ -10,9 +10,10 @@ import { publishLiveEvent } from './live.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 import { recordStageAction } from './card-actions.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
-import { agentRuntimeAvailable } from './runner-availability.ts';
+import { agentRuntimeAvailable, createRuntimeAvailabilityCache } from './runner-availability.ts';
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
+import { notify } from './notifications.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -40,6 +41,7 @@ const TASK_RUN_WORKER_INTERVAL_MS = Number(process.env.TASK_RUN_WORKER_INTERVAL_
 const TASK_RUN_WORKER_BATCH_SIZE = Number(process.env.TASK_RUN_WORKER_BATCH_SIZE ?? 1);
 const TASK_RUN_WORKER_ID = process.env.TASK_RUN_WORKER_ID ?? `server-${Math.random().toString(36).slice(2, 10)}`;
 const TASK_RUN_STALE_MS = Number(process.env.TASK_RUN_STALE_MS ?? 10 * 60 * 1000);
+const EXECUTION_LOCK_TTL_MS = Math.max(60_000, Number(process.env.EXECUTION_LOCK_TTL_MS ?? 10 * 60 * 1000));
 let loopRunning = false;
 let taskRunWorkerClaiming = false;
 const activeTaskRunIds = new Set<string>();
@@ -477,6 +479,9 @@ async function recordUncaughtDispatchFailure(run: TaskRunRow, message: string): 
 export async function enqueueTaskRun(cardId: string, kind: TaskRunKind = 'dispatch', source: TaskRunSource = 'manual', requestedByUserId?: string | null): Promise<TaskRunRow> {
   const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
+  // Recurring templates never execute themselves: the scheduler clones them into
+  // normal cards on each occurrence.
+  if (card.recurEveryMinutes) throw new Error('recurring_template_cannot_run');
   const [existing] = await db.select().from(taskRuns).where(and(
     eq(taskRuns.cardId, cardId),
     eq(taskRuns.kind, kind),
@@ -485,6 +490,8 @@ export async function enqueueTaskRun(cardId: string, kind: TaskRunKind = 'dispat
   if (existing) return existing;
 
   const previous = await db.select({ id: taskRuns.id }).from(taskRuns).where(and(eq(taskRuns.cardId, cardId), eq(taskRuns.kind, kind)));
+  // The partial unique index task_runs_active_card_kind_uidx guarantees at most one
+  // queued/running run per (card, kind); concurrent enqueues resolve to the winner row.
   const [run] = await db.insert(taskRuns).values({
     companyId: card.companyId,
     cardId: card.id,
@@ -496,8 +503,16 @@ export async function enqueueTaskRun(cardId: string, kind: TaskRunKind = 'dispat
     attemptNumber: previous.length + 1,
     maxAttempts: 1,
     requestedByUserId: requestedByUserId ?? null,
-  }).returning();
-  if (!run) throw new Error('task_run_create_failed');
+  }).onConflictDoNothing().returning();
+  if (!run) {
+    const [winner] = await db.select().from(taskRuns).where(and(
+      eq(taskRuns.cardId, cardId),
+      eq(taskRuns.kind, kind),
+      inArray(taskRuns.status, ['queued', 'running']),
+    )).orderBy(desc(taskRuns.createdAt)).limit(1);
+    if (winner) return winner;
+    throw new Error('task_run_create_failed');
+  }
   await addTaskRunLog(run, 'queued', `${kind} task run queued via ${source}.`);
   await addActivity({
     companyId: card.companyId,
@@ -515,6 +530,7 @@ export async function enqueueTaskRun(cardId: string, kind: TaskRunKind = 'dispat
 async function claimNextTaskRun(): Promise<TaskRunRow | null> {
   const candidates = await db.select().from(taskRuns).where(eq(taskRuns.status, 'queued')).orderBy(desc(taskRuns.priority), taskRuns.createdAt).limit(25);
   const now = new Date();
+  const availabilityCache = createRuntimeAvailabilityCache();
   for (const queued of candidates) {
     const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, queued.cardId), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card) continue;
@@ -528,7 +544,7 @@ async function claimNextTaskRun(): Promise<TaskRunRow | null> {
     if (!targetAgentId) continue;
     const [targetAgent] = await db.select().from(agents).where(and(eq(agents.id, targetAgentId), isNull(agents.deletedAt))).limit(1);
     if (!targetAgent || !targetAgent.isActive || targetAgent.isBusy) continue;
-    if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: targetAgent.runtimeId, adapterType: targetAgent.adapterType ?? 'hermes-ssh' }))) continue;
+    if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: targetAgent.runtimeId, adapterType: targetAgent.adapterType ?? 'hermes-ssh' }, availabilityCache))) continue;
     const [claimed] = await db.update(taskRuns).set({
       status: 'running',
       lockedBy: TASK_RUN_WORKER_ID,
@@ -612,8 +628,10 @@ export async function processTaskRunQueue(app: FastifyInstance): Promise<{ claim
   return result;
 }
 
-export async function getBudgetGuard(agent: AgentRow): Promise<{ monthlyLimit: number | null; perTaskLimit: number | null; warnAtPercent: number; hardStop: boolean }> {
-  const rows = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, agent.companyId), eq(budgetPolicies.isActive, true)));
+type BudgetPolicyRow = typeof budgetPolicies.$inferSelect;
+
+export async function getBudgetGuard(agent: AgentRow, preloadedPolicies?: BudgetPolicyRow[]): Promise<{ monthlyLimit: number | null; perTaskLimit: number | null; warnAtPercent: number; hardStop: boolean }> {
+  const rows = preloadedPolicies ?? await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, agent.companyId), eq(budgetPolicies.isActive, true)));
   const applicable = rows.filter((policy) => !policy.agentId || policy.agentId === agent.id);
   const monthlyLimits = [
     agent.budgetMonthly ? Number(agent.budgetMonthly) : null,
@@ -631,8 +649,8 @@ export async function getBudgetGuard(agent: AgentRow): Promise<{ monthlyLimit: n
   };
 }
 
-export async function budgetOk(agent: AgentRow): Promise<boolean> {
-  const guard = await getBudgetGuard(agent);
+export async function budgetOk(agent: AgentRow, preloadedPolicies?: BudgetPolicyRow[]): Promise<boolean> {
+  const guard = await getBudgetGuard(agent, preloadedPolicies);
   if (!guard.monthlyLimit) return true;
   return Number(agent.spentThisMonth ?? 0) < guard.monthlyLimit;
 }
@@ -725,11 +743,13 @@ async function selectBestAgent(card: CardRow): Promise<AgentRow | null> {
     ? []
     : await db.select({ id: positions.id }).from(positions).where(and(eq(positions.companyId, card.companyId), eq(positions.isCompanyBoss, true), eq(positions.isActive, true)));
   const bossPositionIds = new Set(bossPositions.map((position) => position.id));
+  const companyPolicies = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, card.companyId), eq(budgetPolicies.isActive, true)));
+  const availabilityCache = createRuntimeAvailabilityCache();
   const available = [];
   for (const agent of rows) {
     if (!agent.isActive || agent.isBusy) continue;
-    if (!(await budgetOk(agent))) continue;
-    if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'hermes-ssh' }))) continue;
+    if (!(await budgetOk(agent, companyPolicies))) continue;
+    if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'hermes-ssh' }, availabilityCache))) continue;
     available.push(agent);
   }
   const bossAgents = available.filter((agent) => agent.positionId && bossPositionIds.has(agent.positionId));
@@ -751,6 +771,16 @@ async function ensureAssigned(card: CardRow, source: string): Promise<CardRow | 
     updatedAt: new Date(),
   }).where(eq(kanbanCards.id, card.id)).returning();
   await addTaskLog({ cardId: card.id, agentId: agent.id, type: source, status: 'queued', message: `Auto-assigned to ${agent.name}.` });
+  await addActivity({
+    companyId: card.companyId,
+    actorType: 'system',
+    actorId: 'auto-assign',
+    agentId: agent.id,
+    action: 'card.auto_assigned',
+    entityType: 'card',
+    entityId: card.id,
+    details: { fromAssigneeId: card.assigneeId ?? null, toAssigneeId: agent.id, source },
+  });
   if (card.columnStatus !== 'todo') await addStageLog(card.id, agent.id, card.columnStatus, 'todo', 'auto-assignment');
   return updated ?? null;
 }
@@ -769,9 +799,50 @@ async function openHeartbeatRun(card: CardRow, agent: AgentRow, source: string, 
   return run;
 }
 
+// Claims one execution slot on the agent. With maxConcurrent=1 (the default) this is
+// the original atomic isBusy flip. With maxConcurrent>1, isBusy means "at capacity"
+// and the claim counts running heartbeat runs against the configured limit.
+async function claimAgentCapacity(agent: AgentRow): Promise<boolean> {
+  const maxConcurrent = Math.max(1, agent.maxConcurrent ?? 1);
+  if (maxConcurrent === 1) {
+    const [row] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, agent.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
+    return Boolean(row);
+  }
+  const rows = await rawSql`
+    UPDATE agents SET is_busy = (
+      (SELECT count(*) FROM heartbeat_runs hr WHERE hr.agent_id = agents.id AND hr.status = 'running') + 1 >= ${maxConcurrent}
+    )
+    WHERE id = ${agent.id} AND is_active = true AND deleted_at IS NULL AND (
+      SELECT count(*) FROM heartbeat_runs hr WHERE hr.agent_id = agents.id AND hr.status = 'running'
+    ) < ${maxConcurrent}
+    RETURNING id
+  `;
+  return rows.length > 0;
+}
+
+function cardDispatchTimeoutSeconds(card: CardRow): number {
+  const configured = card.timeoutSeconds ?? null;
+  if (configured && Number.isFinite(configured) && configured >= 30) return Math.min(configured, 14_400);
+  return 300;
+}
+
+function startExecutionLockRenewal(cardId: string, runId: string): () => void {
+  // Long adapter runs must keep extending their lock, otherwise stale-lock recovery
+  // would hand the card to another worker while this dispatch is still executing.
+  const interval = setInterval(() => {
+    void db.update(kanbanCards).set({
+      executionLockExpiresAt: new Date(Date.now() + EXECUTION_LOCK_TTL_MS),
+      updatedAt: new Date(),
+    }).where(and(eq(kanbanCards.id, cardId), eq(kanbanCards.executionLockId, runId)))
+      .catch(() => { /* best effort; stale-lock recovery remains the fallback */ });
+  }, Math.max(30_000, Math.floor(EXECUTION_LOCK_TTL_MS / 3)));
+  interval.unref?.();
+  return () => clearInterval(interval);
+}
+
 async function acquireExecutionLock(card: CardRow, agent: AgentRow, run: HeartbeatRunRow, source: string): Promise<CardRow> {
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
+  const expiresAt = new Date(now.getTime() + EXECUTION_LOCK_TTL_MS);
   const [locked] = await db.update(kanbanCards).set({
     executionLockId: run.id,
     executionLockedByAgentId: agent.id,
@@ -829,6 +900,7 @@ export async function createPendingApproval(card: CardRow, agentId: string | nul
   }).returning();
   await addTaskLog({ cardId: card.id, agentId, type: 'approval', status: 'queued', message: `Approval requested: ${reason}.` });
   await addActivity({ companyId: card.companyId, actorType: agentId ? 'agent' : 'system', actorId: agentId ?? 'system', agentId, action: 'approval.requested', entityType: 'card', entityId: card.id, details: { approvalId: approval?.id, reason } });
+  await notify({ companyId: card.companyId, type: 'approval_pending', title: `Approval needed: ${card.title}`, body: reason, entityType: 'approval', entityId: approval?.id ?? card.id, cardId: card.id, agentId });
   return approval;
 }
 
@@ -879,6 +951,16 @@ async function recordCostAndEnforceBudget(card: CardRow, agent: AgentRow, runId:
         payload: { costUsd, newSpend, monthlyLimit: guard.monthlyLimit, perTaskLimit: guard.perTaskLimit, monthlyExceeded, taskExceeded },
       });
     }
+    await notify({
+      companyId: card.companyId,
+      type: shouldPause ? 'budget_stop' : 'budget_warning',
+      title: shouldPause ? `Budget hard stop: ${agent.name} paused` : `Budget warning: ${agent.name} at ${guard.warnAtPercent}% of monthly budget`,
+      body: message,
+      entityType: 'agent',
+      entityId: agent.id,
+      cardId: card.id,
+      agentId: agent.id,
+    });
   }
   return shouldPause;
 }
@@ -959,20 +1041,26 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
   const maxRetries = card.maxRetries ?? 3;
   const message = error instanceof Error ? error.message : 'dispatch_failed';
   const blocked = retryCount >= maxRetries;
-  const [updated] = await db.update(kanbanCards).set({
-    columnStatus: blocked ? 'blocked' : 'todo',
-    retryCount,
-    nextRunAt: blocked ? null : nextBackoff(retryCount),
-    lastError: message,
-    executionLockId: null,
-    executionLockedByAgentId: null,
-    executionLockedAt: null,
-    executionLockExpiresAt: null,
-    activeHeartbeatRunId: null,
-    updatedAt: new Date(),
-  }).where(eq(kanbanCards.id, card.id)).returning();
-  await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
-  await releaseExecutionLock(card.id, runId ?? card.activeHeartbeatRunId ?? null, 'failed', message);
+  const failedRunId = runId ?? card.activeHeartbeatRunId ?? null;
+  const updated = await db.transaction(async (tx) => {
+    const [row] = await tx.update(kanbanCards).set({
+      columnStatus: blocked ? 'blocked' : 'todo',
+      retryCount,
+      nextRunAt: blocked ? null : nextBackoff(retryCount),
+      lastError: message,
+      executionLockId: null,
+      executionLockedByAgentId: null,
+      executionLockedAt: null,
+      executionLockExpiresAt: null,
+      activeHeartbeatRunId: null,
+      updatedAt: new Date(),
+    }).where(eq(kanbanCards.id, card.id)).returning();
+    await tx.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
+    if (failedRunId) {
+      await tx.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, failedRunId));
+    }
+    return row;
+  });
   await addStageLog(card.id, agent.id, card.columnStatus, blocked ? 'blocked' : 'todo', 'retry');
   await addTaskLog({
     cardId: card.id,
@@ -984,6 +1072,9 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
   });
   await addCardMessage({ cardId: card.id, agentId: agent.id, action: blocked ? 'agent_blocked' : 'agent_error', body: message });
   await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: blocked ? 'dispatch.blocked' : 'dispatch.retry_scheduled', entityType: 'card', entityId: card.id, details: { retryCount, maxRetries, error: message } });
+  if (blocked) {
+    await notify({ companyId: card.companyId, type: 'card_blocked', title: `Card blocked: ${card.title}`, body: message, entityType: 'card', entityId: card.id, cardId: card.id, agentId: agent.id });
+  }
   await completeTaskRun(taskRunId, { status: 'failed', error: message });
   if (!updated) throw new Error('card_update_failed');
   return updated;
@@ -1011,8 +1102,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
   }
   if (!(await cardDependenciesMet(card.id))) throw new Error('card_dependencies_not_met');
 
-  const [busyAgent] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, agent.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
-  if (!busyAgent) throw new Error('agent_busy');
+  if (!(await claimAgentCapacity(agent))) throw new Error('agent_busy');
   const run = await openHeartbeatRun(card, agent, source, options.taskRunId);
   let lockedCard = card;
   try {
@@ -1030,7 +1120,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const adapterSessionId = adapterSession?.adapterSessionId ?? null;
     const executionAgent = await buildExecutionAgent(agent, adapterSessionId);
     const taskPrompt = await buildTaskPrompt(card, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'dispatch' });
-    const task = { id: card.id, title: card.title, body: taskPrompt, timeoutSeconds: 300, taskRunId: options.taskRunId };
+    const task = { id: card.id, title: card.title, body: taskPrompt, timeoutSeconds: cardDispatchTimeoutSeconds(card), taskRunId: options.taskRunId };
     await recordPromptLog({
       companyId: card.companyId,
       agentId: agent.id,
@@ -1045,7 +1135,13 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { adapterSessionId, source, megacorpsPromptChars: taskPrompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
-    const result = await adapter.dispatch(executionAgent, task);
+    const stopLockRenewal = startExecutionLockRenewal(card.id, run.id);
+    let result: Awaited<ReturnType<typeof adapter.dispatch>>;
+    try {
+      result = await adapter.dispatch(executionAgent, task);
+    } finally {
+      stopLockRenewal();
+    }
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && !latest.executionLockId && latest.activeHeartbeatRunId !== run.id) {
       if (result.success) await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
@@ -1076,25 +1172,34 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const delegatedRows = await createDelegatedSubtasks(card, agent, delegationItems(result.output));
     if (delegatedRows.length > 0) {
       const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-      await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
-      const [updated] = await db.update(kanbanCards).set({
-        columnStatus: 'in_progress',
-        rollupStatus: 'waiting_on_children',
-        executionLog: result.output,
-        sessionId: result.sessionId,
-        costUsd: result.costUsd.toString(),
-        retryCount: 0,
-        nextRunAt: null,
-        completedAt: null,
-        lastError: null,
-        executionLockId: null,
-        executionLockedByAgentId: null,
-        executionLockedAt: null,
-        executionLockExpiresAt: null,
-        activeHeartbeatRunId: null,
-        updatedAt: new Date(),
-      }).where(eq(kanbanCards.id, card.id)).returning();
-      await releaseExecutionLock(card.id, run.id, 'success', null, result.costUsd, result.durationSeconds);
+      const updated = await db.transaction(async (tx) => {
+        await tx.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
+        const [row] = await tx.update(kanbanCards).set({
+          columnStatus: 'in_progress',
+          rollupStatus: 'waiting_on_children',
+          executionLog: result.output,
+          sessionId: result.sessionId,
+          costUsd: result.costUsd.toString(),
+          retryCount: 0,
+          nextRunAt: null,
+          completedAt: null,
+          lastError: null,
+          executionLockId: null,
+          executionLockedByAgentId: null,
+          executionLockedAt: null,
+          executionLockExpiresAt: null,
+          activeHeartbeatRunId: null,
+          updatedAt: new Date(),
+        }).where(eq(kanbanCards.id, card.id)).returning();
+        await tx.update(heartbeatRuns).set({
+          status: 'success',
+          completedAt: new Date(),
+          durationSeconds: result.durationSeconds,
+          error: null,
+          costUsd: result.costUsd.toString(),
+        }).where(eq(heartbeatRuns.id, run.id));
+        return row;
+      });
       await addTaskLog({
         cardId: card.id,
         agentId: agent.id,
@@ -1125,27 +1230,41 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const childBlock = await completionBlockedByChildren(card, nextStatus);
     const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : nextStatus;
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-    await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
-    const [updated] = await db.update(kanbanCards).set({
-      columnStatus: effectiveNextStatus,
-      rollupStatus: childBlock ? 'waiting_on_children' : effectiveNextStatus === 'done' ? 'done' : undefined,
-      executionLog: result.output,
-      sessionId: result.sessionId,
-      costUsd: result.costUsd.toString(),
-      reviewerId: effectiveReviewerId,
-      retryCount: 0,
-      nextRunAt: null,
-      completedAt: effectiveNextStatus === 'done' ? new Date() : null,
-      lastError: null,
-      executionLockId: null,
-      executionLockedByAgentId: null,
-      executionLockedAt: null,
-      executionLockExpiresAt: null,
-      activeHeartbeatRunId: null,
-      updatedAt: new Date(),
-    }).where(eq(kanbanCards.id, card.id)).returning();
-    await releaseExecutionLock(card.id, run.id, result.success ? 'success' : 'failed', result.success ? null : result.output, result.costUsd, result.durationSeconds);
+    // Agent release + card stage move + heartbeat completion commit atomically, so a
+    // crash mid-completion cannot leave the agent free while the card looks running.
+    const updated = await db.transaction(async (tx) => {
+      await tx.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
+      const [row] = await tx.update(kanbanCards).set({
+        columnStatus: effectiveNextStatus,
+        rollupStatus: childBlock ? 'waiting_on_children' : effectiveNextStatus === 'done' ? 'done' : undefined,
+        executionLog: result.output,
+        sessionId: result.sessionId,
+        costUsd: result.costUsd.toString(),
+        reviewerId: effectiveReviewerId,
+        retryCount: 0,
+        nextRunAt: null,
+        completedAt: effectiveNextStatus === 'done' ? new Date() : null,
+        lastError: null,
+        executionLockId: null,
+        executionLockedByAgentId: null,
+        executionLockedAt: null,
+        executionLockExpiresAt: null,
+        activeHeartbeatRunId: null,
+        updatedAt: new Date(),
+      }).where(eq(kanbanCards.id, card.id)).returning();
+      await tx.update(heartbeatRuns).set({
+        status: 'success',
+        completedAt: new Date(),
+        durationSeconds: result.durationSeconds,
+        error: null,
+        costUsd: result.costUsd.toString(),
+      }).where(eq(heartbeatRuns.id, run.id));
+      return row;
+    });
     if (effectiveNextStatus !== 'in_progress') await addStageLog(card.id, agent.id, 'in_progress', effectiveNextStatus, 'dispatch');
+    if (effectiveNextStatus === 'needs_review') {
+      await notify({ companyId: card.companyId, type: 'needs_review', title: `Help review requested: ${card.title}`, body: `${agent.name} requested reviewer guidance.`, entityType: 'card', entityId: card.id, cardId: card.id, agentId: agent.id });
+    }
     await addTaskLog({
       cardId: card.id,
       agentId: agent.id,
@@ -1265,8 +1384,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
   if (reviewer.isBusy) throw new Error('reviewer_busy');
   if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: reviewer.runtimeId, adapterType: reviewer.adapterType ?? 'hermes-ssh' }))) throw new Error('reviewer_runtime_unavailable');
 
-  const [busyReviewer] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, reviewer.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
-  if (!busyReviewer) throw new Error('reviewer_busy');
+  if (!(await claimAgentCapacity(reviewer))) throw new Error('reviewer_busy');
   const run = await openHeartbeatRun(card, reviewer, 'review', options.taskRunId);
   await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'running', message: 'Review started.' });
   try {
@@ -1506,6 +1624,69 @@ export async function getTaskLogs(cardId: string) {
   return db.select().from(taskLogs).where(eq(taskLogs.cardId, cardId)).orderBy(desc(taskLogs.createdAt));
 }
 
+// Recurring templates: when recur_next_at is due, clone the template into a normal
+// dispatchable card and schedule the next occurrence. The conditional update on
+// recur_next_at makes each occurrence claimable exactly once even with concurrent ticks.
+async function spawnDueScheduledCards(app: FastifyInstance, companyIds: string[]): Promise<number> {
+  if (companyIds.length === 0) return 0;
+  const now = new Date();
+  const due = await db.select().from(kanbanCards).where(and(
+    inArray(kanbanCards.companyId, companyIds),
+    isNull(kanbanCards.deletedAt),
+    drizzleSql`${kanbanCards.recurEveryMinutes} IS NOT NULL`,
+    drizzleSql`${kanbanCards.recurNextAt} IS NOT NULL AND ${kanbanCards.recurNextAt} <= now()`,
+  )).limit(20);
+  let spawned = 0;
+  for (const template of due) {
+    if (!template.recurNextAt) continue;
+    const interval = Math.max(5, template.recurEveryMinutes ?? 5);
+    // Schedule from now (not from the missed slot) so downtime does not cause a burst
+    // of catch-up occurrences.
+    const [claimed] = await db.update(kanbanCards).set({
+      recurNextAt: new Date(now.getTime() + interval * 60_000),
+      updatedAt: new Date(),
+    }).where(and(eq(kanbanCards.id, template.id), eq(kanbanCards.recurNextAt, template.recurNextAt))).returning();
+    if (!claimed) continue;
+    const occurrenceLabel = now.toISOString().slice(0, 16).replace('T', ' ');
+    const [clone] = await db.insert(kanbanCards).values({
+      companyId: template.companyId,
+      departmentId: template.departmentId,
+      projectId: template.projectId,
+      goalId: template.goalId,
+      title: `${template.title} (${occurrenceLabel})`,
+      body: template.body,
+      columnStatus: 'todo',
+      priority: template.priority,
+      tags: template.tags ?? [],
+      assigneeId: template.assigneeId,
+      reviewerId: template.reviewerId,
+      requiresApproval: template.requiresApproval,
+      decisionMode: template.decisionMode,
+      maxRetries: template.maxRetries,
+      maxRevisions: template.maxRevisions,
+      timeoutSeconds: template.timeoutSeconds,
+      taskBudgetLimit: template.taskBudgetLimit,
+      scheduledFromCardId: template.id,
+      createdBy: template.createdBy,
+    }).returning();
+    if (!clone) continue;
+    spawned += 1;
+    await addTaskLog({ cardId: clone.id, type: 'schedule', status: 'queued', message: `Scheduled occurrence created from recurring template "${template.title}".` });
+    await addActivity({
+      companyId: template.companyId,
+      actorType: 'system',
+      actorId: 'scheduler',
+      action: 'card.scheduled_occurrence_created',
+      entityType: 'card',
+      entityId: clone.id,
+      details: { templateCardId: template.id, recurEveryMinutes: interval, nextOccurrenceAt: claimed.recurNextAt },
+    });
+    publishLiveEvent({ type: 'card.created', companyId: template.companyId, entityType: 'card', entityId: clone.id, cardId: clone.id, projectId: clone.projectId });
+    app.log.info({ templateCardId: template.id, cloneCardId: clone.id }, 'scheduled occurrence spawned');
+  }
+  return spawned;
+}
+
 async function recoverStaleExecutionLocks(app: FastifyInstance) {
   const stale = await db.select().from(kanbanCards).where(drizzleSql`${kanbanCards.executionLockExpiresAt} IS NOT NULL AND ${kanbanCards.executionLockExpiresAt} < now()`);
   for (const card of stale) {
@@ -1538,6 +1719,7 @@ async function recoverStaleExecutionLocks(app: FastifyInstance) {
     await addTaskLog({ cardId: card.id, agentId, type: 'lock_expired', status: 'warning', message });
     if (nextStatus !== (card.columnStatus ?? 'todo')) await addStageLog(card.id, agentId ?? null, card.columnStatus, nextStatus, 'stale-lock-recovery');
     if (blocked) await addTaskLog({ cardId: card.id, agentId, type: 'retry', status: 'failed', message: `Max retries exceeded after ${retryCount} attempt(s).` });
+    if (blocked) await notify({ companyId: card.companyId, type: 'card_blocked', title: `Card blocked: ${card.title}`, body: message, entityType: 'card', entityId: card.id, cardId: card.id, agentId });
     if (shouldRetry) await addCardMessage({ cardId: card.id, agentId, action: blocked ? 'agent_blocked' : 'agent_error', body: message });
     await addActivity({
       companyId: card.companyId,
@@ -1699,9 +1881,18 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
     result.activeCompanies = activeCompanyIds.length;
 
     if (activeCompanyIds.length > 0) {
-      const cards = await db.select().from(kanbanCards).where(and(inArray(kanbanCards.companyId, activeCompanyIds), isNull(kanbanCards.deletedAt)));
+      await spawnDueScheduledCards(app, activeCompanyIds);
+      // Only statuses the loop can act on; done/blocked/cancelled/in_progress cards
+      // used to be loaded and skipped one by one, which scales badly with board size.
+      const cards = await db.select().from(kanbanCards).where(and(
+        inArray(kanbanCards.companyId, activeCompanyIds),
+        isNull(kanbanCards.deletedAt),
+        inArray(kanbanCards.columnStatus, ['backlog', 'todo', 'in_review', 'needs_review']),
+      ));
       result.cardsScanned = cards.length;
       for (const card of cards) {
+        if (card.recurEveryMinutes) { result.skipped += 1; continue; }
+        if (card.scheduleAt && card.scheduleAt > now) { result.skipped += 1; continue; }
         if (card.columnStatus === 'backlog' || card.columnStatus === 'todo') {
           if (card.nextRunAt && card.nextRunAt > now) { result.skipped += 1; continue; }
           if (!(await cardDependenciesMet(card.id))) { result.skipped += 1; continue; }

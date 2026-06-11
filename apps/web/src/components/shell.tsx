@@ -7,6 +7,8 @@ import { BookOpen, BriefcaseBusiness, Building2, ChartGantt, CircleHelp, Clock3,
 import { useLocale, localeList, localeNames } from '@/lib/locale-context';
 import { api } from '@/lib/api';
 import { AppMouseMotion } from '@/components/app-mouse-motion';
+import { NotificationBell } from '@/components/notification-bell';
+import { CommandPalette } from '@/components/command-palette';
 
 type NavItem = { href: string; labelKey: string; fallback: string; icon: LucideIcon; level?: number; exact?: boolean };
 
@@ -129,6 +131,7 @@ export function AppShell({ title, children }: { title: string; children: React.R
 
   return <div className={`app-frame ${open ? 'sidebar-open' : 'sidebar-compact'}`}>
     <AppMouseMotion />
+    <CommandPalette />
     <aside className="sidebar">
       <div className="sidebar-head">
         <Link href="/dashboard" className="brand-lockup" title="MegaCorps Dashboard">
@@ -160,6 +163,7 @@ export function AppShell({ title, children }: { title: string; children: React.R
           <strong>{displayTitle}</strong>
         </div>
         <span style={{ flex: 1 }} />
+        <NotificationBell />
         <Link className="btn icon-btn" href="/help" aria-label={t('common.help')} title={t('common.help')}><CircleHelp size={16} /></Link>
         <button className="btn icon-btn" aria-label="Toggle theme" onClick={toggleTheme}>{isDark ? <Moon size={16} /> : <Sun size={16} />}</button>
 

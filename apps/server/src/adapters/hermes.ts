@@ -118,19 +118,27 @@ function hermesModelOptions(agent: AgentLike): string[] {
   const model = configuredString(agent.adapterConfig?.model) ?? configuredString(agent.adapterConfig?.hermesModel);
   const provider = configuredString(agent.adapterConfig?.provider) ?? configuredString(agent.adapterConfig?.hermesProvider);
   return [
-    ...(model ? ['--model', model] : []),
-    ...(provider ? ['--provider', provider] : []),
+    ...(model ? ['--model', assertSafeCliValue(model, 'Hermes model')] : []),
+    ...(provider ? ['--provider', assertSafeCliValue(provider, 'Hermes provider')] : []),
   ];
 }
 
 function hermesSource(agent: AgentLike, task: TaskContext): string {
   const configured = configuredString(agent.adapterConfig?.source) ?? configuredString(agent.adapterConfig?.hermesSource);
-  if (configured) return configured;
+  if (configured) return assertSafeCliValue(configured, 'Hermes source');
   return task.kind === 'chat' ? 'megacorps-direct-chat' : 'megacorps-kanban';
+}
+
+const HERMES_PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function assertSafeCliValue(value: string, label: string): string {
+  if (value.startsWith('-') || /[\r\n\0]/.test(value)) throw new Error(`${label} contains unsupported characters for the Hermes CLI`);
+  return value;
 }
 
 export function buildHermesCliCommand(agent: AgentLike, task: TaskContext, hermesCommand = 'hermes'): string[] {
   if (!agent.hermesProfile) throw new Error('Agent has no Hermes profile configured');
+  if (!HERMES_PROFILE_PATTERN.test(agent.hermesProfile)) throw new Error('Agent Hermes profile must use only letters, digits, dot, underscore, or hyphen and cannot start with a hyphen');
   const prompt = buildAgentPrompt(agent, task);
   return [
     hermesCommand,

@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Save, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
+import { useLocale } from '@/lib/locale-context';
 
 type Runtime = { id: string; companyId?: string | null; name: string; adapterType: string; localWorkspaceRoot?: string | null; localScratchRoot?: string | null; config: Record<string, unknown>; isActive?: boolean };
 type RuntimeHealth = { runtimeId: string; name: string; adapterType: string; status: string; isActive: boolean; agents: number; activeAgents: number; busyAgents: number; lastRunAt?: string | null; lastRunStatus?: string | null; lastError?: string | null; capabilities?: string[] };
@@ -77,6 +78,7 @@ function formatConfig(config: Record<string, unknown>): string {
 }
 
 export function SettingsPage() {
+  const { t } = useLocale();
   const [tab, setTab] = useState<'runtimes' | 'company' | 'members' | 'advanced'>('runtimes');
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealth[]>([]);
@@ -159,11 +161,11 @@ export function SettingsPage() {
     setRuntimeConfigJson(value);
     try {
       const parsed = JSON.parse(value) as unknown;
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Runtime config must be a JSON object.');
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(t('settings.configMustBeObject'));
       setRuntimeConfig(parsed as Record<string, unknown>);
       setRuntimeConfigJsonError('');
     } catch (error) {
-      setRuntimeConfigJsonError(error instanceof Error ? error.message : 'Invalid JSON');
+      setRuntimeConfigJsonError(error instanceof Error ? error.message : t('settings.invalidJson'));
     }
   }
 
@@ -188,7 +190,7 @@ export function SettingsPage() {
 
   async function saveRuntime() {
     if (runtimeConfigJsonError) {
-      setToast(`Runtime config JSON error: ${runtimeConfigJsonError}`);
+      setToast(`${t('settings.configJsonError')}: ${runtimeConfigJsonError}`);
       return;
     }
     const payload = {
@@ -202,15 +204,15 @@ export function SettingsPage() {
     };
     const saved = runtimeId ? await api<Runtime>(`/api/agent-runtimes/${runtimeId}`, { method: 'PUT', body: JSON.stringify(payload) }) : await api<Runtime>('/api/agent-runtimes', { method: 'POST', body: JSON.stringify(payload) });
     setRuntimeId(saved.id);
-    setToast('Runtime saved');
+    setToast(t('settings.runtimeSaved'));
     await refresh();
   }
 
   async function deleteRuntime(runtime: Runtime) {
-    if (!window.confirm(`Delete runtime "${runtime.name}"? Agents using it will fall back to their own config/env.`)) return;
+    if (!window.confirm(`${t('settings.deleteRuntimeConfirm')} "${runtime.name}"? ${t('settings.deleteRuntimeDetail')}`)) return;
     await api(`/api/agent-runtimes/${runtime.id}`, { method: 'DELETE' });
     setRuntimeId('');
-    setToast('Runtime deleted');
+    setToast(t('settings.runtimeDeleted'));
     await refresh();
   }
 
@@ -219,7 +221,7 @@ export function SettingsPage() {
     const payload = { name: companyName, slug: selected?.slug ?? companyName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''), mission: companyMission, dispatchIntervalSeconds: companyInterval, autoDispatchEnabled: autoDispatch };
     const saved = selected ? await api<Company>(`/api/companies/${selected.id}`, { method: 'PUT', body: JSON.stringify(payload) }) : await api<Company>('/api/companies', { method: 'POST', body: JSON.stringify(payload) });
     selectCompany(saved);
-    setToast('Company saved');
+    setToast(t('companies.saved'));
     await refresh();
   }
 
@@ -228,7 +230,7 @@ export function SettingsPage() {
     await api<Department>('/api/departments', { method: 'POST', body: JSON.stringify({ companyId, name: deptName, slug: deptSlug }) });
     setDeptName('');
     setDeptSlug('');
-    setToast('Department added');
+    setToast(t('departments.added'));
     await refresh();
   }
 
@@ -237,112 +239,112 @@ export function SettingsPage() {
     await api<Membership>('/api/company-memberships', { method: 'POST', body: JSON.stringify({ companyId, email: memberEmail.trim(), role: memberRole, status: 'active' }) });
     setMemberEmail('');
     setMemberRole('viewer');
-    setToast('Member saved');
+    setToast(t('settings.memberSaved'));
     await refresh();
   }
 
   async function updateMember(membership: Membership, role: string) {
     await api<Membership>(`/api/company-memberships/${membership.id}`, { method: 'PUT', body: JSON.stringify({ role, status: membership.status }) });
-    setToast('Member role updated');
+    setToast(t('settings.memberRoleUpdated'));
     await refresh();
   }
 
   async function disableMember(membership: Membership) {
     await api(`/api/company-memberships/${membership.id}`, { method: 'DELETE' });
-    setToast('Member disabled');
+    setToast(t('settings.memberDisabled'));
     await refresh();
   }
 
   return <div style={{ display: 'grid', gap: 16 }}>
     <div className="page-head">
-      <div><h1>Settings</h1><p>Configure companies, departments, agent runtimes, and adapter endpoints.</p></div>
+      <div><h1>{t('title.settings')}</h1><p>{t('settings.subtitle')}</p></div>
     </div>
     {toast && <p className="status-pill">{toast}</p>}
     <div className="tab-row page-tabs">
-      {(['runtimes', 'company', 'members', 'advanced'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => setTab(next)}>{next}</button>)}
+      {(['runtimes', 'company', 'members', 'advanced'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => setTab(next)}>{t(`settings.tab.${next}`)}</button>)}
     </div>
     {tab === 'runtimes' && <div className="data-grid">
       <section className="card section-card">
-        <div className="panel-title"><h2>Agent runtimes</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeCompanyId(companyId || companies[0]?.id || ''); setRuntimeName(''); setRuntimeAdapter('hermes-ssh'); setRuntimeLocalWorkspaceRoot(''); setRuntimeLocalScratchRoot(''); setRuntimeConfigState({}); }}>New</button></div>
+        <div className="panel-title"><h2>{t('settings.agentRuntimes')}</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeCompanyId(companyId || companies[0]?.id || ''); setRuntimeName(''); setRuntimeAdapter('hermes-ssh'); setRuntimeLocalWorkspaceRoot(''); setRuntimeLocalScratchRoot(''); setRuntimeConfigState({}); }}>{t('common.new')}</button></div>
         <div className="form-grid">
-          <label className="field-label">Company<select className="input" value={runtimeCompanyId} onChange={(event) => setRuntimeCompanyId(event.target.value)}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
-          <label className="field-label">Name<input className="input" value={runtimeName} onChange={(event) => setRuntimeName(event.target.value)} /></label>
-          <label className="field-label">Adapter<select className="input" value={runtimeAdapter} onChange={(event) => setRuntimeAdapter(event.target.value)}>{adapterTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
-          <label className="field-label">Local workspace root
-            <span className="field-hint">Runtime-owned clone/cache root, for example /home/alice/workspaces or C:\Agents\Alice\workspaces.</span>
+          <label className="field-label">{t('common.company')}<select className="input" value={runtimeCompanyId} onChange={(event) => setRuntimeCompanyId(event.target.value)}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
+          <label className="field-label">{t('common.name')}<input className="input" value={runtimeName} onChange={(event) => setRuntimeName(event.target.value)} /></label>
+          <label className="field-label">{t('settings.adapter')}<select className="input" value={runtimeAdapter} onChange={(event) => setRuntimeAdapter(event.target.value)}>{adapterTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
+          <label className="field-label">{t('settings.localWorkspaceRoot')}
+            <span className="field-hint">{t('settings.workspaceRootHint')}</span>
             <input className="input" value={runtimeLocalWorkspaceRoot} onChange={(event) => setRuntimeLocalWorkspaceRoot(event.target.value)} />
           </label>
-          <label className="field-label">Local scratch root
-            <span className="field-hint">Runtime-owned temporary task folder root. Final artifacts should still be reported as URLs, commits, PRs, or work products.</span>
+          <label className="field-label">{t('settings.localScratchRoot')}
+            <span className="field-hint">{t('settings.scratchRootHint')}</span>
             <input className="input" value={runtimeLocalScratchRoot} onChange={(event) => setRuntimeLocalScratchRoot(event.target.value)} />
           </label>
         </div>
-        <label className="check-row"><input type="checkbox" checked={runtimeActive} onChange={(event) => setRuntimeActive(event.target.checked)} /> Runtime active</label>
+        <label className="check-row"><input type="checkbox" checked={runtimeActive} onChange={(event) => setRuntimeActive(event.target.checked)} /> {t('settings.runtimeActive')}</label>
         <div className="form-grid">
           {visibleConfigFields(runtimeAdapter, runtimeConfig).map((field) => <label className="field-label" key={field.key}>{field.label}
             {field.description && <span className="field-hint">{field.description}</span>}
             <input className="input" type={field.type ?? (isSensitiveConfigKey(field.key) ? 'password' : 'text')} value={String(configValue(runtimeConfig, field.key) ?? '')} onChange={(event) => updateRuntimeConfigField(field, event.target.value)} />
           </label>)}
         </div>
-        <label className="field-label">Advanced runtime config JSON
+        <label className="field-label">{t('settings.advancedConfigJson')}
           <textarea className="input config-json-editor" rows={8} spellCheck={false} value={runtimeConfigJson} onChange={(event) => updateRuntimeConfigJson(event.target.value)} />
-          <span className={runtimeConfigJsonError ? 'field-hint danger' : 'field-hint'}>{runtimeConfigJsonError || 'Adapter-specific keys stored in config are preserved here, including legacy publicApiUrl.'}</span>
+          <span className={runtimeConfigJsonError ? 'field-hint danger' : 'field-hint'}>{runtimeConfigJsonError || t('settings.configJsonHint')}</span>
         </label>
-        <button className="btn btn-primary" onClick={saveRuntime}><Save size={15} /> Save runtime</button>
+        <button className="btn btn-primary" onClick={saveRuntime}><Save size={15} /> {t('settings.saveRuntime')}</button>
         <div className="table-list">
           {runtimes.map((runtime) => <div className="list-row" key={runtime.id}>
-            <b>{runtime.name}</b><p>{companies.find((company) => company.id === runtime.companyId)?.name ?? 'company'} / {runtime.adapterType} / {runtime.isActive === false ? 'inactive' : 'active'}</p>
-            <p className="field-hint">{runtime.localWorkspaceRoot ? `Workspace: ${runtime.localWorkspaceRoot}` : 'Workspace root not configured'}{runtime.localScratchRoot ? ` / Scratch: ${runtime.localScratchRoot}` : ''}</p>
-            <div className="action-row"><button className="btn" onClick={() => selectRuntime(runtime)}>Edit</button><button className="btn" style={{ color: 'var(--danger)' }} onClick={() => deleteRuntime(runtime)}><Trash2 size={14} /> Delete</button></div>
+            <b>{runtime.name}</b><p>{companies.find((company) => company.id === runtime.companyId)?.name ?? 'company'} / {runtime.adapterType} / {runtime.isActive === false ? t('common.inactive') : t('common.active')}</p>
+            <p className="field-hint">{runtime.localWorkspaceRoot ? `${t('common.workspace')}: ${runtime.localWorkspaceRoot}` : t('settings.workspaceNotConfigured')}{runtime.localScratchRoot ? ` / ${t('settings.scratchLabel')}: ${runtime.localScratchRoot}` : ''}</p>
+            <div className="action-row"><button className="btn" onClick={() => selectRuntime(runtime)}>{t('common.edit')}</button><button className="btn" style={{ color: 'var(--danger)' }} onClick={() => deleteRuntime(runtime)}><Trash2 size={14} /> {t('common.delete')}</button></div>
           </div>)}
         </div>
       </section>
 
       <section className="card section-card">
-        <div className="panel-title"><h2>Runtime health</h2><span className="status-pill">{runtimeHealth.length} runtimes</span></div>
+        <div className="panel-title"><h2>{t('settings.runtimeHealth')}</h2><span className="status-pill">{runtimeHealth.length} {t('settings.runtimesCount')}</span></div>
         <div className="table-list">
           {runtimeHealth.map((runtime) => <div className="list-row" key={runtime.runtimeId}>
             <b>{runtime.name}</b>
             <p>{runtime.status} / {runtime.adapterType} / agents {runtime.activeAgents}/{runtime.agents} active / {runtime.busyAgents} busy</p>
             <div className="meta-grid">
-              <span>Last run <b>{runtime.lastRunAt ? new Date(runtime.lastRunAt).toLocaleString() : 'none'}</b></span>
-              <span>Last status <b>{runtime.lastRunStatus ?? 'none'}</b></span>
-              <span>Runtime features <b>{runtime.capabilities?.join(', ') || 'none'}</b></span>
-              <span>Error <b>{runtime.lastError ?? 'none'}</b></span>
+              <span>{t('settings.lastRun')} <b>{runtime.lastRunAt ? new Date(runtime.lastRunAt).toLocaleString() : 'none'}</b></span>
+              <span>{t('cron.lastStatus')} <b>{runtime.lastRunStatus ?? 'none'}</b></span>
+              <span>{t('settings.runtimeFeatures')} <b>{runtime.capabilities?.join(', ') || 'none'}</b></span>
+              <span>{t('common.errorLabel')} <b>{runtime.lastError ?? 'none'}</b></span>
             </div>
           </div>)}
-          {runtimeHealth.length === 0 && <p style={{ color: 'var(--muted)' }}>No runtime presets yet.</p>}
+          {runtimeHealth.length === 0 && <p style={{ color: 'var(--muted)' }}>{t('settings.noRuntimes')}</p>}
         </div>
       </section>
     </div>}
 
     {tab === 'company' && <div className="data-grid">
       <section className="card section-card">
-        <div className="panel-title"><h2>Company settings</h2><button className="btn btn-primary" onClick={saveCompany}>Save company</button></div>
-        <label className="field-label">Company<select className="input" value={companyId} onChange={(event) => { const company = companies.find((item) => item.id === event.target.value); if (company) selectCompany(company); }}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
+        <div className="panel-title"><h2>{t('settings.companySettings')}</h2><button className="btn btn-primary" onClick={saveCompany}>{t('companies.saveCompany')}</button></div>
+        <label className="field-label">{t('common.company')}<select className="input" value={companyId} onChange={(event) => { const company = companies.find((item) => item.id === event.target.value); if (company) selectCompany(company); }}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
         <div className="form-grid">
-          <label className="field-label">Name<input className="input" value={companyName} onChange={(event) => setCompanyName(event.target.value)} /></label>
-          <label className="field-label">Dispatch interval seconds<input className="input" type="number" min={5} max={3600} value={companyInterval} onChange={(event) => setCompanyInterval(Number(event.target.value))} /></label>
+          <label className="field-label">{t('common.name')}<input className="input" value={companyName} onChange={(event) => setCompanyName(event.target.value)} /></label>
+          <label className="field-label">{t('companies.dispatchIntervalSeconds')}<input className="input" type="number" min={5} max={3600} value={companyInterval} onChange={(event) => setCompanyInterval(Number(event.target.value))} /></label>
         </div>
-        <label className="check-row"><input type="checkbox" checked={autoDispatch} onChange={(event) => setAutoDispatch(event.target.checked)} /> Auto-dispatch todo tasks</label>
-        <label className="field-label">Mission<textarea className="input" rows={4} value={companyMission} onChange={(event) => setCompanyMission(event.target.value)} /></label>
+        <label className="check-row"><input type="checkbox" checked={autoDispatch} onChange={(event) => setAutoDispatch(event.target.checked)} /> {t('companies.autoDispatchTodo')}</label>
+        <label className="field-label">{t('companies.mission')}<textarea className="input" rows={4} value={companyMission} onChange={(event) => setCompanyMission(event.target.value)} /></label>
         <div className="form-grid">
-          <label className="field-label">New department<input className="input" value={deptName} onChange={(event) => setDeptName(event.target.value)} /></label>
-          <label className="field-label">Slug<input className="input" value={deptSlug} onChange={(event) => setDeptSlug(event.target.value)} /></label>
+          <label className="field-label">{t('departments.newDepartment')}<input className="input" value={deptName} onChange={(event) => setDeptName(event.target.value)} /></label>
+          <label className="field-label">{t('common.slug')}<input className="input" value={deptSlug} onChange={(event) => setDeptSlug(event.target.value)} /></label>
         </div>
-        <button className="btn" title={companyId ? 'Add department' : 'Create a company first before adding departments'} disabled={!companyId || !deptName.trim() || !deptSlug.trim()} onClick={addDepartment}>Add department</button>
+        <button className="btn" title={companyId ? t('departments.addDepartment') : t('departments.createCompanyFirstHint')} disabled={!companyId || !deptName.trim() || !deptSlug.trim()} onClick={addDepartment}>{t('departments.addDepartment')}</button>
         <div className="table-list">{selectedCompanyDepartments.map((department) => <div className="list-row" key={department.id}><b>{department.name}</b><p>{department.slug}</p></div>)}</div>
       </section>
     </div>}
 
     {tab === 'members' && <div className="data-grid">
       <section className="card section-card">
-        <div className="panel-title"><h2>Company members</h2><span className="status-pill">{selectedCompanyMembers.length} active</span></div>
+        <div className="panel-title"><h2>{t('settings.companyMembers')}</h2><span className="status-pill">{selectedCompanyMembers.length} {t('settings.activeCount')}</span></div>
         <div className="form-grid">
-          <label className="field-label">User email<input className="input" value={memberEmail} onChange={(event) => setMemberEmail(event.target.value)} /></label>
-          <label className="field-label">Role<select className="input" value={memberRole} onChange={(event) => setMemberRole(event.target.value)}><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select></label>
+          <label className="field-label">{t('settings.userEmail')}<input className="input" value={memberEmail} onChange={(event) => setMemberEmail(event.target.value)} /></label>
+          <label className="field-label">{t('settings.role')}<select className="input" value={memberRole} onChange={(event) => setMemberRole(event.target.value)}><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select></label>
         </div>
-        <button className="btn" onClick={addMember}>Add or update member</button>
+        <button className="btn" onClick={addMember}>{t('settings.addOrUpdateMember')}</button>
         <div className="table-list">
           {selectedCompanyMembers.map((membership) => <div className="list-row" key={membership.id}>
             <b>{membership.userName ?? membership.userEmail ?? membership.userId}</b>
@@ -353,21 +355,21 @@ export function SettingsPage() {
                 <option value="operator">operator</option>
                 <option value="admin">admin</option>
               </select>
-              <button className="btn" style={{ color: 'var(--danger)' }} onClick={() => disableMember(membership)}>Disable</button>
+              <button className="btn" style={{ color: 'var(--danger)' }} onClick={() => disableMember(membership)}>{t('settings.disableMember')}</button>
             </div>
           </div>)}
-          {selectedCompanyMembers.length === 0 && <p style={{ color: 'var(--muted)' }}>No active members.</p>}
+          {selectedCompanyMembers.length === 0 && <p style={{ color: 'var(--muted)' }}>{t('settings.noActiveMembers')}</p>}
         </div>
       </section>
     </div>}
 
     {tab === 'advanced' && <section className="card section-card">
-      <div className="panel-title"><h2>Advanced</h2><span className="status-pill">future settings</span></div>
+      <div className="panel-title"><h2>{t('settings.tab.advanced')}</h2><span className="status-pill">{t('settings.futureSettings')}</span></div>
       <div className="meta-grid">
-        <span>Budget <b>Moved out of primary navigation; ready to host budget controls here.</b></span>
-        <span>Secrets <b>API keys and webhook secrets can be added here without crowding runtime setup.</b></span>
-        <span>Company <b>{companies.length} visible companies</b></span>
-        <span>Runtimes <b>{runtimes.length} configured</b></span>
+        <span>{t('agents.budget')} <b>{t('settings.advancedBudgetHint')}</b></span>
+        <span>{t('settings.secrets')} <b>{t('settings.advancedSecretsHint')}</b></span>
+        <span>{t('common.company')} <b>{companies.length} {t('settings.visibleCompanies')}</b></span>
+        <span>{t('settings.runtimes')} <b>{runtimes.length} {t('cron.configured')}</b></span>
       </div>
     </section>}
   </div>;

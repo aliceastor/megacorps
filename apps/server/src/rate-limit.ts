@@ -38,9 +38,24 @@ export function rateLimitPolicyForPath(method: string, path: string): RateLimitP
 }
 
 function clientKey(request: FastifyRequest): string {
+  // With TRUST_PROXY, use the right-most X-Forwarded-For hop: it is the address the
+  // trusted reverse proxy itself observed, so clients cannot spoof their bucket key
+  // by sending a forged X-Forwarded-For prefix.
   const forwarded = truthy(process.env.TRUST_PROXY) ? request.headers['x-forwarded-for'] : undefined;
-  const ip = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0]?.trim();
-  return ip || request.ip || 'unknown';
+  const header = Array.isArray(forwarded) ? forwarded[forwarded.length - 1] : forwarded;
+  const hops = header?.split(',').map((item) => item.trim()).filter(Boolean) ?? [];
+  return hops[hops.length - 1] || request.ip || 'unknown';
+}
+
+const BUCKET_SWEEP_INTERVAL_MS = 60_000;
+let lastBucketSweep = 0;
+
+function sweepExpiredBuckets(now: number): void {
+  if (now - lastBucketSweep < BUCKET_SWEEP_INTERVAL_MS) return;
+  lastBucketSweep = now;
+  for (const [key, bucket] of buckets) {
+    if (bucket.resetAt <= now) buckets.delete(key);
+  }
 }
 
 export function registerRateLimit(app: FastifyInstance): void {
@@ -50,6 +65,7 @@ export function registerRateLimit(app: FastifyInstance): void {
     if (!policy) return;
 
     const now = Date.now();
+    sweepExpiredBuckets(now);
     const bucketKey = `${policy.key}:${clientKey(request)}`;
     const existing = buckets.get(bucketKey);
     const bucket = existing && existing.resetAt > now ? existing : { count: 0, resetAt: now + policy.windowMs };

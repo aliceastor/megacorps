@@ -6,8 +6,10 @@ import { ZodError } from 'zod';
 import { migrate } from './db/migrate.ts';
 import { registerRoutes } from './routes.ts';
 import { startDispatchLoop } from './dispatch.ts';
+import { startRetentionLoop } from './retention.ts';
 import { registerRequestLogging } from './request-log.ts';
 import { registerRateLimit } from './rate-limit.ts';
+import { registerCsrfOriginCheck } from './csrf.ts';
 import { registerLiveRoutes } from './live.ts';
 
 export async function buildServer() {
@@ -17,6 +19,7 @@ export async function buildServer() {
   await app.register(cookie);
   registerRequestLogging(app);
   registerRateLimit(app);
+  registerCsrfOriginCheck(app);
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ZodError) {
       request.log.warn({ issues: error.issues }, 'validation failed');
@@ -32,6 +35,7 @@ export async function buildServer() {
   await registerLiveRoutes(app);
   await registerRoutes(app);
   startDispatchLoop(app);
+  startRetentionLoop(app);
   return app;
 }
 

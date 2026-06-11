@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Building2, CheckCircle2, Loader2, Network, Pause, Save, Users, Wifi } from 'lucide-react';
 import { api } from '@/lib/api';
 
@@ -72,11 +73,12 @@ function OChartNode({ agent, agents, departments, positions, selectedId, onSelec
 }
 
 export function CompanyOChartPage() {
-  const [companies, setCompanies] = useState<Company[]>([]);
-  const [departments, setDepartments] = useState<Department[]>([]);
-  const [positions, setPositions] = useState<Position[]>([]);
-  const [runtimes, setRuntimes] = useState<Runtime[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
+  const queryClient = useQueryClient();
+  const companiesQuery = useQuery({ queryKey: ['companies'], queryFn: () => api<Company[]>('/api/companies') });
+  const departmentsQuery = useQuery({ queryKey: ['departments'], queryFn: () => api<Department[]>('/api/departments') });
+  const positionsQuery = useQuery({ queryKey: ['positions'], queryFn: () => api<Position[]>('/api/positions') });
+  const runtimesQuery = useQuery({ queryKey: ['agentRuntimes'], queryFn: () => api<Runtime[]>('/api/agent-runtimes') });
+  const agentsQuery = useQuery({ queryKey: ['agents'], queryFn: () => api<Agent[]>('/api/agents') });
   const [companyId, setCompanyId] = useState('');
   const [selectedAgentId, setSelectedAgentId] = useState('');
   const [agentDraft, setAgentDraft] = useState<Partial<Agent> | null>(null);
@@ -84,29 +86,26 @@ export function CompanyOChartPage() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
-  async function refresh(nextCompanyId = companyId) {
-    setError('');
-    try {
-      const [companyRows, departmentRows, positionRows, runtimeRows, agentRows] = await Promise.all([
-        api<Company[]>('/api/companies'),
-        api<Department[]>('/api/departments'),
-        api<Position[]>('/api/positions'),
-        api<Runtime[]>('/api/agent-runtimes'),
-        api<Agent[]>('/api/agents'),
-      ]);
-      setCompanies(companyRows);
-      setDepartments(departmentRows);
-      setPositions(positionRows);
-      setRuntimes(runtimeRows);
-      setAgents(agentRows);
-      const activeCompanyId = companyRows.some((company) => company.id === nextCompanyId) ? nextCompanyId : companyRows[0]?.id ?? '';
-      setCompanyId(activeCompanyId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load O-Chart');
-    }
+  const companies = companiesQuery.data ?? [];
+  const departments = departmentsQuery.data ?? [];
+  const positions = positionsQuery.data ?? [];
+  const runtimes = runtimesQuery.data ?? [];
+  const agents = agentsQuery.data ?? [];
+  const loadError = companiesQuery.error ?? departmentsQuery.error ?? positionsQuery.error ?? runtimesQuery.error ?? agentsQuery.error;
+
+  async function refreshQueries() {
+    await Promise.all([['companies'], ['departments'], ['positions'], ['agentRuntimes'], ['agents']]
+      .map((queryKey) => queryClient.invalidateQueries({ queryKey })));
   }
 
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    if (!companiesQuery.data) return;
+    const rows = companiesQuery.data;
+    setCompanyId((current) => rows.some((company) => company.id === current) ? current : rows[0]?.id ?? '');
+  }, [companiesQuery.data]);
+  useEffect(() => {
+    if (loadError) setError(loadError instanceof Error ? loadError.message : 'Failed to load O-Chart');
+  }, [loadError]);
 
   const selectedCompany = companies.find((company) => company.id === companyId) ?? null;
   const companyDepartments = useMemo(() => departments.filter((department) => department.companyId === companyId), [departments, companyId]);
@@ -165,7 +164,7 @@ export function CompanyOChartPage() {
         budgetMonthly: agentDraft.budgetMonthly ? Number(agentDraft.budgetMonthly) : undefined,
       };
       const updated = await api<Agent>(`/api/agents/${selectedAgent.id}`, { method: 'PUT', body: JSON.stringify(payload) });
-      setAgents((current) => current.map((agent) => agent.id === updated.id ? updated : agent));
+      queryClient.setQueryData<Agent[]>(['agents'], (current) => current?.map((agent) => agent.id === updated.id ? updated : agent));
       setSelectedAgentId(updated.id);
       setNotice('Agent saved');
     } catch (err) {
@@ -182,7 +181,7 @@ export function CompanyOChartPage() {
     setNotice('');
     try {
       const result = await api<Agent | { ok: true }>(path, { method: 'POST' });
-      if ('id' in result) setAgents((current) => current.map((agent) => agent.id === result.id ? result : agent));
+      if ('id' in result) queryClient.setQueryData<Agent[]>(['agents'], (current) => current?.map((agent) => agent.id === result.id ? result : agent));
       setNotice(message);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Action failed');
@@ -194,7 +193,7 @@ export function CompanyOChartPage() {
   return <div className="page-stack company-o-chart-page">
     <div className="page-head">
       <div><h1>O-Chart</h1><p>Company-based reporting structure for agents and departments.</p></div>
-      <label className="field-label o-chart-company-select">Company<select className="input compact" value={companyId} onChange={(event) => { setCompanyId(event.target.value); setSelectedAgentId(''); void refresh(event.target.value); }}>
+      <label className="field-label o-chart-company-select">Company<select className="input compact" value={companyId} onChange={(event) => { setCompanyId(event.target.value); setSelectedAgentId(''); setError(''); void refreshQueries(); }}>
         {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
       </select></label>
     </div>

@@ -58,6 +58,10 @@ function invalidateLiveEvent(queryClient: QueryClient, event: LiveEvent): void {
     void queryClient.invalidateQueries({ queryKey: ['projects'] });
     void queryClient.invalidateQueries({ queryKey: ['goals'] });
     void queryClient.invalidateQueries({ queryKey: ['kanbanBoard'] });
+    return;
+  }
+  if (event.type.startsWith('notification.')) {
+    void queryClient.invalidateQueries({ queryKey: ['notifications'] });
   }
 }
 
