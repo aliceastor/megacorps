@@ -125,7 +125,7 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
     ].filter(Boolean).join('\n\n');
   }
   return [
-    company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
+    kanbanContext ? '' : company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
     `Goal context:\n${goalContext}`,
     [
       `Agent name: ${agent.name}`,
@@ -335,7 +335,13 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       const recentLimit = handOffContextToAdapter ? DIRECT_CHAT_CONTINUATION_MESSAGE_LIMIT : DIRECT_CHAT_BOOTSTRAP_MESSAGE_LIMIT;
       const recent = await db.select().from(chatMessages).where(eq(chatMessages.sessionId, session.id)).orderBy(desc(chatMessages.createdAt)).limit(recentLimit);
       const history = recent.reverse();
-      const kanbanContext = handOffContextToAdapter ? '' : await buildCompanyKanbanContext(session.companyId, { focusAgentId: agent.id, projectId: session.projectId ?? null, budgetChars: 20_000 });
+      const kanbanContext = handOffContextToAdapter ? '' : await buildCompanyKanbanContext(session.companyId, {
+        focusAgentId: agent.id,
+        projectId: session.projectId ?? null,
+        budgetChars: 20_000,
+        includeGoals: false,
+        includeInvocationPositionPrompt: false,
+      });
       const goalContext = handOffContextToAdapter ? '' : await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
       const prompt = buildChatPrompt(company, agent, history, kanbanContext, goalContext, handOffContextToAdapter);
       const executionAgent = await buildExecutionAgent(agent, existingChatSessionId);

@@ -50,3 +50,18 @@ test('direct chat history formatter keeps the most recent messages when capped',
   assert.doesNotMatch(formatted, /old message/);
   assert.match(formatted, /latest question/);
 });
+
+test('direct chat bootstrap does not duplicate company header when kanban context is present', () => {
+  const prompt = chatInternals.buildChatPrompt(
+    { id: 'company-1', name: 'Auroria Inc.', mission: 'Ship useful tools.' } as any,
+    { id: 'agent-1', name: 'Ribel', adapterType: 'hermes-ssh' } as any,
+    [chatMessage('user', 'hello')],
+    '## Company\nName: Auroria Inc.\nMission: Ship useful tools.\n\n## Company Structure\nCompany structure:\n[Alice (alice), CTO | Engineering, Owns technical direction.|[list: bob]]',
+    'Project: No project / general chat',
+    false,
+  );
+
+  assert.doesNotMatch(prompt, /^Company: Auroria Inc\./m);
+  assert.match(prompt, /## Company\nName: Auroria Inc\./);
+  assert.match(prompt, /Company structure:/);
+});

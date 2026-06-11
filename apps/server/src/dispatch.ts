@@ -17,13 +17,23 @@ import { notify } from './notifications.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
+export type DelegationReport = { id?: string; name: string; slug: string; positionName?: string | null; departmentName?: string | null };
+type CompanyStructureAgent = Pick<AgentRow, 'id' | 'name' | 'slug' | 'bossId' | 'role' | 'title' | 'positionId' | 'departmentId' | 'isActive'>;
 type GoalRow = typeof goals.$inferSelect;
 type ProjectRow = typeof projects.$inferSelect;
 type RuntimeRow = typeof agentRuntimes.$inferSelect;
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
 type AdapterSessionRow = NonNullable<Awaited<ReturnType<typeof findAdapterSession>>>;
-type KanbanContextOptions = { focusCardId?: string; focusAgentId?: string | null; budgetChars?: number; projectId?: string | null };
+type KanbanContextOptions = {
+  focusCardId?: string;
+  focusAgentId?: string | null;
+  budgetChars?: number;
+  projectId?: string | null;
+  includeGoals?: boolean;
+  includeInvocationPositionPrompt?: boolean;
+  includeFocusProjectRepo?: boolean;
+};
 type PromptBuildOptions = { continuation?: boolean; since?: Date | null; kind?: TaskRunKind };
 type LogStatus = 'queued' | 'running' | 'success' | 'warning' | 'failed';
 type TaskRunKind = 'dispatch' | 'review';
@@ -100,6 +110,106 @@ export function delegationItems(output: string | null | undefined): string[] {
     if (items.length >= 8) break;
   }
   return items;
+}
+
+function directReportList(reports: DelegationReport[]): string {
+  if (reports.length === 0) return 'the active direct reports listed in the assignment context';
+  return reports.map((report) => {
+    const slug = report.slug && report.slug !== report.name ? `slug: ${report.slug}` : null;
+    const position = `position: ${report.positionName ?? 'none'}`;
+    const department = `department: ${report.departmentName ?? 'none'}`;
+    return `${report.name} (${[slug, position, department].filter(Boolean).join(', ')})`;
+  }).join(', ');
+}
+
+function oneLine(value: string | null | undefined, maxChars = 600): string {
+  const text = value?.replace(/\s+/g, ' ').trim() ?? '';
+  return text ? clipText(text, maxChars).replace(/\s+/g, ' ') : 'none';
+}
+
+function promptDiagnostic(value: string | null | undefined): string {
+  const text = value?.trim() ?? '';
+  if (!text) return 'none';
+  if (text.startsWith('collaboration_mode_requires_delegation')) {
+    return 'collaboration_mode_requires_delegation (see Completion protocol for the required DELEGATE format).';
+  }
+  return text;
+}
+
+function companyStructureLines(input: {
+  agents: CompanyStructureAgent[];
+  departmentById: Map<string, typeof departments.$inferSelect>;
+  positionById: Map<string, typeof positions.$inferSelect>;
+}): string[] {
+  const activeAgents = input.agents.filter((agent) => agent.isActive !== false);
+  return activeAgents.map((agent) => {
+    const position = agent.positionId ? input.positionById.get(agent.positionId) : undefined;
+    const department = agent.departmentId ? input.departmentById.get(agent.departmentId) : undefined;
+    const directReportSlugs = activeAgents
+      .filter((report) => report.bossId === agent.id)
+      .map((report) => report.slug)
+      .sort((left, right) => left.localeCompare(right));
+    const positionName = position?.name ?? agent.title ?? agent.role ?? 'none';
+    const departmentName = department?.name ?? 'none';
+    const positionDescription = oneLine(position?.description ?? position?.prompt, 600);
+    return `[${agent.name} (${agent.slug}), ${positionName} | ${departmentName}, ${positionDescription}|[list: ${directReportSlugs.join(', ') || 'none'}]]`;
+  });
+}
+
+export function collaborationDelegationInstructions(reports: DelegationReport[] = []): string {
+  const first = reports[0];
+  const second = reports[1];
+  return [
+    'Collaboration Mode is ON.',
+    'If you have active direct reports, you MUST split this work into meaningful sub-tasks and delegate them to the most suitable employees so more appropriate staff participate and improve quality.',
+    'Do not complete the current leader card directly with status="done" or status="in_review" while active direct reports are available.',
+    `Active direct reports to consider: ${directReportList(reports)}.`,
+    'Return the delegation plan exactly like this in stdout, or send status="in_progress" with this block in the webhook summary/output:',
+    'DELEGATE:',
+    first ? `- ${first.name}: <sub-task title and expected deliverable>` : '- <direct report name or slug>: <sub-task title and expected deliverable>',
+    second ? `- ${second.name}: <another sub-task title and expected deliverable>` : '- <another direct report name or slug>: <another sub-task title and expected deliverable>',
+    'Each bullet becomes one child Kanban card. Prefix a bullet with "name:" or "slug:" to target a specific direct report; omit the prefix only if any direct report can take it.',
+    'If you truly have no active direct reports, complete the work yourself and state that no active direct reports were available for delegation.',
+  ].join('\n');
+}
+
+export function optionalDelegationInstructions(reports: DelegationReport[] = []): string {
+  const first = reports[0];
+  const second = reports[1];
+  return [
+    'Collaboration Mode is OFF.',
+    'You may complete the work directly when that is the best path.',
+    'If you have active direct reports and the task has meaningful parts that fit their skills, you may split those parts into delegated sub-tasks so suitable employees participate and improve quality.',
+    `Active direct reports to consider: ${directReportList(reports)}.`,
+    'To delegate, return the delegation plan exactly like this in stdout, or send status="in_progress" with this block in the webhook summary/output:',
+    'DELEGATE:',
+    first ? `- ${first.name}: <sub-task title and expected deliverable>` : '- <direct report name or slug>: <sub-task title and expected deliverable>',
+    second ? `- ${second.name}: <another sub-task title and expected deliverable>` : '- <another direct report name or slug>: <another sub-task title and expected deliverable>',
+    'Each bullet becomes one child Kanban card. Prefix a bullet with "name:" or "slug:" to target a specific direct report; omit the prefix only if any direct report can take it.',
+  ].join('\n');
+}
+
+export async function activeDirectReportsForAgent(companyId: string, bossId: string): Promise<DelegationReport[]> {
+  return db.select({
+    id: agents.id,
+    name: agents.name,
+    slug: agents.slug,
+    positionName: positions.name,
+    departmentName: departments.name,
+  }).from(agents)
+    .leftJoin(positions, eq(agents.positionId, positions.id))
+    .leftJoin(departments, eq(agents.departmentId, departments.id))
+    .where(and(
+    eq(agents.companyId, companyId),
+    eq(agents.bossId, bossId),
+    eq(agents.isActive, true),
+    isNull(agents.deletedAt),
+  ));
+}
+
+async function activeDirectReportsForCard(card: CardRow): Promise<DelegationReport[]> {
+  if (!card.assigneeId) return [];
+  return activeDirectReportsForAgent(card.companyId, card.assigneeId);
 }
 
 function escapeRegex(value: string): string {
@@ -1218,11 +1328,11 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       return updated;
     }
     if (collaborationModeRequiresDelegation(card)) {
-      const directReports = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, card.companyId), eq(agents.bossId, agent.id), eq(agents.isActive, true), isNull(agents.deletedAt))).limit(1);
+      const directReports = await activeDirectReportsForAgent(card.companyId, agent.id);
       if (directReports.length > 0) {
         await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
         await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
-        return handleDispatchFailure(card, agent, new Error('collaboration_mode_requires_delegation: return a DELEGATE: block for direct reports instead of completing this card directly.'), run.id, options.taskRunId);
+        return handleDispatchFailure(card, agent, new Error(`collaboration_mode_requires_delegation\n\n${collaborationDelegationInstructions(directReports)}`), run.id, options.taskRunId);
       }
     }
     const effectiveReviewerId = resolveEffectiveReviewerId(card, agent);
@@ -1970,9 +2080,13 @@ export function startDispatchLoop(app: FastifyInstance): void {
 
 export const dispatchInternals = {
   childCompletionPolicySatisfied,
+  collaborationDelegationInstructions,
+  collaborationModeRequiresDelegation,
+  companyStructureLines,
   completionStatusForQualityGate,
   delegationItems,
   dispatchCompletionDecision,
+  optionalDelegationInstructions,
 };
 
 function clipText(value: string | null | undefined, maxChars: number): string {
@@ -2015,7 +2129,7 @@ function ancestorChain(card: CardRow, companyCards: CardRow[]): CardRow[] {
   return ancestors;
 }
 
-function collaborationModeRequiresDelegation(card: CardRow): boolean {
+export function collaborationModeRequiresDelegation(card: CardRow): boolean {
   return card.decisionMode === 'delegate';
 }
 
@@ -2061,17 +2175,23 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
   const scopedCards = scopedToProject ? companyCards.filter((card) => options.projectId ? card.projectId === options.projectId : !card.projectId) : companyCards;
   const focusCard = options.focusCardId ? companyCards.find((card) => card.id === options.focusCardId) : undefined;
   const focusAgent = options.focusAgentId ? agentById.get(options.focusAgentId) : undefined;
+  const includeGoals = options.includeGoals !== false;
+  const includeInvocationPositionPrompt = options.includeInvocationPositionPrompt !== false;
+  const includeFocusProjectRepo = options.includeFocusProjectRepo !== false;
 
   addContextSection(state, 'Company', [
     `Name: ${company?.name ?? 'unknown'}`,
     `Mission: ${company?.mission ?? 'No mission configured.'}`,
     `Auto dispatch: ${company?.autoDispatchEnabled === false ? 'off' : 'on'}`,
     `Dispatch interval seconds: ${company?.dispatchIntervalSeconds ?? 10}`,
-    `Departments: ${companyDepartments.map((department) => `${department.name} (${department.slug})`).join(', ') || 'none'}`,
-    `Positions: ${companyPositions.map((position) => `${position.name} (${position.slug})`).join(', ') || 'none'}`,
     `Projects: ${scopedToProject ? scopedProjects.map((project) => project.name).join(', ') || 'not included for no-project chat' : companyProjects.map((project) => project.name).join(', ') || 'none'}`,
-    `Goals:\n${scopedGoals.map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
-  ].join('\n'), 2600);
+    includeGoals ? `Goals:\n${scopedGoals.map((goal) => formatGoal(goal)).join('\n') || 'none'}` : '',
+  ].filter(Boolean).join('\n'), includeGoals ? 2600 : 1600);
+
+  addContextSection(state, 'Company Structure', [
+    'Company structure:',
+    ...companyStructureLines({ agents: companyAgents, departmentById, positionById }),
+  ].join('\n') || 'Company structure:\nnone', 12000);
 
   const statusCounts = scopedCards.reduce<Record<string, number>>((acc, card) => {
     const key = card.columnStatus ?? 'todo';
@@ -2093,17 +2213,25 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
     const department = focusAgent.departmentId ? departmentById.get(focusAgent.departmentId) : undefined;
     const position = focusAgent.positionId ? positionById.get(focusAgent.positionId) : undefined;
     const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt });
-    const reports = companyAgents.filter((agent) => agent.bossId === focusAgent.id);
+    const reports = companyAgents
+      .filter((agent) => agent.bossId === focusAgent.id && agent.isActive !== false)
+      .map((agent) => ({
+        id: agent.id,
+        name: agent.name,
+        slug: agent.slug,
+        positionName: agent.positionId ? positionById.get(agent.positionId)?.name ?? null : null,
+        departmentName: agent.departmentId ? departmentById.get(agent.departmentId)?.name ?? null : null,
+      }));
+    const reportIds = new Set(reports.map((report) => report.id).filter(Boolean));
     const assigned = scopedCards.filter((card) => card.assigneeId === focusAgent.id && !['done', 'blocked', 'cancelled'].includes(card.columnStatus ?? 'todo')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
-    const reviews = scopedCards.filter((card) => card.reviewerId === focusAgent.id || reports.some((report) => report.id === card.assigneeId && ['in_review', 'needs_review'].includes(card.columnStatus ?? 'todo'))).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
+    const reviews = scopedCards.filter((card) => card.reviewerId === focusAgent.id || (card.assigneeId ? reportIds.has(card.assigneeId) : false) && ['in_review', 'needs_review'].includes(card.columnStatus ?? 'todo')).slice(0, KANBAN_CONTEXT_RECORD_LIMIT);
     addContextSection(state, 'Invocation Agent Work Context', [
       `Agent: ${focusAgent.name}`,
       `Position: ${position?.name ?? 'none'}`,
-      positionPrompt ? `Position prompt:\n${positionPrompt}` : '',
+      includeInvocationPositionPrompt && positionPrompt ? `Position prompt:\n${positionPrompt}` : '',
       `Runtime: ${runtime?.name ?? focusAgent.runtimeId ?? 'none'}`,
       ...runtimeLocalLines(runtime),
       `Reports to: ${manager?.name ?? 'top-level'}`,
-      `Direct reports: ${reports.map((report) => report.name).join(', ') || 'none'}`,
       `Assigned open work:\n${assigned.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
       `Review queue:\n${reviews.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
     ].join('\n'), 6000);
@@ -2135,7 +2263,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
       `Task budget limit: ${focusCard.taskBudgetLimit ?? 'not set'}`,
       `Department: ${focusCard.departmentId ? departmentById.get(focusCard.departmentId)?.name ?? focusCard.departmentId : 'none'}`,
       `Project: ${focusCard.projectId ? projectById.get(focusCard.projectId)?.name ?? focusCard.projectId : 'none'}`,
-      `Project repo:\n${projectRepoLines(focusCard.projectId ? projectById.get(focusCard.projectId) : null, focusAssigneeRuntime).join('\n')}`,
+      includeFocusProjectRepo ? `Project repo:\n${projectRepoLines(focusCard.projectId ? projectById.get(focusCard.projectId) : null, focusAssigneeRuntime).join('\n')}` : '',
       `Goal: ${focusCard.goalId ? goalById.get(focusCard.goalId)?.title ?? focusCard.goalId : 'none'}`,
       `Applicable goals:\n${applicableGoals(companyGoals, { departmentId: focusCard.departmentId, projectId: focusCard.projectId, selectedGoalId: focusCard.goalId }).map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
       `Assignee: ${focusAssignee?.name ?? focusCard.assigneeId ?? 'unassigned'}`,
@@ -2214,17 +2342,12 @@ function afterPromptSince(value: Date | string | null | undefined, since?: Date 
   return new Date(value).getTime() > since.getTime();
 }
 
-function completionProtocol(card: CardRow): string {
+function completionProtocol(card: CardRow, reports: DelegationReport[] = []): string {
   return [
-    `If the task is simple enough for you to finish directly, complete it yourself and post the final answer back through the MegaCorps webhook with status="done".`,
     card.decisionMode === 'delegate'
-      ? `Collaboration Mode is ON. You must delegate meaningful sub-tasks to your direct reports with a DELEGATE: block. Do not mark this card done directly unless there are no active direct reports or the task is already a child card that cannot be decomposed further.`
-      : `Collaboration Mode is OFF. You may decide whether to complete directly or delegate.`,
-    `If you have direct reports and the task should move through the company hierarchy, do not execute every part yourself. Return a delegation plan with this exact heading and bullet format so MegaCorps can create child cards:`,
-    `DELEGATE:`,
-    `- <sub-task title for a direct report>`,
-    `- <another sub-task title for a direct report>`,
-    `Do not call POST /api/cards yourself for delegation. MegaCorps creates child cards from the DELEGATE block. If your runtime reports through the webhook, send status="in_progress" and include the same DELEGATE block in summary/output instead of marking the parent done.`,
+      ? collaborationDelegationInstructions(reports)
+      : optionalDelegationInstructions(reports),
+    `Do not call POST /api/cards yourself for delegation. MegaCorps creates child cards from the DELEGATE block. If your runtime reports through the webhook, send status="in_progress" and include the same DELEGATE block in summary/output instead of marking the current card done.`,
     `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, report URL, screenshot URL, or artifact URL instead of local-only file paths.`,
     `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
     `If you are waiting on CI/CD, deploy, external approval, or another external system, use status="waiting_on_external" and include pollIntervalSeconds based on how often that system should be checked.`,
@@ -2257,22 +2380,22 @@ async function buildKanbanDeltaContext(card: CardRow, options: PromptBuildOption
     `Updated at: ${card.updatedAt ? formatDate(card.updatedAt) : 'unknown'}`,
     `Decision mode: ${card.decisionMode ?? 'not set'}`,
     `Required child policy: ${card.requiredChildPolicy ?? 'all_required_accepted'}`,
-    `Last error: ${card.lastError ?? 'none'}`,
+    `Last error: ${promptDiagnostic(card.lastError)}`,
     card.reviewFeedback ? `Current review feedback:\n${clipText(card.reviewFeedback, 2500)}` : 'Current review feedback: none',
     `Parent chain:\n${ancestors.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
     `Children now:\n${children.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
     `Dependencies now:\n${deps.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
     `New message board entries:\n${recentMessages.map((message) => {
       const author = message.agentId ? agentById.get(message.agentId)?.name ?? message.agentId : message.authorType;
-      return `- ${formatDate(message.createdAt)} | ${author} | ${message.action}: ${clipText(message.body, 900)}`;
+      return `- ${formatDate(message.createdAt)} | ${author} | ${message.action}: ${clipText(promptDiagnostic(message.body), 900)}`;
     }).join('\n') || 'none'}`,
     `New action timeline entries:\n${recentActions.map((action) => [
       `- ${formatDate(action.createdAt)} | ${action.actorType}:${action.actorId} | ${action.action} | ${action.fromStatus ?? 'none'} -> ${action.toStatus ?? 'none'}`,
       action.detail ? `  detail: ${clipText(action.detail, 700)}` : '',
     ].filter(Boolean).join('\n')).join('\n') || 'none'}`,
     `New lifecycle log entries:\n${recentLogs.map((log) => [
-      `- ${formatDate(log.createdAt)} | ${log.type}/${log.status}: ${clipText(log.message, 700)}`,
-      log.output ? `  output: ${clipText(log.output, 900)}` : '',
+      `- ${formatDate(log.createdAt)} | ${log.type}/${log.status}: ${clipText(promptDiagnostic(log.message), 700)}`,
+      log.output ? `  output: ${clipText(promptDiagnostic(log.output), 900)}` : '',
     ].filter(Boolean).join('\n')).join('\n') || 'none'}`,
     `New work products:\n${recentProducts.map((product) => `- ${product.type}: ${product.title}${product.url ? ` (${product.url})` : product.pullRequestUrl ? ` (${product.pullRequestUrl})` : ''}${product.summary ? ` -- ${clipText(product.summary, 500)}` : ''}`).join('\n') || 'none'}`,
     'If your adapter session has lost the original task context, do not guess. Use status="needs_review" and say that the session context was lost so a full context retry is needed.',
@@ -2281,23 +2404,25 @@ async function buildKanbanDeltaContext(card: CardRow, options: PromptBuildOption
 
 async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
   if (options.continuation) {
+    const [deltaContext, reports] = await Promise.all([
+      buildKanbanDeltaContext(card, options),
+      activeDirectReportsForCard(card),
+    ]);
     return [
       'Continue this existing Kanban adapter session.',
       'Do not rely on stale stage, child, dependency, or review state from memory. Treat the fresh DB delta below as the source of truth for anything that changed since your last turn.',
       'Fresh Kanban delta:',
-      await buildKanbanDeltaContext(card, options),
+      deltaContext,
       'Completion protocol:',
-      completionProtocol(card),
+      completionProtocol(card, reports),
     ].join('\n\n');
   }
-  const [department] = card.departmentId ? await db.select().from(departments).where(eq(departments.id, card.departmentId)).limit(1) : [];
   const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
-  const [goal] = card.goalId ? await db.select().from(goals).where(eq(goals.id, card.goalId)).limit(1) : [];
   const [assignee] = card.assigneeId ? await db.select().from(agents).where(and(eq(agents.id, card.assigneeId), isNull(agents.deletedAt))).limit(1) : [];
   const [runtime] = assignee?.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, assignee.runtimeId)).limit(1) : [];
-  const reports = assignee ? await db.select().from(agents).where(eq(agents.bossId, assignee.id)) : [];
+  const reports = await activeDirectReportsForCard(card);
   const docs = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.companyId, card.companyId)).orderBy(desc(knowledgeDocs.updatedAt)).limit(10);
-  const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.assigneeId });
+  const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.assigneeId, includeFocusProjectRepo: false });
   const matchingDocs = docs.filter((doc) => {
     const tags = doc.tags ?? [];
     return tags.length === 0 || tags.some((tag) => (card.tags ?? []).includes(tag));
@@ -2308,18 +2433,13 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
       `Card ID: ${card.id}`,
       `Title: ${card.title}`,
       `Stage: ${card.columnStatus ?? 'todo'}`,
-      `Assignee: ${assignee?.name ?? card.assigneeId ?? 'unassigned'}`,
-      `Department: ${department?.name ?? 'none'}`,
-      `Project: ${project?.name ?? 'none'}`,
-      `Selected goal: ${goal?.title ?? 'none'}`,
-      `Direct reports: ${reports.length ? reports.map((report) => report.name).join(', ') : 'none'}`,
-      'Use the Kanban context snapshot below as the source of truth for full task details, goals, parent chain, dependencies, message board, lifecycle logs, and prior output.',
+      'Use the Kanban context snapshot below as the source of truth for assignee, department, project, goals, company structure, parent chain, dependencies, message board, lifecycle logs, and prior output.',
     ].join('\n'),
     kanbanContext ? `Kanban context snapshot:\n${kanbanContext}` : '',
     matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
     `Repository protocol:\n${projectGitProtocol(project, card, assignee, runtime)}`,
     'Completion protocol:',
-    completionProtocol(card),
+    completionProtocol(card, reports),
   ].filter(Boolean).join('\n\n');
 }
 

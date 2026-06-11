@@ -89,3 +89,61 @@ test('delegation parser accepts webhook summary plus output payloads', () => {
     'Score and cluster the strongest concepts',
   ]);
 });
+
+test('collaboration mode applies recursively to child cards', () => {
+  assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'delegate', parentCardId: null } as any), true);
+  assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'delegate', parentCardId: 'parent-1' } as any), true);
+  assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'auto', parentCardId: null } as any), false);
+});
+
+test('collaboration delegation instructions include required webhook and block format', () => {
+  const instructions = dispatchInternals.collaborationDelegationInstructions([
+    { name: 'Alice', slug: 'alice', positionName: 'Design Lead', departmentName: 'Product' },
+    { name: 'Bob', slug: 'bob', positionName: 'Backend Engineer', departmentName: 'Engineering' },
+  ]);
+  assert.match(instructions, /MUST split this work/);
+  assert.match(instructions, /Alice \(slug: alice, position: Design Lead, department: Product\)/);
+  assert.match(instructions, /Bob \(slug: bob, position: Backend Engineer, department: Engineering\)/);
+  assert.match(instructions, /status="in_progress"/);
+  assert.match(instructions, /DELEGATE:/);
+  assert.match(instructions, /- Alice: <sub-task title and expected deliverable>/);
+  assert.match(instructions, /- Bob: <another sub-task title and expected deliverable>/);
+});
+
+test('optional delegation instructions include direct reports and block format', () => {
+  const instructions = dispatchInternals.optionalDelegationInstructions([
+    { name: 'Alice', slug: 'alice', positionName: 'Design Lead', departmentName: 'Product' },
+    { name: 'Bob', slug: 'bob', positionName: 'Backend Engineer', departmentName: 'Engineering' },
+  ]);
+  assert.match(instructions, /Collaboration Mode is OFF/);
+  assert.match(instructions, /may split those parts into delegated sub-tasks/);
+  assert.doesNotMatch(instructions, /MUST split this work/);
+  assert.match(instructions, /Active direct reports to consider: Alice \(slug: alice, position: Design Lead, department: Product\), Bob \(slug: bob, position: Backend Engineer, department: Engineering\)/);
+  assert.match(instructions, /status="in_progress"/);
+  assert.match(instructions, /DELEGATE:/);
+  assert.match(instructions, /- Alice: <sub-task title and expected deliverable>/);
+  assert.match(instructions, /- Bob: <another sub-task title and expected deliverable>/);
+});
+
+test('company structure lines include name slug position department description and direct reports', () => {
+  const departmentById = new Map<string, any>([
+    ['dept-eng', { id: 'dept-eng', name: 'Engineering', slug: 'engineering' }],
+    ['dept-prod', { id: 'dept-prod', name: 'Product', slug: 'product' }],
+  ]);
+  const positionById = new Map<string, any>([
+    ['pos-cto', { id: 'pos-cto', name: 'CTO', slug: 'cto', description: 'Owns technical direction.' }],
+    ['pos-eng', { id: 'pos-eng', name: 'Backend Engineer', slug: 'backend-engineer', description: 'Builds backend systems.' }],
+  ]);
+  const lines = dispatchInternals.companyStructureLines({
+    agents: [
+      { id: 'agent-1', name: 'Alice', slug: 'alice', bossId: null, role: 'leader', title: null, positionId: 'pos-cto', departmentId: 'dept-eng', isActive: true },
+      { id: 'agent-2', name: 'Bob', slug: 'bob', bossId: 'agent-1', role: 'worker', title: null, positionId: 'pos-eng', departmentId: 'dept-prod', isActive: true },
+    ] as any,
+    departmentById,
+    positionById,
+  });
+  assert.deepEqual(lines, [
+    '[Alice (alice), CTO | Engineering, Owns technical direction.|[list: bob]]',
+    '[Bob (bob), Backend Engineer | Product, Builds backend systems.|[list: none]]',
+  ]);
+});
