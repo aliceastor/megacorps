@@ -10,15 +10,16 @@ import { publishLiveEvent } from './live.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 import { recordStageAction } from './card-actions.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
-import { agentRuntimeAvailable, createRuntimeAvailabilityCache } from './runner-availability.ts';
+import { agentRuntimeAvailable, createRuntimeAvailabilityCache, type RuntimeAvailabilityCache } from './runner-availability.ts';
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { notify } from './notifications.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
-export type DelegationReport = { id?: string; name: string; slug: string; positionName?: string | null; departmentName?: string | null };
-type CompanyStructureAgent = Pick<AgentRow, 'id' | 'name' | 'slug' | 'bossId' | 'role' | 'title' | 'positionId' | 'departmentId' | 'isActive'>;
+export type DelegationReport = { id?: string; name: string; slug: string; departmentId?: string | null; positionName?: string | null; departmentName?: string | null };
+type AvailableDelegationReport = DelegationReport & { id: string };
+type CompanyStructureAgent = Pick<AgentRow, 'id' | 'name' | 'slug' | 'bossId' | 'role' | 'title' | 'positionId' | 'departmentId' | 'adapterType' | 'runtimeId' | 'isActive'>;
 type GoalRow = typeof goals.$inferSelect;
 type ProjectRow = typeof projects.$inferSelect;
 type RuntimeRow = typeof agentRuntimes.$inferSelect;
@@ -189,11 +190,14 @@ export function optionalDelegationInstructions(reports: DelegationReport[] = [])
   ].join('\n');
 }
 
-export async function activeDirectReportsForAgent(companyId: string, bossId: string): Promise<DelegationReport[]> {
-  return db.select({
+export async function activeDirectReportsForAgent(companyId: string, bossId: string): Promise<AvailableDelegationReport[]> {
+  const rows = await db.select({
     id: agents.id,
     name: agents.name,
     slug: agents.slug,
+    departmentId: agents.departmentId,
+    adapterType: agents.adapterType,
+    runtimeId: agents.runtimeId,
     positionName: positions.name,
     departmentName: departments.name,
   }).from(agents)
@@ -205,11 +209,34 @@ export async function activeDirectReportsForAgent(companyId: string, bossId: str
     eq(agents.isActive, true),
     isNull(agents.deletedAt),
   ));
+  const availabilityCache = createRuntimeAvailabilityCache();
+  const available = await Promise.all(rows.map(async (report) => (
+    await agentRuntimeAvailable({ companyId, runtimeId: report.runtimeId, adapterType: report.adapterType ?? 'hermes-ssh' }, availabilityCache)
+      ? report
+      : null
+  )));
+  return available.filter((report): report is NonNullable<typeof report> => Boolean(report)).map((report) => ({
+    id: report.id,
+    name: report.name,
+    slug: report.slug,
+    departmentId: report.departmentId,
+    positionName: report.positionName,
+    departmentName: report.departmentName,
+  }));
 }
 
 async function activeDirectReportsForCard(card: CardRow): Promise<DelegationReport[]> {
   if (!card.assigneeId) return [];
   return activeDirectReportsForAgent(card.companyId, card.assigneeId);
+}
+
+async function promptVisibleAgents(companyId: string, agentRows: CompanyStructureAgent[], cache?: RuntimeAvailabilityCache): Promise<CompanyStructureAgent[]> {
+  const visible = await Promise.all(agentRows.map(async (agent) => {
+    if (agent.isActive === false) return null;
+    const available = await agentRuntimeAvailable({ companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'hermes-ssh' }, cache);
+    return available ? agent : null;
+  }));
+  return visible.filter((agent): agent is CompanyStructureAgent => Boolean(agent));
 }
 
 function escapeRegex(value: string): string {
@@ -1190,6 +1217,97 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
   return updated;
 }
 
+async function sendAgentFeedbackAndRequeue(input: {
+  card: CardRow;
+  agent: AgentRow;
+  kind: TaskRunKind;
+  message: string;
+  runId?: string | null;
+  taskRunId?: string | null;
+  output?: string | null;
+  result?: { sessionId: string; turnId?: string | null; costUsd?: number; durationSeconds?: number };
+}): Promise<CardRow> {
+  const previousOutput = input.output?.trim();
+  const feedback = [
+    'MegaCorps could not accept your previous Kanban reply. Continue in the same task session and send a corrected response.',
+    `Error: ${input.message}`,
+    previousOutput && previousOutput !== input.message ? `Previous agent output:\n${clipText(previousOutput, 4000)}` : '',
+    input.kind === 'dispatch'
+      ? 'Follow the Completion protocol exactly. If delegation is required, return a valid DELEGATE block or send the same block through the webhook with status="in_progress".'
+      : 'Follow the review protocol exactly. Return APPROVE/DONE, REVISION_REQUESTED with concrete guidance, or ESCALATE when your manager must decide.',
+  ].filter(Boolean).join('\n\n');
+  const nextStatus: CardStatus = input.kind === 'dispatch'
+    ? 'todo'
+    : normalizeCardStatus(input.card.columnStatus) ?? 'needs_review';
+  const updated = await db.transaction(async (tx) => {
+    const [row] = await tx.update(kanbanCards).set({
+      columnStatus: nextStatus,
+      executionLog: previousOutput ?? input.card.executionLog,
+      lastError: input.message,
+      nextRunAt: null,
+      executionLockId: null,
+      executionLockedByAgentId: null,
+      executionLockedAt: null,
+      executionLockExpiresAt: null,
+      activeHeartbeatRunId: null,
+      updatedAt: new Date(),
+    }).where(eq(kanbanCards.id, input.card.id)).returning();
+    await tx.update(agents).set({
+      currentSessionId: input.result?.sessionId,
+      isBusy: false,
+    }).where(eq(agents.id, input.agent.id));
+    if (input.runId) {
+      await tx.update(heartbeatRuns).set({
+        status: 'failed',
+        completedAt: new Date(),
+        error: input.message,
+        durationSeconds: input.result?.durationSeconds,
+        costUsd: input.result?.costUsd === undefined ? undefined : input.result.costUsd.toString(),
+      }).where(eq(heartbeatRuns.id, input.runId));
+    }
+    return row;
+  });
+  if (input.kind === 'dispatch' && input.card.columnStatus !== nextStatus) {
+    await addStageLog(input.card.id, input.agent.id, input.card.columnStatus, nextStatus, 'feedback');
+  }
+  await addTaskLog({
+    cardId: input.card.id,
+    agentId: input.agent.id,
+    type: input.kind,
+    status: 'warning',
+    message: 'Agent reply rejected; correction feedback was sent back to the same agent session and the card was requeued without increasing card retry count.',
+    output: feedback,
+    costUsd: input.result?.costUsd,
+    durationSeconds: input.result?.durationSeconds,
+  });
+  await addCardMessage({
+    cardId: input.card.id,
+    agentId: input.agent.id,
+    action: input.kind === 'dispatch' ? 'agent_error' : 'review_error',
+    body: feedback,
+  });
+  await addActivity({
+    companyId: input.card.companyId,
+    actorType: 'system',
+    actorId: 'feedback',
+    agentId: input.agent.id,
+    action: `${input.kind}.feedback_requeued`,
+    entityType: 'card',
+    entityId: input.card.id,
+    details: { taskRunId: input.taskRunId, runId: input.runId, error: input.message },
+  });
+  await completeTaskRun(input.taskRunId, {
+    status: 'failed',
+    error: input.message,
+    output: feedback,
+    costUsd: input.result?.costUsd,
+    durationSeconds: input.result?.durationSeconds,
+  });
+  await enqueueTaskRun(input.card.id, input.kind, 'queue');
+  if (!updated) throw new Error('card_update_failed');
+  return updated;
+}
+
 export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = 'manual', options: { taskRunId?: string | null } = {}): Promise<CardRow> {
   let [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
@@ -1276,10 +1394,35 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     }
     if (!result.success) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-      throw new Error(result.output || 'adapter_reported_failure');
+      await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
+      return sendAgentFeedbackAndRequeue({
+        card: lockedCard,
+        agent,
+        kind: 'dispatch',
+        message: result.output || 'adapter_reported_failure',
+        runId: run.id,
+        taskRunId: options.taskRunId,
+        output: result.output,
+        result,
+      });
     }
     await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
-    const delegatedRows = await createDelegatedSubtasks(card, agent, delegationItems(result.output));
+    let delegatedRows: Awaited<ReturnType<typeof createDelegatedSubtasks>>;
+    try {
+      delegatedRows = await createDelegatedSubtasks(card, agent, delegationItems(result.output));
+    } catch (error) {
+      await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+      return sendAgentFeedbackAndRequeue({
+        card: lockedCard,
+        agent,
+        kind: 'dispatch',
+        message: error instanceof Error ? error.message : 'delegation_failed',
+        runId: run.id,
+        taskRunId: options.taskRunId,
+        output: result.output,
+        result,
+      });
+    }
     if (delegatedRows.length > 0) {
       const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       const updated = await db.transaction(async (tx) => {
@@ -1331,8 +1474,16 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       const directReports = await activeDirectReportsForAgent(card.companyId, agent.id);
       if (directReports.length > 0) {
         await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-        await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
-        return handleDispatchFailure(card, agent, new Error(`collaboration_mode_requires_delegation\n\n${collaborationDelegationInstructions(directReports)}`), run.id, options.taskRunId);
+        return sendAgentFeedbackAndRequeue({
+          card: lockedCard,
+          agent,
+          kind: 'dispatch',
+          message: `collaboration_mode_requires_delegation\n\n${collaborationDelegationInstructions(directReports)}`,
+          runId: run.id,
+          taskRunId: options.taskRunId,
+          output: result.output,
+          result,
+        });
       }
     }
     const effectiveReviewerId = resolveEffectiveReviewerId(card, agent);
@@ -1543,7 +1694,19 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       return latest;
     }
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-    if (!result.success) throw new Error(result.output || 'review_adapter_reported_failure');
+    if (!result.success) {
+      await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
+      return sendAgentFeedbackAndRequeue({
+        card,
+        agent: reviewer,
+        kind: 'review',
+        message: result.output || 'review_adapter_reported_failure',
+        runId: run.id,
+        taskRunId: options.taskRunId,
+        output: result.output,
+        result,
+      });
+    }
     await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
     const decision = reviewDecision(result.output, reviewMode);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
@@ -1641,7 +1804,7 @@ export async function decomposeCard(cardId: string): Promise<CardRow[]> {
   const [parent] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!parent) throw new Error('card_not_found');
   const directReports = parent.assigneeId
-    ? await db.select().from(agents).where(and(eq(agents.bossId, parent.assigneeId), eq(agents.isActive, true), isNull(agents.deletedAt)))
+    ? await activeDirectReportsForAgent(parent.companyId, parent.assigneeId)
     : [];
   const items = parent.body
     .split(/\r?\n/)
@@ -1686,9 +1849,19 @@ export async function decomposeCard(cardId: string): Promise<CardRow[]> {
 
 export async function createDelegatedSubtasks(parent: CardRow, leader: AgentRow, titles: string[]): Promise<CardRow[]> {
   if (titles.length === 0) return [];
-  const directReports = await db.select().from(agents).where(and(eq(agents.companyId, parent.companyId), eq(agents.bossId, leader.id), eq(agents.isActive, true), isNull(agents.deletedAt)));
+  const allDirectReports = await db.select().from(agents).where(and(eq(agents.companyId, parent.companyId), eq(agents.bossId, leader.id), eq(agents.isActive, true), isNull(agents.deletedAt)));
+  const directReports = await activeDirectReportsForAgent(parent.companyId, leader.id);
   if (directReports.length === 0) return [];
+  const availableIds = new Set(directReports.map((report) => report.id));
+  const unavailableDirectReports = allDirectReports.filter((report) => !availableIds.has(report.id));
   const rows = await db.insert(kanbanCards).values(titles.map((rawTitle, index) => {
+    const unavailableTarget = unavailableDirectReports.find((report) => {
+      const lower = rawTitle.toLowerCase();
+      return lower.startsWith(`${report.name}:`.toLowerCase()) || lower.startsWith(`${report.slug}:`.toLowerCase());
+    });
+    if (unavailableTarget) {
+      throw new Error(`delegation_target_unavailable: ${unavailableTarget.name} (${unavailableTarget.slug}) is not currently available. Delegate only to available direct reports: ${directReportList(directReports)}.`);
+    }
     const explicitReport = directReports.find((report) => {
       const prefix = `${report.name}:`.toLowerCase();
       const slugPrefix = `${report.slug}:`.toLowerCase();
@@ -2100,13 +2273,13 @@ function formatDate(value: Date | string | null | undefined): string {
   return new Date(value).toISOString();
 }
 
-function compactCardLine(card: CardRow, agentById: Map<string, AgentRow>): string {
+function compactCardLine(card: CardRow, agentById: Map<string, Pick<AgentRow, 'name'>>): string {
   return [
     `- [${card.columnStatus ?? 'todo'}] ${clipText(card.title, 96)}`,
     `id=${card.id}`,
     `priority=${card.priority ?? 0}`,
-    `assignee=${card.assigneeId ? agentById.get(card.assigneeId)?.name ?? card.assigneeId : 'unassigned'}`,
-    `reviewer=${card.reviewerId ? agentById.get(card.reviewerId)?.name ?? card.reviewerId : 'none'}`,
+    `assignee=${card.assigneeId ? agentById.get(card.assigneeId)?.name ?? 'unavailable' : 'unassigned'}`,
+    `reviewer=${card.reviewerId ? agentById.get(card.reviewerId)?.name ?? 'unavailable' : 'none'}`,
     `parent=${card.parentCardId ?? 'none'}`,
     `deps=${(card.dependencyCardIds ?? []).join(',') || 'none'}`,
     `tags=${(card.tags ?? []).join(',') || 'none'}`,
@@ -2163,7 +2336,10 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
     db.select().from(activityLog).where(eq(activityLog.companyId, companyId)).orderBy(desc(activityLog.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
     db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)).orderBy(desc(heartbeatRuns.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
   ]);
-  const agentById = new Map(companyAgents.map((agent) => [agent.id, agent]));
+  const availabilityCache = createRuntimeAvailabilityCache();
+  for (const runtime of companyRuntimes) availabilityCache.runtimes.set(runtime.id, runtime);
+  const visibleAgents = await promptVisibleAgents(companyId, companyAgents, availabilityCache);
+  const agentById = new Map(visibleAgents.map((agent) => [agent.id, agent]));
   const runtimeById = new Map(companyRuntimes.map((runtime) => [runtime.id, runtime]));
   const departmentById = new Map(companyDepartments.map((department) => [department.id, department]));
   const positionById = new Map(companyPositions.map((position) => [position.id, position]));
@@ -2190,7 +2366,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
 
   addContextSection(state, 'Company Structure', [
     'Company structure:',
-    ...companyStructureLines({ agents: companyAgents, departmentById, positionById }),
+    ...companyStructureLines({ agents: visibleAgents, departmentById, positionById }),
   ].join('\n') || 'Company structure:\nnone', 12000);
 
   const statusCounts = scopedCards.reduce<Record<string, number>>((acc, card) => {
@@ -2213,7 +2389,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
     const department = focusAgent.departmentId ? departmentById.get(focusAgent.departmentId) : undefined;
     const position = focusAgent.positionId ? positionById.get(focusAgent.positionId) : undefined;
     const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt });
-    const reports = companyAgents
+    const reports = visibleAgents
       .filter((agent) => agent.bossId === focusAgent.id && agent.isActive !== false)
       .map((agent) => ({
         id: agent.id,
@@ -2266,8 +2442,8 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
       includeFocusProjectRepo ? `Project repo:\n${projectRepoLines(focusCard.projectId ? projectById.get(focusCard.projectId) : null, focusAssigneeRuntime).join('\n')}` : '',
       `Goal: ${focusCard.goalId ? goalById.get(focusCard.goalId)?.title ?? focusCard.goalId : 'none'}`,
       `Applicable goals:\n${applicableGoals(companyGoals, { departmentId: focusCard.departmentId, projectId: focusCard.projectId, selectedGoalId: focusCard.goalId }).map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
-      `Assignee: ${focusAssignee?.name ?? focusCard.assigneeId ?? 'unassigned'}`,
-      `Reviewer: ${focusReviewer?.name ?? focusCard.reviewerId ?? 'none'}`,
+      `Assignee: ${focusAssignee?.name ?? (focusCard.assigneeId ? 'unavailable' : 'unassigned')}`,
+      `Reviewer: ${focusReviewer?.name ?? (focusCard.reviewerId ? 'unavailable' : 'none')}`,
       `Parent: ${parent ? compactCardLine(parent, agentById) : 'none'}`,
       `Children:\n${children.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
       `Dependencies:\n${deps.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
@@ -2291,8 +2467,8 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
           `ID: ${ancestor.id}`,
           `Stage: ${ancestor.columnStatus ?? 'todo'}`,
           `Decision mode: ${ancestor.decisionMode ?? 'not set'}`,
-          `Assignee: ${ancestor.assigneeId ? agentById.get(ancestor.assigneeId)?.name ?? ancestor.assigneeId : 'unassigned'}`,
-          `Reviewer: ${ancestor.reviewerId ? agentById.get(ancestor.reviewerId)?.name ?? ancestor.reviewerId : 'none'}`,
+          `Assignee: ${ancestor.assigneeId ? agentById.get(ancestor.assigneeId)?.name ?? 'unavailable' : 'unassigned'}`,
+          `Reviewer: ${ancestor.reviewerId ? agentById.get(ancestor.reviewerId)?.name ?? 'unavailable' : 'none'}`,
           `Body:\n${clipText(ancestor.body, 5000)}`,
           ancestor.executionLog ? `Latest execution output:\n${clipText(ancestor.executionLog, 4000)}` : '',
           ancestor.reviewFeedback ? `Review feedback:\n${clipText(ancestor.reviewFeedback, 2500)}` : '',
@@ -2358,15 +2534,19 @@ function completionProtocol(card: CardRow, reports: DelegationReport[] = []): st
 
 async function buildKanbanDeltaContext(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
   const since = options.since ?? null;
-  const [companyAgents, companyCards, messages, actions, logs, products] = await Promise.all([
+  const [companyAgents, companyRuntimes, companyCards, messages, actions, logs, products] = await Promise.all([
     db.select().from(agents).where(and(eq(agents.companyId, card.companyId), isNull(agents.deletedAt))),
+    db.select().from(agentRuntimes).where(eq(agentRuntimes.companyId, card.companyId)),
     db.select().from(kanbanCards).where(and(eq(kanbanCards.companyId, card.companyId), isNull(kanbanCards.deletedAt))),
     db.select().from(cardComments).where(eq(cardComments.cardId, card.id)).orderBy(desc(cardComments.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
     db.select().from(cardActions).where(eq(cardActions.cardId, card.id)).orderBy(desc(cardActions.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
     db.select().from(taskLogs).where(eq(taskLogs.cardId, card.id)).orderBy(desc(taskLogs.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
     db.select().from(workProducts).where(eq(workProducts.cardId, card.id)).orderBy(desc(workProducts.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
   ]);
-  const agentById = new Map(companyAgents.map((agent) => [agent.id, agent]));
+  const availabilityCache = createRuntimeAvailabilityCache();
+  for (const runtime of companyRuntimes) availabilityCache.runtimes.set(runtime.id, runtime);
+  const visibleAgents = await promptVisibleAgents(card.companyId, companyAgents, availabilityCache);
+  const agentById = new Map(visibleAgents.map((agent) => [agent.id, agent]));
   const ancestors = ancestorChain(card, companyCards);
   const children = companyCards.filter((item) => item.parentCardId === card.id);
   const deps = (card.dependencyCardIds ?? []).map((id) => companyCards.find((item) => item.id === id)).filter((item): item is CardRow => Boolean(item));
@@ -2386,7 +2566,7 @@ async function buildKanbanDeltaContext(card: CardRow, options: PromptBuildOption
     `Children now:\n${children.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
     `Dependencies now:\n${deps.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
     `New message board entries:\n${recentMessages.map((message) => {
-      const author = message.agentId ? agentById.get(message.agentId)?.name ?? message.agentId : message.authorType;
+      const author = message.agentId ? agentById.get(message.agentId)?.name ?? 'unavailable' : message.authorType;
       return `- ${formatDate(message.createdAt)} | ${author} | ${message.action}: ${clipText(promptDiagnostic(message.body), 900)}`;
     }).join('\n') || 'none'}`,
     `New action timeline entries:\n${recentActions.map((action) => [

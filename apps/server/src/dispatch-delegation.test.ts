@@ -138,6 +138,7 @@ test('company structure lines include name slug position department description 
     agents: [
       { id: 'agent-1', name: 'Alice', slug: 'alice', bossId: null, role: 'leader', title: null, positionId: 'pos-cto', departmentId: 'dept-eng', isActive: true },
       { id: 'agent-2', name: 'Bob', slug: 'bob', bossId: 'agent-1', role: 'worker', title: null, positionId: 'pos-eng', departmentId: 'dept-prod', isActive: true },
+      { id: 'agent-3', name: 'Cyd', slug: 'cyd', bossId: 'agent-1', role: 'worker', title: null, positionId: 'pos-eng', departmentId: 'dept-prod', isActive: false },
     ] as any,
     departmentById,
     positionById,
