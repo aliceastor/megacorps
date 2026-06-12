@@ -44,6 +44,7 @@ const LOOP_INTERVAL_MS = Number(process.env.DISPATCH_LOOP_INTERVAL_MS ?? 10_000)
 const CONTEXT_CHAR_BUDGET = Number(process.env.DISPATCH_CONTEXT_CHAR_BUDGET ?? 32_000);
 const KANBAN_CONTEXT_CARD_LIMIT = Number(process.env.DISPATCH_CONTEXT_CARD_LIMIT ?? 160);
 const KANBAN_CONTEXT_RECORD_LIMIT = Number(process.env.DISPATCH_CONTEXT_RECORD_LIMIT ?? 30);
+const TASK_RUN_CANDIDATE_SCAN_LIMIT = Number(process.env.TASK_RUN_CANDIDATE_SCAN_LIMIT ?? 250);
 const MESSAGE_BOARD_COMMENT_LIMIT = Number(process.env.MESSAGE_BOARD_COMMENT_LIMIT ?? 20_000);
 const TASK_BODY_CHAR_LIMIT = Number(process.env.DISPATCH_TASK_BODY_CHAR_LIMIT ?? 12_000);
 const KNOWLEDGE_DOC_CHAR_LIMIT = Number(process.env.DISPATCH_KNOWLEDGE_DOC_CHAR_LIMIT ?? 4_000);
@@ -665,7 +666,7 @@ export async function enqueueTaskRun(cardId: string, kind: TaskRunKind = 'dispat
 }
 
 async function claimNextTaskRun(): Promise<TaskRunRow | null> {
-  const candidates = await db.select().from(taskRuns).where(eq(taskRuns.status, 'queued')).orderBy(desc(taskRuns.priority), taskRuns.createdAt).limit(25);
+  const candidates = await db.select().from(taskRuns).where(eq(taskRuns.status, 'queued')).orderBy(desc(taskRuns.priority), taskRuns.createdAt).limit(Math.max(25, TASK_RUN_CANDIDATE_SCAN_LIMIT));
   const now = new Date();
   const availabilityCache = createRuntimeAvailabilityCache();
   for (const queued of candidates) {

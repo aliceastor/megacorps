@@ -61,9 +61,11 @@ function errorMessage(data: unknown): string {
   if (data && typeof data === 'object' && 'issues' in data && Array.isArray((data as { issues?: unknown }).issues)) {
     return (data as { issues: unknown[] }).issues.map(formatIssue).join('\n');
   }
-  const raw = data && typeof data === 'object' && 'error' in data
-    ? String((data as { error?: unknown }).error)
-    : typeof data === 'string' ? data : 'request_failed';
+  const raw = data && typeof data === 'object' && 'message' in data
+    ? String((data as { message?: unknown }).message)
+    : data && typeof data === 'object' && 'error' in data
+      ? String((data as { error?: unknown }).error)
+      : typeof data === 'string' ? data : 'request_failed';
   return friendlyError(raw);
 }
 

@@ -1420,6 +1420,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         message: `Parent is waiting on child card: ${card.title}.`,
       });
     }
+    const shouldQueueReview = card?.reviewerId && (
+      (toStatus && ['in_review', 'needs_review'].includes(toStatus))
+      || (!toStatus && ['in_review', 'needs_review'].includes(card.columnStatus ?? '') && card.reviewerId !== existing.reviewerId)
+    );
+    if (card && shouldQueueReview) {
+      try {
+        await enqueueTaskRun(card.id, 'review', 'manual', user.id);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'review_enqueue_failed';
+        await db.insert(taskLogs).values({ cardId: card.id, agentId: card.reviewerId, type: 'review', status: 'failed', message });
+      }
+    }
     if (card) await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: card.assigneeId, action: input.columnStatus && input.columnStatus !== existing.columnStatus ? 'card.stage_changed' : 'card.updated', entityType: 'card', entityId: card.id, details: { from: existing.columnStatus, to: input.columnStatus, title: card.title } });
     if (card) publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: input.columnStatus && input.columnStatus !== existing.columnStatus ? 'card.stage_changed' : 'card.updated' });
     if (card) {

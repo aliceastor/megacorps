@@ -3,7 +3,7 @@ import { DndContext, type DragEndEvent, useDraggable, useDroppable } from '@dnd-
 import { CSS } from '@dnd-kit/utilities';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { isCancelledError, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Ban, ExternalLink, GitBranch, GripVertical, ListChecks, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, StopCircle, Trash2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
@@ -207,6 +207,10 @@ function priorityNumber(priority: string | number | undefined): number {
 
 function parseCsv(value: string): string[] {
   return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function isQueryCancellation(error: unknown): boolean {
+  return isCancelledError(error) || (error instanceof Error && error.name === 'CancelledError');
 }
 
 function projectScopedDependencyCandidates(cards: Card[], input: { companyId?: string | null; projectId?: string | null; excludeCardId?: string | null; query?: string }) {
@@ -492,6 +496,7 @@ export function KanbanBoard() {
       if (!filterCompany && onlyCompany) setFilterCompany(onlyCompany.id);
       if (selected) setSelected(nextCards.find((card) => card.id === selected.id) ?? null);
     } catch (err) {
+      if (isQueryCancellation(err)) return;
       setToast({ message: err instanceof Error ? err.message : t('kanban.loadFailed'), type: 'error' });
     } finally {
       setLoading(false);
@@ -532,8 +537,8 @@ export function KanbanBoard() {
       saveCardTabCache(card.id, { comments: { rows, cachedAt: Date.now() } });
       if (selectedIdRef.current === card.id) setComments(rows);
       return rows;
-    } catch {
-      if (selectedIdRef.current === card.id && !cached) setComments([]);
+    } catch (err) {
+      if (!isQueryCancellation(err) && selectedIdRef.current === card.id && !cached) setComments([]);
       return cached?.rows ?? [];
     } finally {
       setLoadingKey('comments', false);
@@ -553,8 +558,8 @@ export function KanbanBoard() {
       saveCardTabCache(card.id, { logs: { rows, cachedAt: Date.now() } });
       if (selectedIdRef.current === card.id) setLogs(rows);
       return rows;
-    } catch {
-      if (selectedIdRef.current === card.id && !cached) setLogs([]);
+    } catch (err) {
+      if (!isQueryCancellation(err) && selectedIdRef.current === card.id && !cached) setLogs([]);
       return cached?.rows ?? [];
     } finally {
       setLoadingKey('logs', false);
@@ -574,8 +579,8 @@ export function KanbanBoard() {
       saveCardTabCache(card.id, { actions: { rows, cachedAt: Date.now() } });
       if (selectedIdRef.current === card.id) setActions(rows);
       return rows;
-    } catch {
-      if (selectedIdRef.current === card.id && !cached) setActions([]);
+    } catch (err) {
+      if (!isQueryCancellation(err) && selectedIdRef.current === card.id && !cached) setActions([]);
       return cached?.rows ?? [];
     } finally {
       setLoadingKey('actions', false);
@@ -596,8 +601,8 @@ export function KanbanBoard() {
       saveCardTabCache(card.id, { apiLogs: { rows, cachedAt: Date.now() } });
       if (selectedIdRef.current === card.id) setApiLogs(rows);
       return rows;
-    } catch {
-      if (selectedIdRef.current === card.id && !cached) setApiLogs([]);
+    } catch (err) {
+      if (!isQueryCancellation(err) && selectedIdRef.current === card.id && !cached) setApiLogs([]);
       return cached?.rows ?? [];
     } finally {
       setLoadingKey('apiLogs', false);
@@ -620,8 +625,8 @@ export function KanbanBoard() {
       saveCardTabCache(card.id, { workProducts: { rows, cachedAt: Date.now() } });
       if (selectedIdRef.current === card.id) setWorkProducts(rows);
       return rows;
-    } catch {
-      if (selectedIdRef.current === card.id && !cached) setWorkProducts([]);
+    } catch (err) {
+      if (!isQueryCancellation(err) && selectedIdRef.current === card.id && !cached) setWorkProducts([]);
       return cached?.rows ?? [];
     } finally {
       setLoadingKey('workProducts', false);
@@ -1115,7 +1120,7 @@ export function KanbanBoard() {
                   <option value="collaboration">{t('kanban.collaborationMode')}</option>
                 </select>
               </label>
-              <label className="field-label">{t('kanban.dependencies')}<DependencyPicker cards={cards} companyId={newCompany} projectId={newProject || null} value={newDependencies} onChange={setNewDependencies} /></label>
+              <div className="field-label"><span>{t('kanban.dependencies')}</span><DependencyPicker cards={cards} companyId={newCompany} projectId={newProject || null} value={newDependencies} onChange={setNewDependencies} /></div>
               <div className="form-grid">
                 <label className="field-label">{t('kanban.scheduleAt')}
                   <input className="input" type="datetime-local" value={newScheduleAt} onChange={(e) => setNewScheduleAt(e.target.value)} />
@@ -1178,7 +1183,7 @@ export function KanbanBoard() {
                 <option value="collaboration">{t('kanban.collaborationMode')}</option>
               </select>
             </label>
-            <label className="field-label">{t('kanban.dependencies')}<DependencyPicker cards={cards} companyId={selected.companyId} projectId={(draft?.projectId ?? selected.projectId) || null} excludeCardId={selected.id} value={draft?.dependencyCardIds ?? []} onChange={(next) => setDraft({ ...(draft ?? {}), dependencyCardIds: next })} /></label>
+            <div className="field-label"><span>{t('kanban.dependencies')}</span><DependencyPicker cards={cards} companyId={selected.companyId} projectId={(draft?.projectId ?? selected.projectId) || null} excludeCardId={selected.id} value={draft?.dependencyCardIds ?? []} onChange={(next) => setDraft({ ...(draft ?? {}), dependencyCardIds: next })} /></div>
             <div className="form-grid">
               <label className="field-label">{t('kanban.maxRetries')}<input className="input" type="number" min={1} max={10} value={Number(draft?.maxRetries ?? 3)} onChange={(e) => setDraft({ ...(draft ?? {}), maxRetries: Number(e.target.value) })} /></label>
               <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={Boolean(draft?.requiresApproval)} onChange={(e) => setDraft({ ...(draft ?? {}), requiresApproval: e.target.checked })} /> {t('kanban.requiresApproval')}</label>
