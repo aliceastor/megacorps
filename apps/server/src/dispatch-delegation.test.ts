@@ -21,6 +21,46 @@ test('normal dispatch completion enters quality review when a reviewer exists', 
   assert.equal(decision.nextStatus, 'in_review');
 });
 
+test('explicit approved review verdict wins over infrastructure blocker wording', () => {
+  const output = [
+    'FINAL REVIEW VERDICT: APPROVED \u2014 DONE',
+    'The deliverable is sound.',
+    'Infrastructure is broken and the card cannot progress without a human dashboard seal.',
+    'status: blocked in the server loop',
+  ].join('\n');
+  assert.equal(dispatchInternals.explicitReviewDecision(output), 'approved');
+  assert.equal(dispatchInternals.reviewDecision(output, 'quality'), 'approved');
+});
+
+test('explicit review rejection wins over approval wording', () => {
+  const output = 'REJECT - REVISION_REQUESTED: No deliverable artifact. I would approve after the missing artifact is added.';
+  assert.equal(dispatchInternals.explicitReviewDecision(output), 'revision_requested');
+  assert.equal(dispatchInternals.reviewDecision(output, 'quality'), 'revision_requested');
+});
+
+test('review verdict JSON status done is accepted as approval despite loop notes', () => {
+  const output = '{"status":"done","summary":"APPROVED \u2014 DONE"}\nServer loop continues; only external human action can move the card.';
+  assert.equal(dispatchInternals.explicitReviewDecision(output), 'approved');
+});
+
+test('dispatch preserves webhook-updated card status after adapter returns', () => {
+  assert.equal(dispatchInternals.cardChangedOutsideCurrentRun(
+    { columnStatus: 'waiting_on_external', activeHeartbeatRunId: null, executionLockId: null } as any,
+    { columnStatus: 'in_progress' } as any,
+    'run-1',
+  ), true);
+  assert.equal(dispatchInternals.cardChangedOutsideCurrentRun(
+    { columnStatus: 'in_progress', activeHeartbeatRunId: 'run-1', executionLockId: 'lock-1' } as any,
+    { columnStatus: 'in_progress' } as any,
+    'run-1',
+  ), false);
+  assert.equal(dispatchInternals.cardChangedOutsideCurrentRun(
+    { columnStatus: 'done', activeHeartbeatRunId: null, executionLockId: null } as any,
+    { columnStatus: 'in_progress' } as any,
+    'run-1',
+  ), true);
+});
+
 test('confirmation-seeking replies are rejected for autonomous kanban work', () => {
   assert.equal(dispatchInternals.asksForConfirmationInsteadOfWorking('我目前其實不確定您要我直接動手做，還是您想先看初稿方向再決定。請問……？'), true);
   assert.equal(dispatchInternals.asksForConfirmationInsteadOfWorking('Should I continue and POST the result?'), true);

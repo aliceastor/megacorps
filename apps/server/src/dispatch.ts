@@ -337,11 +337,33 @@ export async function completionBlockedByChildren(card: CardRow, targetStatus: C
 
 type ReviewDecision = 'approved' | 'revision_requested' | 'escalate';
 
+function explicitReviewDecision(output: string | null | undefined): ReviewDecision | null {
+  const text = output ?? '';
+  if (/\b(?:final\s+)?(?:review\s+)?verdict\s*[:=]\s*(?:reject(?:ed)?|revision[_ -]?requested)\b|\breject(?:ed)?\W{0,30}revision[_ -]?requested\b|\bnot\s+approved\b|\bcannot\s+approve\b/i.test(text)) {
+    return 'revision_requested';
+  }
+  if (/\b(?:final\s+)?(?:review\s+)?verdict\s*[:=]\s*escalate\b|\bescalate\b(?:\s*[:=]|\W{1,16}(?:manager|boss|higher|review|decision)\b)/i.test(text)) {
+    return 'escalate';
+  }
+  if (/\b(?:final\s+)?(?:review\s+)?verdict\s*[:=]\s*(?:approved?|pass|done)\b|\bapproved?\W{0,16}(?:done|complete(?:d)?|resolved)\b|["']status["']\s*:\s*["']done["']/i.test(text)) {
+    return 'approved';
+  }
+  return null;
+}
+
 function reviewDecision(output: string, mode: 'quality' | 'help'): ReviewDecision {
+  const explicit = explicitReviewDecision(output);
+  if (explicit) return explicit;
   if (/\b(escalate|needs[_ -]?higher|needs[_ -]?boss|needs[_ -]?manager|cannot[_ -]?resolve|unable[_ -]?to[_ -]?resolve)\b/i.test(output)) return 'escalate';
   if (/\b(revision[_ -]?requested|request[_ -]?revision|needs[_ -]?rework|redo|retry|reject|rejected|fail|failed|blocked|not\s+approved|not\s+acceptable|cannot\s+approve)\b/i.test(output)) return 'revision_requested';
   if (/\b(pass|approve|approved|done|complete|completed|resolved)\b/i.test(output)) return 'approved';
   return mode === 'help' ? 'revision_requested' : 'approved';
+}
+
+function cardChangedOutsideCurrentRun(latest: Pick<CardRow, 'columnStatus' | 'activeHeartbeatRunId' | 'executionLockId'> | null | undefined, lockedCard: Pick<CardRow, 'columnStatus'>, runId: string): boolean {
+  if (!latest) return false;
+  if (latest.activeHeartbeatRunId === runId || latest.executionLockId) return false;
+  return (normalizeCardStatus(latest.columnStatus) ?? 'todo') !== (normalizeCardStatus(lockedCard.columnStatus) ?? 'todo');
 }
 
 function goalScopeLabel(goal: GoalRow): string {
@@ -1164,20 +1186,20 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
 
 async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unknown, runId?: string | null, taskRunId?: string | null): Promise<CardRow> {
   const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
-  if (latest && isTerminalCardStatus(latest.columnStatus) && !latest.executionLockId && latest.activeHeartbeatRunId !== runId) {
-    const status = terminalRunStatus(latest.columnStatus);
+  if (latest && cardChangedOutsideCurrentRun(latest, card, runId ?? '')) {
+    const status = isTerminalCardStatus(latest.columnStatus) ? terminalRunStatus(latest.columnStatus) : 'success';
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
     await releaseExecutionLock(card.id, runId ?? null, status);
     await completeTaskRun(taskRunId, {
       status,
-      output: `Card was already ${latest.columnStatus} before dispatch returned.`,
+      output: `Card moved to ${latest.columnStatus} before dispatch failed; preserving the current stage.`,
     });
     await addTaskLog({
       cardId: card.id,
       agentId: agent.id,
       type: 'dispatch',
       status: status === 'cancelled' ? 'warning' : status,
-      message: `Dispatch result ignored because card was already ${latest.columnStatus}.`,
+      message: `Dispatch error ignored because card moved to ${latest.columnStatus}.`,
       output: error instanceof Error ? error.message : 'dispatch_finished_after_external_status',
     });
     return latest;
@@ -1380,14 +1402,14 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       stopLockRenewal();
     }
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
-    if (latest && isTerminalCardStatus(latest.columnStatus) && !latest.executionLockId && latest.activeHeartbeatRunId !== run.id) {
+    if (latest && cardChangedOutsideCurrentRun(latest, lockedCard, run.id)) {
       if (result.success) await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
-      const status = terminalRunStatus(latest.columnStatus);
+      const status = isTerminalCardStatus(latest.columnStatus) ? terminalRunStatus(latest.columnStatus) : 'success';
       await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
       await releaseExecutionLock(card.id, run.id, status);
       await completeTaskRun(options.taskRunId, {
         status,
-        output: `Card was already ${latest.columnStatus} before dispatch returned.`,
+        output: `Card moved to ${latest.columnStatus} before dispatch returned; preserving the current stage.`,
         durationSeconds: result.durationSeconds,
       });
       await addTaskLog({
@@ -1395,7 +1417,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         agentId: agent.id,
         type: 'dispatch',
         status: status === 'cancelled' ? 'warning' : status,
-        message: `Dispatch output received after card was already ${latest.columnStatus}; keeping the current stage.`,
+        message: `Dispatch output received after card moved to ${latest.columnStatus}; keeping the current stage.`,
         output: result.output,
         durationSeconds: result.durationSeconds,
       });
@@ -1716,7 +1738,8 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       return latest;
     }
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-    if (!result.success) {
+    const explicitDecision = explicitReviewDecision(result.output);
+    if (!result.success && !explicitDecision) {
       await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
       return sendAgentFeedbackAndRequeue({
         card,
@@ -1742,7 +1765,8 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
         result,
       });
     }
-    const decision = reviewDecision(result.output, reviewMode);
+    const decision = explicitDecision ?? reviewDecision(result.output, reviewMode);
+    const acceptedReviewOutput = result.success || Boolean(explicitDecision);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
 
     if (decision === 'escalate') {
@@ -1808,7 +1832,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       cardId: card.id,
       agentId: reviewer.id,
       type: childBlock ? 'children' : 'review',
-      status: childBlock ? 'queued' : result.success ? 'success' : 'failed',
+      status: childBlock ? 'queued' : acceptedReviewOutput ? 'success' : 'failed',
       message: childBlock ? childBlock.message : rejected
         ? reviewMode === 'help' ? 'Reviewer provided guidance; card returned to todo for rework.' : 'Review rejected; card returned to todo.'
         : reviewMode === 'help' ? 'Reviewer resolved the escalated task; card marked done.' : 'Review passed; card marked done.',
@@ -1817,7 +1841,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       durationSeconds: result.durationSeconds,
     });
     await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: childBlock ? 'review_waiting_on_children' : rejected ? (reviewMode === 'help' ? 'review_guidance' : 'review_rejected') : 'review_note', body: childBlock ? `${childBlock.message}\n\n${result.output}` : result.output });
-    await db.update(heartbeatRuns).set({ status: result.success ? 'success' : 'failed', completedAt: new Date(), durationSeconds: result.durationSeconds, error: result.success ? null : result.output }).where(eq(heartbeatRuns.id, run.id));
+    await db.update(heartbeatRuns).set({ status: acceptedReviewOutput ? 'success' : 'failed', completedAt: new Date(), durationSeconds: result.durationSeconds, error: acceptedReviewOutput ? null : result.output }).where(eq(heartbeatRuns.id, run.id));
     await resolvePendingApproval(card, childBlock ? 'cancelled' : rejected ? (reviewMode === 'help' ? 'revision_requested' : 'rejected') : 'approved', childBlock ? childBlock.message : rejected ? result.output : 'Reviewer approved task.', reviewer.id);
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: childBlock ? 'review.waiting_on_children' : rejected ? (reviewMode === 'help' ? 'review.revision_requested' : 'review.rejected') : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, mode: reviewMode, childBlock } });
     await completeTaskRun(options.taskRunId, { status: rejected ? 'failed' : 'success', error: rejected ? result.output : null, output: childBlock ? childBlock.message : result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
@@ -2287,6 +2311,7 @@ export function startDispatchLoop(app: FastifyInstance): void {
 
 export const dispatchInternals = {
   asksForConfirmationInsteadOfWorking,
+  cardChangedOutsideCurrentRun,
   childCompletionPolicySatisfied,
   collaborationDelegationInstructions,
   collaborationModeRequiresDelegation,
@@ -2294,7 +2319,9 @@ export const dispatchInternals = {
   completionStatusForQualityGate,
   delegationItems,
   dispatchCompletionDecision,
+  explicitReviewDecision,
   optionalDelegationInstructions,
+  reviewDecision,
 };
 
 function clipText(value: string | null | undefined, maxChars: number): string {
