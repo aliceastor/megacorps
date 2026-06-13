@@ -2,7 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { db } from './db/client.ts';
 import { adapterSessions, taskRuns } from './db/schema.ts';
 
-type AdapterSessionKind = 'dispatch' | 'review' | 'chat';
+type AdapterSessionKind = 'dispatch' | 'review' | 'message' | 'message_review' | 'chat';
 type AdapterSessionScopeType = 'card' | 'chat';
 
 type SessionInput = {

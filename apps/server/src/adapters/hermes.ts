@@ -87,7 +87,7 @@ Respond to the user directly. Do not report task completion or call the Kanban w
 - POST ${apiUrl}/api/webhook/task-complete -- Report task progress, delegation, or completion
 - GET  ${apiUrl}/api/help -- Read API documentation if network access is available
 
-Task runtimes usually do not have a browser session cookie. Do not call session-auth endpoints such as POST /api/cards for delegation. If the MegaCorps task prompt asks you to delegate, include the exact DELEGATE block in your output or webhook payload; the MegaCorps server will create child cards and assign direct reports.
+Task runtimes usually do not have a browser session cookie. Do not call session-auth endpoints such as POST /api/cards for delegation. If the MegaCorps task prompt asks you to delegate, include the exact DELEGATE block in your output or webhook payload; the MegaCorps server will create Message Board delegation requests inside the same card and assign direct reports.
 
 === Your Identity ===
 Agent: ${agent.hermesProfile ?? 'unknown'}
@@ -104,7 +104,7 @@ POST ${apiUrl}/api/webhook/task-complete
 ${taskWebhookSecret ? `Header: X-MegaCorps-Webhook-Secret: ${taskWebhookSecret}` : 'Webhook auth: no shared secret was provided in your runtime config.'}
 Body: ${webhookBodyExample}
 
-If you are delegating to direct reports, POST status "in_progress" and include a DELEGATE block in summary/output. Do not mark the parent card done and do not try to create child cards yourself.
+If you are delegating to direct reports, POST status "in_progress" and include a DELEGATE block in summary/output. Do not mark the parent card done and do not try to create Kanban cards yourself; MegaCorps will create same-card Message Board delegation requests.
 If the work is complete but needs QA, POST status "in_review" with the completed output.
 If you cannot solve the task, do not mark it done. POST status "needs_review" with attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs:
 Body: ${escalationBodyExample}

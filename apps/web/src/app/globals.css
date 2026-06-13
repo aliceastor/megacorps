@@ -4120,6 +4120,22 @@ button.card {
   text-align: right;
 }
 
+.message-board-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.message-board-meta > span {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: color-mix(in srgb, var(--background) 48%, transparent);
+}
+
 .message-board-entry p {
   margin: 0;
   white-space: pre-wrap;

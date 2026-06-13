@@ -268,8 +268,11 @@ export const updateCompanyMembershipSchema = z.object({
 
 export const createCardCommentSchema = z.object({
   body: z.string().trim().min(1).max(5000),
-  action: z.enum(['comment', 'agent_note', 'pause_agent', 'send_to_agent', 'continue_run', 'escalate_to_reviewer']).default('comment'),
+  action: z.enum(['comment', 'agent_note', 'pause_agent', 'send_to_agent', 'continue_run', 'escalate_to_reviewer', 'delegate_to_agent']).default('comment'),
   agentId: z.string().uuid().nullable().optional(),
+  assigneeAgentId: z.string().uuid().nullable().optional(),
+  reviewerAgentId: z.string().uuid().nullable().optional(),
+  reviewerScope: z.enum(['phase', 'final']).nullable().optional(),
 });
 
 export const createChatSessionSchema = z.object({

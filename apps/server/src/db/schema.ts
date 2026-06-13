@@ -243,6 +243,7 @@ export const taskRuns = pgTable('task_runs', {
   companyId: uuid('company_id').notNull().references(() => companies.id),
   cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
   agentId: uuid('agent_id').references(() => agents.id),
+  messageCommentId: uuid('message_comment_id'),
   heartbeatRunId: uuid('heartbeat_run_id').references(() => heartbeatRuns.id),
   kind: text('kind').notNull().default('dispatch'),
   source: text('source').notNull().default('queue'),
@@ -318,11 +319,17 @@ export const taskLogs = pgTable('task_logs', {
 export const cardComments = pgTable('card_comments', {
   id: uuid('id').primaryKey().defaultRandom(),
   cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
+  parentCommentId: uuid('parent_comment_id'),
   authorType: text('author_type').notNull().default('user'),
   authorId: uuid('author_id').references(() => users.id),
   agentId: uuid('agent_id').references(() => agents.id),
+  assigneeAgentId: uuid('assignee_agent_id').references(() => agents.id),
+  reviewerAgentId: uuid('reviewer_agent_id').references(() => agents.id),
+  reviewerScope: text('reviewer_scope'),
+  delegationStatus: text('delegation_status'),
   body: text('body').notNull(),
   action: text('action').notNull().default('comment'),
+  metadata: jsonb('metadata').default({}),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 

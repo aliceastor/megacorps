@@ -83,7 +83,7 @@ type Goal = { id: string; companyId: string; departmentId?: string | null; proje
 type TaskLog = { id: string; type: string; status: string; message: string; output?: string; costUsd?: string; durationSeconds?: number; createdAt?: string };
 type TaskRun = { id: string; cardId: string; kind: string; status: string };
 type ApiEvent = { id: string; method: string; path: string; statusCode?: number; requestBody?: unknown; responseBody?: unknown; error?: string | null; durationMs?: number; createdAt?: string };
-type CardComment = { id: string; body: string; action: string; authorType: string; agentId?: string | null; authorId?: string | null; createdAt?: string };
+type CardComment = { id: string; body: string; action: string; authorType: string; agentId?: string | null; authorId?: string | null; parentCommentId?: string | null; assigneeAgentId?: string | null; reviewerAgentId?: string | null; reviewerScope?: 'phase' | 'final' | null; delegationStatus?: string | null; createdAt?: string };
 type CardAction = { id: string; actorType: string; actorId: string; action: string; fromStatus?: string | null; toStatus?: string | null; detail?: string | null; metadata?: unknown; createdAt?: string };
 type WorkProduct = { id: string; cardId?: string | null; projectId?: string | null; agentId?: string | null; type: string; title: string; summary?: string | null; url?: string | null; repoProvider?: string | null; repoUrl?: string | null; branch?: string | null; commitSha?: string | null; pullRequestUrl?: string | null; createdAt?: string };
 type CardUpdatePayload = Omit<Partial<Card>, 'priority'> & { priority?: (typeof priorities)[number] };
@@ -448,8 +448,11 @@ export function KanbanBoard() {
   const [tabLoading, setTabLoading] = useState<Record<CardTabKey, boolean>>({ comments: false, logs: false, actions: false, apiLogs: false, workProducts: false, childTree: false });
   const [tab, setTab] = useState<'details' | 'comments' | 'thread' | 'logs' | 'workProducts' | 'subtasks'>('details');
   const [commentBody, setCommentBody] = useState('');
-  const [commentAction, setCommentAction] = useState<'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run' | 'escalate_to_reviewer'>('comment');
+  const [commentAction, setCommentAction] = useState<'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run' | 'escalate_to_reviewer' | 'delegate_to_agent'>('comment');
   const [commentAgentId, setCommentAgentId] = useState('');
+  const [commentDelegateAssigneeId, setCommentDelegateAssigneeId] = useState('');
+  const [commentDelegateReviewerId, setCommentDelegateReviewerId] = useState('');
+  const [commentDelegateScope, setCommentDelegateScope] = useState<'phase' | 'final'>('phase');
   const [modalOpen, setModalOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newBody, setNewBody] = useState('');
@@ -774,6 +777,7 @@ export function KanbanBoard() {
       requiresApproval: selected.requiresApproval ?? false,
       maxRetries: selected.maxRetries ?? 3,
     });
+    setCommentDelegateReviewerId(selected.assigneeId ?? selected.reviewerId ?? '');
     const cached = cardTabCache[selected.id] ?? {};
     setComments(cached.comments?.rows ?? []);
     setLogs(cached.logs?.rows ?? []);
@@ -1053,10 +1057,24 @@ export function KanbanBoard() {
 
   async function addComment() {
     if (!selected || !commentBody.trim()) return;
+    if (commentAction === 'delegate_to_agent' && !commentDelegateAssigneeId) {
+      setToast({ message: t('kanban.delegateAssigneeRequired'), type: 'error' });
+      return;
+    }
     setBusy(true);
     try {
       const effectiveAction = commentAgentId ? 'agent_note' : commentAction;
-      const comment = await api<CardComment>(`/api/cards/${selected.id}/comments`, { method: 'POST', body: JSON.stringify({ body: commentBody.trim(), action: effectiveAction, agentId: commentAgentId || null }) });
+      const comment = await api<CardComment>(`/api/cards/${selected.id}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          body: commentBody.trim(),
+          action: effectiveAction,
+          agentId: commentAgentId || null,
+          assigneeAgentId: effectiveAction === 'delegate_to_agent' ? commentDelegateAssigneeId : null,
+          reviewerAgentId: effectiveAction === 'delegate_to_agent' ? commentDelegateReviewerId || selected.assigneeId || selected.reviewerId || null : null,
+          reviewerScope: effectiveAction === 'delegate_to_agent' ? commentDelegateScope : null,
+        }),
+      });
       const nextComments = [comment, ...comments];
       setComments(nextComments);
       saveCardTabCache(selected.id, { comments: { rows: nextComments, cachedAt: Date.now() } });
@@ -1064,7 +1082,8 @@ export function KanbanBoard() {
       void queryClient.invalidateQueries({ queryKey: ['kanbanBoard'] });
       void loadCardActions(selected, true);
       setCommentBody('');
-      setToast({ message: effectiveAction === 'pause_agent' ? t('kanban.agentPausedBlocked') : effectiveAction === 'continue_run' ? t('kanban.taskQueuedContinue') : effectiveAction === 'escalate_to_reviewer' ? t('kanban.taskEscalated') : t('kanban.messageAdded'), type: 'success' });
+      if (effectiveAction === 'delegate_to_agent') setCommentDelegateAssigneeId('');
+      setToast({ message: effectiveAction === 'pause_agent' ? t('kanban.agentPausedBlocked') : effectiveAction === 'continue_run' ? t('kanban.taskQueuedContinue') : effectiveAction === 'escalate_to_reviewer' ? t('kanban.taskEscalated') : effectiveAction === 'delegate_to_agent' ? t('kanban.delegationQueued') : t('kanban.messageAdded'), type: 'success' });
       await refresh();
       await Promise.all([loadCardLogs(selected, true), loadCardActions(selected, true), loadCardApiLogs(selected, true)]);
     } catch (err) {
@@ -1286,9 +1305,16 @@ export function KanbanBoard() {
             <div className="message-board-list">
               {comments.length === 0 && !tabLoading.comments ? <p style={{ opacity: 0.6 }}>{t('kanban.noMessages')}</p> : comments.map((comment) => {
                 const authorAgent = comment.agentId ? agents.find((agent) => agent.id === comment.agentId) : undefined;
+                const assigneeAgent = comment.assigneeAgentId ? agents.find((agent) => agent.id === comment.assigneeAgentId) : undefined;
+                const reviewerAgent = comment.reviewerAgentId ? agents.find((agent) => agent.id === comment.reviewerAgentId) : undefined;
                 const author = authorAgent?.name ?? (comment.authorType === 'system' ? t('common.system') : comment.authorType === 'agent' ? t('common.agent') : t('common.you'));
                 return <article className="message-board-entry" key={comment.id}>
                   <div className="message-board-entry-head"><b>{author}</b><span>{comment.action} / {comment.createdAt ? new Date(comment.createdAt).toLocaleString() : ''}</span></div>
+                  {(comment.delegationStatus || comment.assigneeAgentId || comment.reviewerAgentId) && <div className="message-board-meta">
+                    {comment.delegationStatus && <span className="status-pill">{comment.delegationStatus}</span>}
+                    {assigneeAgent && <span>{t('kanban.delegateAssignee')}: {assigneeAgent.name}</span>}
+                    {reviewerAgent && <span>{comment.reviewerScope === 'final' ? t('kanban.finalReviewer') : t('kanban.phaseReviewer')}: {reviewerAgent.name}</span>}
+                  </div>}
                   <p>{comment.body}</p>
                 </article>;
               })}
@@ -1304,9 +1330,14 @@ export function KanbanBoard() {
                 </select>
               </label>
               <label className="field-label">{t('kanban.action')}
-                <select className="input" value={commentAgentId ? 'agent_note' : commentAction} disabled={Boolean(commentAgentId)} onChange={(event) => setCommentAction(event.target.value as typeof commentAction)}>
+                <select className="input" value={commentAgentId ? 'agent_note' : commentAction} disabled={Boolean(commentAgentId)} onChange={(event) => {
+                  const next = event.target.value as typeof commentAction;
+                  setCommentAction(next);
+                  if (next === 'delegate_to_agent') setCommentAgentId('');
+                }}>
                   <option value="comment">{t('kanban.commentOnly')}</option>
                   <option value="agent_note">{t('kanban.agentNote')}</option>
+                  <option value="delegate_to_agent">{t('kanban.delegateToAgent')}</option>
                   <option value="pause_agent">{t('kanban.stopAgentBlock')}</option>
                   <option value="escalate_to_reviewer">{t('kanban.escalateReviewer')}</option>
                   <option value="send_to_agent">{t('kanban.sendToAgent')}</option>
@@ -1314,6 +1345,26 @@ export function KanbanBoard() {
                 </select>
               </label>
             </div>
+            {commentAction === 'delegate_to_agent' && !commentAgentId && <div className="form-grid">
+              <label className="field-label">{t('kanban.delegateAssignee')}
+                <select className="input" value={commentDelegateAssigneeId} onChange={(event) => setCommentDelegateAssigneeId(event.target.value)}>
+                  <option value="">{t('kanban.delegateAssignee')}</option>
+                  {agents.filter((agent) => !selected.companyId || agent.companyId === selected.companyId).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}{agent.role ? ` / ${agent.role}` : ''}</option>)}
+                </select>
+              </label>
+              <label className="field-label">{t('kanban.reviewScope')}
+                <select className="input" value={commentDelegateScope} onChange={(event) => setCommentDelegateScope(event.target.value as typeof commentDelegateScope)}>
+                  <option value="phase">{t('kanban.phaseReviewer')}</option>
+                  <option value="final">{t('kanban.finalReviewer')}</option>
+                </select>
+              </label>
+              <label className="field-label">{commentDelegateScope === 'final' ? t('kanban.finalReviewer') : t('kanban.phaseReviewer')}
+                <select className="input" value={commentDelegateReviewerId} onChange={(event) => setCommentDelegateReviewerId(event.target.value)}>
+                  <option value="">{t('kanban.reviewer')}</option>
+                  {agents.filter((agent) => !selected.companyId || agent.companyId === selected.companyId).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}{agent.role ? ` / ${agent.role}` : ''}</option>)}
+                </select>
+              </label>
+            </div>}
             <label className="field-label">{t('kanban.message')}
               <textarea className="input" rows={5} value={commentBody} onChange={(event) => setCommentBody(event.target.value)} placeholder={t('kanban.messageHint')} />
             </label>
