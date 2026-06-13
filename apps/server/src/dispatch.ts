@@ -522,13 +522,18 @@ export async function enqueueMessageTaskRun(comment: CardCommentRow, kind: Extra
   if (card.recurEveryMinutes) throw new Error('recurring_template_cannot_run');
   const agentId = kind === 'message_review' ? comment.reviewerAgentId : comment.assigneeAgentId;
   if (!agentId) throw new Error(kind === 'message_review' ? 'message_review_has_no_reviewer' : 'message_delegation_has_no_assignee');
+  const terminalCard = isTerminalCardStatus(card.columnStatus);
   const [existing] = await db.select().from(taskRuns).where(and(
     eq(taskRuns.messageCommentId, comment.id),
     eq(taskRuns.kind, kind),
     inArray(taskRuns.status, ['queued', 'running']),
   )).orderBy(desc(taskRuns.createdAt)).limit(1);
-  if (existing) return existing;
+  if (existing) {
+    if (terminalCard) return await cancelTerminalMessageTaskRun(existing, card) ?? existing;
+    return existing;
+  }
   const previous = await db.select({ id: taskRuns.id }).from(taskRuns).where(and(eq(taskRuns.messageCommentId, comment.id), eq(taskRuns.kind, kind)));
+  const terminalReason = terminalMessageTaskReason({ kind }, card);
   const [run] = await db.insert(taskRuns).values({
     companyId: card.companyId,
     cardId: card.id,
@@ -536,10 +541,12 @@ export async function enqueueMessageTaskRun(comment: CardCommentRow, kind: Extra
     agentId,
     kind,
     source: 'queue',
-    status: 'queued',
+    status: terminalCard ? 'cancelled' : 'queued',
     priority: card.priority ?? 0,
     attemptNumber: previous.length + 1,
     maxAttempts: 1,
+    completedAt: terminalCard ? new Date() : null,
+    error: terminalCard ? terminalReason : null,
   }).onConflictDoNothing().returning();
   if (!run) {
     const [winner] = await db.select().from(taskRuns).where(and(
@@ -549,6 +556,10 @@ export async function enqueueMessageTaskRun(comment: CardCommentRow, kind: Extra
     )).orderBy(desc(taskRuns.createdAt)).limit(1);
     if (winner) return winner;
     throw new Error('message_task_run_create_failed');
+  }
+  if (terminalCard) {
+    await recordTerminalMessageTaskSkip(run, card, terminalReason);
+    return run;
   }
   await addTaskRunLog(run, 'queued', `${kind} task run queued for message board delegation.`);
   await addActivity({
@@ -724,6 +735,61 @@ async function completeTaskRun(runId: string | null | undefined, input: {
   }).where(and(eq(taskRuns.id, runId), inArray(taskRuns.status, ['queued', 'running'])));
 }
 
+function terminalMessageTaskReason(run: Pick<TaskRunRow, 'kind'>, card: Pick<CardRow, 'columnStatus'>): string {
+  return `${run.kind} task run skipped because card is already ${card.columnStatus ?? 'terminal'}.`;
+}
+
+async function recordTerminalMessageTaskSkip(run: TaskRunRow, card: CardRow, reason = terminalMessageTaskReason(run, card)): Promise<void> {
+  const [comment] = run.messageCommentId
+    ? await db.select().from(cardComments).where(and(eq(cardComments.id, run.messageCommentId), eq(cardComments.cardId, card.id))).limit(1)
+    : [];
+  if (comment) {
+    const relatedCommentIds = run.kind === 'message_review' && comment.parentCommentId
+      ? [comment.id, comment.parentCommentId]
+      : [comment.id];
+    await db.update(cardComments).set({ delegationStatus: 'cancelled' }).where(inArray(cardComments.id, relatedCommentIds));
+    await addCardMessage({
+      cardId: card.id,
+      parentCommentId: comment.id,
+      agentId: run.agentId,
+      action: run.kind === 'message_review' ? 'delegate_review_cancelled' : 'delegate_cancelled',
+      body: reason,
+      assigneeAgentId: comment.assigneeAgentId,
+      reviewerAgentId: comment.reviewerAgentId,
+      reviewerScope: comment.reviewerScope === 'final' ? 'final' : comment.reviewerScope === 'phase' ? 'phase' : null,
+      delegationStatus: 'cancelled',
+      metadata: { taskRunId: run.id, cardStatus: card.columnStatus },
+    });
+  }
+  await addTaskRunLog(run, 'warning', reason);
+  await addActivity({
+    companyId: run.companyId,
+    actorType: 'system',
+    actorId: TASK_RUN_WORKER_ID,
+    agentId: run.agentId,
+    action: 'task_run.cancelled_terminal_card',
+    entityType: 'task_run',
+    entityId: run.id,
+    details: { cardId: card.id, kind: run.kind, messageCommentId: run.messageCommentId, cardStatus: card.columnStatus },
+  });
+}
+
+async function cancelTerminalMessageTaskRun(run: TaskRunRow, card: CardRow): Promise<TaskRunRow | null> {
+  const reason = terminalMessageTaskReason(run, card);
+  const [updated] = await db.update(taskRuns).set({
+    status: 'cancelled',
+    lockedBy: null,
+    lockedAt: null,
+    startedAt: null,
+    completedAt: new Date(),
+    error: reason,
+    updatedAt: new Date(),
+  }).where(and(eq(taskRuns.id, run.id), inArray(taskRuns.status, ['queued', 'running']))).returning();
+  if (!updated) return null;
+  await recordTerminalMessageTaskSkip(updated, card, reason);
+  return updated;
+}
+
 async function requeueBackpressuredTaskRun(run: TaskRunRow, message: string): Promise<boolean> {
   if (!['agent_busy', 'reviewer_busy', 'agent_runtime_unavailable', 'reviewer_runtime_unavailable'].includes(message)) return false;
   await db.update(taskRuns).set({
@@ -845,6 +911,7 @@ async function claimNextTaskRun(): Promise<TaskRunRow | null> {
       if (card.nextRunAt && card.nextRunAt > now) continue;
       if (!(await cardDependenciesMet(card.id))) continue;
     } else if (!queued.messageCommentId || isTerminalCardStatus(card.columnStatus)) {
+      if (queued.messageCommentId && isTerminalCardStatus(card.columnStatus)) await cancelTerminalMessageTaskRun(queued, card);
       continue;
     }
     const targetAgentId = queued.kind === 'review'
