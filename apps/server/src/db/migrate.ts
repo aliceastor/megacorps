@@ -12,6 +12,7 @@ const MIGRATION_LOCK_KEY = 727274001;
 const migrations: Migration[] = [
   { version: 1, name: 'bootstrap', run: runBootstrap },
   { version: 2, name: 'scheduling-and-notifications', run: runSchedulingAndNotifications },
+  { version: 3, name: 'message-board-delegation-schema', run: runMessageBoardDelegationSchema },
 ];
 
 async function runSchedulingAndNotifications(): Promise<void> {
@@ -40,6 +41,29 @@ CREATE TABLE IF NOT EXISTS notification_reads (
   PRIMARY KEY (notification_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS notification_reads_user_idx ON notification_reads(user_id, read_at DESC);`);
+}
+
+async function runMessageBoardDelegationSchema(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS message_comment_id UUID;
+ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS adapter_session_id UUID;
+ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS adapter_turn_id TEXT;
+CREATE INDEX IF NOT EXISTS task_runs_status_priority_created_at_idx ON task_runs(status, priority DESC, created_at ASC);
+UPDATE task_runs SET status = 'failed', error = 'duplicate_active_run_superseded', completed_at = now(), updated_at = now()
+WHERE status IN ('queued','running') AND message_comment_id IS NULL AND id NOT IN (
+  SELECT DISTINCT ON (card_id, kind) id FROM task_runs WHERE status IN ('queued','running') AND message_comment_id IS NULL ORDER BY card_id, kind, created_at DESC
+);
+DROP INDEX IF EXISTS task_runs_active_card_kind_uidx;
+CREATE UNIQUE INDEX IF NOT EXISTS task_runs_active_card_kind_uidx ON task_runs(card_id, kind) WHERE status IN ('queued','running') AND message_comment_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS task_runs_active_message_comment_kind_uidx ON task_runs(message_comment_id, kind) WHERE status IN ('queued','running') AND message_comment_id IS NOT NULL;
+ALTER TABLE card_comments ADD COLUMN IF NOT EXISTS agent_id UUID REFERENCES agents(id);
+ALTER TABLE card_comments ADD COLUMN IF NOT EXISTS parent_comment_id UUID REFERENCES card_comments(id);
+ALTER TABLE card_comments ADD COLUMN IF NOT EXISTS assignee_agent_id UUID REFERENCES agents(id);
+ALTER TABLE card_comments ADD COLUMN IF NOT EXISTS reviewer_agent_id UUID REFERENCES agents(id);
+ALTER TABLE card_comments ADD COLUMN IF NOT EXISTS reviewer_scope TEXT;
+ALTER TABLE card_comments ADD COLUMN IF NOT EXISTS delegation_status TEXT;
+ALTER TABLE card_comments ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS card_comments_parent_comment_idx ON card_comments(parent_comment_id);
+CREATE INDEX IF NOT EXISTS card_comments_delegation_status_idx ON card_comments(card_id, delegation_status, created_at DESC);`);
 }
 
 export async function migrate(): Promise<void> {
