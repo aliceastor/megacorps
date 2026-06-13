@@ -51,6 +51,7 @@ const registeredRoutes = [
   ['POST', '/api/cards/:id/cancel'],
   ['DELETE', '/api/cards/:id'],
   ['GET', '/api/cards/:id/logs'],
+  ['GET', '/api/cards/:id/subtree'],
   ['GET', '/api/cards/:id/actions'],
   ['GET', '/api/cards/:id/rollup'],
   ['GET', '/api/cards/:id/context'],

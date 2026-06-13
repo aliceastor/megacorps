@@ -74,6 +74,7 @@ type Card = {
   createdAt?: string;
   updatedAt?: string;
 };
+type ChildTreeCard = Card & { depth: number; childCount: number };
 type Agent = { id: string; companyId?: string; name: string; role?: string; adapterType?: string; isBusy?: boolean };
 type Company = { id: string; name: string };
 type Department = { id: string; companyId: string; name: string };
@@ -94,12 +95,15 @@ type CardTabCache = {
   actions?: CachedRows<CardAction>;
   apiLogs?: CachedRows<ApiEvent>;
   workProducts?: CachedRows<WorkProduct>;
+  childTree?: CachedRows<ChildTreeCard>;
 };
 type CardTabKey = keyof CardTabCache;
 
-const CARD_TAB_CACHE_KEY = 'megacorps.kanban.card-tabs.v1';
+const CARD_TAB_CACHE_KEY = 'megacorps.kanban.card-tabs.v2';
 const CARD_TAB_CACHE_TTL_MS = 2 * 60 * 1000;
 const CARD_TAB_CACHE_LIMIT = 50;
+const CARD_LOG_PAGE_SIZE = 80;
+const CARD_TREE_LIMIT = 2000;
 
 function isFresh<T>(entry?: CachedRows<T>): boolean {
   return Boolean(entry && Date.now() - entry.cachedAt < CARD_TAB_CACHE_TTL_MS);
@@ -126,7 +130,7 @@ function writeCardTabCache(cache: Record<string, CardTabCache>): void {
 }
 
 function newestCacheTime(cache: CardTabCache): number {
-  return Math.max(cache.comments?.cachedAt ?? 0, cache.logs?.cachedAt ?? 0, cache.actions?.cachedAt ?? 0, cache.apiLogs?.cachedAt ?? 0, cache.workProducts?.cachedAt ?? 0);
+  return Math.max(cache.comments?.cachedAt ?? 0, cache.logs?.cachedAt ?? 0, cache.actions?.cachedAt ?? 0, cache.apiLogs?.cachedAt ?? 0, cache.workProducts?.cachedAt ?? 0, cache.childTree?.cachedAt ?? 0);
 }
 
 function pruneCardTabCache(cache: Record<string, CardTabCache>): Record<string, CardTabCache> {
@@ -438,8 +442,10 @@ export function KanbanBoard() {
   const [apiLogs, setApiLogs] = useState<ApiEvent[]>([]);
   const [comments, setComments] = useState<CardComment[]>([]);
   const [workProducts, setWorkProducts] = useState<WorkProduct[]>([]);
+  const [childTree, setChildTree] = useState<ChildTreeCard[]>([]);
+  const [logsHasMore, setLogsHasMore] = useState(false);
   const [cardTabCache, setCardTabCache] = useState<Record<string, CardTabCache>>(() => readCardTabCache());
-  const [tabLoading, setTabLoading] = useState<Record<CardTabKey, boolean>>({ comments: false, logs: false, actions: false, apiLogs: false, workProducts: false });
+  const [tabLoading, setTabLoading] = useState<Record<CardTabKey, boolean>>({ comments: false, logs: false, actions: false, apiLogs: false, workProducts: false, childTree: false });
   const [tab, setTab] = useState<'details' | 'comments' | 'thread' | 'logs' | 'workProducts' | 'subtasks'>('details');
   const [commentBody, setCommentBody] = useState('');
   const [commentAction, setCommentAction] = useState<'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run' | 'escalate_to_reviewer'>('comment');
@@ -549,18 +555,41 @@ export function KanbanBoard() {
     const cached = cardTabCache[card.id]?.logs;
     if (!force && isFresh(cached)) {
       if (selectedIdRef.current === card.id) setLogs(cached?.rows ?? []);
+      if (selectedIdRef.current === card.id) setLogsHasMore((cached?.rows.length ?? 0) >= CARD_LOG_PAGE_SIZE);
       return cached?.rows ?? [];
     }
     if (!cached) setLoadingKey('logs', true);
     try {
       if (force) await queryClient.invalidateQueries({ queryKey: ['cardLogs', card.id] });
-      const rows = await queryClient.fetchQuery({ queryKey: ['cardLogs', card.id], queryFn: () => api<TaskLog[]>(`/api/cards/${card.id}/logs`) });
+      const rows = await queryClient.fetchQuery({ queryKey: ['cardLogs', card.id, CARD_LOG_PAGE_SIZE, 0], queryFn: () => api<TaskLog[]>(`/api/cards/${card.id}/logs?limit=${CARD_LOG_PAGE_SIZE}`) });
       saveCardTabCache(card.id, { logs: { rows, cachedAt: Date.now() } });
-      if (selectedIdRef.current === card.id) setLogs(rows);
+      if (selectedIdRef.current === card.id) {
+        setLogs(rows);
+        setLogsHasMore(rows.length >= CARD_LOG_PAGE_SIZE);
+      }
       return rows;
     } catch (err) {
-      if (!isQueryCancellation(err) && selectedIdRef.current === card.id && !cached) setLogs([]);
+      if (!isQueryCancellation(err) && selectedIdRef.current === card.id && !cached) {
+        setLogs([]);
+        setLogsHasMore(false);
+      }
       return cached?.rows ?? [];
+    } finally {
+      setLoadingKey('logs', false);
+    }
+  }
+
+  async function loadMoreCardLogs(card: Card): Promise<void> {
+    setLoadingKey('logs', true);
+    try {
+      const offset = logs.length;
+      const rows = await api<TaskLog[]>(`/api/cards/${card.id}/logs?limit=${CARD_LOG_PAGE_SIZE}&offset=${offset}`);
+      const nextRows = [...logs, ...rows];
+      setLogs(nextRows);
+      setLogsHasMore(rows.length >= CARD_LOG_PAGE_SIZE);
+      saveCardTabCache(card.id, { logs: { rows: nextRows, cachedAt: Date.now() } });
+    } catch (err) {
+      if (!isQueryCancellation(err)) setToast({ message: err instanceof Error ? err.message : t('kanban.loadFailed'), type: 'error' });
     } finally {
       setLoadingKey('logs', false);
     }
@@ -633,6 +662,30 @@ export function KanbanBoard() {
     }
   }
 
+  async function loadCardChildTree(card: Card, force = false): Promise<ChildTreeCard[]> {
+    const cached = cardTabCache[card.id]?.childTree;
+    if (!force && isFresh(cached)) {
+      if (selectedIdRef.current === card.id) setChildTree(cached?.rows ?? []);
+      return cached?.rows ?? [];
+    }
+    if (!cached) setLoadingKey('childTree', true);
+    try {
+      if (force) await queryClient.invalidateQueries({ queryKey: ['cardSubtree', card.id] });
+      const rows = await queryClient.fetchQuery({
+        queryKey: ['cardSubtree', card.id, CARD_TREE_LIMIT],
+        queryFn: () => api<ChildTreeCard[]>(`/api/cards/${card.id}/subtree?limit=${CARD_TREE_LIMIT}`),
+      });
+      saveCardTabCache(card.id, { childTree: { rows, cachedAt: Date.now() } });
+      if (selectedIdRef.current === card.id) setChildTree(rows);
+      return rows;
+    } catch (err) {
+      if (!isQueryCancellation(err) && selectedIdRef.current === card.id && !cached) setChildTree([]);
+      return cached?.rows ?? [];
+    } finally {
+      setLoadingKey('childTree', false);
+    }
+  }
+
   function selectTab(next: typeof tab) {
     setTab(next);
     if (!selected) return;
@@ -648,6 +701,7 @@ export function KanbanBoard() {
       void loadCardApiLogs(selected);
     }
     if (next === 'workProducts') void loadCardWorkProducts(selected);
+    if (next === 'subtasks') void loadCardChildTree(selected);
   }
 
   useEffect(() => {
@@ -679,7 +733,10 @@ export function KanbanBoard() {
         return;
       }
       if (detail.type.startsWith('card.') || detail.type === 'activity.created') void refresh();
-      if (!selected || detail.cardId !== selected.id) return;
+      const affectsSelectedCard = Boolean(selected && detail.cardId === selected.id);
+      const affectsSelectedTree = Boolean(selected && tab === 'subtasks' && detail.cardId && childTree.some((card) => card.id === detail.cardId));
+      if (selected && tab === 'subtasks' && detail.type.startsWith('card.') && (affectsSelectedCard || affectsSelectedTree)) void loadCardChildTree(selected, true);
+      if (!selected || !affectsSelectedCard) return;
       if (detail.type === 'card.comment.created') void loadCardComments(selected, true);
       if (detail.type === 'task_log.created') void loadCardLogs(selected, true);
       if (detail.type === 'card.action.created') void loadCardActions(selected, true);
@@ -687,7 +744,7 @@ export function KanbanBoard() {
     }
     window.addEventListener('megacorps-live', onLive);
     return () => window.removeEventListener('megacorps-live', onLive);
-  }, [selected?.id]);
+  }, [selected?.id, tab, childTree]);
   useEffect(() => {
     selectedIdRef.current = selected?.id ?? null;
     if (!selected) {
@@ -697,6 +754,8 @@ export function KanbanBoard() {
       setApiLogs([]);
       setComments([]);
       setWorkProducts([]);
+      setChildTree([]);
+      setLogsHasMore(false);
       return;
     }
     setDraft({
@@ -721,12 +780,22 @@ export function KanbanBoard() {
     setActions(cached.actions?.rows ?? []);
     setApiLogs(cached.apiLogs?.rows ?? []);
     setWorkProducts(cached.workProducts?.rows ?? []);
+    setChildTree(cached.childTree?.rows ?? []);
+    setLogsHasMore((cached.logs?.rows.length ?? 0) >= CARD_LOG_PAGE_SIZE);
     const timer = window.setTimeout(() => {
-      void loadCardComments(selected);
-      void loadCardLogs(selected);
-      void loadCardActions(selected);
-      void loadCardApiLogs(selected);
-      void loadCardWorkProducts(selected);
+      if (tab === 'comments') void loadCardComments(selected);
+      if (tab === 'thread') {
+        void loadCardLogs(selected);
+        void loadCardActions(selected);
+        void loadCardWorkProducts(selected);
+      }
+      if (tab === 'logs') {
+        void loadCardLogs(selected);
+        void loadCardActions(selected);
+        void loadCardApiLogs(selected);
+      }
+      if (tab === 'workProducts') void loadCardWorkProducts(selected);
+      if (tab === 'subtasks') void loadCardChildTree(selected);
     }, 150);
     return () => window.clearTimeout(timer);
   }, [selected?.id]);
@@ -762,7 +831,6 @@ export function KanbanBoard() {
     }
     return next;
   }, [cardIds, cards]);
-  const subtasks = selected ? cards.filter((card) => card.parentCardId === selected.id) : [];
   const ticketThreadEntries = selected ? [
     ...logs.map((log) => ({
       id: `log-${log.id}`,
@@ -945,6 +1013,7 @@ export function KanbanBoard() {
       if (Array.isArray(result)) {
         setCards([...result, ...cards]);
         setTab('subtasks');
+        if (selected) void loadCardChildTree(selected, true);
         setToast({ message, type: 'success' });
       } else if ('kind' in result && 'cardId' in result) {
         setToast({ message: `${result.kind} ${t('kanban.queued')} (${result.status})`, type: 'success' });
@@ -1158,7 +1227,7 @@ export function KanbanBoard() {
             <button className="btn" onClick={() => setSelected(null)}><X size={16} /></button>
           </div>
           <div className="tab-row">
-            {(['details', 'comments', 'thread', 'logs', 'workProducts', 'subtasks'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => selectTab(next)}>{next === 'comments' ? t('kanban.tabMessageBoard') : next === 'thread' ? t('kanban.tabThread') : next === 'workProducts' ? t('kanban.tabWorkProducts') : next === 'details' ? t('kanban.tabDetails') : next === 'logs' ? t('kanban.tabLogs') : t('kanban.subtasks')}</button>)}
+            {(['details', 'comments', 'thread', 'logs', 'workProducts', 'subtasks'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => selectTab(next)}>{next === 'comments' ? t('kanban.tabMessageBoard') : next === 'thread' ? t('kanban.tabThread') : next === 'workProducts' ? t('kanban.tabWorkProducts') : next === 'details' ? t('kanban.tabDetails') : next === 'logs' ? t('kanban.tabLogs') : t('kanban.childTree')}</button>)}
           </div>
           {tab === 'details' && <div style={{ display: 'grid', gap: 12 }}>
             <label className="field-label">{t('common.title')}<input className="input" value={String(draft?.title ?? '')} onChange={(e) => setDraft({ ...(draft ?? {}), title: e.target.value })} /></label>
@@ -1291,6 +1360,7 @@ export function KanbanBoard() {
               </div>
               {log.output && <pre className="log-block">{log.output}</pre>}
             </article>)}
+            {logsHasMore && <button className="btn" disabled={tabLoading.logs} onClick={() => selected && loadMoreCardLogs(selected)}><RefreshCw size={14} /> {t('kanban.loadOlderLogs')}</button>}
             <article className="log-item">
               <b>{t('logs.apiLifecycle')}</b>
               <span>{apiLogs.length} {t('kanban.relatedOperations')}{tabLoading.apiLogs ? ` / ${t('kanban.refreshing')}` : ''}</span>
@@ -1336,9 +1406,34 @@ export function KanbanBoard() {
             })}
           </div>}
           {tab === 'subtasks' && <div style={{ display: 'grid', gap: 10 }}>
-            {subtasks.length === 0 ? <p style={{ opacity: 0.6 }}>{t('kanban.noSubtasks')}</p> : subtasks.map((card) => <button className="subtask-row" key={card.id} onClick={() => { setSelected(card); setTab('details'); }}>
-              <ListChecks size={15} /><span>{card.title}</span><b>{card.columnStatus}</b>
-            </button>)}
+            <div className="panel-title">
+              <div><h2>{t('kanban.childTree')}</h2><span className="status-pill">{childTree.length} {t('kanban.childTreeCount')}{tabLoading.childTree ? ` / ${t('kanban.refreshing')}` : ''}</span></div>
+              <button className="btn" disabled={tabLoading.childTree} onClick={() => loadCardChildTree(selected, true)}><RefreshCw size={14} /> {t('common.refresh')}</button>
+            </div>
+            {childTree.length >= CARD_TREE_LIMIT && <p className="field-hint danger">{t('kanban.childTreeCapped')}</p>}
+            {tabLoading.childTree && childTree.length === 0 ? <p style={{ opacity: 0.6 }}>{t('kanban.loadingChildTree')}</p> : childTree.length === 0 ? <p style={{ opacity: 0.6 }}>{t('kanban.noChildTree')}</p> : <div className="child-tree-list">
+              {childTree.map((card) => {
+                const assignee = card.assigneeId ? agents.find((agent) => agent.id === card.assigneeId)?.name ?? card.assigneeId.slice(0, 8) : '-';
+                const reviewer = card.reviewerId ? agents.find((agent) => agent.id === card.reviewerId)?.name ?? card.reviewerId.slice(0, 8) : '-';
+                return <button
+                  className="child-tree-row"
+                  key={card.id}
+                  style={{ ['--tree-indent' as string]: `${Math.max(0, card.depth - 1) * 18}px` }}
+                  onClick={() => { setSelected(card); setTab('details'); }}
+                  aria-label={`${t('kanban.openTask')} ${card.title}`}
+                >
+                  <span className="child-tree-rail" aria-hidden="true" />
+                  <span className="child-tree-main">
+                    <b>{card.title}</b>
+                    <small>{card.id.slice(0, 8)} / {t('kanban.assignee')}: {assignee} / {t('kanban.reviewer')}: {reviewer}</small>
+                  </span>
+                  <span className="child-tree-meta">
+                    <span className="status-pill" style={{ borderColor: statusColor(card.columnStatus) }}>{statusLabels[card.columnStatus as CardStatus]?.[locale] ?? card.columnStatus}</span>
+                    <small>{card.childCount > 0 ? `${card.childCount} ${t('kanban.childTreeCount')}` : card.updatedAt ? new Date(card.updatedAt).toLocaleString() : ''}</small>
+                  </span>
+                </button>;
+              })}
+            </div>}
           </div>}
         </motion.aside>
         </motion.div>

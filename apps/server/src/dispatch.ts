@@ -1961,8 +1961,10 @@ export async function createDelegatedSubtasks(parent: CardRow, leader: AgentRow,
   return rows;
 }
 
-export async function getTaskLogs(cardId: string) {
-  return db.select().from(taskLogs).where(eq(taskLogs.cardId, cardId)).orderBy(desc(taskLogs.createdAt));
+export async function getTaskLogs(cardId: string, options: { limit?: number; offset?: number } = {}) {
+  const limit = Math.min(Math.max(Math.trunc(options.limit ?? 100), 1), 500);
+  const offset = Math.max(Math.trunc(options.offset ?? 0), 0);
+  return db.select().from(taskLogs).where(eq(taskLogs.cardId, cardId)).orderBy(desc(taskLogs.createdAt)).limit(limit).offset(offset);
 }
 
 // Recurring templates: when recur_next_at is due, clone the template into a normal

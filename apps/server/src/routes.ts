@@ -241,6 +241,100 @@ async function ensureVisibleCard(request: Parameters<typeof requireVisibleCompan
   return user ? card : null;
 }
 
+function boundedQueryInt(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(Math.trunc(parsed), min), max);
+}
+
+async function getCardSubtreeRows(card: typeof kanbanCards.$inferSelect, limit: number) {
+  return db.execute(drizzleSql`
+    WITH RECURSIVE subtree AS (
+      SELECT
+        c.*,
+        1::int AS depth,
+        ARRAY[lower(c.title), c.id::text] AS sort_path,
+        ARRAY[c.id] AS path_ids
+      FROM kanban_cards c
+      WHERE c.parent_card_id = ${card.id}::uuid
+        AND c.company_id = ${card.companyId}::uuid
+        AND c.deleted_at IS NULL
+
+      UNION ALL
+
+      SELECT
+        child.*,
+        subtree.depth + 1 AS depth,
+        subtree.sort_path || ARRAY[lower(child.title), child.id::text] AS sort_path,
+        subtree.path_ids || child.id AS path_ids
+      FROM kanban_cards child
+      JOIN subtree ON child.parent_card_id = subtree.id
+      WHERE child.company_id = ${card.companyId}::uuid
+        AND child.deleted_at IS NULL
+        AND subtree.depth < 32
+        AND NOT child.id = ANY(subtree.path_ids)
+    ),
+    child_counts AS (
+      SELECT parent_card_id, count(*)::int AS child_count
+      FROM kanban_cards
+      WHERE company_id = ${card.companyId}::uuid
+        AND deleted_at IS NULL
+        AND parent_card_id IS NOT NULL
+      GROUP BY parent_card_id
+    )
+    SELECT
+      subtree.id,
+      subtree.title,
+      subtree.body,
+      subtree.column_status AS "columnStatus",
+      subtree.priority,
+      subtree.tags,
+      subtree.company_id AS "companyId",
+      subtree.department_id AS "departmentId",
+      subtree.project_id AS "projectId",
+      subtree.goal_id AS "goalId",
+      subtree.parent_card_id AS "parentCardId",
+      subtree.assignee_id AS "assigneeId",
+      subtree.reviewer_id AS "reviewerId",
+      subtree.dependency_card_ids AS "dependencyCardIds",
+      subtree.requires_approval AS "requiresApproval",
+      subtree.decision_mode AS "decisionMode",
+      subtree.rollup_status AS "rollupStatus",
+      subtree.required_child_policy AS "requiredChildPolicy",
+      subtree.child_requirement_level AS "childRequirementLevel",
+      subtree.estimated_weight AS "estimatedWeight",
+      subtree.estimated_duration_minutes AS "estimatedDurationMinutes",
+      subtree.task_budget_limit AS "taskBudgetLimit",
+      subtree.revision_count AS "revisionCount",
+      subtree.max_revisions AS "maxRevisions",
+      subtree.retry_count AS "retryCount",
+      subtree.max_retries AS "maxRetries",
+      subtree.timeout_seconds AS "timeoutSeconds",
+      subtree.schedule_at AS "scheduleAt",
+      subtree.recur_every_minutes AS "recurEveryMinutes",
+      subtree.recur_next_at AS "recurNextAt",
+      subtree.scheduled_from_card_id AS "scheduledFromCardId",
+      subtree.next_run_at AS "nextRunAt",
+      subtree.started_at AS "startedAt",
+      subtree.completed_at AS "completedAt",
+      subtree.last_error AS "lastError",
+      subtree.review_feedback AS "reviewFeedback",
+      subtree.execution_log AS "executionLog",
+      subtree.session_id AS "sessionId",
+      subtree.cost_usd AS "costUsd",
+      subtree.execution_lock_id AS "executionLockId",
+      subtree.active_heartbeat_run_id AS "activeHeartbeatRunId",
+      subtree.created_at AS "createdAt",
+      subtree.updated_at AS "updatedAt",
+      subtree.depth,
+      coalesce(child_counts.child_count, 0)::int AS "childCount"
+    FROM subtree
+    LEFT JOIN child_counts ON child_counts.parent_card_id = subtree.id
+    ORDER BY subtree.sort_path
+    LIMIT ${limit}
+  `);
+}
+
 type CompanyReferenceInput = {
   departmentId?: string | null;
   positionId?: string | null;
@@ -1542,7 +1636,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/cards/:id/logs', async (request, reply) => {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
     if (!card) return reply;
-    return getTaskLogs(card.id);
+    const query = request.query as { limit?: string; offset?: string };
+    return getTaskLogs(card.id, {
+      limit: boundedQueryInt(query.limit, 100, 1, 500),
+      offset: boundedQueryInt(query.offset, 0, 0, 100_000),
+    });
+  });
+  app.get('/api/cards/:id/subtree', async (request, reply) => {
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    const query = request.query as { limit?: string };
+    return getCardSubtreeRows(card, boundedQueryInt(query.limit, 1000, 1, 5000));
   });
   app.get('/api/cards/:id/actions', async (request, reply) => {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);

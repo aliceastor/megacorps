@@ -4404,6 +4404,70 @@ button.card {
   min-height: 44px;
 }
 
+.child-tree-list {
+  display: grid;
+  gap: 6px;
+}
+
+.child-tree-row {
+  --tree-indent: 0px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--card-strong) 42%, transparent);
+  color: var(--foreground);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(148px, auto);
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 10px 8px calc(10px + var(--tree-indent));
+  text-align: left;
+  cursor: pointer;
+}
+
+.child-tree-row:hover,
+.child-tree-row:focus-visible {
+  border-color: var(--primary);
+  outline: none;
+}
+
+.child-tree-rail {
+  width: 10px;
+  height: 28px;
+  border-left: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-bottom-left-radius: 5px;
+}
+
+.child-tree-main {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.child-tree-main b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.child-tree-main small,
+.child-tree-meta small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.child-tree-meta {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  min-width: 0;
+}
+
 .check-row {
   display: flex;
   align-items: center;
@@ -5656,6 +5720,17 @@ button.agent-node-card {
   .modal { max-height: calc(100dvh - 24px); overflow: auto; }
   .subtask-row { grid-template-columns: auto 1fr; }
   .subtask-row b { grid-column: 2; }
+  .child-tree-row {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding-left: calc(8px + var(--tree-indent));
+  }
+  .child-tree-meta {
+    grid-column: 2;
+    justify-items: start;
+  }
+  .child-tree-main b {
+    white-space: normal;
+  }
 }
 
 /* MegaCorps production visual system, adapted from /design-demo. */
