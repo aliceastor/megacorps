@@ -165,6 +165,15 @@ test('collaboration delegation instructions include required webhook and block f
   assert.match(instructions, /- Bob: <another sub-task title and expected deliverable>/);
 });
 
+test('delegation instructions omit fake second delegate when only one report is active', () => {
+  const instructions = dispatchInternals.collaborationDelegationInstructions([
+    { name: 'Ribel', slug: 'ribel', positionName: 'Senior Engineer', departmentName: 'Engineering' },
+  ]);
+  assert.match(instructions, /Active direct reports to consider: Ribel \(slug: ribel, position: Senior Engineer, department: Engineering\)/);
+  assert.match(instructions, /DELEGATE:\n- Ribel: <sub-task title and expected deliverable>/);
+  assert.doesNotMatch(instructions, /another direct report/);
+});
+
 test('optional delegation instructions include direct reports and block format', () => {
   const instructions = dispatchInternals.optionalDelegationInstructions([
     { name: 'Alice', slug: 'alice', positionName: 'Design Lead', departmentName: 'Product' },

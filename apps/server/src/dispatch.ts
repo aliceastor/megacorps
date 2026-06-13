@@ -133,6 +133,15 @@ function directReportList(reports: DelegationReport[]): string {
   }).join(', ');
 }
 
+function delegationExampleBullets(reports: DelegationReport[]): string[] {
+  if (reports.length === 0) return ['- <direct report name or slug>: <sub-task title and expected deliverable>'];
+  return reports.slice(0, 3).map((report, index) => (
+    index === 0
+      ? `- ${report.name}: <sub-task title and expected deliverable>`
+      : `- ${report.name}: <another sub-task title and expected deliverable>`
+  ));
+}
+
 function oneLine(value: string | null | undefined, maxChars = 600): string {
   const text = value?.replace(/\s+/g, ' ').trim() ?? '';
   return text ? clipText(text, maxChars).replace(/\s+/g, ' ') : 'none';
@@ -168,8 +177,6 @@ function companyStructureLines(input: {
 }
 
 export function collaborationDelegationInstructions(reports: DelegationReport[] = []): string {
-  const first = reports[0];
-  const second = reports[1];
   return [
     'Collaboration Mode is ON.',
     'If you have active direct reports, you MUST split this work into meaningful sub-tasks and delegate them to the most suitable employees so more appropriate staff participate and improve quality.',
@@ -177,8 +184,7 @@ export function collaborationDelegationInstructions(reports: DelegationReport[] 
     `Active direct reports to consider: ${directReportList(reports)}.`,
     'Return the delegation plan exactly like this in stdout, or send status="in_progress" with this block in the webhook summary/output:',
     'DELEGATE:',
-    first ? `- ${first.name}: <sub-task title and expected deliverable>` : '- <direct report name or slug>: <sub-task title and expected deliverable>',
-    second ? `- ${second.name}: <another sub-task title and expected deliverable>` : '- <another direct report name or slug>: <another sub-task title and expected deliverable>',
+    ...delegationExampleBullets(reports),
     'Each bullet becomes a Message Board delegation inside this same Kanban card, not a child Kanban card. Prefix a bullet with "name:" or "slug:" to target a specific direct report; omit the prefix only if any direct report can take it.',
     'The delegate reports back to the reviewer chain on this card: top-level delegates report to you as FINAL REVIEWER; nested delegates report to their requester as PHASE REVIEWER.',
     'If you truly have no active direct reports, complete the work yourself and state that no active direct reports were available for delegation.',
@@ -186,8 +192,6 @@ export function collaborationDelegationInstructions(reports: DelegationReport[] 
 }
 
 export function optionalDelegationInstructions(reports: DelegationReport[] = []): string {
-  const first = reports[0];
-  const second = reports[1];
   return [
     'Collaboration Mode is OFF.',
     'You may complete the work directly when that is the best path.',
@@ -195,8 +199,7 @@ export function optionalDelegationInstructions(reports: DelegationReport[] = [])
     `Active direct reports to consider: ${directReportList(reports)}.`,
     'To delegate, return the delegation plan exactly like this in stdout, or send status="in_progress" with this block in the webhook summary/output:',
     'DELEGATE:',
-    first ? `- ${first.name}: <sub-task title and expected deliverable>` : '- <direct report name or slug>: <sub-task title and expected deliverable>',
-    second ? `- ${second.name}: <another sub-task title and expected deliverable>` : '- <another direct report name or slug>: <another sub-task title and expected deliverable>',
+    ...delegationExampleBullets(reports),
     'Each bullet becomes a Message Board delegation inside this same Kanban card, not a child Kanban card. Prefix a bullet with "name:" or "slug:" to target a specific direct report; omit the prefix only if any direct report can take it.',
     'The delegate reports back to the reviewer chain on this card: top-level delegates report to you as FINAL REVIEWER; nested delegates report to their requester as PHASE REVIEWER.',
   ].join('\n');
