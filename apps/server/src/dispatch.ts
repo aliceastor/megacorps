@@ -1483,6 +1483,12 @@ async function sendAgentFeedbackAndRequeue(input: {
   return updated;
 }
 
+function adapterFailureMessage(kind: Extract<TaskRunKind, 'dispatch' | 'review'>, output: string | null | undefined): string {
+  const label = kind === 'review' ? 'review_adapter_failed' : 'dispatch_adapter_failed';
+  const details = output?.trim();
+  return details ? `${label}: ${clipText(details, 2000)}` : label;
+}
+
 async function messageRunContext(cardId: string, taskRunId: string | null | undefined, kind: Extract<TaskRunKind, 'message' | 'message_review'>) {
   const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
@@ -1885,17 +1891,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     }
     if (!result.success) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-      await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
-      return sendAgentFeedbackAndRequeue({
-        card: lockedCard,
-        agent,
-        kind: 'dispatch',
-        message: result.output || 'adapter_reported_failure',
-        runId: run.id,
-        taskRunId: options.taskRunId,
-        output: result.output,
-        result,
-      });
+      throw new Error(adapterFailureMessage('dispatch', result.output));
     }
     await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
     let delegatedRows: Awaited<ReturnType<typeof createMessageDelegations>>;
@@ -2198,17 +2194,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     const explicitDecision = explicitReviewDecision(result.output);
     if (!result.success && !explicitDecision) {
-      await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
-      return sendAgentFeedbackAndRequeue({
-        card,
-        agent: reviewer,
-        kind: 'review',
-        message: result.output || 'review_adapter_reported_failure',
-        runId: run.id,
-        taskRunId: options.taskRunId,
-        output: result.output,
-        result,
-      });
+      throw new Error(adapterFailureMessage('review', result.output));
     }
     await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
     if (asksForConfirmationInsteadOfWorking(result.output)) {
@@ -2770,6 +2756,7 @@ export function startDispatchLoop(app: FastifyInstance): void {
 }
 
 export const dispatchInternals = {
+  adapterFailureMessage,
   asksForConfirmationInsteadOfWorking,
   cardChangedOutsideCurrentRun,
   childCompletionPolicySatisfied,

@@ -67,6 +67,15 @@ test('confirmation-seeking replies are rejected for autonomous kanban work', () 
   assert.equal(dispatchInternals.asksForConfirmationInsteadOfWorking('Executive Summary\n- Differentiated USP\n- Priority matrix\n- Red flags'), false);
 });
 
+test('adapter transport failures are not treated as agent feedback corrections', () => {
+  const message = dispatchInternals.adapterFailureMessage(
+    'dispatch',
+    'kex_exchange_identification: Connection closed by remote host\nConnection closed by 192.168.1.180 port 2222',
+  );
+  assert.match(message, /^dispatch_adapter_failed:/);
+  assert.doesNotMatch(message, /collaboration_mode_requires_delegation|agent_asked_for_confirmation|DELEGATE/);
+});
+
 test('external completion reports respect the quality review gate', () => {
   assert.equal(dispatchInternals.completionStatusForQualityGate('done', 'reviewer-1'), 'in_review');
   assert.equal(dispatchInternals.completionStatusForQualityGate('success', 'reviewer-1'), 'in_review');
