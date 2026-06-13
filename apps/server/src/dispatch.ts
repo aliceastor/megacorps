@@ -134,11 +134,11 @@ function directReportList(reports: DelegationReport[]): string {
 }
 
 function delegationExampleBullets(reports: DelegationReport[]): string[] {
-  if (reports.length === 0) return ['- <direct report name or slug>: <sub-task title and expected deliverable>'];
+  if (reports.length === 0) return ['- <direct report name or slug>: <delegated work item and expected deliverable>'];
   return reports.slice(0, 3).map((report, index) => (
     index === 0
-      ? `- ${report.name}: <sub-task title and expected deliverable>`
-      : `- ${report.name}: <another sub-task title and expected deliverable>`
+      ? `- ${report.name}: <delegated work item and expected deliverable>`
+      : `- ${report.name}: <another delegated work item and expected deliverable>`
   ));
 }
 
@@ -179,7 +179,7 @@ function companyStructureLines(input: {
 export function collaborationDelegationInstructions(reports: DelegationReport[] = []): string {
   return [
     'Collaboration Mode is ON.',
-    'If you have active direct reports, you MUST split this work into meaningful sub-tasks and delegate them to the most suitable employees so more appropriate staff participate and improve quality.',
+    'If you have active direct reports, you MUST split this work into meaningful delegated work items and assign them to the most suitable employees so more appropriate staff participate and improve quality.',
     'Do not complete the current leader card directly with status="done" or status="in_review" while active direct reports are available.',
     `Active direct reports to consider: ${directReportList(reports)}.`,
     'Return the delegation plan exactly like this in stdout, or send status="in_progress" with this block in the webhook summary/output:',
@@ -195,7 +195,7 @@ export function optionalDelegationInstructions(reports: DelegationReport[] = [])
   return [
     'Collaboration Mode is OFF.',
     'You may complete the work directly when that is the best path.',
-    'If you have active direct reports and the task has meaningful parts that fit their skills, you may split those parts into delegated sub-tasks so suitable employees participate and improve quality.',
+    'If you have active direct reports and the task has meaningful parts that fit their skills, you may split those parts into delegated work items so suitable employees participate and improve quality.',
     `Active direct reports to consider: ${directReportList(reports)}.`,
     'To delegate, return the delegation plan exactly like this in stdout, or send status="in_progress" with this block in the webhook summary/output:',
     'DELEGATE:',

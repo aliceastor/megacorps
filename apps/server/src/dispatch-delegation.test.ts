@@ -161,8 +161,8 @@ test('collaboration delegation instructions include required webhook and block f
   assert.match(instructions, /Bob \(slug: bob, position: Backend Engineer, department: Engineering\)/);
   assert.match(instructions, /status="in_progress"/);
   assert.match(instructions, /DELEGATE:/);
-  assert.match(instructions, /- Alice: <sub-task title and expected deliverable>/);
-  assert.match(instructions, /- Bob: <another sub-task title and expected deliverable>/);
+  assert.match(instructions, /- Alice: <delegated work item and expected deliverable>/);
+  assert.match(instructions, /- Bob: <another delegated work item and expected deliverable>/);
 });
 
 test('delegation instructions omit fake second delegate when only one report is active', () => {
@@ -170,8 +170,9 @@ test('delegation instructions omit fake second delegate when only one report is 
     { name: 'Ribel', slug: 'ribel', positionName: 'Senior Engineer', departmentName: 'Engineering' },
   ]);
   assert.match(instructions, /Active direct reports to consider: Ribel \(slug: ribel, position: Senior Engineer, department: Engineering\)/);
-  assert.match(instructions, /DELEGATE:\n- Ribel: <sub-task title and expected deliverable>/);
+  assert.match(instructions, /DELEGATE:\n- Ribel: <delegated work item and expected deliverable>/);
   assert.doesNotMatch(instructions, /another direct report/);
+  assert.doesNotMatch(instructions, /sub-task title/);
 });
 
 test('optional delegation instructions include direct reports and block format', () => {
@@ -180,13 +181,13 @@ test('optional delegation instructions include direct reports and block format',
     { name: 'Bob', slug: 'bob', positionName: 'Backend Engineer', departmentName: 'Engineering' },
   ]);
   assert.match(instructions, /Collaboration Mode is OFF/);
-  assert.match(instructions, /may split those parts into delegated sub-tasks/);
+  assert.match(instructions, /may split those parts into delegated work items/);
   assert.doesNotMatch(instructions, /MUST split this work/);
   assert.match(instructions, /Active direct reports to consider: Alice \(slug: alice, position: Design Lead, department: Product\), Bob \(slug: bob, position: Backend Engineer, department: Engineering\)/);
   assert.match(instructions, /status="in_progress"/);
   assert.match(instructions, /DELEGATE:/);
-  assert.match(instructions, /- Alice: <sub-task title and expected deliverable>/);
-  assert.match(instructions, /- Bob: <another sub-task title and expected deliverable>/);
+  assert.match(instructions, /- Alice: <delegated work item and expected deliverable>/);
+  assert.match(instructions, /- Bob: <another delegated work item and expected deliverable>/);
 });
 
 test('company structure lines include name slug position department description and direct reports', () => {
