@@ -98,6 +98,14 @@ function assigneeNeedsReview(output: string | null | undefined): boolean {
   return /\b(needs[_ -]?review|needs[_ -]?guidance|needs[_ -]?reviewer|escalat(?:e|ed|ion)|cannot[_ -]?complete|unable[_ -]?to[_ -]?complete|stuck|blocked:)\b/i.test(text);
 }
 
+function asksForConfirmationInsteadOfWorking(output: string | null | undefined): boolean {
+  const text = output?.trim() ?? '';
+  if (!text) return false;
+  const englishConfirmation = /\b(please\s+confirm|awaiting\s+confirmation|waiting\s+for\s+confirmation|do\s+you\s+want\s+me\s+to|would\s+you\s+like\s+me\s+to|want\s+me\s+to|should\s+i\s+(?:continue|proceed|start|submit|post)|shall\s+i\s+(?:continue|proceed|start|submit|post)|may\s+i\s+(?:continue|proceed|start|submit|post))\b/i;
+  const chineseConfirmation = /(\u8acb\u554f|\u78ba\u8a8d|\u4e0d\u78ba\u5b9a|\u662f\u5426|\u8981\u4e0d\u8981|\u53ef\u4ee5\u55ce|\u53ef\u5426|\u8981\u6211|\u60a8\u60f3|\u4f60\u60f3|\u5148\u770b|\u518d\u6c7a\u5b9a|\u540c\u610f|\u6279\u51c6|\u51c6\u8a31|\u6211\u53ef\u4ee5|\u6211\u61c9\u8a72|\u53ef\u4e0d\u53ef\u4ee5).{0,80}(\u7e7c\u7e8c|\u958b\u59cb|\u76f4\u63a5|\u57f7\u884c|\u52d5\u624b|\u63d0\u4ea4|\u9001\u51fa|POST|post|\u56de\u5831|\u5b8c\u6210|\u6c7a\u5b9a|\u78ba\u8a8d)/i;
+  return englishConfirmation.test(text) || chineseConfirmation.test(text);
+}
+
 export function delegationItems(output: string | null | undefined): string[] {
   const lines = (output ?? '').split(/\r?\n/);
   const start = lines.findIndex((line) => /^\s*(?:#{1,4}\s*)?(?:DELEGATE|DELEGATION|SUB-?TASKS?|TASKS FOR DIRECT REPORTS)\s*:?\s*$/i.test(line));
@@ -1487,6 +1495,19 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         });
       }
     }
+    if (asksForConfirmationInsteadOfWorking(result.output)) {
+      await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+      return sendAgentFeedbackAndRequeue({
+        card: lockedCard,
+        agent,
+        kind: 'dispatch',
+        message: 'agent_asked_for_confirmation_instead_of_working: Kanban tasks are autonomous. Do not ask the user whether to proceed; complete the assigned work directly. If you truly cannot proceed, use status="needs_review" with attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.',
+        runId: run.id,
+        taskRunId: options.taskRunId,
+        output: result.output,
+        result,
+      });
+    }
     const effectiveReviewerId = resolveEffectiveReviewerId(card, agent);
     const { needsHelpReview, nextStatus, topLevelGuidanceAccepted } = dispatchCompletionDecision(result.output, effectiveReviewerId);
     const childBlock = await completionBlockedByChildren(card, nextStatus);
@@ -1709,6 +1730,18 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       });
     }
     await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
+    if (asksForConfirmationInsteadOfWorking(result.output)) {
+      return sendAgentFeedbackAndRequeue({
+        card,
+        agent: reviewer,
+        kind: 'review',
+        message: 'reviewer_asked_for_confirmation_instead_of_deciding: Kanban review tasks require a decision. Do not ask the user whether to proceed; return APPROVE/DONE, REVISION_REQUESTED with concrete guidance, or ESCALATE if your manager must decide.',
+        runId: run.id,
+        taskRunId: options.taskRunId,
+        output: result.output,
+        result,
+      });
+    }
     const decision = reviewDecision(result.output, reviewMode);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
 
@@ -2253,6 +2286,7 @@ export function startDispatchLoop(app: FastifyInstance): void {
 }
 
 export const dispatchInternals = {
+  asksForConfirmationInsteadOfWorking,
   childCompletionPolicySatisfied,
   collaborationDelegationInstructions,
   collaborationModeRequiresDelegation,
@@ -2524,6 +2558,7 @@ function completionProtocol(card: CardRow, reports: DelegationReport[] = []): st
     card.decisionMode === 'delegate'
       ? collaborationDelegationInstructions(reports)
       : optionalDelegationInstructions(reports),
+    `Do not ask the user whether to proceed, whether they want a draft first, or whether you should submit/POST. Kanban tasks are assigned work; complete them autonomously unless you truly cannot proceed, then use status="needs_review".`,
     `Do not call POST /api/cards yourself for delegation. MegaCorps creates child cards from the DELEGATE block. If your runtime reports through the webhook, send status="in_progress" and include the same DELEGATE block in summary/output instead of marking the current card done.`,
     `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, report URL, screenshot URL, or artifact URL instead of local-only file paths.`,
     `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,

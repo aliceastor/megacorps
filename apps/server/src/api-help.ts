@@ -135,8 +135,8 @@ const endpoints: ApiEndpoint[] = [
   { method: 'POST', path: '/api/auth/invites', group: 'Auth', auth: 'session', requiredRole: 'admin', summary: 'Create a one-time company invite token. The raw token is returned once and only its SHA-256 hash is stored.', body: { companyId: 'uuid', email: 'operator@example.com', name: 'Optional name', role: 'viewer | operator | admin', expiresInDays: 7 } },
   { method: 'POST', path: '/api/auth/accept-invite', group: 'Auth', auth: 'none', summary: 'Accept a one-time invite token and create or activate the user membership.', body: { token: 'invite token', name: 'Optional display name', password: 'at least 12 chars' } },
   { method: 'GET', path: '/api/me', group: 'Auth', auth: 'session', summary: 'Read the current authenticated user.' },
-  { method: 'GET', path: '/api/admin/settings', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Read global admin settings such as DB-backed signup enablement.' },
-  { method: 'PUT', path: '/api/admin/settings', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Update global admin settings.', body: { signupEnabled: true } },
+  { method: 'GET', path: '/api/admin/settings', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Read global admin settings such as DB-backed signup enablement and direct API token status.' },
+  { method: 'PUT', path: '/api/admin/settings', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Update global admin settings. apiTokenAction=rotate returns a raw API token once; revoke disables direct Bearer token access.', body: { signupEnabled: true, apiTokenAction: 'rotate | revoke optional' } },
   { method: 'GET', path: '/api/admin/users', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'List all user accounts and company memberships.' },
   { method: 'PUT', path: '/api/admin/users/:id', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Update an account name, global role, active/disabled status, or reset password. The last active admin cannot be demoted or disabled.', params: { id: 'User UUID.' }, body: { name: 'Operator', role: 'viewer | operator | admin', status: 'active | disabled', password: 'optional reset password' } },
 
@@ -390,7 +390,27 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
   }
 
   if (endpoint.path.includes('/api/admin/settings')) {
-    return { responseSchema: { signupEnabled: 'boolean' }, responseExample: { signupEnabled: true }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return {
+      responseSchema: {
+        signupEnabled: 'boolean',
+        apiTokenConfigured: 'boolean',
+        apiTokenPreview: 'string | null',
+        apiTokenUpdatedAt: 'ISO datetime | null',
+        apiTokenOwnerUserId: 'uuid | null',
+        apiTokenOwnerEmail: 'string | null',
+        apiToken: 'string returned once only after apiTokenAction=rotate',
+      },
+      responseExample: {
+        signupEnabled: true,
+        apiTokenConfigured: true,
+        apiTokenPreview: 'mca_abcd...xyz789',
+        apiTokenUpdatedAt: '2026-06-13T12:00:00.000Z',
+        apiTokenOwnerUserId: 'user-uuid',
+        apiTokenOwnerEmail: 'admin@example.com',
+      },
+      rateLimit: endpoint.rateLimit ?? defaultRateLimit,
+      requiredRole: roleDefault(endpoint),
+    };
   }
 
   if (endpoint.path.includes('/api/admin/users')) {
@@ -587,8 +607,9 @@ export function apiHelpCatalog() {
     },
     architecture: currentArchitecture,
     auth: {
-      mode: 'Cookie session with company membership role checks for human/API management. Runner endpoints use Authorization: Bearer MEGACORPS_RUNNER_KEY or X-MegaCorps-Runner-Key against hashed machine runner keys. Agent-session endpoints use Ed25519-signed JWTs from runner-created sessions. Signup is DB-configured and defaults to enabled; if no active admin exists, the next signup becomes global admin and default-company admin. If BOOTSTRAP_TOKEN is configured, POST /api/auth/bootstrap can create or recover the admin account only while no active admin exists. Viewer can read data for visible companies; company operator/admin is required for company-scoped mutation, run/review/decompose, adapter tests, runtime edits, and budget decisions. Manual cron remains an operator system action.',
+      mode: 'Cookie session with company membership role checks for human/API management. Admin-created direct API tokens can call session-auth management endpoints with Authorization: Bearer MEGACORPS_API_TOKEN and inherit the owner user memberships. Runner endpoints use Authorization: Bearer MEGACORPS_RUNNER_KEY or X-MegaCorps-Runner-Key against hashed machine runner keys. Agent-session endpoints use Ed25519-signed JWTs from runner-created sessions. Signup is DB-configured and defaults to enabled; if no active admin exists, the next signup becomes global admin and default-company admin. If BOOTSTRAP_TOKEN is configured, POST /api/auth/bootstrap can create or recover the admin account only while no active admin exists. Viewer can read data for visible companies; company operator/admin is required for company-scoped mutation, run/review/decompose, adapter tests, runtime edits, and budget decisions. Manual cron remains an operator system action.',
       login: 'POST /api/auth/login',
+      apiToken: 'Set in Admin > general. Send Authorization: Bearer <token> to call session-auth endpoints without browser cookies.',
       signup: 'POST /api/auth/signup',
       bootstrap: 'POST /api/auth/bootstrap',
       admin: 'GET/PUT /api/admin/settings and GET/PUT /api/admin/users require global admin role.',

@@ -21,6 +21,12 @@ test('normal dispatch completion enters quality review when a reviewer exists', 
   assert.equal(decision.nextStatus, 'in_review');
 });
 
+test('confirmation-seeking replies are rejected for autonomous kanban work', () => {
+  assert.equal(dispatchInternals.asksForConfirmationInsteadOfWorking('我目前其實不確定您要我直接動手做，還是您想先看初稿方向再決定。請問……？'), true);
+  assert.equal(dispatchInternals.asksForConfirmationInsteadOfWorking('Should I continue and POST the result?'), true);
+  assert.equal(dispatchInternals.asksForConfirmationInsteadOfWorking('Executive Summary\n- Differentiated USP\n- Priority matrix\n- Red flags'), false);
+});
+
 test('external completion reports respect the quality review gate', () => {
   assert.equal(dispatchInternals.completionStatusForQualityGate('done', 'reviewer-1'), 'in_review');
   assert.equal(dispatchInternals.completionStatusForQualityGate('success', 'reviewer-1'), 'in_review');

@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { randomBytes } from 'node:crypto';
 import { db } from './db/client.ts';
 import { appSettings, users } from './db/schema.ts';
+import { authenticateApiToken } from './api-token.ts';
 
 export type AuthUser = { id: string; email: string; role: string };
 export type AuthenticatedRequest = FastifyRequest & { authUser?: AuthUser };
@@ -29,7 +30,26 @@ export async function signSession(user: AuthUser): Promise<string> {
   return new SignJWT({ sub: user.id }).setProtectedHeader({ alg: 'HS256' }).setIssuedAt().setExpirationTime('7d').sign(await sessionSecret());
 }
 
+function bearerToken(request: FastifyRequest): string | null {
+  const header = request.headers.authorization;
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value?.startsWith('Bearer ')) return null;
+  return value.slice('Bearer '.length).trim() || null;
+}
+
 export async function requireAuth(request: FastifyRequest, reply: FastifyReply): Promise<AuthUser | null> {
+  const apiToken = bearerToken(request);
+  if (apiToken) {
+    const row = await authenticateApiToken(apiToken);
+    if (!row) {
+      await reply.code(401).send({ error: 'api_token_invalid' });
+      return null;
+    }
+    const user: AuthUser = { id: row.id, email: row.email, role: row.role ?? 'viewer' };
+    (request as AuthenticatedRequest).authUser = user;
+    return user;
+  }
+
   const token = request.cookies.session;
   if (!token) { await reply.code(401).send({ error: 'auth_required' }); return null; }
   try {

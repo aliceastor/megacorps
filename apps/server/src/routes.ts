@@ -24,6 +24,7 @@ import { hydrateCardDependencyState, setCardDependencies } from './card-dependen
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { listNotifications, markAllNotificationsRead, markNotificationRead, notify, unreadNotificationCount } from './notifications.ts';
 import { notifications } from './db/schema.ts';
+import { API_TOKEN_HASH_SETTING, readApiTokenSettings, revokeApiToken, rotateApiToken } from './api-token.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
@@ -153,6 +154,19 @@ async function setSettingValue(key: string, value: string): Promise<void> {
 
 async function signupEnabled(): Promise<boolean> {
   return truthy(await settingValue(SIGNUP_ENABLED_SETTING, 'true'));
+}
+
+async function adminSettingsResponse(apiToken?: string) {
+  const tokenSettings = await readApiTokenSettings();
+  return {
+    signupEnabled: await signupEnabled(),
+    apiTokenConfigured: tokenSettings.configured,
+    apiTokenPreview: tokenSettings.preview,
+    apiTokenUpdatedAt: tokenSettings.updatedAt,
+    apiTokenOwnerUserId: tokenSettings.ownerUserId,
+    apiTokenOwnerEmail: tokenSettings.ownerEmail,
+    ...(apiToken ? { apiToken } : {}),
+  };
 }
 
 async function userCount(): Promise<number> {
@@ -474,16 +488,27 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/admin/settings', async (request, reply) => {
     const user = await requireRole(request, reply, 'admin'); if (!user) return reply;
-    return { signupEnabled: await signupEnabled() };
+    return adminSettingsResponse();
   });
 
   app.put('/api/admin/settings', async (request, reply) => {
     const user = await requireRole(request, reply, 'admin'); if (!user) return reply;
     const input = adminUpdateSettingsSchema.parse(request.body);
     if (input.signupEnabled !== undefined) await setSettingValue(SIGNUP_ENABLED_SETTING, input.signupEnabled ? 'true' : 'false');
+    const rotated = input.apiTokenAction === 'rotate' ? await rotateApiToken(user.id) : null;
+    if (input.apiTokenAction === 'revoke') await revokeApiToken();
     const companyId = await defaultCompanyId();
-    await db.insert(activityLog).values({ companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'admin.settings.updated', entityType: 'app_settings', entityId: SIGNUP_ENABLED_SETTING, details: { signupEnabled: input.signupEnabled } });
-    return { signupEnabled: await signupEnabled() };
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: 'user',
+      actorId: user.id,
+      userId: user.id,
+      action: 'admin.settings.updated',
+      entityType: 'app_settings',
+      entityId: input.apiTokenAction ? API_TOKEN_HASH_SETTING : SIGNUP_ENABLED_SETTING,
+      details: { signupEnabled: input.signupEnabled, apiTokenAction: input.apiTokenAction },
+    });
+    return adminSettingsResponse(rotated?.token);
   });
 
   app.get('/api/admin/users', async (request, reply) => {

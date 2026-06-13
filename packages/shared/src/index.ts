@@ -469,6 +469,7 @@ export const adminUpdateUserSchema = z.object({
 
 export const adminUpdateSettingsSchema = z.object({
   signupEnabled: z.boolean().optional(),
+  apiTokenAction: z.enum(['rotate', 'revoke']).optional(),
 });
 
 export const createInviteSchema = z.object({

@@ -1,6 +1,6 @@
 'use client';
 import { Fragment, useEffect, useMemo, useState } from 'react';
-import { Copy, MailPlus, Save, ShieldCheck, UserCog } from 'lucide-react';
+import { Copy, KeyRound, MailPlus, RefreshCw, Save, ShieldCheck, Trash2, UserCog } from 'lucide-react';
 import { api } from '@/lib/api';
 
 type Membership = {
@@ -24,6 +24,11 @@ type Account = {
 
 type AdminSettings = {
   signupEnabled: boolean;
+  apiTokenConfigured: boolean;
+  apiTokenPreview?: string | null;
+  apiTokenUpdatedAt?: string | null;
+  apiTokenOwnerEmail?: string | null;
+  apiToken?: string;
 };
 type Company = { id: string; name: string };
 type InviteResponse = {
@@ -48,6 +53,8 @@ export function AdminPage() {
   const [inviteRole, setInviteRole] = useState('viewer');
   const [inviteExpiresDays, setInviteExpiresDays] = useState('7');
   const [lastInvite, setLastInvite] = useState<InviteResponse | null>(null);
+  const [lastApiToken, setLastApiToken] = useState('');
+  const [apiUrl, setApiUrl] = useState('/api/proxy');
   const [toast, setToast] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -66,6 +73,7 @@ export function AdminPage() {
   }
 
   useEffect(() => { void refresh().catch((err) => setError(err instanceof Error ? err.message : 'Unable to load admin data')); }, []);
+  useEffect(() => { setApiUrl(`${window.location.origin}/api/proxy`); }, []);
 
   const activeAdmins = useMemo(() => accounts.filter((account) => account.role === 'admin' && account.status === 'active').length, [accounts]);
 
@@ -78,7 +86,7 @@ export function AdminPage() {
     setBusy(true);
     setError('');
     try {
-      const saved = await api<AdminSettings>('/api/admin/settings', { method: 'PUT', body: JSON.stringify(settings) });
+      const saved = await api<AdminSettings>('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ signupEnabled: settings.signupEnabled }) });
       setSettings(saved);
       setToast('Settings saved');
     } catch (err) {
@@ -86,6 +94,42 @@ export function AdminPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function rotateApiToken() {
+    setBusy(true);
+    setError('');
+    try {
+      const saved = await api<AdminSettings>('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ apiTokenAction: 'rotate' }) });
+      setSettings(saved);
+      setLastApiToken(saved.apiToken ?? '');
+      setToast('API token rotated');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'API token update failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeApiToken() {
+    if (!window.confirm('Revoke the current API token? Existing API clients using it will stop working.')) return;
+    setBusy(true);
+    setError('');
+    try {
+      const saved = await api<AdminSettings>('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ apiTokenAction: 'revoke' }) });
+      setSettings(saved);
+      setLastApiToken('');
+      setToast('API token revoked');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'API token update failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyText(value: string, label: string) {
+    await navigator.clipboard.writeText(value);
+    setToast(`${label} copied`);
   }
 
   async function saveAccount(account: Account) {
@@ -157,11 +201,33 @@ export function AdminPage() {
       <section className="card section-card">
         <div className="panel-title"><h2>Signup control</h2><ShieldCheck size={18} /></div>
         <label className="check-row">
-          <input type="checkbox" checked={settings?.signupEnabled ?? true} onChange={(event) => setSettings({ signupEnabled: event.target.checked })} />
+          <input type="checkbox" checked={settings?.signupEnabled ?? true} onChange={(event) => setSettings((current) => ({ ...(current ?? { apiTokenConfigured: false }), signupEnabled: event.target.checked }))} />
           Signup enabled
         </label>
         <p className="auth-note">Signup defaults to enabled in the DB. If no active admin exists, the next signup becomes global admin and default-company admin.</p>
         <button className="btn btn-primary" onClick={saveSettings} disabled={busy || !settings}><Save size={15} /> Save settings</button>
+      </section>
+
+      <section className="card section-card">
+        <div className="panel-title"><h2>Direct API token</h2><KeyRound size={18} /></div>
+        <div className="meta-grid">
+          <span>API URL <b>{apiUrl}</b></span>
+          <span>Status <b>{settings?.apiTokenConfigured ? 'configured' : 'not configured'}</b></span>
+          <span>Token <b>{settings?.apiTokenPreview ?? 'none'}</b></span>
+          <span>Owner <b>{settings?.apiTokenOwnerEmail ?? 'none'}</b></span>
+          <span>Updated <b>{settings?.apiTokenUpdatedAt ? new Date(settings.apiTokenUpdatedAt).toLocaleString() : 'never'}</b></span>
+        </div>
+        {lastApiToken && <label className="field-label">New token
+          <div className="action-row">
+            <input className="input" readOnly value={lastApiToken} />
+            <button className="btn" onClick={() => copyText(lastApiToken, 'API token')}><Copy size={15} /> Copy</button>
+          </div>
+        </label>}
+        <div className="action-row">
+          <button className="btn" onClick={() => copyText(apiUrl, 'API URL')}><Copy size={15} /> Copy URL</button>
+          <button className="btn btn-primary" onClick={rotateApiToken} disabled={busy}><RefreshCw size={15} /> Rotate token</button>
+          <button className="btn" style={{ color: 'var(--danger)' }} onClick={revokeApiToken} disabled={busy || !settings?.apiTokenConfigured}><Trash2 size={15} /> Revoke</button>
+        </div>
       </section>
 
       <section className="card section-card">
