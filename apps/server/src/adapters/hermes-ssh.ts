@@ -54,7 +54,7 @@ export function resolveHermesCommand(agent: AgentLike): string {
 export function resolveHermesSshConnectionConfig(agent: AgentLike) {
   return {
     host: assertAdapterTargetAllowed(getStringConfigAliases(agent, ['sshHost', 'host'], 'HERMES_SSH_HOST'), 'HERMES_SSH_HOST'),
-    user: getOptionalStringConfigAliases(agent, ['sshUser', 'sshUsername', 'username', 'user'], 'HERMES_SSH_USER') ?? 'root',
+    user: getOptionalStringConfigAliases(agent, ['sshUsername', 'username', 'user', 'sshUser'], 'HERMES_SSH_USER') ?? 'root',
     port: getNumberConfigAliases(agent, ['sshPort', 'port'], 'HERMES_SSH_PORT', 22),
     keyPath: getOptionalStringConfigAliases(agent, ['sshKeyPath', 'keyPath'], 'HERMES_SSH_KEY_PATH'),
     sshBin: getOptionalStringConfigAliases(agent, ['sshBin'], 'HERMES_SSH_BIN') ?? 'ssh',

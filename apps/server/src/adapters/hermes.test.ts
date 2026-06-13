@@ -106,6 +106,24 @@ test('Hermes SSH accepts legacy runtime config aliases', () => {
   assert.match(command, /'--source' 'megacorps-direct-chat'$/);
 });
 
+test('Hermes SSH prefers explicit username aliases over legacy sshUser', () => {
+  const config = resolveHermesSshConnectionConfig({
+    hermesProfile: 'alice',
+    currentSessionId: null,
+    adapterConfig: {
+      sshHost: '192.168.1.180',
+      sshPort: 2222,
+      sshUser: 'root',
+      sshUsername: 'hermes',
+      username: 'hermes',
+    },
+  });
+
+  assert.equal(config.host, '192.168.1.180');
+  assert.equal(config.port, 2222);
+  assert.equal(config.user, 'hermes');
+});
+
 test('Hermes SSH command shell-quotes prompt passed through chat query mode', () => {
   const command = buildHermesSshRemoteCommand({
     hermesProfile: 'alice',
