@@ -171,6 +171,7 @@ const endpoints: ApiEndpoint[] = [
   { method: 'GET', path: '/api/cards/:id/logs', group: 'Kanban', auth: 'session', summary: 'Read paged task logs. Use limit/offset for cards with large retry or review histories.', params: { id: 'Task UUID.' }, query: { limit: '1-500, default 100.', offset: 'Default 0.' } },
   { method: 'GET', path: '/api/cards/:id/subtree', group: 'Kanban', auth: 'session', summary: 'Read the recursive child-card tree for a task, including depth and direct child counts for each descendant.', params: { id: 'Task UUID.' }, query: { limit: '1-5000, default 1000.' } },
   { method: 'GET', path: '/api/cards/:id/actions', group: 'Kanban', auth: 'session', summary: 'Read the normalized card action timeline. This records lifecycle actions, actors, from/to status, human-readable detail, runner/session ids, and metadata separately from raw task logs.', params: { id: 'Task UUID.' }, query: { limit: '1-500, default 200.' } },
+  { method: 'GET', path: '/api/cards/:id/delegation-summary', group: 'Kanban', auth: 'session', summary: 'Read lightweight current Message Board delegation metadata for the card detail header, including phase assignee and phase reviewer without loading full comments.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/rollup', group: 'Kanban Lifecycle', auth: 'session', summary: 'Read recursive child-card rollup: counts, waiting-on-external total, next action owner, ETA, budget allocation, and rollup percent.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/context', group: 'Kanban Lifecycle', auth: 'session', summary: 'Read the TaskContextPackage for a card: root mission, parent chain, current card, flow map, main cast, message digest, log digest, action timeline, and rollup.', params: { id: 'Task UUID.' } },
   { method: 'GET', path: '/api/cards/:id/context-snapshots', group: 'Kanban Lifecycle', auth: 'session', summary: 'Read stored context snapshots for a card so operators can inspect what context was available at decision time.', params: { id: 'Task UUID.' } },
@@ -328,6 +329,7 @@ function entityFromEndpoint(endpoint: ApiEndpoint): string {
   if (endpoint.path.includes('/machine-runners')) return 'machineRunner';
   if (endpoint.path.includes('/agent-sessions')) return 'agentSession';
   if (endpoint.path.includes('/cards/:id/actions')) return 'cardAction';
+  if (endpoint.path.includes('/cards/:id/delegation-summary')) return 'cardDelegationSummary';
   if (endpoint.path.includes('/api/live')) return 'liveEvent';
   if (endpoint.path.includes('/cards') || endpoint.path.includes('/webhook/task-complete')) return 'card';
   if (endpoint.path.includes('/agents') && !endpoint.path.includes('/agent-runtimes')) return 'agent';
@@ -536,6 +538,29 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
 
   if (endpoint.path.includes('/cards/:id/actions')) {
     return { responseSchema: { type: 'array', items: { id: 'uuid', cardId: 'uuid', actorType: 'user | machine | agent:worker | agent:reviewer | system', actorId: 'uuid | system label', action: 'claim | submit_review | approve | manual_move | ...', fromStatus: 'CardStatus | null', toStatus: 'CardStatus | null', detail: 'string | null', metadata: 'object' } }, responseExample: [{ id: 'action-uuid', cardId: 'card-uuid', actorType: 'machine', actorId: 'runner-uuid', action: 'claim', fromStatus: 'todo', toStatus: 'in_progress', detail: 'Runner claimed dispatch task run.', metadata: { runnerId: 'runner-uuid' } }], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+
+  if (endpoint.path.includes('/cards/:id/delegation-summary')) {
+    return {
+      responseSchema: {
+        phaseAssigneeId: 'uuid | null',
+        phaseReviewerId: 'uuid | null',
+        phaseStatus: 'queued | running | waiting | submitted | approved | rejected | failed | cancelled | null',
+        phaseUpdatedAt: 'ISO datetime | null',
+        phaseSourceAction: 'string | null',
+        phaseSourceCommentId: 'uuid | null',
+      },
+      responseExample: {
+        phaseAssigneeId: 'agent-uuid',
+        phaseReviewerId: 'reviewer-uuid',
+        phaseStatus: 'submitted',
+        phaseUpdatedAt: '2026-06-06T00:00:00.000Z',
+        phaseSourceAction: 'delegate_report',
+        phaseSourceCommentId: 'comment-uuid',
+      },
+      rateLimit: endpoint.rateLimit ?? defaultRateLimit,
+      requiredRole: roleDefault(endpoint),
+    };
   }
 
   if (endpoint.path.includes('/cards/:id/comments')) {

@@ -53,6 +53,7 @@ const registeredRoutes = [
   ['GET', '/api/cards/:id/logs'],
   ['GET', '/api/cards/:id/subtree'],
   ['GET', '/api/cards/:id/actions'],
+  ['GET', '/api/cards/:id/delegation-summary'],
   ['GET', '/api/cards/:id/rollup'],
   ['GET', '/api/cards/:id/context'],
   ['GET', '/api/cards/:id/context-snapshots'],

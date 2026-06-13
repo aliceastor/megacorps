@@ -57,6 +57,8 @@ function hydrateReviewCommentAuthors(
   });
 }
 
+const ACTIVE_DELEGATION_STATUSES = new Set(['queued', 'running', 'waiting', 'submitted']);
+
 function normalizedReviewerId(assigneeId: string | null | undefined, reviewerId: string | null | undefined): string | null {
   if (!reviewerId) return null;
   return reviewerId === assigneeId ? null : reviewerId;
@@ -1653,6 +1655,34 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!card) return reply;
     const query = request.query as { limit?: string };
     return getCardActions(card.id, Number(query.limit ?? 200));
+  });
+  app.get('/api/cards/:id/delegation-summary', async (request, reply) => {
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    const rows = await db.select({
+      id: cardComments.id,
+      action: cardComments.action,
+      assigneeAgentId: cardComments.assigneeAgentId,
+      reviewerAgentId: cardComments.reviewerAgentId,
+      reviewerScope: cardComments.reviewerScope,
+      delegationStatus: cardComments.delegationStatus,
+      createdAt: cardComments.createdAt,
+    }).from(cardComments).where(and(
+      eq(cardComments.cardId, card.id),
+      drizzleSql`(${cardComments.assigneeAgentId} IS NOT NULL OR ${cardComments.reviewerAgentId} IS NOT NULL OR ${cardComments.delegationStatus} IS NOT NULL)`,
+    )).orderBy(desc(cardComments.createdAt)).limit(80);
+    const activeRows = rows.filter((row) => row.delegationStatus && ACTIVE_DELEGATION_STATUSES.has(row.delegationStatus));
+    const phaseAssigneeRow = activeRows.find((row) => row.assigneeAgentId) ?? rows.find((row) => row.assigneeAgentId) ?? null;
+    const phaseReviewerRow = activeRows.find((row) => row.reviewerScope === 'phase' && row.reviewerAgentId) ?? rows.find((row) => row.reviewerScope === 'phase' && row.reviewerAgentId) ?? null;
+    const sourceRow = phaseAssigneeRow ?? phaseReviewerRow;
+    return {
+      phaseAssigneeId: phaseAssigneeRow?.assigneeAgentId ?? null,
+      phaseReviewerId: phaseReviewerRow?.reviewerAgentId ?? null,
+      phaseStatus: sourceRow?.delegationStatus ?? null,
+      phaseUpdatedAt: sourceRow?.createdAt ?? null,
+      phaseSourceAction: sourceRow?.action ?? null,
+      phaseSourceCommentId: sourceRow?.id ?? null,
+    };
   });
   app.get('/api/cards/:id/comments', async (request, reply) => {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);

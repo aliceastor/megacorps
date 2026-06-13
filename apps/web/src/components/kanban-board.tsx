@@ -85,15 +85,18 @@ type ApiEvent = { id: string; method: string; path: string; statusCode?: number;
 type CardComment = { id: string; body: string; action: string; authorType: string; agentId?: string | null; authorId?: string | null; parentCommentId?: string | null; assigneeAgentId?: string | null; reviewerAgentId?: string | null; reviewerScope?: 'phase' | 'final' | null; delegationStatus?: string | null; createdAt?: string };
 type CardAction = { id: string; actorType: string; actorId: string; action: string; fromStatus?: string | null; toStatus?: string | null; detail?: string | null; metadata?: unknown; createdAt?: string };
 type WorkProduct = { id: string; cardId?: string | null; projectId?: string | null; agentId?: string | null; type: string; title: string; summary?: string | null; url?: string | null; repoProvider?: string | null; repoUrl?: string | null; branch?: string | null; commitSha?: string | null; pullRequestUrl?: string | null; createdAt?: string };
+type CardDelegationSummary = { phaseAssigneeId?: string | null; phaseReviewerId?: string | null; phaseStatus?: string | null; phaseUpdatedAt?: string | null; phaseSourceAction?: string | null; phaseSourceCommentId?: string | null };
 type CardUpdatePayload = Omit<Partial<Card>, 'priority'> & { priority?: (typeof priorities)[number] };
 type LiveEvent = { type: string; cardId?: string | null; entityId?: string; projectId?: string | null };
 type CachedRows<T> = { rows: T[]; cachedAt: number };
+type CachedValue<T> = { value: T; cachedAt: number };
 type CardTabCache = {
   comments?: CachedRows<CardComment>;
   logs?: CachedRows<TaskLog>;
   actions?: CachedRows<CardAction>;
   apiLogs?: CachedRows<ApiEvent>;
   workProducts?: CachedRows<WorkProduct>;
+  delegationSummary?: CachedValue<CardDelegationSummary>;
 };
 type CardTabKey = keyof CardTabCache;
 type CardDetailTab = 'details' | 'comments' | 'delegation' | 'thread' | 'logs' | 'workProducts';
@@ -103,7 +106,7 @@ const CARD_TAB_CACHE_TTL_MS = 2 * 60 * 1000;
 const CARD_TAB_CACHE_LIMIT = 50;
 const CARD_LOG_PAGE_SIZE = 80;
 
-function isFresh<T>(entry?: CachedRows<T>): boolean {
+function isFresh<T>(entry?: CachedRows<T> | CachedValue<T>): boolean {
   return Boolean(entry && Date.now() - entry.cachedAt < CARD_TAB_CACHE_TTL_MS);
 }
 
@@ -128,7 +131,7 @@ function writeCardTabCache(cache: Record<string, CardTabCache>): void {
 }
 
 function newestCacheTime(cache: CardTabCache): number {
-  return Math.max(cache.comments?.cachedAt ?? 0, cache.logs?.cachedAt ?? 0, cache.actions?.cachedAt ?? 0, cache.apiLogs?.cachedAt ?? 0, cache.workProducts?.cachedAt ?? 0);
+  return Math.max(cache.comments?.cachedAt ?? 0, cache.logs?.cachedAt ?? 0, cache.actions?.cachedAt ?? 0, cache.apiLogs?.cachedAt ?? 0, cache.workProducts?.cachedAt ?? 0, cache.delegationSummary?.cachedAt ?? 0);
 }
 
 function pruneCardTabCache(cache: Record<string, CardTabCache>): Record<string, CardTabCache> {
@@ -228,6 +231,11 @@ function priorityNumber(priority: string | number | undefined): number {
 
 function parseCsv(value: string): string[] {
   return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function agentDisplayName(agent: Agent | undefined): string | null {
+  if (!agent) return null;
+  return [agent.name, agent.role].filter(Boolean).join(' / ');
 }
 
 function isQueryCancellation(error: unknown): boolean {
@@ -459,9 +467,10 @@ export function KanbanBoard() {
   const [apiLogs, setApiLogs] = useState<ApiEvent[]>([]);
   const [comments, setComments] = useState<CardComment[]>([]);
   const [workProducts, setWorkProducts] = useState<WorkProduct[]>([]);
+  const [delegationSummary, setDelegationSummary] = useState<CardDelegationSummary | null>(null);
   const [logsHasMore, setLogsHasMore] = useState(false);
   const [cardTabCache, setCardTabCache] = useState<Record<string, CardTabCache>>(() => readCardTabCache());
-  const [tabLoading, setTabLoading] = useState<Record<CardTabKey, boolean>>({ comments: false, logs: false, actions: false, apiLogs: false, workProducts: false });
+  const [tabLoading, setTabLoading] = useState<Record<CardTabKey, boolean>>({ comments: false, logs: false, actions: false, apiLogs: false, workProducts: false, delegationSummary: false });
   const [tab, setTab] = useState<CardDetailTab>('details');
   const [commentBody, setCommentBody] = useState('');
   const [commentAction, setCommentAction] = useState<'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run' | 'escalate_to_reviewer' | 'delegate_to_agent'>('comment');
@@ -567,6 +576,30 @@ export function KanbanBoard() {
       return cached?.rows ?? [];
     } finally {
       setLoadingKey('comments', false);
+    }
+  }
+
+  async function loadCardDelegationSummary(card: Card, force = false): Promise<CardDelegationSummary | null> {
+    const cached = cardTabCache[card.id]?.delegationSummary;
+    if (!force && isFresh(cached)) {
+      if (selectedIdRef.current === card.id) setDelegationSummary(cached?.value ?? null);
+      return cached?.value ?? null;
+    }
+    if (!cached) setLoadingKey('delegationSummary', true);
+    try {
+      if (force) await queryClient.invalidateQueries({ queryKey: ['cardDelegationSummary', card.id] });
+      const value = await queryClient.fetchQuery({
+        queryKey: ['cardDelegationSummary', card.id],
+        queryFn: () => api<CardDelegationSummary>(`/api/cards/${card.id}/delegation-summary`),
+      });
+      saveCardTabCache(card.id, { delegationSummary: { value, cachedAt: Date.now() } });
+      if (selectedIdRef.current === card.id) setDelegationSummary(value);
+      return value;
+    } catch (err) {
+      if (!isQueryCancellation(err) && selectedIdRef.current === card.id && !cached) setDelegationSummary(null);
+      return cached?.value ?? null;
+    } finally {
+      setLoadingKey('delegationSummary', false);
     }
   }
 
@@ -684,6 +717,7 @@ export function KanbanBoard() {
   function selectTab(next: CardDetailTab) {
     setTab(next);
     if (!selected) return;
+    if (next === 'details') void loadCardDelegationSummary(selected);
     if (next === 'comments' || next === 'delegation') void loadCardComments(selected);
     if (next === 'thread') {
       void loadCardLogs(selected);
@@ -729,7 +763,10 @@ export function KanbanBoard() {
       if (detail.type.startsWith('card.') || detail.type === 'activity.created') void refresh();
       const affectsSelectedCard = Boolean(selected && detail.cardId === selected.id);
       if (!selected || !affectsSelectedCard) return;
-      if (detail.type === 'card.comment.created') void loadCardComments(selected, true);
+      if (detail.type === 'card.comment.created') {
+        void loadCardComments(selected, true);
+        void loadCardDelegationSummary(selected, true);
+      }
       if (detail.type === 'task_log.created') void loadCardLogs(selected, true);
       if (detail.type === 'card.action.created') void loadCardActions(selected, true);
       if (detail.type === 'work_product.created') void loadCardWorkProducts(selected, true);
@@ -746,6 +783,7 @@ export function KanbanBoard() {
       setApiLogs([]);
       setComments([]);
       setWorkProducts([]);
+      setDelegationSummary(null);
       setLogsHasMore(false);
       return;
     }
@@ -772,8 +810,10 @@ export function KanbanBoard() {
     setActions(cached.actions?.rows ?? []);
     setApiLogs(cached.apiLogs?.rows ?? []);
     setWorkProducts(cached.workProducts?.rows ?? []);
+    setDelegationSummary(cached.delegationSummary?.value ?? null);
     setLogsHasMore((cached.logs?.rows.length ?? 0) >= CARD_LOG_PAGE_SIZE);
     const timer = window.setTimeout(() => {
+      if (tab === 'details') void loadCardDelegationSummary(selected);
       if (tab === 'comments' || tab === 'delegation') void loadCardComments(selected);
       if (tab === 'thread') {
         void loadCardLogs(selected);
@@ -853,6 +893,14 @@ export function KanbanBoard() {
   const delegationReviewRecords = selected
     ? comments.filter(isDelegationReviewComment).sort((a, b) => Date.parse(a.createdAt ?? '') - Date.parse(b.createdAt ?? ''))
     : [];
+  const phaseAssigneeAgent = delegationSummary?.phaseAssigneeId ? agents.find((agent) => agent.id === delegationSummary.phaseAssigneeId) : undefined;
+  const phaseReviewerAgent = delegationSummary?.phaseReviewerId ? agents.find((agent) => agent.id === delegationSummary.phaseReviewerId) : undefined;
+  const phaseAssigneeLabel = agentDisplayName(phaseAssigneeAgent) ?? t('kanban.noneAssigned');
+  const phaseReviewerLabel = agentDisplayName(phaseReviewerAgent) ?? t('kanban.noneAssigned');
+  const phaseSummaryMeta = [
+    delegationSummary?.phaseStatus,
+    delegationSummary?.phaseUpdatedAt ? new Date(delegationSummary.phaseUpdatedAt).toLocaleString() : null,
+  ].filter(Boolean).join(' / ');
 
   async function create() {
     if (!newTitle.trim()) { setToast({ message: t('kanban.titleRequired'), type: 'error' }); return; }
@@ -1266,6 +1314,8 @@ export function KanbanBoard() {
             <div className="meta-grid">
               <span>UUID <b>{selected.id}</b></span>
               <span>{t('kanban.stage')} <b>{selected.columnStatus}</b></span>
+              <span>{t('kanban.phaseAssignee')} <b>{phaseAssigneeLabel}</b>{phaseSummaryMeta && <small>{phaseSummaryMeta}</small>}</span>
+              <span>{t('kanban.phaseReviewer')} <b>{phaseReviewerLabel}</b>{phaseSummaryMeta && <small>{phaseSummaryMeta}</small>}</span>
               <span>{t('kanban.priority')} <b>{t(`kanban.priority.${priorityValue(selected.priority)}`)}</b></span>
               <span>{t('kanban.cost')} <b>{selected.costUsd ?? '0.0000'}</b></span>
               <span>{t('kanban.session')} <b>{selected.sessionId ?? 'none'}</b></span>

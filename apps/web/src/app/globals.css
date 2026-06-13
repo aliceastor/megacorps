@@ -3886,6 +3886,7 @@ button.card {
 }
 
 .meta-grid b { color: var(--foreground); overflow-wrap: anywhere; }
+.meta-grid small { overflow-wrap: anywhere; }
 .action-row { display: flex; gap: 8px; flex-wrap: wrap; }
 
 .admin-account-row {
