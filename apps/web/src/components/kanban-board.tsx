@@ -4,7 +4,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { isCancelledError, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Ban, ExternalLink, GitBranch, GripVertical, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, StopCircle, Trash2, X } from 'lucide-react';
+import { Ban, ExternalLink, GripVertical, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, StopCircle, Trash2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
@@ -315,18 +315,12 @@ function Column({
   group,
   cards,
   companies,
-  childCardsByParent,
-  expandedParentIds,
   onSelect,
-  onToggleSubtasks,
 }: {
   group: StatusGroup;
   cards: Card[];
   companies: Company[];
-  childCardsByParent: Map<string, Card[]>;
-  expandedParentIds: Set<string>;
   onSelect: (card: Card) => void;
-  onToggleSubtasks: (cardId: string) => void;
 }) {
   const { locale } = useLocale();
   const { setNodeRef, isOver } = useDroppable({ id: group.id });
@@ -340,11 +334,8 @@ function Column({
       {cards.map((card) => <DraggableCard
         key={card.id}
         card={card}
-        childCards={childCardsByParent.get(card.id) ?? []}
-        subtasksExpanded={expandedParentIds.has(card.id)}
         companyName={companies.find((company) => company.id === card.companyId)?.name}
         onSelect={onSelect}
-        onToggleSubtasks={onToggleSubtasks}
       />)}
     </div>
   </section>;
@@ -352,18 +343,12 @@ function Column({
 
 function DraggableCard({
   card,
-  childCards,
-  subtasksExpanded,
   companyName,
   onSelect,
-  onToggleSubtasks,
 }: {
   card: Card;
-  childCards: Card[];
-  subtasksExpanded: boolean;
   companyName?: string;
   onSelect: (card: Card) => void;
-  onToggleSubtasks: (cardId: string) => void;
 }) {
   const { t } = useLocale();
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: card.id });
@@ -411,35 +396,6 @@ function DraggableCard({
       {card.costUsd && <span className="badge">${card.costUsd}</span>}
       {card.tags?.map((tag) => <span className="badge" key={tag}>{tag}</span>)}
     </div>
-    {childCards.length > 0 && <div className="kanban-subtasks">
-      <button
-        type="button"
-        className="kanban-subtask-toggle"
-        aria-expanded={subtasksExpanded}
-        onClick={(event) => {
-          event.stopPropagation();
-          onToggleSubtasks(card.id);
-        }}
-      >
-        <GitBranch size={13} />
-        <span>{subtasksExpanded ? t('kanban.hideSubtasks') : t('kanban.subtasks')}</span>
-        <b>{childCards.length}</b>
-      </button>
-      {subtasksExpanded && <div className="kanban-subtask-list">
-        {childCards.map((child) => <button
-          type="button"
-          className="kanban-subtask-chip"
-          key={child.id}
-          onClick={(event) => {
-            event.stopPropagation();
-            onSelect(child);
-          }}
-        >
-          <span>{child.title}</span>
-          <b>{child.columnStatus}</b>
-        </button>)}
-      </div>}
-    </div>}
   </article>;
 }
 
@@ -508,7 +464,6 @@ export function KanbanBoard() {
   const [filterProject, setFilterProject] = useState('');
   const [sortMode, setSortMode] = useState<'priority' | 'company' | 'created_desc' | 'created_asc' | 'updated_desc'>('priority');
   const [query, setQuery] = useState('');
-  const [expandedParentIds, setExpandedParentIds] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -849,18 +804,7 @@ export function KanbanBoard() {
     if (sortMode === 'updated_desc') return Date.parse(b.updatedAt ?? '') - Date.parse(a.updatedAt ?? '');
     return b.priority - a.priority;
   }), [cards, companyNameById, filterAssignee, filterCompany, filterProject, query, sortMode]);
-  const cardIds = useMemo(() => new Set(cards.map((card) => card.id)), [cards]);
-  const boardCards = useMemo(() => visibleCards.filter((card) => !card.parentCardId || !cardIds.has(card.parentCardId)), [cardIds, visibleCards]);
-  const childCardsByParent = useMemo(() => {
-    const next = new Map<string, Card[]>();
-    for (const card of cards) {
-      if (!card.parentCardId || !cardIds.has(card.parentCardId)) continue;
-      const rows = next.get(card.parentCardId) ?? [];
-      rows.push(card);
-      next.set(card.parentCardId, rows);
-    }
-    return next;
-  }, [cardIds, cards]);
+  const boardCards = visibleCards;
   const ticketThreadEntries = selected ? [
     ...logs.map((log) => ({
       id: `log-${log.id}`,
@@ -1037,15 +981,6 @@ export function KanbanBoard() {
     catch (err) { setToast({ message: err instanceof Error ? err.message : t('kanban.moveFailed'), type: 'error' }); }
   }
 
-  function toggleSubtasks(cardId: string) {
-    setExpandedParentIds((current) => {
-      const next = new Set(current);
-      if (next.has(cardId)) next.delete(cardId);
-      else next.add(cardId);
-      return next;
-    });
-  }
-
   async function action(path: string, message: string) {
     if (!selected) return;
     setBusy(true);
@@ -1201,10 +1136,7 @@ export function KanbanBoard() {
             group={group}
             companies={companies}
             cards={cardsForStatusGroup(boardCards, group)}
-            childCardsByParent={childCardsByParent}
-            expandedParentIds={expandedParentIds}
             onSelect={(card) => { setSelected(card); setTab('details'); }}
-            onToggleSubtasks={toggleSubtasks}
           />)}
         </div>
       </DndContext>

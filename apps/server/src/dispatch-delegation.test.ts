@@ -145,6 +145,41 @@ test('delegation parser accepts webhook summary plus output payloads', () => {
   ]);
 });
 
+test('delegation parser stops before later markdown status bullets', () => {
+  const output = [
+    'DELEGATE:',
+    '- Ribel: 對上面這 12 個候選功能做技術可行性審查，輸出風險、取捨、MVP 建議。',
+    '',
+    '---',
+    '',
+    '## 關於這張卡本身',
+    '- **狀態**：in_progress，等待 Ribel 回覆後整合。',
+    '- **預計完成**：Ribel report -> Alice final integration。',
+    '- **不要做的事**：不要建立 child Kanban card。',
+    '- **要你回覆的**：請直接提交 report。',
+  ].join('\n');
+  assert.deepEqual(dispatchInternals.delegationItems(output), [
+    'Ribel: 對上面這 12 個候選功能做技術可行性審查，輸出風險、取捨、MVP 建議。',
+  ]);
+});
+
+test('delegation source context is only injected on the first message turn', () => {
+  const comment = {
+    metadata: {
+      sourceContext: [
+        'Requester full output:',
+        '| # | Feature | Notes |',
+        '| 12 | Browser extension capture | Needs local archive queue. |',
+      ].join('\n'),
+    },
+  } as any;
+  const firstTurn = dispatchInternals.delegationSourceContextForPrompt(comment, {});
+  assert.match(firstTurn, /Delegation source context/);
+  assert.match(firstTurn, /Browser extension capture/);
+  assert.equal(dispatchInternals.delegationSourceContextForPrompt(comment, { continuation: true }), '');
+  assert.equal(dispatchInternals.delegationSourceContextForPrompt({ metadata: {} } as any, {}), '');
+});
+
 test('submitted final reports can be reviewed after the parent card is done', () => {
   assert.equal(dispatchInternals.terminalMessageTaskCanRun(
     { kind: 'message_review' } as any,
@@ -163,7 +198,7 @@ test('submitted final reports can be reviewed after the parent card is done', ()
   ), false);
 });
 
-test('collaboration mode applies recursively to child cards', () => {
+test('collaboration mode remains enabled on legacy parent-linked card rows', () => {
   assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'delegate', parentCardId: null } as any), true);
   assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'delegate', parentCardId: 'parent-1' } as any), true);
   assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'auto', parentCardId: null } as any), false);

@@ -47,6 +47,7 @@ const KANBAN_CONTEXT_CARD_LIMIT = Number(process.env.DISPATCH_CONTEXT_CARD_LIMIT
 const KANBAN_CONTEXT_RECORD_LIMIT = Number(process.env.DISPATCH_CONTEXT_RECORD_LIMIT ?? 30);
 const TASK_RUN_CANDIDATE_SCAN_LIMIT = Number(process.env.TASK_RUN_CANDIDATE_SCAN_LIMIT ?? 250);
 const MESSAGE_BOARD_COMMENT_LIMIT = Number(process.env.MESSAGE_BOARD_COMMENT_LIMIT ?? 20_000);
+const DELEGATION_SOURCE_CONTEXT_LIMIT = Number(process.env.DISPATCH_DELEGATION_SOURCE_CONTEXT_LIMIT ?? 12_000);
 const TASK_BODY_CHAR_LIMIT = Number(process.env.DISPATCH_TASK_BODY_CHAR_LIMIT ?? 12_000);
 const KNOWLEDGE_DOC_CHAR_LIMIT = Number(process.env.DISPATCH_KNOWLEDGE_DOC_CHAR_LIMIT ?? 4_000);
 const BUDGET_RESET_DAY = Number(process.env.BUDGET_RESET_DAY ?? 1);
@@ -113,10 +114,17 @@ export function delegationItems(output: string | null | undefined): string[] {
   if (start < 0) return [];
   const items: string[] = [];
   for (const line of lines.slice(start + 1)) {
-    if (items.length > 0 && /^\s*(?:#{1,4}\s*)?(?:STATUS|DONE|FINAL|OUTPUT|REVIEW|NOTES?|RECOMMENDATION)\s*:?\s*$/i.test(line)) break;
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (items.length > 0) break;
+      continue;
+    }
+    if (/^(?:-{3,}|\*{3,}|_{3,})$/.test(trimmed) || /^#{1,6}\s+\S/.test(trimmed)) break;
+    if (/^\s*(?:#{1,4}\s*)?(?:STATUS|DONE|FINAL|OUTPUT|REVIEW|NOTES?|RECOMMENDATION|NEXT|FOLLOW-?UP)\s*:?\s*$/i.test(line)) break;
     const match = line.match(/^\s*(?:[-*]|\d+[.)])\s+(.+?)\s*$/);
-    if (!match) continue;
+    if (!match) break;
     const title = match[1]?.replace(/\s+/g, ' ').trim();
+    if (title && /^(?:\*\*)?(?:status|done|final|output|review|notes?|recommendation|next|follow-?up|\u72c0\u614b|\u9810\u8a08\u5b8c\u6210|\u4e0d\u8981\u505a\u7684\u4e8b|\u8981\u4f60\u56de\u8986\u7684)(?:\*\*)?\s*[:\uff1a]/i.test(title)) break;
     if (title && !items.includes(title)) items.push(title.slice(0, 180));
     if (items.length >= 8) break;
   }
@@ -580,6 +588,7 @@ export async function createMessageDelegations(parent: CardRow, leader: AgentRow
   parentCommentId?: string | null;
   reviewerScope?: 'phase' | 'final';
   sourceTaskRunId?: string | null;
+  sourceOutput?: string | null;
 } = {}): Promise<CardCommentRow[]> {
   if (titles.length === 0) return [];
   const allDirectReports = await db.select().from(agents).where(and(eq(agents.companyId, parent.companyId), eq(agents.bossId, leader.id), eq(agents.isActive, true), isNull(agents.deletedAt)));
@@ -603,6 +612,13 @@ export async function createMessageDelegations(parent: CardRow, leader: AgentRow
       '',
       title,
     ].join('\n');
+    const metadata: Record<string, unknown> = {
+      requesterAgentId: leader.id,
+      sourceTaskRunId: input.sourceTaskRunId ?? null,
+      rawTitle,
+    };
+    const sourceContext = clipText(input.sourceOutput, DELEGATION_SOURCE_CONTEXT_LIMIT);
+    if (sourceContext) metadata.sourceContext = sourceContext;
     const comment = await addCardMessage({
       cardId: parent.id,
       parentCommentId: input.parentCommentId ?? null,
@@ -613,11 +629,7 @@ export async function createMessageDelegations(parent: CardRow, leader: AgentRow
       reviewerAgentId: leader.id,
       reviewerScope: scope,
       delegationStatus: 'queued',
-      metadata: {
-        requesterAgentId: leader.id,
-        sourceTaskRunId: input.sourceTaskRunId ?? null,
-        rawTitle,
-      },
+      metadata,
     });
     if (comment) {
       comments.push(comment);
@@ -1594,6 +1606,27 @@ async function messageRunContext(cardId: string, taskRunId: string | null | unde
   return { card, taskRun, comment, agent };
 }
 
+async function observedSettledMessageReview(taskRun: TaskRunRow, report: CardCommentRow, request?: CardCommentRow | null): Promise<{ settled: boolean; status: 'success' | 'failed' | 'cancelled'; reason: string } | null> {
+  const [latestTaskRun] = await db.select().from(taskRuns).where(eq(taskRuns.id, taskRun.id)).limit(1);
+  if (latestTaskRun && ['success', 'failed', 'cancelled'].includes(latestTaskRun.status)) {
+    const status = latestTaskRun.status === 'cancelled'
+      ? 'cancelled'
+      : latestTaskRun.status === 'failed'
+        ? 'failed'
+        : 'success';
+    return { settled: true, status, reason: `message_review task run is already ${latestTaskRun.status}` };
+  }
+  const commentIds = [report.id, request?.id].filter((id): id is string => Boolean(id));
+  const latestComments = commentIds.length
+    ? await db.select({ id: cardComments.id, delegationStatus: cardComments.delegationStatus }).from(cardComments).where(inArray(cardComments.id, commentIds))
+    : [];
+  const statuses = new Set(latestComments.map((comment) => comment.delegationStatus).filter(Boolean));
+  if (statuses.has('approved')) return { settled: true, status: 'success', reason: 'message_review comment chain is already approved' };
+  if (statuses.has('cancelled')) return { settled: true, status: 'cancelled', reason: 'message_review comment chain is already cancelled' };
+  if (statuses.has('rejected')) return { settled: true, status: 'failed', reason: 'message_review comment chain is already rejected' };
+  return null;
+}
+
 async function childDelegationsPending(parentCommentId: string): Promise<boolean> {
   const rows = await db.select({ id: cardComments.id }).from(cardComments).where(and(
     eq(cardComments.parentCommentId, parentCommentId),
@@ -1674,7 +1707,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       await completeTaskRun(taskRun.id, { status: 'failed', error: result.output || 'message_delegation_failed', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       return card;
     }
-    const delegated = await createMessageDelegations(card, agent, delegationItems(result.output), { parentCommentId: comment.id, reviewerScope: 'phase', sourceTaskRunId: taskRun.id });
+    const delegated = await createMessageDelegations(card, agent, delegationItems(result.output), { parentCommentId: comment.id, reviewerScope: 'phase', sourceTaskRunId: taskRun.id, sourceOutput: result.output });
     if (delegated.length > 0) {
       await db.update(cardComments).set({ delegationStatus: 'waiting' }).where(eq(cardComments.id, comment.id));
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'agent_delegated', body: result.output, delegationStatus: 'waiting' });
@@ -1790,6 +1823,17 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
   } catch (error) {
     const message = error instanceof Error ? error.message : 'message_review_failed';
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
+    const settled = await observedSettledMessageReview(taskRun, report, request);
+    if (settled?.settled) {
+      await db.update(heartbeatRuns).set({
+        status: settled.status,
+        completedAt: new Date(),
+        error: settled.status === 'success' ? null : settled.reason,
+      }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, 'running')));
+      await addTaskRunLog(taskRun, settled.status === 'success' ? 'success' : 'warning', `Message Board delegation review adapter failure ignored because ${settled.reason}.`, message);
+      await completeTaskRun(taskRun.id, { status: settled.status, error: settled.status === 'success' ? null : settled.reason, output: settled.reason });
+      return card;
+    }
     await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
     await addCardMessage({ cardId: card.id, parentCommentId: report.id, agentId: reviewer.id, action: 'delegate_review_failed', body: message, delegationStatus: 'failed' });
     await completeTaskRun(taskRun.id, { status: 'failed', error: message });
@@ -1826,7 +1870,7 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
     }
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), isNull(agents.deletedAt))).limit(1) : [];
     const delegated = actorAgent
-      ? await createMessageDelegations(card, actorAgent, delegationItems(output), { parentCommentId: comment.id, reviewerScope: 'phase', sourceTaskRunId: taskRun.id })
+      ? await createMessageDelegations(card, actorAgent, delegationItems(output), { parentCommentId: comment.id, reviewerScope: 'phase', sourceTaskRunId: taskRun.id, sourceOutput: output })
       : [];
     if (delegated.length > 0) {
       await db.update(cardComments).set({ delegationStatus: 'waiting' }).where(eq(cardComments.id, comment.id));
@@ -1984,7 +2028,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
     let delegatedRows: Awaited<ReturnType<typeof createMessageDelegations>>;
     try {
-      delegatedRows = await createMessageDelegations(card, agent, delegationItems(result.output), { reviewerScope: 'final', sourceTaskRunId: options.taskRunId ?? null });
+      delegatedRows = await createMessageDelegations(card, agent, delegationItems(result.output), { reviewerScope: 'final', sourceTaskRunId: options.taskRunId ?? null, sourceOutput: result.output });
     } catch (error) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       return sendAgentFeedbackAndRequeue({
@@ -2391,106 +2435,15 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
 }
 
 export async function decomposeCard(cardId: string): Promise<CardRow[]> {
-  const [parent] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
-  if (!parent) throw new Error('card_not_found');
-  const directReports = parent.assigneeId
-    ? await activeDirectReportsForAgent(parent.companyId, parent.assigneeId)
-    : [];
-  const items = parent.body
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^[-*#\d.\s]+/, '').trim())
-    .filter((line) => line.length > 0)
-    .slice(0, 8);
-  const titles = items.length > 1 ? items : [`Plan ${parent.title}`, `Execute ${parent.title}`, `Review ${parent.title}`];
-  const rows = await db.insert(kanbanCards).values(titles.map((title, index) => {
-    const delegate = directReports.length ? directReports[index % directReports.length] : null;
-    return {
-      companyId: parent.companyId,
-      departmentId: delegate?.departmentId ?? parent.departmentId,
-      projectId: parent.projectId,
-      goalId: parent.goalId,
-      parentCardId: parent.id,
-      title,
-      body: `Sub-task for ${parent.title}\n\n${title}`,
-      columnStatus: 'todo',
-      priority: parent.priority,
-      tags: [...(parent.tags ?? []), 'subtask'],
-      assigneeId: delegate?.id ?? parent.assigneeId,
-      reviewerId: delegate ? parent.assigneeId : parent.reviewerId,
-      requiresApproval: parent.requiresApproval || Boolean(delegate),
-      decisionMode: parent.decisionMode,
-      requiredChildPolicy: parent.requiredChildPolicy,
-      childRequirementLevel: parent.childRequirementLevel,
-      createdBy: parent.createdBy,
-    };
-  })).returning();
-  await ensureParentWaitingOnChildren(parent.id, {
-    childCount: rows.length,
-    actor: 'decomposition',
-    agentId: parent.assigneeId,
-    message: directReports.length
-      ? `Parent is waiting on ${rows.length} delegated sub-task(s) before integration.`
-      : `Parent is waiting on ${rows.length} sub-task(s) before completion.`,
-  });
-  await addTaskLog({ cardId: parent.id, type: 'decomposition', status: 'success', message: directReports.length ? `Created ${rows.length} sub-task(s) and delegated them to direct reports.` : `Created ${rows.length} sub-task(s).` });
-  await addActivity({ companyId: parent.companyId, actorType: 'system', actorId: 'decomposition', agentId: parent.assigneeId, action: 'card.decomposed', entityType: 'card', entityId: parent.id, details: { childCount: rows.length, delegatedToReports: directReports.length > 0 } });
-  return rows;
+  void cardId;
+  throw new Error('child_cards_disabled: Kanban no longer creates child cards. Use same-card Message Board DELEGATE / REVIEWER records instead.');
 }
 
 export async function createDelegatedSubtasks(parent: CardRow, leader: AgentRow, titles: string[]): Promise<CardRow[]> {
-  if (titles.length === 0) return [];
-  const allDirectReports = await db.select().from(agents).where(and(eq(agents.companyId, parent.companyId), eq(agents.bossId, leader.id), eq(agents.isActive, true), isNull(agents.deletedAt)));
-  const directReports = await activeDirectReportsForAgent(parent.companyId, leader.id);
-  if (directReports.length === 0) return [];
-  const availableIds = new Set(directReports.map((report) => report.id));
-  const unavailableDirectReports = allDirectReports.filter((report) => !availableIds.has(report.id));
-  const rows = await db.insert(kanbanCards).values(titles.map((rawTitle, index) => {
-    const unavailableTarget = unavailableDirectReports.find((report) => {
-      const lower = rawTitle.toLowerCase();
-      return lower.startsWith(`${report.name}:`.toLowerCase()) || lower.startsWith(`${report.slug}:`.toLowerCase());
-    });
-    if (unavailableTarget) {
-      throw new Error(`delegation_target_unavailable: ${unavailableTarget.name} (${unavailableTarget.slug}) is not currently available. Delegate only to available direct reports: ${directReportList(directReports)}.`);
-    }
-    const explicitReport = directReports.find((report) => {
-      const prefix = `${report.name}:`.toLowerCase();
-      const slugPrefix = `${report.slug}:`.toLowerCase();
-      const lower = rawTitle.toLowerCase();
-      return lower.startsWith(prefix) || lower.startsWith(slugPrefix);
-    });
-    const delegate = explicitReport ?? directReports[index % directReports.length]!;
-    const reportPrefixes = directReports.flatMap((report) => [report.name, report.slug]).map(escapeRegex).join('|');
-    const title = rawTitle.replace(new RegExp(`^(${reportPrefixes}):\\s*`, 'i'), '').trim() || rawTitle;
-    return {
-      companyId: parent.companyId,
-      departmentId: delegate?.departmentId ?? parent.departmentId,
-      projectId: parent.projectId,
-      goalId: parent.goalId,
-      parentCardId: parent.id,
-      title,
-      body: `Delegated by ${leader.name} from ${parent.title}\n\n${title}`,
-      columnStatus: 'todo',
-      priority: parent.priority,
-      tags: [...(parent.tags ?? []), 'delegated'],
-      assigneeId: delegate.id,
-      reviewerId: leader.id,
-      requiresApproval: true,
-      decisionMode: parent.decisionMode,
-      requiredChildPolicy: parent.requiredChildPolicy,
-      childRequirementLevel: parent.childRequirementLevel,
-      createdBy: parent.createdBy,
-      maxRetries: parent.maxRetries,
-    };
-  })).returning();
-  await ensureParentWaitingOnChildren(parent.id, {
-    childCount: rows.length,
-    actor: 'delegation',
-    agentId: leader.id,
-    message: `Parent is waiting on ${rows.length} delegated sub-task(s) before integration.`,
-  });
-  await addTaskLog({ cardId: parent.id, agentId: leader.id, type: 'decomposition', status: 'success', message: `Created ${rows.length} delegated sub-task(s) for direct reports.` });
-  await addActivity({ companyId: parent.companyId, actorType: 'agent', actorId: leader.id, agentId: leader.id, action: 'card.delegated_to_reports', entityType: 'card', entityId: parent.id, details: { childCount: rows.length, delegatedToReports: true } });
-  return rows;
+  void parent;
+  void leader;
+  void titles;
+  throw new Error('child_cards_disabled: Kanban no longer creates child cards. Use same-card Message Board DELEGATE / REVIEWER records instead.');
 }
 
 export async function getTaskLogs(cardId: string, options: { limit?: number; offset?: number } = {}) {
@@ -2853,6 +2806,7 @@ export const dispatchInternals = {
   companyStructureLines,
   completionStatusForQualityGate,
   delegationItems,
+  delegationSourceContextForPrompt,
   dispatchCompletionDecision,
   explicitReviewDecision,
   optionalDelegationInstructions,
@@ -3030,8 +2984,8 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
       `Priority: ${focusCard.priority ?? 0}`,
       `Decision mode: ${focusCard.decisionMode ?? 'not set'}`,
       `Rollup status: ${focusCard.rollupStatus ?? 'not set'}`,
-      `Required child policy: ${focusCard.requiredChildPolicy ?? 'all_required_accepted'}`,
-      `Child requirement level: ${focusCard.childRequirementLevel ?? 'required'}`,
+      'Current workflow: use same-card Message Board DELEGATE / REVIEWER records. Child Kanban cards are legacy read-only context and must not be created for new delegation.',
+      parent || children.length > 0 ? `Legacy child-card policy: ${focusCard.requiredChildPolicy ?? 'all_required_accepted'} / ${focusCard.childRequirementLevel ?? 'required'}` : '',
       `Estimated weight: ${focusCard.estimatedWeight ?? 'not set'}`,
       `Estimated duration minutes: ${focusCard.estimatedDurationMinutes ?? 'not set'}`,
       `Task budget limit: ${focusCard.taskBudgetLimit ?? 'not set'}`,
@@ -3042,8 +2996,8 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
       `Applicable goals:\n${applicableGoals(companyGoals, { departmentId: focusCard.departmentId, projectId: focusCard.projectId, selectedGoalId: focusCard.goalId }).map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
       `Assignee: ${focusAssignee?.name ?? (focusCard.assigneeId ? 'unavailable' : 'unassigned')}`,
       `Reviewer: ${focusReviewer?.name ?? (focusCard.reviewerId ? 'unavailable' : 'none')}`,
-      `Parent: ${parent ? compactCardLine(parent, agentById) : 'none'}`,
-      `Children:\n${children.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
+      parent ? `Legacy parent card (read-only): ${compactCardLine(parent, agentById)}` : '',
+      children.length > 0 ? `Legacy child cards (read-only; do not create more):\n${children.map((card) => compactCardLine(card, agentById)).join('\n')}` : '',
       `Dependencies:\n${deps.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
       `Requires approval: ${focusCard.requiresApproval ? 'yes' : 'no'}`,
       `Retry: ${focusCard.retryCount ?? 0}/${focusCard.maxRetries ?? 3}`,
@@ -3123,7 +3077,7 @@ function completionProtocol(card: CardRow, reports: DelegationReport[] = []): st
       : optionalDelegationInstructions(reports),
     `Do not ask the user whether to proceed, whether they want a draft first, or whether you should submit/POST. Kanban tasks are assigned work; complete them autonomously unless you truly cannot proceed, then use status="needs_review".`,
     `Do not call POST /api/cards yourself for delegation. MegaCorps creates Message Board delegation requests from the DELEGATE block inside this same Kanban card. If your runtime reports through the webhook, send status="in_progress" and include the same DELEGATE block in summary/output instead of marking the current card done.`,
-    `Kanban stage belongs to the parent card. Message Board delegation has its own phase/final reviewer chain; do not create child Kanban cards unless a human explicitly asks for decomposition.`,
+    `Kanban stage belongs to the current card. Message Board delegation has its own phase/final reviewer chain; do not create child Kanban cards or split this work through /api/cards. Use DELEGATE blocks and Message Board reports instead.`,
     `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, report URL, screenshot URL, or artifact URL instead of local-only file paths.`,
     `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
     `If you are waiting on CI/CD, deploy, external approval, or another external system, use status="waiting_on_external" and include pollIntervalSeconds based on how often that system should be checked.`,
@@ -3159,11 +3113,11 @@ async function buildKanbanDeltaContext(card: CardRow, options: PromptBuildOption
     `Current task: ${compactCardLine(card, agentById)}`,
     `Updated at: ${card.updatedAt ? formatDate(card.updatedAt) : 'unknown'}`,
     `Decision mode: ${card.decisionMode ?? 'not set'}`,
-    `Required child policy: ${card.requiredChildPolicy ?? 'all_required_accepted'}`,
+    'Current workflow: same-card Message Board DELEGATE / REVIEWER records. Child Kanban cards are legacy read-only context and must not be created for new delegation.',
     `Last error: ${promptDiagnostic(card.lastError)}`,
     card.reviewFeedback ? `Current review feedback:\n${clipText(card.reviewFeedback, 2500)}` : 'Current review feedback: none',
-    `Parent chain:\n${ancestors.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
-    `Children now:\n${children.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
+    ancestors.length > 0 ? `Legacy parent chain (read-only):\n${ancestors.map((item) => compactCardLine(item, agentById)).join('\n')}` : 'Legacy parent chain: none',
+    children.length > 0 ? `Legacy child cards now (read-only; do not create more):\n${children.map((item) => compactCardLine(item, agentById)).join('\n')}` : 'Legacy child cards now: none',
     `Dependencies now:\n${deps.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
     `New message board entries:\n${recentMessages.map((message) => {
       const author = message.agentId ? agentById.get(message.agentId)?.name ?? 'unavailable' : message.authorType;
@@ -3203,6 +3157,26 @@ async function messageBoardThreadContext(card: CardRow, focusComment: CardCommen
   }).join('\n') || 'none';
 }
 
+function commentMetadata(metadata: unknown): Record<string, unknown> {
+  return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata as Record<string, unknown> : {};
+}
+
+function commentMetadataString(metadata: unknown, key: string): string | null {
+  const value = commentMetadata(metadata)[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function delegationSourceContextForPrompt(comment: Pick<CardCommentRow, 'metadata'>, options: PromptBuildOptions = {}): string {
+  if (options.continuation) return '';
+  const sourceContext = commentMetadataString(comment.metadata, 'sourceContext');
+  if (!sourceContext) return '';
+  return [
+    'Delegation source context:',
+    'Use this requester output only to resolve references in the delegation request, such as "above", "these items", or numbered candidates. The delegation request above remains your assignment.',
+    clipText(sourceContext, DELEGATION_SOURCE_CONTEXT_LIMIT),
+  ].join('\n');
+}
+
 async function buildMessageDelegationPrompt(card: CardRow, comment: CardCommentRow, options: PromptBuildOptions = {}): Promise<string> {
   const [assignee, reviewer] = await Promise.all([
     comment.assigneeAgentId ? db.select().from(agents).where(and(eq(agents.id, comment.assigneeAgentId), isNull(agents.deletedAt))).limit(1) : Promise.resolve([]),
@@ -3238,6 +3212,7 @@ async function buildMessageDelegationPrompt(card: CardRow, comment: CardCommentR
     '',
     'Delegation request:',
     clipText(comment.body, 6000),
+    delegationSourceContextForPrompt(comment, options),
     '',
     'Recent Message Board thread:',
     await messageBoardThreadContext(card, comment),
@@ -3327,7 +3302,7 @@ async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}
       helpReview
         ? `Help-review the escalated card ${card.id}: ${card.title}.`
         : `Quality-review or integrate the current card ${card.id}: ${card.title}.`,
-      'Use your existing adapter session memory for the original full context. Treat the fresh DB delta below as source of truth for current stage, messages, child/dependency states, and new work products.',
+      'Use your existing adapter session memory for the original full context. Treat the fresh DB delta below as source of truth for current stage, messages, legacy child-card/dependency states, and new work products.',
       'Fresh Kanban delta:',
       await buildKanbanDeltaContext(card, options),
       helpReview
@@ -3362,17 +3337,17 @@ async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}
     helpReview
       ? `Help-review an escalated card ${card.id}: ${card.title}.`
       : childRows.length > 0
-        ? `Integrate and quality-review completed child work for parent card ${card.id}: ${card.title}.`
+        ? `Quality-review the current card ${card.id}: ${card.title}, including any legacy child-card outputs that already exist.`
         : `Quality-review the completed work for card ${card.id}: ${card.title}.`,
     helpReview
       ? 'The assignee says they cannot complete the task. Decide one of: APPROVE/DONE if you can finish it directly, REVISION_REQUESTED with concrete guidance if the assignee should retry, or ESCALATE if your manager must decide.'
       : childRows.length > 0
-        ? 'Read every child result and work product, synthesize the final parent answer, and return PASS/APPROVED only when the combined result is ready. Return REJECT/REVISION_REQUESTED with concrete child-specific feedback if any required child needs rework. Use ESCALATE only if your manager must decide.'
+        ? 'Read every existing legacy child result and work product as read-only context, synthesize the final answer, and return PASS/APPROVED only when the combined result is ready. Return REJECT/REVISION_REQUESTED with concrete feedback if required evidence is missing. Do not create new child Kanban cards; use Message Board delegation records for any future split work.'
         : 'Return PASS/APPROVED if it is acceptable, or REJECT/REVISION_REQUESTED with feedback if it needs more work. Use ESCALATE only if your manager must decide.',
     'Use the Kanban context, message board, lifecycle logs, dependencies, and company state when deciding.',
     'Kanban context snapshot:',
     kanbanContext,
-    childRows.length > 0 ? 'Child results and work products:' : '',
+    childRows.length > 0 ? 'Legacy child-card results and work products:' : '',
     childRows.length > 0 ? childResultSummary || 'No child result details captured.' : '',
   ].join('\n\n');
 }

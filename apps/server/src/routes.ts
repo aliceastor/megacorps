@@ -10,7 +10,7 @@ import { db } from './db/client.ts';
 import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
-import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, decomposeCard, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions } from './dispatch.ts';
+import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions } from './dispatch.ts';
 import { registerChatRoutes } from './chat.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
@@ -1329,6 +1329,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = createCardSchema.parse(request.body);
     const companyId = input.companyId ?? await defaultCompanyId();
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
+    if (input.parentCardId) {
+      return reply.code(410).send({
+        error: 'child_cards_disabled',
+        message: 'Kanban no longer creates child cards. Use same-card Message Board DELEGATE / REVIEWER records instead.',
+      });
+    }
     try {
       await ensureCompanyReferences(companyId, {
         departmentId: input.departmentId,
@@ -1336,15 +1342,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         goalId: input.goalId,
         assigneeId: input.assigneeId,
         reviewerId: input.reviewerId,
-        parentCardId: input.parentCardId,
         dependencyCardIds: input.dependencyCardIds,
       });
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' });
     }
-    const [parentForInheritance] = input.parentCardId
-      ? await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, input.parentCardId), isNull(kanbanCards.deletedAt))).limit(1)
-      : [];
     const reviewerId = normalizedReviewerId(input.assigneeId ?? null, input.reviewerId ?? null);
     const [card] = await db.insert(kanbanCards).values({
       companyId,
@@ -1357,13 +1359,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       reviewerId,
       projectId: input.projectId ?? null,
       goalId: input.goalId ?? null,
-      parentCardId: input.parentCardId ?? null,
+      parentCardId: null,
       dependencyCardIds: input.dependencyCardIds,
       requiresApproval: input.requiresApproval,
-      decisionMode: input.decisionMode === undefined ? parentForInheritance?.decisionMode ?? null : input.decisionMode ?? null,
+      decisionMode: input.decisionMode === undefined ? null : input.decisionMode ?? null,
       rollupStatus: input.rollupStatus ?? null,
-      requiredChildPolicy: input.requiredChildPolicy ?? parentForInheritance?.requiredChildPolicy ?? 'all_required_accepted',
-      childRequirementLevel: input.childRequirementLevel ?? parentForInheritance?.childRequirementLevel ?? 'required',
+      requiredChildPolicy: input.requiredChildPolicy ?? 'manual',
+      childRequirementLevel: input.childRequirementLevel ?? 'follow_up',
       estimatedWeight: input.estimatedWeight === undefined || input.estimatedWeight === null ? null : input.estimatedWeight.toString(),
       estimatedDurationMinutes: input.estimatedDurationMinutes ?? null,
       taskBudgetLimit: input.taskBudgetLimit === undefined || input.taskBudgetLimit === null ? null : input.taskBudgetLimit.toString(),
@@ -1380,13 +1382,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }).returning();
     if (card) {
       await setCardDependencies(card.id, input.dependencyCardIds);
-      if (card.parentCardId) {
-        await ensureParentWaitingOnChildren(card.parentCardId, {
-          childCount: 1,
-          actor: 'user',
-          message: `Parent is waiting on newly created child card: ${card.title}.`,
-        });
-      }
       await recordStageAction({
         cardId: card.id,
         actor: { type: 'user', id: user.id, userId: user.id },
@@ -1424,6 +1419,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const nextAssigneeId = input.assigneeId === undefined ? existing.assigneeId : input.assigneeId ?? null;
     const nextReviewerId = normalizedReviewerId(nextAssigneeId, input.reviewerId === undefined ? existing.reviewerId : input.reviewerId ?? null);
     const nextParentCardId = input.parentCardId === undefined ? existing.parentCardId : input.parentCardId ?? null;
+    if (input.parentCardId && input.parentCardId !== existing.parentCardId) {
+      return reply.code(410).send({
+        error: 'child_cards_disabled',
+        message: 'Kanban no longer creates child-card relationships. Use same-card Message Board DELEGATE / REVIEWER records instead.',
+      });
+    }
     const nextDependencyCardIds = input.dependencyCardIds === undefined ? existing.dependencyCardIds ?? [] : input.dependencyCardIds;
     try {
       await ensureCompanyReferences(existing.companyId, {
@@ -1881,8 +1882,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
     if (!card) return reply;
     const user = await requireCompanyRole(request, reply, card.companyId, 'operator'); if (!user) return reply;
-    try { return reply.code(201).send(await decomposeCard(card.id)); }
-    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'decompose_failed' }); }
+    return reply.code(410).send({
+      error: 'child_cards_disabled',
+      message: 'Kanban no longer creates child cards. Use same-card Message Board DELEGATE / REVIEWER records instead.',
+    });
   });
   app.get('/api/cards/:id/assignment-history', async (request, reply) => {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
@@ -2344,7 +2347,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     let delegationError: string | null = null;
     let delegatedRows: Awaited<ReturnType<typeof createMessageDelegations>> = [];
     try {
-      delegatedRows = actorAgent ? await createMessageDelegations(card, actorAgent, requestedDelegation, { reviewerScope: 'final', sourceTaskRunId: taskRunId ?? null }) : [];
+      delegatedRows = actorAgent ? await createMessageDelegations(card, actorAgent, requestedDelegation, { reviewerScope: 'final', sourceTaskRunId: taskRunId ?? null, sourceOutput: executionLog }) : [];
     } catch (error) {
       delegationError = error instanceof Error ? error.message : 'delegation_failed';
     }
