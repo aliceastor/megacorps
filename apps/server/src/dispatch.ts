@@ -523,13 +523,14 @@ export async function enqueueMessageTaskRun(comment: CardCommentRow, kind: Extra
   const agentId = kind === 'message_review' ? comment.reviewerAgentId : comment.assigneeAgentId;
   if (!agentId) throw new Error(kind === 'message_review' ? 'message_review_has_no_reviewer' : 'message_delegation_has_no_assignee');
   const terminalCard = isTerminalCardStatus(card.columnStatus);
+  const shouldCancelTerminalRun = terminalCard && !terminalMessageTaskCanRun({ kind }, card, comment);
   const [existing] = await db.select().from(taskRuns).where(and(
     eq(taskRuns.messageCommentId, comment.id),
     eq(taskRuns.kind, kind),
     inArray(taskRuns.status, ['queued', 'running']),
   )).orderBy(desc(taskRuns.createdAt)).limit(1);
   if (existing) {
-    if (terminalCard) return await cancelTerminalMessageTaskRun(existing, card) ?? existing;
+    if (shouldCancelTerminalRun) return await cancelTerminalMessageTaskRun(existing, card) ?? existing;
     return existing;
   }
   const previous = await db.select({ id: taskRuns.id }).from(taskRuns).where(and(eq(taskRuns.messageCommentId, comment.id), eq(taskRuns.kind, kind)));
@@ -541,12 +542,12 @@ export async function enqueueMessageTaskRun(comment: CardCommentRow, kind: Extra
     agentId,
     kind,
     source: 'queue',
-    status: terminalCard ? 'cancelled' : 'queued',
+    status: shouldCancelTerminalRun ? 'cancelled' : 'queued',
     priority: card.priority ?? 0,
     attemptNumber: previous.length + 1,
     maxAttempts: 1,
-    completedAt: terminalCard ? new Date() : null,
-    error: terminalCard ? terminalReason : null,
+    completedAt: shouldCancelTerminalRun ? new Date() : null,
+    error: shouldCancelTerminalRun ? terminalReason : null,
   }).onConflictDoNothing().returning();
   if (!run) {
     const [winner] = await db.select().from(taskRuns).where(and(
@@ -557,7 +558,7 @@ export async function enqueueMessageTaskRun(comment: CardCommentRow, kind: Extra
     if (winner) return winner;
     throw new Error('message_task_run_create_failed');
   }
-  if (terminalCard) {
+  if (shouldCancelTerminalRun) {
     await recordTerminalMessageTaskSkip(run, card, terminalReason);
     return run;
   }
@@ -739,6 +740,13 @@ function terminalMessageTaskReason(run: Pick<TaskRunRow, 'kind'>, card: Pick<Car
   return `${run.kind} task run skipped because card is already ${card.columnStatus ?? 'terminal'}.`;
 }
 
+function terminalMessageTaskCanRun(run: Pick<TaskRunRow, 'kind'>, card: Pick<CardRow, 'columnStatus'>, comment: Pick<CardCommentRow, 'action' | 'delegationStatus'> | null | undefined): boolean {
+  return run.kind === 'message_review'
+    && card.columnStatus === 'done'
+    && comment?.action === 'delegate_report'
+    && comment.delegationStatus === 'submitted';
+}
+
 async function recordTerminalMessageTaskSkip(run: TaskRunRow, card: CardRow, reason = terminalMessageTaskReason(run, card)): Promise<void> {
   const [comment] = run.messageCommentId
     ? await db.select().from(cardComments).where(and(eq(cardComments.id, run.messageCommentId), eq(cardComments.cardId, card.id))).limit(1)
@@ -910,9 +918,14 @@ async function claimNextTaskRun(): Promise<TaskRunRow | null> {
     } else if (queued.kind === 'dispatch') {
       if (card.nextRunAt && card.nextRunAt > now) continue;
       if (!(await cardDependenciesMet(card.id))) continue;
-    } else if (!queued.messageCommentId || isTerminalCardStatus(card.columnStatus)) {
-      if (queued.messageCommentId && isTerminalCardStatus(card.columnStatus)) await cancelTerminalMessageTaskRun(queued, card);
+    } else if (!queued.messageCommentId) {
       continue;
+    } else if (isTerminalCardStatus(card.columnStatus)) {
+      const [comment] = await db.select().from(cardComments).where(and(eq(cardComments.id, queued.messageCommentId), eq(cardComments.cardId, card.id))).limit(1);
+      if (!terminalMessageTaskCanRun(queued, card, comment)) {
+        await cancelTerminalMessageTaskRun(queued, card);
+        continue;
+      }
     }
     const targetAgentId = queued.kind === 'review'
       ? card.reviewerId
@@ -1566,6 +1579,7 @@ async function messageRunContext(cardId: string, taskRunId: string | null | unde
   if (!taskRun || taskRun.kind !== kind || !taskRun.messageCommentId) throw new Error(`${kind}_task_run_not_found`);
   const [comment] = await db.select().from(cardComments).where(and(eq(cardComments.id, taskRun.messageCommentId), eq(cardComments.cardId, card.id))).limit(1);
   if (!comment) throw new Error('message_comment_not_found');
+  if (isTerminalCardStatus(card.columnStatus) && !terminalMessageTaskCanRun(taskRun, card, comment)) throw new Error(`${kind}_terminal_card`);
   const agentId = kind === 'message_review' ? comment.reviewerAgentId : comment.assigneeAgentId;
   if (!agentId || agentId !== taskRun.agentId) throw new Error(`${kind}_agent_mismatch`);
   const [agent] = await db.select().from(agents).where(and(eq(agents.id, agentId), isNull(agents.deletedAt))).limit(1);
@@ -1591,6 +1605,10 @@ async function childDelegationsPending(parentCommentId: string): Promise<boolean
 
 async function continueAfterMessageReportApproval(card: CardRow, request: CardCommentRow | null | undefined): Promise<void> {
   if (!request) return;
+  if (isTerminalCardStatus(card.columnStatus)) {
+    await addTaskLog({ cardId: card.id, agentId: request.assigneeAgentId, type: 'message_delegation', status: 'success', message: `Delegated report approved after card was already ${card.columnStatus}; parent dispatch was not queued.` });
+    return;
+  }
   if (request.parentCommentId) {
     const [parentRequest] = await db.select().from(cardComments).where(eq(cardComments.id, request.parentCommentId)).limit(1);
     if (parentRequest && parentRequest.action === 'delegate_request' && parentRequest.assigneeAgentId && !(await childDelegationsPending(parentRequest.id))) {
@@ -2839,6 +2857,7 @@ export const dispatchInternals = {
   explicitReviewDecision,
   optionalDelegationInstructions,
   reviewDecision,
+  terminalMessageTaskCanRun,
 };
 
 function clipText(value: string | null | undefined, maxChars: number): string {

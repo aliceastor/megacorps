@@ -145,6 +145,24 @@ test('delegation parser accepts webhook summary plus output payloads', () => {
   ]);
 });
 
+test('submitted final reports can be reviewed after the parent card is done', () => {
+  assert.equal(dispatchInternals.terminalMessageTaskCanRun(
+    { kind: 'message_review' } as any,
+    { columnStatus: 'done' } as any,
+    { action: 'delegate_report', delegationStatus: 'submitted' } as any,
+  ), true);
+  assert.equal(dispatchInternals.terminalMessageTaskCanRun(
+    { kind: 'message' } as any,
+    { columnStatus: 'done' } as any,
+    { action: 'delegate_request', delegationStatus: 'queued' } as any,
+  ), false);
+  assert.equal(dispatchInternals.terminalMessageTaskCanRun(
+    { kind: 'message_review' } as any,
+    { columnStatus: 'blocked' } as any,
+    { action: 'delegate_report', delegationStatus: 'submitted' } as any,
+  ), false);
+});
+
 test('collaboration mode applies recursively to child cards', () => {
   assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'delegate', parentCardId: null } as any), true);
   assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'delegate', parentCardId: 'parent-1' } as any), true);
