@@ -25,6 +25,7 @@ import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { listNotifications, markAllNotificationsRead, markNotificationRead, notify, unreadNotificationCount } from './notifications.ts';
 import { notifications } from './db/schema.ts';
 import { API_TOKEN_HASH_SETTING, readApiTokenSettings, revokeApiToken, rotateApiToken } from './api-token.ts';
+import { KANBAN_TASK_TIMEOUT_SETTING, readKanbanTaskTimeoutSeconds, setKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
@@ -58,6 +59,7 @@ function hydrateReviewCommentAuthors(
 }
 
 const ACTIVE_DELEGATION_STATUSES = new Set(['queued', 'running', 'waiting', 'submitted']);
+const PROCESS_DELEGATION_STATUSES = new Set(['queued', 'running', 'waiting']);
 
 function normalizedReviewerId(assigneeId: string | null | undefined, reviewerId: string | null | undefined): string | null {
   if (!reviewerId) return null;
@@ -76,6 +78,41 @@ async function resolveIndependentReviewerForCard(card: typeof kanbanCards.$infer
   const [assignee] = await db.select({ bossId: agents.bossId }).from(agents).where(and(eq(agents.id, card.assigneeId), isNull(agents.deletedAt))).limit(1);
   if (assignee?.bossId && assignee.bossId !== card.assigneeId && assignee.bossId !== actorAgentId) return assignee.bossId;
   return null;
+}
+
+async function hydrateCardWorkflowActors<T extends { id: string; columnStatus?: string | null; assigneeId?: string | null; reviewerId?: string | null }>(cards: T[]): Promise<Array<T & { workflowProcessAgentId: string | null; workflowReviewAgentId: string | null }>> {
+  if (cards.length === 0) return [];
+  const cardIds = cards.map((card) => card.id);
+  const rows = await db.select({
+    cardId: cardComments.cardId,
+    assigneeAgentId: cardComments.assigneeAgentId,
+    reviewerAgentId: cardComments.reviewerAgentId,
+    reviewerScope: cardComments.reviewerScope,
+    delegationStatus: cardComments.delegationStatus,
+    createdAt: cardComments.createdAt,
+  }).from(cardComments).where(and(
+    inArray(cardComments.cardId, cardIds),
+    drizzleSql`${cardComments.delegationStatus} IS NOT NULL`,
+  )).orderBy(desc(cardComments.createdAt)).limit(Math.max(500, cardIds.length * 20));
+  const rowsByCard = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const current = rowsByCard.get(row.cardId) ?? [];
+    current.push(row);
+    rowsByCard.set(row.cardId, current);
+  }
+  return cards.map((card) => {
+    const cardRows = rowsByCard.get(card.id) ?? [];
+    const activeRows = cardRows.filter((row) => row.delegationStatus && ACTIVE_DELEGATION_STATUSES.has(row.delegationStatus));
+    const reviewRow = activeRows.find((row) => row.delegationStatus === 'submitted' && row.reviewerAgentId)
+      ?? activeRows.find((row) => row.reviewerScope === 'final' && row.reviewerAgentId)
+      ?? activeRows.find((row) => row.reviewerAgentId);
+    const processRow = activeRows.find((row) => row.delegationStatus && PROCESS_DELEGATION_STATUSES.has(row.delegationStatus) && row.assigneeAgentId)
+      ?? activeRows.find((row) => row.assigneeAgentId);
+    const status = normalizeCardStatus(card.columnStatus) ?? 'todo';
+    const workflowReviewAgentId = reviewRow?.reviewerAgentId ?? (['in_review', 'needs_review'].includes(status) ? card.reviewerId ?? null : null);
+    const workflowProcessAgentId = processRow?.assigneeAgentId ?? (!workflowReviewAgentId && ['todo', 'in_progress', 'waiting_on_external'].includes(status) ? card.assigneeId ?? null : null);
+    return { ...card, workflowProcessAgentId, workflowReviewAgentId };
+  });
 }
 
 function webhookRunStatus(status: string): 'success' | 'failed' | 'cancelled' {
@@ -162,6 +199,7 @@ async function adminSettingsResponse(apiToken?: string) {
   const tokenSettings = await readApiTokenSettings();
   return {
     signupEnabled: await signupEnabled(),
+    kanbanTaskTimeoutSeconds: await readKanbanTaskTimeoutSeconds(),
     apiTokenConfigured: tokenSettings.configured,
     apiTokenPreview: tokenSettings.preview,
     apiTokenUpdatedAt: tokenSettings.updatedAt,
@@ -591,6 +629,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireRole(request, reply, 'admin'); if (!user) return reply;
     const input = adminUpdateSettingsSchema.parse(request.body);
     if (input.signupEnabled !== undefined) await setSettingValue(SIGNUP_ENABLED_SETTING, input.signupEnabled ? 'true' : 'false');
+    if (input.kanbanTaskTimeoutSeconds !== undefined) await setKanbanTaskTimeoutSeconds(input.kanbanTaskTimeoutSeconds);
     const rotated = input.apiTokenAction === 'rotate' ? await rotateApiToken(user.id) : null;
     if (input.apiTokenAction === 'revoke') await revokeApiToken();
     const companyId = await defaultCompanyId();
@@ -601,8 +640,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       userId: user.id,
       action: 'admin.settings.updated',
       entityType: 'app_settings',
-      entityId: input.apiTokenAction ? API_TOKEN_HASH_SETTING : SIGNUP_ENABLED_SETTING,
-      details: { signupEnabled: input.signupEnabled, apiTokenAction: input.apiTokenAction },
+      entityId: input.apiTokenAction ? API_TOKEN_HASH_SETTING : input.kanbanTaskTimeoutSeconds !== undefined ? KANBAN_TASK_TIMEOUT_SETTING : SIGNUP_ENABLED_SETTING,
+      details: { signupEnabled: input.signupEnabled, kanbanTaskTimeoutSeconds: input.kanbanTaskTimeoutSeconds, apiTokenAction: input.apiTokenAction },
     });
     return adminSettingsResponse(rotated?.token);
   });
@@ -1322,7 +1361,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     ].filter(Boolean);
     const where = filters.length ? and(...filters) : undefined;
     const rows = await db.select().from(kanbanCards).where(where).orderBy(desc(kanbanCards.updatedAt)).limit(Number(query.limit ?? 100)).offset(Number(query.offset ?? 0));
-    return hydrateCardDependencyState(rows);
+    return hydrateCardWorkflowActors(await hydrateCardDependencyState(rows));
   });
 
   app.post('/api/cards', async (request, reply) => {

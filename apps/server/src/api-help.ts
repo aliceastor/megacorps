@@ -135,8 +135,8 @@ const endpoints: ApiEndpoint[] = [
   { method: 'POST', path: '/api/auth/invites', group: 'Auth', auth: 'session', requiredRole: 'admin', summary: 'Create a one-time company invite token. The raw token is returned once and only its SHA-256 hash is stored.', body: { companyId: 'uuid', email: 'operator@example.com', name: 'Optional name', role: 'viewer | operator | admin', expiresInDays: 7 } },
   { method: 'POST', path: '/api/auth/accept-invite', group: 'Auth', auth: 'none', summary: 'Accept a one-time invite token and create or activate the user membership.', body: { token: 'invite token', name: 'Optional display name', password: 'at least 12 chars' } },
   { method: 'GET', path: '/api/me', group: 'Auth', auth: 'session', summary: 'Read the current authenticated user.' },
-  { method: 'GET', path: '/api/admin/settings', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Read global admin settings such as DB-backed signup enablement and direct API token status.' },
-  { method: 'PUT', path: '/api/admin/settings', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Update global admin settings. apiTokenAction=rotate returns a raw API token once; revoke disables direct Bearer token access.', body: { signupEnabled: true, apiTokenAction: 'rotate | revoke optional' } },
+  { method: 'GET', path: '/api/admin/settings', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Read global admin settings such as DB-backed signup enablement, Kanban task timeout, and direct API token status.' },
+  { method: 'PUT', path: '/api/admin/settings', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Update global admin settings. kanbanTaskTimeoutSeconds controls Kanban adapter task timeout when a card has no override. apiTokenAction=rotate returns a raw API token once; revoke disables direct Bearer token access.', body: { signupEnabled: true, kanbanTaskTimeoutSeconds: 900, apiTokenAction: 'rotate | revoke optional' } },
   { method: 'GET', path: '/api/admin/users', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'List all user accounts and company memberships.' },
   { method: 'PUT', path: '/api/admin/users/:id', group: 'Admin', auth: 'session', requiredRole: 'admin', summary: 'Update an account name, global role, active/disabled status, or reset password. The last active admin cannot be demoted or disabled.', params: { id: 'User UUID.' }, body: { name: 'Operator', role: 'viewer | operator | admin', status: 'active | disabled', password: 'optional reset password' } },
 
@@ -396,6 +396,7 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
     return {
       responseSchema: {
         signupEnabled: 'boolean',
+        kanbanTaskTimeoutSeconds: 'number',
         apiTokenConfigured: 'boolean',
         apiTokenPreview: 'string | null',
         apiTokenUpdatedAt: 'ISO datetime | null',
@@ -405,6 +406,7 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
       },
       responseExample: {
         signupEnabled: true,
+        kanbanTaskTimeoutSeconds: 900,
         apiTokenConfigured: true,
         apiTokenPreview: 'mca_abcd...xyz789',
         apiTokenUpdatedAt: '2026-06-13T12:00:00.000Z',

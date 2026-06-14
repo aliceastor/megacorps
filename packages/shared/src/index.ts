@@ -472,6 +472,7 @@ export const adminUpdateUserSchema = z.object({
 
 export const adminUpdateSettingsSchema = z.object({
   signupEnabled: z.boolean().optional(),
+  kanbanTaskTimeoutSeconds: z.number().int().min(30).max(14_400).optional(),
   apiTokenAction: z.enum(['rotate', 'revoke']).optional(),
 });
 

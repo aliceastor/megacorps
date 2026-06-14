@@ -73,6 +73,8 @@ type Card = {
   completedAt?: string | null;
   createdAt?: string;
   updatedAt?: string;
+  workflowProcessAgentId?: string | null;
+  workflowReviewAgentId?: string | null;
 };
 type Agent = { id: string; companyId?: string; name: string; role?: string; adapterType?: string; isBusy?: boolean };
 type Company = { id: string; name: string };
@@ -238,6 +240,14 @@ function agentDisplayName(agent: Agent | undefined): string | null {
   return [agent.name, agent.role].filter(Boolean).join(' / ');
 }
 
+function cardWorkflowTag(card: Card, agents: Agent[]): { type: 'Process' | 'Review'; name: string } | null {
+  const reviewId = card.workflowReviewAgentId ?? (['in_review', 'needs_review'].includes(card.columnStatus) ? card.reviewerId : null);
+  const processId = card.workflowProcessAgentId ?? (!reviewId && ['todo', 'in_progress', 'waiting_on_external'].includes(card.columnStatus) ? card.assigneeId : null);
+  if (reviewId) return { type: 'Review', name: agentDisplayName(agents.find((agent) => agent.id === reviewId)) ?? reviewId.slice(0, 8) };
+  if (processId) return { type: 'Process', name: agentDisplayName(agents.find((agent) => agent.id === processId)) ?? processId.slice(0, 8) };
+  return null;
+}
+
 function isQueryCancellation(error: unknown): boolean {
   return isCancelledError(error) || (error instanceof Error && error.name === 'CancelledError');
 }
@@ -314,11 +324,13 @@ async function fetchKanbanBoard() {
 function Column({
   group,
   cards,
+  agents,
   companies,
   onSelect,
 }: {
   group: StatusGroup;
   cards: Card[];
+  agents: Agent[];
   companies: Company[];
   onSelect: (card: Card) => void;
 }) {
@@ -334,6 +346,7 @@ function Column({
       {cards.map((card) => <DraggableCard
         key={card.id}
         card={card}
+        agents={agents}
         companyName={companies.find((company) => company.id === card.companyId)?.name}
         onSelect={onSelect}
       />)}
@@ -343,15 +356,18 @@ function Column({
 
 function DraggableCard({
   card,
+  agents,
   companyName,
   onSelect,
 }: {
   card: Card;
+  agents: Agent[];
   companyName?: string;
   onSelect: (card: Card) => void;
 }) {
   const { t } = useLocale();
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: card.id });
+  const workflowTag = cardWorkflowTag(card, agents);
   return <article
     ref={setNodeRef}
     data-card-id={card.id}
@@ -396,6 +412,7 @@ function DraggableCard({
       {card.costUsd && <span className="badge">${card.costUsd}</span>}
       {card.tags?.map((tag) => <span className="badge" key={tag}>{tag}</span>)}
     </div>
+    {workflowTag && <div className={`kanban-card-owner-tag ${workflowTag.type === 'Review' ? 'review' : 'process'}`}>[{workflowTag.type}: {workflowTag.name}]</div>}
   </article>;
 }
 
@@ -1134,6 +1151,7 @@ export function KanbanBoard() {
           {statusGroups.map((group) => <Column
             key={group.id}
             group={group}
+            agents={agents}
             companies={companies}
             cards={cardsForStatusGroup(boardCards, group)}
             onSelect={(card) => { setSelected(card); setTab('details'); }}

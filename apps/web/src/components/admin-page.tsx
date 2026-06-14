@@ -1,6 +1,6 @@
 'use client';
 import { Fragment, useEffect, useMemo, useState } from 'react';
-import { Copy, KeyRound, MailPlus, RefreshCw, Save, ShieldCheck, Trash2, UserCog } from 'lucide-react';
+import { Clock, Copy, KeyRound, MailPlus, RefreshCw, Save, ShieldCheck, Trash2, UserCog } from 'lucide-react';
 import { api } from '@/lib/api';
 
 type Membership = {
@@ -24,6 +24,7 @@ type Account = {
 
 type AdminSettings = {
   signupEnabled: boolean;
+  kanbanTaskTimeoutSeconds: number;
   apiTokenConfigured: boolean;
   apiTokenPreview?: string | null;
   apiTokenUpdatedAt?: string | null;
@@ -86,7 +87,10 @@ export function AdminPage() {
     setBusy(true);
     setError('');
     try {
-      const saved = await api<AdminSettings>('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ signupEnabled: settings.signupEnabled }) });
+      const saved = await api<AdminSettings>('/api/admin/settings', { method: 'PUT', body: JSON.stringify({
+        signupEnabled: settings.signupEnabled,
+        kanbanTaskTimeoutSeconds: settings.kanbanTaskTimeoutSeconds,
+      }) });
       setSettings(saved);
       setToast('Settings saved');
     } catch (err) {
@@ -201,10 +205,27 @@ export function AdminPage() {
       <section className="card section-card">
         <div className="panel-title"><h2>Signup control</h2><ShieldCheck size={18} /></div>
         <label className="check-row">
-          <input type="checkbox" checked={settings?.signupEnabled ?? true} onChange={(event) => setSettings((current) => ({ ...(current ?? { apiTokenConfigured: false }), signupEnabled: event.target.checked }))} />
+          <input type="checkbox" checked={settings?.signupEnabled ?? true} onChange={(event) => setSettings((current) => ({ ...(current ?? { signupEnabled: true, kanbanTaskTimeoutSeconds: 300, apiTokenConfigured: false }), signupEnabled: event.target.checked }))} />
           Signup enabled
         </label>
         <p className="auth-note">Signup defaults to enabled in the DB. If no active admin exists, the next signup becomes global admin and default-company admin.</p>
+        <button className="btn btn-primary" onClick={saveSettings} disabled={busy || !settings}><Save size={15} /> Save settings</button>
+      </section>
+
+      <section className="card section-card">
+        <div className="panel-title"><h2>Kanban runtime</h2><Clock size={18} /></div>
+        <label className="field-label">Task timeout seconds
+          <input
+            className="input"
+            type="number"
+            min={30}
+            max={14400}
+            step={30}
+            value={settings?.kanbanTaskTimeoutSeconds ?? 300}
+            onChange={(event) => setSettings((current) => ({ ...(current ?? { signupEnabled: true, apiTokenConfigured: false, kanbanTaskTimeoutSeconds: 300 }), kanbanTaskTimeoutSeconds: Number(event.target.value || 300) }))}
+          />
+        </label>
+        <p className="auth-note">Used by Kanban dispatch, Message Board delegation, and review when a card has no per-card timeout override.</p>
         <button className="btn btn-primary" onClick={saveSettings} disabled={busy || !settings}><Save size={15} /> Save settings</button>
       </section>
 
