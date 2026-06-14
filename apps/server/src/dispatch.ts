@@ -15,6 +15,7 @@ import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { notify } from './notifications.ts';
 import { readKanbanTaskTimeoutSeconds, normalizeKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
+import { projectSharedFileSpaceLines } from './project-workspace.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -188,8 +189,10 @@ function companyStructureLines(input: {
 export function collaborationDelegationInstructions(reports: DelegationReport[] = []): string {
   return [
     'Collaboration Mode is ON.',
-    'If you have active direct reports, you MUST split this work into meaningful delegated work items and assign them to the most suitable employees so more appropriate staff participate and improve quality.',
-    'Do not complete the current leader card directly with status="done" or status="in_review" while active direct reports are available.',
+    'If you have active direct reports and you have not delegated this card/delegation assignment yet, you MUST split meaningful work into delegated work items and assign them to the most suitable employees so more appropriate staff participate and improve quality.',
+    'This mandatory delegation requirement is one-time per agent per card/delegation assignment. After you have created a valid Message Board DELEGATE request, integrate, report, complete, or ask for review without creating keepalive delegations.',
+    'Do not complete the current leader work directly with status="done" or status="in_review" before that one required delegation is created while active direct reports are available.',
+    'Review work is exempt: reviewers approve, reject, or escalate the report; they do not need to DELEGATE merely to review.',
     `Active direct reports to consider: ${directReportList(reports)}.`,
     'Return the delegation plan exactly like this in stdout, or send status="in_progress" with this block in the webhook summary/output:',
     'DELEGATE:',
@@ -197,6 +200,18 @@ export function collaborationDelegationInstructions(reports: DelegationReport[] 
     'Each bullet becomes a Message Board delegation inside this same Kanban card, not a child Kanban card. Prefix a bullet with "name:" or "slug:" to target a specific direct report; omit the prefix only if any direct report can take it.',
     'The delegate reports back to the reviewer chain on this card: top-level delegates report to you as FINAL REVIEWER; nested delegates report to their requester as PHASE REVIEWER.',
     'If you truly have no active direct reports, complete the work yourself and state that no active direct reports were available for delegation.',
+  ].join('\n');
+}
+
+export function collaborationDelegationSatisfiedInstructions(reports: DelegationReport[] = []): string {
+  return [
+    'Collaboration Mode is ON.',
+    'You have already satisfied the one required Message Board delegation for this card/delegation assignment.',
+    'Do not create another DELEGATE block unless there is genuinely new work that should be handled by a direct report.',
+    'Do not create keepalive, ack-only, seal-only, or loop-confirmation delegations.',
+    'Integrate the approved delegated work and complete/report/escalate according to the task result.',
+    'Review work is exempt: approve, reject, or escalate the report without delegating merely to review.',
+    `Active direct reports remain available for genuinely new work only: ${directReportList(reports)}.`,
   ].join('\n');
 }
 
@@ -252,6 +267,37 @@ export async function activeDirectReportsForAgent(companyId: string, bossId: str
 async function activeDirectReportsForCard(card: CardRow): Promise<DelegationReport[]> {
   if (!card.assigneeId) return [];
   return activeDirectReportsForAgent(card.companyId, card.assigneeId);
+}
+
+export async function actorHasDelegatedInScope(cardId: string, agentId: string, parentCommentId: string | null = null): Promise<boolean> {
+  const filters = [
+    eq(cardComments.cardId, cardId),
+    eq(cardComments.agentId, agentId),
+    eq(cardComments.action, 'delegate_request'),
+    parentCommentId ? eq(cardComments.parentCommentId, parentCommentId) : isNull(cardComments.parentCommentId),
+  ];
+  const rows = await db.select({ id: cardComments.id }).from(cardComments).where(and(...filters)).limit(1);
+  return rows.length > 0;
+}
+
+export async function collaborationDelegationRequirement(card: CardRow, agentId: string | null | undefined, parentCommentId: string | null = null): Promise<{ required: boolean; alreadyDelegated: boolean; reports: AvailableDelegationReport[] }> {
+  if (!agentId || !collaborationModeRequiresDelegation(card)) return { required: false, alreadyDelegated: false, reports: [] };
+  const reports = await activeDirectReportsForAgent(card.companyId, agentId);
+  if (reports.length === 0) return { required: false, alreadyDelegated: false, reports };
+  const alreadyDelegated = await actorHasDelegatedInScope(card.id, agentId, parentCommentId);
+  return { required: !alreadyDelegated, alreadyDelegated, reports };
+}
+
+function messageDelegationRequirementFeedback(reports: DelegationReport[]): string {
+  return [
+    'collaboration_mode_requires_delegation',
+    '',
+    'You are handling a Message Board delegation in a Collaboration Mode card.',
+    'Because you have active direct reports and have not delegated inside this delegated assignment yet, you must create at least one meaningful nested DELEGATE request before reporting this assignment complete.',
+    'After that nested delegation is reviewed, integrate the result and report back to your phase/final reviewer. Review turns do not require delegation.',
+    '',
+    collaborationDelegationInstructions(reports),
+  ].join('\n');
 }
 
 async function promptVisibleAgents(companyId: string, agentRows: CompanyStructureAgent[], cache?: RuntimeAvailabilityCache): Promise<CompanyStructureAgent[]> {
@@ -399,12 +445,13 @@ function runtimeLocalLines(runtime: RuntimeRow | null | undefined): string[] {
   ];
 }
 
-function projectRepoLines(project: ProjectRow | null | undefined, runtime?: RuntimeRow | null): string[] {
-  if (!project) return ['Project repository: none', ...runtimeLocalLines(runtime)];
+function projectRepoLines(company: typeof companies.$inferSelect | null | undefined, project: ProjectRow | null | undefined, runtime?: RuntimeRow | null): string[] {
+  if (!project) return ['Project repository: none', ...projectSharedFileSpaceLines(company, null), ...runtimeLocalLines(runtime)];
   return [
     `Project repository provider: ${project.repoProvider ?? 'github'}`,
     `Project repository URL: ${project.repoUrl ?? 'not configured'}`,
     `Project work path: ${project.workPath ?? 'project root'}`,
+    ...projectSharedFileSpaceLines(company, project),
     ...runtimeLocalLines(runtime),
     `Default branch: ${project.defaultBranch ?? 'main'}`,
     `Protected branches: ${(project.protectedBranches ?? ['main', 'master']).join(', ') || 'none'}`,
@@ -414,15 +461,16 @@ function projectRepoLines(project: ProjectRow | null | undefined, runtime?: Runt
     `Completion policy: ${project.completionPolicy ?? 'push_or_pr'}`,
     project.setupCommand ? `Setup command: ${project.setupCommand}` : '',
     project.testCommand ? `Test command: ${project.testCommand}` : '',
-    project.workspacePathHint ? `Runtime-local workspace hint: ${project.workspacePathHint}` : '',
     `Runtime services: ${clipText(JSON.stringify(project.runtimeServices ?? {}), 1200)}`,
   ].filter(Boolean);
 }
 
-function projectGitProtocol(project: ProjectRow | null | undefined, card: CardRow, agent: AgentRow | null | undefined, runtime?: RuntimeRow | null): string {
+function projectGitProtocol(company: typeof companies.$inferSelect | null | undefined, project: ProjectRow | null | undefined, card: CardRow, agent: AgentRow | null | undefined, runtime?: RuntimeRow | null): string {
   const localRoots = runtimeLocalLines(runtime).join('\n');
+  const sharedFiles = projectSharedFileSpaceLines(company, project, card.id).join('\n');
   if (!project?.repoUrl) return [
     'No repository is configured for this project. Do not invent shared local file paths; use runtime-local scratch only for temporary work and report external work products by URL when available.',
+    sharedFiles,
     localRoots,
   ].join('\n');
   const branchPattern = project.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}';
@@ -434,6 +482,7 @@ function projectGitProtocol(project: ProjectRow | null | undefined, card: CardRo
     'Repository workflow:',
     `1. Use repo ${project.repoUrl}. Your local clone path is runtime-owned; MegaCorps does not assume a shared folder path.`,
     localRoots,
+    `Project file space:\n${sharedFiles}`,
     `2. Clone/cache the repo under the runtime-local workspace root when configured; otherwise choose a safe local folder owned by your runtime.`,
     `3. Treat project work path as ${project.workPath ?? 'project root'}. Stay inside that path unless the task explicitly requires a broader change.`,
     project.pullBeforeRun === false ? '4. Pull-before-run is disabled for this project.' : `4. Before editing, fetch the latest ${project.defaultBranch ?? 'main'} and pull/rebase so your local workspace is current.`,
@@ -441,8 +490,9 @@ function projectGitProtocol(project: ProjectRow | null | undefined, card: CardRo
     project.setupCommand ? `6. Run setup when needed: ${project.setupCommand}` : '6. Run project setup only when needed and report any failure.',
     project.testCommand ? `7. Validate with: ${project.testCommand}` : '7. Run the most relevant tests/checks available in the repo/work path.',
     project.pushAfterRun === false ? '8. Push-after-run is disabled; report the local result and blocker clearly.' : `8. Commit and push your branch when work is complete. Prefer a pull request when policy is ${project.completionPolicy ?? 'push_or_pr'}.`,
-    '9. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, or external metadata as applicable. Never use runtime-local file paths as the final artifact reference unless the user explicitly asked for local-only work.',
-    '10. If you report status=waiting_on_external, include pollIntervalSeconds when polling is appropriate. Choose the interval yourself based on the external system, minimum 30 seconds.',
+    '9. Put durable non-code deliverables, reports, exports, and handoff docs in the project deliverables path, then include them as workProducts in the webhook payload.',
+    '10. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, file, or external metadata as applicable. Never use runtime-local file paths as the final artifact reference unless the user explicitly asked for local-only work.',
+    '11. If you report status=waiting_on_external, include pollIntervalSeconds when polling is appropriate. Choose the interval yourself based on the external system, minimum 30 seconds.',
   ].join('\n');
 }
 
@@ -1756,6 +1806,16 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       await completeTaskRun(taskRun.id, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       return card;
     }
+    const nestedDelegationRequirement = await collaborationDelegationRequirement(card, agent.id, comment.id);
+    if (nestedDelegationRequirement.required) {
+      const errorMessage = messageDelegationRequirementFeedback(nestedDelegationRequirement.reports);
+      await db.update(heartbeatRuns).set({ status: 'failed', error: errorMessage }).where(eq(heartbeatRuns.id, run.id));
+      await completeTaskRun(taskRun.id, { status: 'failed', error: errorMessage, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      if (await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message', agentId: agent.id, message: errorMessage })) return card;
+      await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
+      await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'delegate_failed', body: errorMessage, delegationStatus: 'failed' });
+      return card;
+    }
     const report = await addCardMessage({
       cardId: card.id,
       parentCommentId: comment.id,
@@ -1925,6 +1985,19 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
       if (heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), error: null, costUsd: input.costUsd?.toString() }).where(eq(heartbeatRuns.id, heartbeatRunId));
       await completeTaskRun(taskRun.id, { status: 'success', output, costUsd: input.costUsd });
       return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'waiting', delegated: true, reviewerId: comment.reviewerAgentId };
+    }
+    const nestedDelegationRequirement = await collaborationDelegationRequirement(card, actorAgentId, comment.id);
+    if (nestedDelegationRequirement.required) {
+      const errorMessage = messageDelegationRequirementFeedback(nestedDelegationRequirement.reports);
+      if (actorAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actorAgentId));
+      if (heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: errorMessage, costUsd: input.costUsd?.toString() }).where(eq(heartbeatRuns.id, heartbeatRunId));
+      await completeTaskRun(taskRun.id, { status: 'failed', error: errorMessage, output, costUsd: input.costUsd });
+      if (await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message', agentId: actorAgentId, message: errorMessage })) {
+        return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'queued', delegated: false, reviewerId: comment.reviewerAgentId };
+      }
+      await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
+      await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: actorAgentId, action: 'delegate_failed', body: errorMessage, delegationStatus: 'failed' });
+      return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'failed', delegated: false, reviewerId: comment.reviewerAgentId };
     }
     const report = await addCardMessage({
       cardId: card.id,
@@ -2133,21 +2206,19 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       if (!updated) throw new Error('card_update_failed');
       return updated;
     }
-    if (collaborationModeRequiresDelegation(card)) {
-      const directReports = await activeDirectReportsForAgent(card.companyId, agent.id);
-      if (directReports.length > 0) {
-        await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-        return sendAgentFeedbackAndRequeue({
-          card: lockedCard,
-          agent,
-          kind: 'dispatch',
-          message: `collaboration_mode_requires_delegation\n\n${collaborationDelegationInstructions(directReports)}`,
-          runId: run.id,
-          taskRunId: options.taskRunId,
-          output: result.output,
-          result,
-        });
-      }
+    const delegationRequirement = await collaborationDelegationRequirement(card, agent.id, null);
+    if (delegationRequirement.required) {
+      await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+      return sendAgentFeedbackAndRequeue({
+        card: lockedCard,
+        agent,
+        kind: 'dispatch',
+        message: `collaboration_mode_requires_delegation\n\n${collaborationDelegationInstructions(delegationRequirement.reports)}`,
+        runId: run.id,
+        taskRunId: options.taskRunId,
+        output: result.output,
+        result,
+      });
     }
     if (asksForConfirmationInsteadOfWorking(result.output)) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
@@ -2848,6 +2919,7 @@ export const dispatchInternals = {
   cardChangedOutsideCurrentRun,
   childCompletionPolicySatisfied,
   collaborationDelegationInstructions,
+  collaborationDelegationSatisfiedInstructions,
   collaborationModeRequiresDelegation,
   companyStructureLines,
   completionStatusForQualityGate,
@@ -3037,7 +3109,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
       `Task budget limit: ${focusCard.taskBudgetLimit ?? 'not set'}`,
       `Department: ${focusCard.departmentId ? departmentById.get(focusCard.departmentId)?.name ?? focusCard.departmentId : 'none'}`,
       `Project: ${focusCard.projectId ? projectById.get(focusCard.projectId)?.name ?? focusCard.projectId : 'none'}`,
-      includeFocusProjectRepo ? `Project repo:\n${projectRepoLines(focusCard.projectId ? projectById.get(focusCard.projectId) : null, focusAssigneeRuntime).join('\n')}` : '',
+      includeFocusProjectRepo ? `Project repo:\n${projectRepoLines(company, focusCard.projectId ? projectById.get(focusCard.projectId) : null, focusAssigneeRuntime).join('\n')}` : '',
       `Goal: ${focusCard.goalId ? goalById.get(focusCard.goalId)?.title ?? focusCard.goalId : 'none'}`,
       `Applicable goals:\n${applicableGoals(companyGoals, { departmentId: focusCard.departmentId, projectId: focusCard.projectId, selectedGoalId: focusCard.goalId }).map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
       `Assignee: ${focusAssignee?.name ?? (focusCard.assigneeId ? 'unavailable' : 'unassigned')}`,
@@ -3116,15 +3188,17 @@ function afterPromptSince(value: Date | string | null | undefined, since?: Date 
   return new Date(value).getTime() > since.getTime();
 }
 
-function completionProtocol(card: CardRow, reports: DelegationReport[] = []): string {
+function completionProtocol(card: CardRow, reports: DelegationReport[] = [], options: { delegationAlreadySatisfied?: boolean } = {}): string {
   return [
     card.decisionMode === 'delegate'
-      ? collaborationDelegationInstructions(reports)
+      ? options.delegationAlreadySatisfied
+        ? collaborationDelegationSatisfiedInstructions(reports)
+        : collaborationDelegationInstructions(reports)
       : optionalDelegationInstructions(reports),
     `Do not ask the user whether to proceed, whether they want a draft first, or whether you should submit/POST. Kanban tasks are assigned work; complete them autonomously unless you truly cannot proceed, then use status="needs_review".`,
     `Do not call POST /api/cards yourself for delegation. MegaCorps creates Message Board delegation requests from the DELEGATE block inside this same Kanban card. If your runtime reports through the webhook, send status="in_progress" and include the same DELEGATE block in summary/output instead of marking the current card done.`,
     `Kanban stage belongs to the current card. Message Board delegation has its own phase/final reviewer chain; do not create child Kanban cards or split this work through /api/cards. Use DELEGATE blocks and Message Board reports instead.`,
-    `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, report URL, screenshot URL, or artifact URL instead of local-only file paths.`,
+    `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, project shared file path/URL, report URL, screenshot URL, artifact URL, or file metadata instead of local-only scratch paths.`,
     `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
     `If you are waiting on CI/CD, deploy, external approval, or another external system, use status="waiting_on_external" and include pollIntervalSeconds based on how often that system should be checked.`,
     `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
@@ -3229,6 +3303,28 @@ async function buildMessageDelegationPrompt(card: CardRow, comment: CardCommentR
     comment.reviewerAgentId ? db.select().from(agents).where(and(eq(agents.id, comment.reviewerAgentId), isNull(agents.deletedAt))).limit(1) : Promise.resolve([]),
   ]);
   const reports = comment.assigneeAgentId ? await activeDirectReportsForAgent(card.companyId, comment.assigneeAgentId) : [];
+  const nestedDelegationAlreadySatisfied = comment.assigneeAgentId ? await actorHasDelegatedInScope(card.id, comment.assigneeAgentId, comment.id) : false;
+  const nestedDelegationRequired = collaborationModeRequiresDelegation(card) && reports.length > 0 && !nestedDelegationAlreadySatisfied;
+  const nestedDelegationProtocol = nestedDelegationRequired
+    ? [
+      'Collaboration Mode is ON for this card.',
+      'Because you have active direct reports and have not delegated inside this delegated assignment yet, you MUST return a DELEGATE block before reporting this assignment complete.',
+      `Active direct reports: ${directReportList(reports)}.`,
+      'DELEGATE:',
+      `- ${reports[0]?.name ?? '<direct report>'}: <specific phase work and expected output>`,
+      'Each bullet becomes a nested Message Board delegation reviewed by you as PHASE REVIEWER. After your nested delegation is reviewed, integrate it and report back to your reviewer.',
+    ].join('\n')
+    : reports.length > 0
+      ? [
+        collaborationModeRequiresDelegation(card)
+          ? 'Collaboration Mode is ON and you have already satisfied the one required nested delegation for this delegated assignment.'
+          : 'Collaboration Mode is OFF for this card.',
+        'You may still delegate genuinely new work to active direct reports when it improves the result, but do not create keepalive or ack-only delegations.',
+        `Active direct reports: ${directReportList(reports)}.`,
+        'DELEGATE:',
+        `- ${reports[0]?.name ?? '<direct report>'}: <specific phase work and expected output>`,
+      ].join('\n')
+      : 'You have no available direct reports for nested delegation; complete this delegation yourself.';
   const delegateProtocol = [
     'You are handling a Message Board delegation inside a Kanban card.',
     'Do the requested work and report your answer back through the normal MegaCorps webhook for this task run.',
@@ -3236,14 +3332,7 @@ async function buildMessageDelegationPrompt(card: CardRow, comment: CardCommentR
     comment.reviewerScope === 'final'
       ? `Your report goes to FINAL REVIEWER: ${reviewer[0]?.name ?? comment.reviewerAgentId ?? 'none'}.`
       : `Your report goes to PHASE REVIEWER: ${reviewer[0]?.name ?? comment.reviewerAgentId ?? 'none'}.`,
-    reports.length > 0
-      ? [
-        `If this delegated phase needs help from your active direct reports, you may return a DELEGATE block. Those bullets become nested Message Board delegations reviewed by you as PHASE REVIEWER.`,
-        `Active direct reports: ${directReportList(reports)}.`,
-        'DELEGATE:',
-        `- ${reports[0]?.name ?? '<direct report>'}: <specific phase work and expected output>`,
-      ].join('\n')
-      : 'You have no available direct reports for nested delegation; complete this delegation yourself.',
+    nestedDelegationProtocol,
     'When complete, provide a concise report with evidence, decisions, and any risks. If you cannot complete it, use status="needs_review" with blocker/root cause and exact reviewer questions.',
   ].join('\n');
   return [
@@ -3301,9 +3390,10 @@ async function buildMessageReviewPrompt(card: CardRow, report: CardCommentRow, r
 
 async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
   if (options.continuation) {
-    const [deltaContext, reports] = await Promise.all([
+    const [deltaContext, reports, delegationAlreadySatisfied] = await Promise.all([
       buildKanbanDeltaContext(card, options),
       activeDirectReportsForCard(card),
+      card.assigneeId ? actorHasDelegatedInScope(card.id, card.assigneeId, null) : Promise.resolve(false),
     ]);
     return [
       'Continue this existing Kanban adapter session.',
@@ -3311,13 +3401,15 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
       'Fresh Kanban delta:',
       deltaContext,
       'Completion protocol:',
-      completionProtocol(card, reports),
+      completionProtocol(card, reports, { delegationAlreadySatisfied }),
     ].join('\n\n');
   }
+  const [company] = await db.select().from(companies).where(eq(companies.id, card.companyId)).limit(1);
   const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
   const [assignee] = card.assigneeId ? await db.select().from(agents).where(and(eq(agents.id, card.assigneeId), isNull(agents.deletedAt))).limit(1) : [];
   const [runtime] = assignee?.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, assignee.runtimeId)).limit(1) : [];
   const reports = await activeDirectReportsForCard(card);
+  const delegationAlreadySatisfied = card.assigneeId ? await actorHasDelegatedInScope(card.id, card.assigneeId, null) : false;
   const docs = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.companyId, card.companyId)).orderBy(desc(knowledgeDocs.updatedAt)).limit(10);
   const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.assigneeId, includeFocusProjectRepo: false });
   const matchingDocs = docs.filter((doc) => {
@@ -3334,9 +3426,9 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
     ].join('\n'),
     kanbanContext ? `Kanban context snapshot:\n${kanbanContext}` : '',
     matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
-    `Repository protocol:\n${projectGitProtocol(project, card, assignee, runtime)}`,
+    `Repository protocol:\n${projectGitProtocol(company, project, card, assignee, runtime)}`,
     'Completion protocol:',
-    completionProtocol(card, reports),
+    completionProtocol(card, reports, { delegationAlreadySatisfied }),
   ].filter(Boolean).join('\n\n');
 }
 

@@ -12,6 +12,7 @@ import { publishLiveEvent } from './live.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
+import { projectSharedFileSpaceLines } from './project-workspace.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -41,9 +42,10 @@ function runtimeLocalContext(runtime: RuntimeRow | null | undefined): string {
   ].join('\n');
 }
 
-function projectRepoContext(project: ProjectRow | null | undefined, runtime?: RuntimeRow | null): string {
+function projectRepoContext(company: CompanyRow | null | undefined, project: ProjectRow | null | undefined, runtime?: RuntimeRow | null): string {
   if (!project) return [
     'Project repository: none',
+    projectSharedFileSpaceLines(company, null).join('\n'),
     runtimeLocalContext(runtime),
     'Repository rule: no repo is configured, so do not invent shared local workspace paths. Runtime-local scratch is only for temporary work.',
   ].join('\n');
@@ -51,6 +53,7 @@ function projectRepoContext(project: ProjectRow | null | undefined, runtime?: Ru
     `Project repository provider: ${project.repoProvider ?? 'github'}`,
     `Project repository URL: ${project.repoUrl ?? 'not configured'}`,
     `Project work path: ${project.workPath ?? 'project root'}`,
+    projectSharedFileSpaceLines(company, project).join('\n'),
     runtimeLocalContext(runtime),
     `Default branch: ${project.defaultBranch ?? 'main'}`,
     `Task branch pattern: ${project.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}'}`,
@@ -62,6 +65,7 @@ function projectRepoContext(project: ProjectRow | null | undefined, runtime?: Ru
     project.repoUrl
       ? 'Repository rule: use your runtime-owned local clone under the runtime-local workspace root when configured, stay inside the project work path unless explicitly required, pull/rebase before code changes, commit and push/PR completed work, and report PR/commit/preview links rather than local-only paths.'
       : 'Repository rule: no repo is configured, so do not invent shared local workspace paths. Runtime-local scratch is only for temporary work.',
+    'Deliverable rule: durable reports, exports, handoff docs, and other non-code files belong in the project shared file space and should be reported as workProducts or durable URLs/paths, not only as /tmp files.',
   ].filter(Boolean).join('\n');
 }
 
@@ -76,7 +80,7 @@ async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, pr
   return [
     `Project: ${project?.name ?? 'No project / general chat'}`,
     project?.description ? `Project description: ${project.description}` : '',
-    projectRepoContext(project, runtime),
+    projectRepoContext(company, project, runtime),
     `Department: ${department?.name ?? 'none'}`,
     positionPrompt ? `Position prompt:\n${positionPrompt}` : '',
     `Company goals:\n${companyGoals.filter((goal) => !goal.departmentId && !goal.projectId).map(formatGoal).join('\n') || 'none'}`,

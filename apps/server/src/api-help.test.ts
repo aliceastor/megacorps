@@ -136,6 +136,7 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.match(catalog.architecture.model, /multi-agent control plane/i);
   assert.match(catalog.architecture.model, /deterministic tools/i);
   assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Projects' && surface.purpose.includes('Project Authority')));
+  assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Workspace' && surface.purpose.includes('shared file authority')));
   assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Positions' && surface.primaryApi.includes('/api/positions')));
   assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'External Events' && surface.primaryApi.includes('/api/external-events')));
   assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Tools' && surface.primaryApi.includes('/api/tools')));
@@ -152,6 +153,8 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.match(JSON.stringify(actionEndpoint?.responseSchema), /detail/);
   const webhookEndpoint = catalog.endpoints.find((endpoint) => endpoint.path === '/api/webhook/task-complete');
   assert.match(webhookEndpoint?.summary ?? '', /queues quality review/i);
+  assert.match(webhookEndpoint?.summary ?? '', /one-time per agent/i);
+  assert.match(webhookEndpoint?.summary ?? '', /\/workspaces\/\{companySlug\}\/\{projectSlug\}\/deliverables/);
   const runnerCompleteEndpoint = catalog.endpoints.find((endpoint) => endpoint.path === '/api/runner/task-runs/:id/complete');
   assert.match(runnerCompleteEndpoint?.summary ?? '', /quality review/i);
   assert.ok(catalog.cli.commands.some((command) => command.command === 'apply' && command.auth === 'session'));
@@ -187,4 +190,6 @@ test('api help markdown exposes response schema and rate limit sections', () => 
   assert.match(markdown, /context requests/i);
   assert.match(markdown, /deterministic tool/i);
   assert.match(markdown, /queues quality review/i);
+  assert.match(markdown, /shared file namespace/i);
+  assert.doesNotMatch(markdown, /Persistent Workspace file\/folder API is still a product gap/);
 });

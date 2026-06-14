@@ -10,7 +10,7 @@ import { db } from './db/client.ts';
 import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
-import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions } from './dispatch.ts';
+import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions } from './dispatch.ts';
 import { registerChatRoutes } from './chat.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
@@ -2393,16 +2393,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const delegatedViaWebhook = delegatedRows.length > 0;
     const delegationFailed = requestedDelegation.length > 0 && !delegatedViaWebhook;
     const activeDirectReports = actorAgent ? await activeDirectReportsForAgent(card.companyId, actorAgent.id) : [];
+    const requiredDelegation = actorAgent ? await collaborationDelegationRequirement(card, actorAgent.id, null) : { required: false, alreadyDelegated: false, reports: [] };
     const delegationFailureReason = delegationFailed ? delegationError ?? 'delegation_requested_but_no_available_direct_reports' : null;
     const delegationFailureGuidance = delegationFailed ? (collaborationModeRequiresDelegation(card) ? collaborationDelegationInstructions(activeDirectReports) : optionalDelegationInstructions(activeDirectReports)) : null;
     const delegationFailureMessage = delegationFailed ? `${delegationFailureReason}\n\n${delegationFailureGuidance}` : null;
-    const collaborationModeRejected = collaborationModeRequiresDelegation(card)
+    const collaborationModeRejected = requiredDelegation.required
       && requestedDelegation.length === 0
       && (requestedStatus === 'done' || requestedStatus === 'in_review')
-      && actorAgent
-      && activeDirectReports.length > 0;
+      && actorAgent;
     if (collaborationModeRejected) {
-      const message = `collaboration_mode_requires_delegation\n\n${collaborationDelegationInstructions(activeDirectReports)}`;
+      const message = `collaboration_mode_requires_delegation\n\n${collaborationDelegationInstructions(requiredDelegation.reports)}`;
       await db.update(kanbanCards).set({
         columnStatus: 'todo',
         executionLog,

@@ -209,7 +209,8 @@ test('collaboration delegation instructions include required webhook and block f
     { name: 'Alice', slug: 'alice', positionName: 'Design Lead', departmentName: 'Product' },
     { name: 'Bob', slug: 'bob', positionName: 'Backend Engineer', departmentName: 'Engineering' },
   ]);
-  assert.match(instructions, /MUST split this work/);
+  assert.match(instructions, /MUST split meaningful work/);
+  assert.match(instructions, /one-time per agent/);
   assert.match(instructions, /Alice \(slug: alice, position: Design Lead, department: Product\)/);
   assert.match(instructions, /Bob \(slug: bob, position: Backend Engineer, department: Engineering\)/);
   assert.match(instructions, /status="in_progress"/);
@@ -226,6 +227,16 @@ test('delegation instructions omit fake second delegate when only one report is 
   assert.match(instructions, /DELEGATE:\n- Ribel: <delegated work item and expected deliverable>/);
   assert.doesNotMatch(instructions, /another direct report/);
   assert.doesNotMatch(instructions, /sub-task title/);
+});
+
+test('satisfied collaboration instructions allow integration without keepalive delegation', () => {
+  const instructions = dispatchInternals.collaborationDelegationSatisfiedInstructions([
+    { name: 'Ribel', slug: 'ribel', positionName: 'Senior Engineer', departmentName: 'Engineering' },
+  ]);
+  assert.match(instructions, /already satisfied the one required/);
+  assert.match(instructions, /Do not create keepalive/);
+  assert.match(instructions, /Review work is exempt/);
+  assert.doesNotMatch(instructions, /MUST split this work/);
 });
 
 test('optional delegation instructions include direct reports and block format', () => {
