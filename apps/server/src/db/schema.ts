@@ -96,6 +96,7 @@ export const projects = pgTable('projects', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
+
 export const goals = pgTable('goals', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), departmentId: uuid('department_id').references(() => departments.id), projectId: uuid('project_id').references(() => projects.id), title: text('title').notNull(), body: text('body'), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
 
 export const agents = pgTable('agents', {
@@ -211,6 +212,25 @@ export const kanbanCards = pgTable('kanban_cards', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
+
+export const projectWorkspaceFiles = pgTable('project_workspace_files', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  projectId: uuid('project_id').notNull().references(() => projects.id),
+  cardId: uuid('card_id').references(() => kanbanCards.id),
+  path: text('path').notNull(),
+  body: text('body').notNull().default(''),
+  contentType: text('content_type').notNull().default('text/plain'),
+  encoding: text('encoding').notNull().default('utf-8'),
+  sizeBytes: integer('size_bytes').notNull().default(0),
+  metadata: jsonb('metadata').default({}),
+  createdByUserId: uuid('created_by_user_id').references(() => users.id),
+  updatedByUserId: uuid('updated_by_user_id').references(() => users.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+}, (table) => ({
+  projectWorkspaceFilePathUnique: unique().on(table.projectId, table.path),
+}));
 
 export const cardDependencies = pgTable('card_dependencies', {
   cardId: uuid('card_id').notNull().references(() => kanbanCards.id),

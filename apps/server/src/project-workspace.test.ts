@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { projectDeliverablesPath, projectSharedFileSpaceLines, projectSharedWorkspacePath, workspaceSlug } from './project-workspace.ts';
+import { normalizeProjectWorkspacePath, normalizeProjectWorkspacePrefix, projectDeliverablesPath, projectSharedFileSpaceLines, projectSharedWorkspacePath, workspaceSlug } from './project-workspace.ts';
 
 test('project shared workspace paths are derived from company and project slugs', () => {
   const company = { name: 'Mega Corps', slug: 'mega-corps' };
@@ -16,6 +16,30 @@ test('project shared file space instructions reject runtime scratch as final out
   const text = lines.join('\n');
   assert.match(text, /Project shared file space: \/workspaces\/aurora\/video-platform\//);
   assert.match(text, /Project deliverables path: \/workspaces\/aurora\/video-platform\/deliverables\/card-abc\//);
+  assert.match(text, /Authorization: Bearer <MEGACORPS_API_TOKEN>/);
+  assert.match(text, /\/api\/projects\/<projectId>\/workspace-files/);
   assert.match(text, /\/tmp are temporary only/);
   assert.match(text, /workProducts/);
+});
+
+test('project workspace paths normalize within the project namespace', () => {
+  const company = { slug: 'mega-corps' };
+  const project = { id: 'project-1', name: 'TubeLike Research' };
+
+  assert.equal(
+    normalizeProjectWorkspacePath(company, project, 'deliverables/card-1/report.md'),
+    '/workspaces/mega-corps/tubelike-research/deliverables/card-1/report.md',
+  );
+  assert.equal(
+    normalizeProjectWorkspacePrefix(company, project, 'deliverables/card-1'),
+    '/workspaces/mega-corps/tubelike-research/deliverables/card-1/',
+  );
+  assert.throws(
+    () => normalizeProjectWorkspacePath(company, project, '/workspaces/other/project/report.md'),
+    /workspace_path_outside_project/,
+  );
+  assert.throws(
+    () => normalizeProjectWorkspacePath(company, project, 'deliverables/../secret.md'),
+    /workspace_path_must_not_contain_parent_segments/,
+  );
 });

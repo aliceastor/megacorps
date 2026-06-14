@@ -13,7 +13,30 @@ const migrations: Migration[] = [
   { version: 1, name: 'bootstrap', run: runBootstrap },
   { version: 2, name: 'scheduling-and-notifications', run: runSchedulingAndNotifications },
   { version: 3, name: 'message-board-delegation-schema', run: runMessageBoardDelegationSchema },
+  { version: 4, name: 'project-workspace-files', run: runProjectWorkspaceFiles },
 ];
+
+async function runProjectWorkspaceFiles(): Promise<void> {
+  await sql.unsafe(`CREATE TABLE IF NOT EXISTS project_workspace_files (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id UUID NOT NULL REFERENCES companies(id),
+  project_id UUID NOT NULL REFERENCES projects(id),
+  card_id UUID REFERENCES kanban_cards(id),
+  path TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  content_type TEXT NOT NULL DEFAULT 'text/plain',
+  encoding TEXT NOT NULL DEFAULT 'utf-8',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  metadata JSONB DEFAULT '{}',
+  created_by_user_id UUID REFERENCES users(id),
+  updated_by_user_id UUID REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(project_id, path)
+);
+CREATE INDEX IF NOT EXISTS project_workspace_files_company_project_updated_idx ON project_workspace_files(company_id, project_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS project_workspace_files_path_idx ON project_workspace_files(project_id, path);`);
+}
 
 async function runSchedulingAndNotifications(): Promise<void> {
   await sql.unsafe(`ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS schedule_at TIMESTAMPTZ;

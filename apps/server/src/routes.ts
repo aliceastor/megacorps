@@ -1,13 +1,13 @@
 import bcrypt from 'bcryptjs';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, ne, sql as drizzleSql } from 'drizzle-orm';
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createPositionSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateAgentSchema, updateCardSchema, updateCompanyMembershipSchema, validateCardTransition } from '@megacorps/shared';
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
-import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
+import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions } from './dispatch.ts';
@@ -26,6 +26,7 @@ import { listNotifications, markAllNotificationsRead, markNotificationRead, noti
 import { notifications } from './db/schema.ts';
 import { API_TOKEN_HASH_SETTING, readApiTokenSettings, revokeApiToken, rotateApiToken } from './api-token.ts';
 import { KANBAN_TASK_TIMEOUT_SETTING, readKanbanTaskTimeoutSeconds, setKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
+import { normalizeProjectWorkspacePath, normalizeProjectWorkspacePrefix } from './project-workspace.ts';
 
 async function defaultCompanyId(): Promise<string> {
   const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
@@ -206,6 +207,77 @@ async function adminSettingsResponse(apiToken?: string) {
     apiTokenOwnerUserId: tokenSettings.ownerUserId,
     apiTokenOwnerEmail: tokenSettings.ownerEmail,
     ...(apiToken ? { apiToken } : {}),
+  };
+}
+
+const workspaceFileQuerySchema = z.object({
+  path: z.string().trim().min(1).max(2000).optional(),
+  prefix: z.string().trim().min(1).max(2000).optional(),
+  includeBody: z.union([z.boolean(), z.string()]).optional().transform((value) => {
+    if (value === undefined) return undefined;
+    if (typeof value === 'boolean') return value;
+    return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+  }),
+  limit: z.coerce.number().int().min(1).max(500).default(200),
+});
+
+const workspaceFileUpsertSchema = z.object({
+  path: z.string().trim().min(1).max(2000),
+  body: z.string().max(5_000_000).default(''),
+  contentType: z.string().trim().min(1).max(160).default('text/plain'),
+  encoding: z.enum(['utf-8', 'base64']).default('utf-8'),
+  cardId: z.string().uuid().nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+
+const workspaceFileDeleteQuerySchema = z.object({
+  path: z.string().trim().min(1).max(2000),
+});
+
+function workspaceFileSizeBytes(body: string, encoding: 'utf-8' | 'base64'): number {
+  return Buffer.byteLength(body, encoding === 'base64' ? 'base64' : 'utf8');
+}
+
+type WorkspaceFileResponseRow = Omit<typeof projectWorkspaceFiles.$inferSelect, 'body'> & { body?: string | null };
+
+function serializeWorkspaceFile(row: WorkspaceFileResponseRow, includeBody: boolean) {
+  return {
+    id: row.id,
+    companyId: row.companyId,
+    projectId: row.projectId,
+    cardId: row.cardId,
+    path: row.path,
+    ...(includeBody ? { body: row.body ?? '' } : {}),
+    contentType: row.contentType,
+    encoding: row.encoding,
+    sizeBytes: row.sizeBytes,
+    metadata: row.metadata ?? {},
+    createdByUserId: row.createdByUserId,
+    updatedByUserId: row.updatedByUserId,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+async function requireProjectRole(request: FastifyRequest, reply: FastifyReply, projectId: string, role: 'viewer' | 'operator' | 'admin') {
+  const [project] = await db.select({
+    id: projects.id,
+    companyId: projects.companyId,
+    name: projects.name,
+    workspacePathHint: projects.workspacePathHint,
+    companyName: companies.name,
+    companySlug: companies.slug,
+  }).from(projects).innerJoin(companies, eq(projects.companyId, companies.id)).where(eq(projects.id, projectId)).limit(1);
+  if (!project) {
+    await reply.code(404).send({ error: 'project_not_found' });
+    return null;
+  }
+  const user = await requireCompanyRole(request, reply, project.companyId, role);
+  if (!user) return null;
+  return {
+    user,
+    project,
+    company: { name: project.companyName, slug: project.companySlug },
   };
 }
 
@@ -2215,6 +2287,104 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     publishLiveEvent({ type: 'project.updated', companyId: row.companyId, entityType: 'project', entityId: row.id });
     return row;
   });
+  app.get('/api/projects/:id/workspace-files', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const context = await requireProjectRole(request, reply, id, 'viewer'); if (!context) return reply;
+    const query = workspaceFileQuerySchema.parse(request.query);
+    const includeBody = query.includeBody ?? Boolean(query.path);
+
+    try {
+      if (query.path) {
+        const path = normalizeProjectWorkspacePath(context.company, context.project, query.path);
+        const [file] = await db.select().from(projectWorkspaceFiles).where(and(eq(projectWorkspaceFiles.projectId, id), eq(projectWorkspaceFiles.path, path))).limit(1);
+        if (!file) return reply.code(404).send({ error: 'workspace_file_not_found', path });
+        return { file: serializeWorkspaceFile(file, includeBody) };
+      }
+
+      const prefix = normalizeProjectWorkspacePrefix(context.company, context.project, query.prefix);
+      const where = and(eq(projectWorkspaceFiles.projectId, id), drizzleSql`${projectWorkspaceFiles.path} LIKE ${`${prefix}%`}`);
+      const rows = includeBody
+        ? await db.select().from(projectWorkspaceFiles).where(where).orderBy(desc(projectWorkspaceFiles.updatedAt)).limit(query.limit)
+        : await db.select({
+          id: projectWorkspaceFiles.id,
+          companyId: projectWorkspaceFiles.companyId,
+          projectId: projectWorkspaceFiles.projectId,
+          cardId: projectWorkspaceFiles.cardId,
+          path: projectWorkspaceFiles.path,
+          contentType: projectWorkspaceFiles.contentType,
+          encoding: projectWorkspaceFiles.encoding,
+          sizeBytes: projectWorkspaceFiles.sizeBytes,
+          metadata: projectWorkspaceFiles.metadata,
+          createdByUserId: projectWorkspaceFiles.createdByUserId,
+          updatedByUserId: projectWorkspaceFiles.updatedByUserId,
+          createdAt: projectWorkspaceFiles.createdAt,
+          updatedAt: projectWorkspaceFiles.updatedAt,
+        }).from(projectWorkspaceFiles).where(where).orderBy(desc(projectWorkspaceFiles.updatedAt)).limit(query.limit);
+      return { files: rows.map((file) => serializeWorkspaceFile(file, includeBody)), prefix };
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : 'workspace_path_invalid' });
+    }
+  });
+  app.put('/api/projects/:id/workspace-files', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const context = await requireProjectRole(request, reply, id, 'operator'); if (!context) return reply;
+    const input = workspaceFileUpsertSchema.parse(request.body);
+    let path: string;
+    try {
+      path = normalizeProjectWorkspacePath(context.company, context.project, input.path);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : 'workspace_path_invalid' });
+    }
+    if (input.cardId) {
+      const [card] = await db.select({ id: kanbanCards.id, companyId: kanbanCards.companyId, projectId: kanbanCards.projectId }).from(kanbanCards).where(eq(kanbanCards.id, input.cardId)).limit(1);
+      if (!card || card.companyId !== context.project.companyId || card.projectId !== id) return reply.code(400).send({ error: 'workspace_file_card_mismatch', cardId: input.cardId });
+    }
+    const now = new Date();
+    const values = {
+      companyId: context.project.companyId,
+      projectId: id,
+      cardId: input.cardId ?? null,
+      path,
+      body: input.body,
+      contentType: input.contentType,
+      encoding: input.encoding,
+      sizeBytes: workspaceFileSizeBytes(input.body, input.encoding),
+      metadata: input.metadata,
+      createdByUserId: context.user.id,
+      updatedByUserId: context.user.id,
+      updatedAt: now,
+    };
+    const [file] = await db.insert(projectWorkspaceFiles).values(values).onConflictDoUpdate({
+      target: [projectWorkspaceFiles.projectId, projectWorkspaceFiles.path],
+      set: {
+        cardId: values.cardId,
+        body: values.body,
+        contentType: values.contentType,
+        encoding: values.encoding,
+        sizeBytes: values.sizeBytes,
+        metadata: values.metadata,
+        updatedByUserId: values.updatedByUserId,
+        updatedAt: now,
+      },
+    }).returning();
+    if (file) publishLiveEvent({ type: 'project.workspace_file.upserted', companyId: file.companyId, entityType: 'projectWorkspaceFile', entityId: file.id });
+    if (!file) return reply.code(500).send({ error: 'workspace_file_upsert_failed' });
+    return { file: serializeWorkspaceFile(file, true) };
+  });
+  app.delete('/api/projects/:id/workspace-files', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const context = await requireProjectRole(request, reply, id, 'operator'); if (!context) return reply;
+    const query = workspaceFileDeleteQuerySchema.parse(request.query);
+    let path: string;
+    try {
+      path = normalizeProjectWorkspacePath(context.company, context.project, query.path);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : 'workspace_path_invalid' });
+    }
+    const deleted = await db.delete(projectWorkspaceFiles).where(and(eq(projectWorkspaceFiles.projectId, id), eq(projectWorkspaceFiles.path, path))).returning({ id: projectWorkspaceFiles.id, companyId: projectWorkspaceFiles.companyId });
+    if (deleted[0]) publishLiveEvent({ type: 'project.workspace_file.deleted', companyId: deleted[0].companyId, entityType: 'projectWorkspaceFile', entityId: deleted[0].id });
+    return { ok: true };
+  });
   app.delete('/api/projects/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const [existing] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
@@ -2226,12 +2396,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       [chatSessionUsage],
       [costUsage],
       [promptLogUsage],
+      [workspaceFileUsage],
     ] = await Promise.all([
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(kanbanCards).where(eq(kanbanCards.projectId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(workProducts).where(eq(workProducts.projectId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(chatSessions).where(eq(chatSessions.projectId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(costEvents).where(eq(costEvents.projectId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(promptLogs).where(eq(promptLogs.projectId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(projectWorkspaceFiles).where(eq(projectWorkspaceFiles.projectId, id)),
     ]);
     const blocking = Object.entries({
       cards: cardUsage?.count ?? 0,
@@ -2239,6 +2411,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       chatSessions: chatSessionUsage?.count ?? 0,
       costEvents: costUsage?.count ?? 0,
       promptLogs: promptLogUsage?.count ?? 0,
+      workspaceFiles: workspaceFileUsage?.count ?? 0,
     }).filter(([, count]) => Number(count) > 0);
     if (blocking.length > 0) return reply.code(409).send({ error: 'project_not_empty', blocking: Object.fromEntries(blocking) });
     await db.transaction(async (tx) => {

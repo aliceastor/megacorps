@@ -94,6 +94,9 @@ const registeredRoutes = [
   ['GET', '/api/projects'],
   ['POST', '/api/projects'],
   ['PUT', '/api/projects/:id'],
+  ['GET', '/api/projects/:id/workspace-files'],
+  ['PUT', '/api/projects/:id/workspace-files'],
+  ['DELETE', '/api/projects/:id/workspace-files'],
   ['DELETE', '/api/projects/:id'],
   ['GET', '/api/goals'],
   ['POST', '/api/goals'],
@@ -146,6 +149,7 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/cards/:id/context-requests' && endpoint.group === 'Kanban Lifecycle'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/cards/:id/external-waits' && endpoint.group === 'External Events'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/tools' && endpoint.group === 'Tools'));
+  assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/projects/:id/workspace-files' && endpoint.summary.includes('Bearer')));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/auth/bootstrap'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/runner/task-runs/claim' && endpoint.auth === 'runner'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/agent/cards/:id/claim' && endpoint.auth === 'agent-session'));
