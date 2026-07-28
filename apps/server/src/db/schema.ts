@@ -118,6 +118,7 @@ export const agents = pgTable('agents', {
   budgetMonthly: numeric('budget_monthly', { precision: 10, scale: 4 }),
   spentThisMonth: numeric('spent_this_month', { precision: 10, scale: 4 }).default('0'),
   capabilities: text('capabilities').array().default([]),
+  memoryConfig: jsonb('memory_config').default({}),
   maxConcurrent: integer('max_concurrent').default(1),
   isBusy: boolean('is_busy').default(false),
   isActive: boolean('is_active').default(true),

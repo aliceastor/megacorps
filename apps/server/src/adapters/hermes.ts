@@ -1,5 +1,5 @@
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
-export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat'; taskRunId?: string | null };
+export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' | 'maintenance'; taskRunId?: string | null };
 export type TaskResult = { success: boolean; output: string; sessionId: string; turnId?: string | null; tokensUsed: number; costUsd: number; durationSeconds: number };
 export type AgentLike = {
   id?: string;
@@ -73,6 +73,18 @@ ${task.body}
 Respond to the user directly. Do not report task completion or call the Kanban webhook unless the user explicitly asks you to create or update MegaCorps work items.`;
   }
 
+  if (task.kind === 'maintenance') {
+    return `You are in a MegaCorps shift-end maintenance session.
+
+=== Your Identity ===
+Agent: ${agent.hermesProfile ?? 'unknown'}
+
+=== Maintenance Task ===
+${task.body}
+
+This session is only for consolidating your own memory and skills. Do not call the MegaCorps Kanban webhook, do not create or update work items, and do not start new project work.`;
+  }
+
   const apiUrl = megacorpsApiUrl(agent);
   const taskWebhookSecret = webhookSharedSecret(agent);
   const webhookBodyExample = task.taskRunId
@@ -126,7 +138,9 @@ function hermesModelOptions(agent: AgentLike): string[] {
 function hermesSource(agent: AgentLike, task: TaskContext): string {
   const configured = configuredString(agent.adapterConfig?.source) ?? configuredString(agent.adapterConfig?.hermesSource);
   if (configured) return assertSafeCliValue(configured, 'Hermes source');
-  return task.kind === 'chat' ? 'megacorps-direct-chat' : 'megacorps-kanban';
+  if (task.kind === 'chat') return 'megacorps-direct-chat';
+  if (task.kind === 'maintenance') return 'megacorps-maintenance';
+  return 'megacorps-kanban';
 }
 
 const HERMES_PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;

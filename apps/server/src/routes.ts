@@ -12,6 +12,7 @@ import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions } from './dispatch.ts';
 import { registerChatRoutes } from './chat.ts';
+import { runAgentMaintenance } from './agent-maintenance.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
@@ -2027,7 +2028,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     try { await ensureCompanyReferences(companyId, { departmentId: input.departmentId, positionId: input.positionId, bossId: input.bossId, runtimeId: input.runtimeId, adapterType: input.adapterType }); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
-    const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, positionId: input.positionId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, capabilities: input.capabilities ?? [], maxConcurrent: input.maxConcurrent ?? 1, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
+    const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, positionId: input.positionId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, capabilities: input.capabilities ?? [], memoryConfig: input.memoryConfig ?? {}, maxConcurrent: input.maxConcurrent ?? 1, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
     if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
     return reply.code(201).send(agent ? redactAgent(agent) : agent);
   });
@@ -2067,6 +2068,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.resumed', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
     return redactAgent(agent);
+  });
+  app.post('/api/agents/:id/maintenance', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const companyId = await agentCompanyId(id);
+    if (!companyId) return reply.code(404).send({ error: 'agent_not_found' });
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
+    const [agent] = await db.select().from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
+    if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    // Manual trigger skips idle/new-work checks but still respects paused,
+    // busy, budget, and adapter-support guards inside runAgentMaintenance.
+    const result = await runAgentMaintenance(app, agent, { source: 'manual', requestedByUserId: user.id });
+    if (result.status === 'skipped') return reply.code(409).send({ error: result.reason ?? 'maintenance_skipped', result });
+    if (result.status === 'failed') return reply.code(502).send({ error: result.reason ?? 'maintenance_failed', result });
+    return { ok: true, result };
   });
   app.post('/api/agents/:id/reset-session', async (request, reply) => {
     const id = (request.params as { id: string }).id;
@@ -2108,6 +2123,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       hermesProfile: input.hermesProfile,
       bossId: input.bossId,
       capabilities: input.capabilities,
+      memoryConfig: input.memoryConfig,
       maxConcurrent: input.maxConcurrent,
       budgetPerTask: input.budgetPerTask?.toString(),
       budgetMonthly: input.budgetMonthly?.toString(),

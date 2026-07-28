@@ -233,6 +233,11 @@ export const createAgentSchema = z.object({
   budgetPerTask: z.number().nonnegative().optional(),
   budgetMonthly: z.number().nonnegative().optional(),
   maxConcurrent: z.number().int().min(1).max(16).optional(),
+  memoryConfig: z.object({
+    enabled: z.boolean().optional(),
+    idleMinutes: z.number().int().min(1).max(1440).optional(),
+    dailyLimit: z.number().int().min(1).max(24).optional(),
+  }).optional(),
 });
 
 export const updateAgentSchema = createAgentSchema.omit({ adapterType: true, capabilities: true }).partial().extend({

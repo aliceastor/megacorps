@@ -14,7 +14,13 @@ const migrations: Migration[] = [
   { version: 2, name: 'scheduling-and-notifications', run: runSchedulingAndNotifications },
   { version: 3, name: 'message-board-delegation-schema', run: runMessageBoardDelegationSchema },
   { version: 4, name: 'project-workspace-files', run: runProjectWorkspaceFiles },
+  { version: 5, name: 'agent-memory-config', run: runAgentMemoryConfig },
 ];
+
+async function runAgentMemoryConfig(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS memory_config JSONB DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS heartbeat_runs_agent_source_created_at_idx ON heartbeat_runs(agent_id, source, created_at DESC);`);
+}
 
 async function runProjectWorkspaceFiles(): Promise<void> {
   await sql.unsafe(`CREATE TABLE IF NOT EXISTS project_workspace_files (

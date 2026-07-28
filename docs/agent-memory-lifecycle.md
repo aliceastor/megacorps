@@ -68,11 +68,11 @@
 
 2. **新模組 `apps/server/src/agent-maintenance.ts`**:
    - `findMaintenanceCandidates(companyId?)` — 依上節六條件篩選;工作紀錄以 `heartbeat_runs`(`source != 'maintenance'`)與 `task_runs.completedAt` 推導。
-   - `buildShiftSummary(agent, since)` — 彙整完成的 task_runs、card 標題與結果、review 退件理由(card_actions / card_comments)、work_products。
+   - `buildShiftSummary(agent, since)` — 彙整完成的 task_runs、card 標題與結果、review 退件理由(card_comments 的 `review_rejected`/`review_guidance`/`review_escalated`/`review_blocked`)、work_products。
    - `runAgentMaintenance(agent)` — `claimAgentCapacity` → 預算檢查(`getBudgetGuard`/`budgetOk`)→ `getAdapter(agent.adapterType).dispatch(...)`(fresh session,不 resume)→ 寫 `heartbeat_runs`(`source='maintenance'`, `cardId=null`)與 `cost_events` → 釋放 capacity。逾時沿用 `runtime-settings.ts` 的 kanban task timeout。
    - 整理 prompt 模板(含兩層記憶指示)。
 
-3. **接進 cron**:[dispatch.ts:2750](../apps/server/src/dispatch.ts) `runDispatchCronTick` 末端加 `await runMaintenanceSweep(app)`(有工作可派時 agent 不會 idle,順序天然正確)。
+3. **接進啟動流程**:獨立的 `startMaintenanceLoop(app)`(index.ts,與 `startDispatchLoop` 並列;預設每 60 秒 sweep,`MAINTENANCE_SWEEP_INTERVAL_MS`/`MAINTENANCE_SWEEP_ENABLED` 可調)。不掛在 dispatch cron tick 內,避免 dispatch.ts ↔ agent-maintenance.ts 循環相依;idle 判定以分鐘計,60 秒粒度足夠。
 
 4. **手動觸發 API**:`POST /api/agents/:id/maintenance`(admin/operator)——再教育談話後立即固化用;繞過 idle 門檻,但仍尊重 busy 與預算。
 
@@ -102,13 +102,13 @@
 | 預算計費 | **已存在機制可重用** | `budgetOk`/`getBudgetGuard`、`cost_events`、`heartbeat_runs` 費用欄位 |
 | 再教育對話通道 | **已存在** | direct chat(chat.ts);`send_to_agent` 只是把留言排進下次 run 的 context([routes.ts:1930](../apps/server/src/routes.ts)),談話請用 direct chat |
 | 卡內 session resume(工作記憶) | **已存在** | `adapter_sessions` per (agent, card, kind) |
-| `agents.memory_config` 欄位 | **未實裝** | migrate.ts + schema.ts |
-| idle 偵測 / maintenance sweep | **未實裝** | 新模組 agent-maintenance.ts |
-| 整理執行(fresh session、heartbeat 記帳) | **未實裝** | 同上;`heartbeat_runs.source='maintenance'` |
-| 單日整理上限 | **未實裝** | memory_config.dailyLimit |
-| Shift summary 彙整(含退件理由) | **未實裝**(素材都在:task_runs、card_actions、work_products) | buildShiftSummary |
-| 兩層記憶(職能/專案事實)指示 | **未實裝** | 整理 prompt 模板 |
-| 手動觸發 API | **未實裝** | routes.ts |
+| `agents.memory_config` 欄位 | **已實裝**(migration v5;`PUT /api/agents/:id` 可設定 `memoryConfig: { enabled, idleMinutes, dailyLimit }`) | migrate.ts、schema.ts、shared updateAgentSchema |
+| idle 偵測 / maintenance sweep | **已實裝**(六條件判定 `maintenanceSkipReason`;失敗以 idle 門檻退避,不 hot-loop) | agent-maintenance.ts |
+| 整理執行(fresh session、heartbeat 記帳) | **已實裝**(`heartbeat_runs.source='maintenance'`、cost_events、hardStop 預算守衛;限 `hermes-ssh` adapter) | agent-maintenance.ts、adapters/hermes.ts(`kind:'maintenance'`) |
+| 單日整理上限 | **已實裝**(預設 3 次/日,UTC 日界) | memory_config.dailyLimit |
+| Shift summary 彙整(含退件理由) | **已實裝**(task_runs + card_comments review_* + work_products) | buildShiftSummary |
+| 兩層記憶(職能/專案事實)指示 | **已實裝** | buildMaintenancePrompt |
+| 手動觸發 API | **已實裝**(`POST /api/agents/:id/maintenance`,operator 權限;略過 idle 檢查,保留 busy/預算/paused 守衛) | routes.ts |
 | 教育談話後自動整理 | **未實裝**(Phase 2) | chat.ts |
 | 記憶目錄每日備份 | **未實裝,且不在本 repo**(Hermes 主機側 cron) | 部署文件待補 |
 | Machine runner 與記憶的衝突防護 | **未實裝**;目前固定主機拓撲下無風險,**若未來啟用 machine runner 動態接單,必須先加 affinity 防護**,否則記憶會散落多台主機 | runner-routes.ts claim 邏輯 |

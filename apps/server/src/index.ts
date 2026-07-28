@@ -6,6 +6,7 @@ import { ZodError } from 'zod';
 import { migrate } from './db/migrate.ts';
 import { registerRoutes } from './routes.ts';
 import { startDispatchLoop } from './dispatch.ts';
+import { startMaintenanceLoop } from './agent-maintenance.ts';
 import { startRetentionLoop } from './retention.ts';
 import { registerRequestLogging } from './request-log.ts';
 import { registerRateLimit } from './rate-limit.ts';
@@ -35,6 +36,7 @@ export async function buildServer() {
   await registerLiveRoutes(app);
   await registerRoutes(app);
   startDispatchLoop(app);
+  startMaintenanceLoop(app);
   startRetentionLoop(app);
   return app;
 }
