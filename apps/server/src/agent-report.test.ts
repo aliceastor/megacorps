@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { agentReportSchema } from '@megacorps/shared';
+import { delegationLineFromReportItem, extractAgentReport } from './agent-report.ts';
 
 test('agentReportSchema accepts a complete report', () => {
   const parsed = agentReportSchema.parse({
@@ -33,4 +34,63 @@ test('agentReportSchema caps delegations at 8', () => {
   assert.equal(agentReportSchema.safeParse({
     kind: 'megacorps-report', status: 'completed', summary: 'ok', delegations,
   }).success, false);
+});
+
+const validReportJson = JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'done the work' });
+
+test('extractAgentReport reads a fenced json block', () => {
+  const output = `Here is my report:\n\n\`\`\`json\n${validReportJson}\n\`\`\`\n\nThanks.`;
+  const result = extractAgentReport(output);
+  assert.ok(result && 'report' in result);
+  assert.equal(result.report.summary, 'done the work');
+});
+
+test('extractAgentReport reads a bare json object output', () => {
+  const result = extractAgentReport(validReportJson);
+  assert.ok(result && 'report' in result);
+});
+
+test('extractAgentReport reads an embedded json object mid-prose', () => {
+  const output = `Status update. ${validReportJson} End of message.`;
+  const result = extractAgentReport(output);
+  assert.ok(result && 'report' in result);
+});
+
+test('extractAgentReport returns error for invalid report blocks', () => {
+  const bad = JSON.stringify({ kind: 'megacorps-report', status: 'nope', summary: 'x' });
+  const result = extractAgentReport(`\`\`\`json\n${bad}\n\`\`\``);
+  assert.ok(result && 'error' in result);
+});
+
+test('extractAgentReport returns null when no report marker exists', () => {
+  assert.equal(extractAgentReport('Just a plain prose update with {"some":"json"}.'), null);
+  assert.equal(extractAgentReport(''), null);
+  assert.equal(extractAgentReport(null), null);
+});
+
+test('extractAgentReport uses the last report when multiple exist', () => {
+  const first = JSON.stringify({ kind: 'megacorps-report', status: 'failed', summary: 'first' });
+  const second = JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'second' });
+  const result = extractAgentReport(`\`\`\`json\n${first}\n\`\`\`\ntext\n\`\`\`json\n${second}\n\`\`\``);
+  assert.ok(result && 'report' in result);
+  assert.equal(result.report.summary, 'second');
+});
+
+test('delegationLineFromReportItem formats assignee prefix and constraints', () => {
+  assert.equal(
+    delegationLineFromReportItem({ to: 'ribel', objective: 'Build the UI shell', mode: 'subroutine' }),
+    'ribel: Build the UI shell',
+  );
+  const line = delegationLineFromReportItem({
+    objective: 'Cluster the concepts',
+    outputFormat: 'markdown table',
+    boundaries: 'do not rank',
+    mode: 'subroutine',
+  });
+  assert.match(line, /^Cluster the concepts — output: markdown table — boundaries: do not rank$/);
+});
+
+test('delegationLineFromReportItem clips very long lines', () => {
+  const line = delegationLineFromReportItem({ objective: 'x'.repeat(600), mode: 'subroutine' });
+  assert.ok(line.length <= 500);
 });
