@@ -116,6 +116,10 @@ POST ${apiUrl}/api/webhook/task-complete
 ${taskWebhookSecret ? `Header: X-MegaCorps-Webhook-Secret: ${taskWebhookSecret}` : 'Webhook auth: no shared secret was provided in your runtime config.'}
 Body: ${webhookBodyExample}
 
+Prefer including a structured "report" field in the webhook body:
+"report": { "kind": "megacorps-report", "status": "completed", "summary": "...", "delegations": [{ "to": "<direct-report-slug>", "objective": "...", "effort": "small" }] }
+The legacy DELEGATE block still works but is deprecated.
+
 If you are delegating to direct reports, POST status "in_progress" and include a DELEGATE block in summary/output. Do not mark the parent card done and do not try to create Kanban cards yourself; MegaCorps will create same-card Message Board delegation requests.
 If the work is complete but needs QA, POST status "in_review" with the completed output.
 If you cannot solve the task, do not mark it done. POST status "needs_review" with attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs:

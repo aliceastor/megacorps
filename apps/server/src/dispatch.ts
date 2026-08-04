@@ -3430,6 +3430,7 @@ async function buildMessageReviewPrompt(card: CardRow, report: CardCommentRow, r
     'Return APPROVE/DONE if the report satisfies this phase.',
     'Return REVISION_REQUESTED with concrete guidance if the assignee must revise.',
     'Return ESCALATE only if your manager must decide.',
+    'Reviews with no explicit verdict are returned for retry - never omit the decision.',
     'This review only affects the Message Board delegation chain. Do not move the Kanban card stage.',
   ].join('\n');
 }
@@ -3492,6 +3493,7 @@ async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}
       helpReview
         ? 'Decision options: APPROVE/DONE if you can finish it directly, REVISION_REQUESTED with concrete guidance if the assignee should retry, or ESCALATE if your manager must decide.'
         : 'Decision options: PASS/APPROVED if acceptable, REJECT/REVISION_REQUESTED with concrete feedback if it needs more work, or ESCALATE only if your manager must decide.',
+      'Reviews with no explicit verdict are returned for retry - never omit the decision.',
     ].join('\n\n');
   }
   const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.reviewerId });
