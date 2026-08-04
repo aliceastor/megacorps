@@ -1,5 +1,7 @@
 # Stage A: 結構化報告 + Verdict 必填 Implementation Plan
 
+> **STATUS: ✅ 全部完成(2026-08-04)** — commits `4aedb86`(Task 1)、`86d5cb8`(Task 2)、`eab4968`(Task 3)、`fb63fe8`(Task 4)、`bb09004`(Task 5)。全套 95 測試綠、全 workspace typecheck 綠。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 引入 A2A 對齊的結構化報告 schema(`megacorps-report`),review verdict 改為可缺席即退回(廢除「默認 approve」),webhook 接受結構化 `report` 並以其 delegations 取代散文解析。

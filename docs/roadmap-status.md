@@ -57,11 +57,11 @@ PUT /api/agents/<id>  body: {"memoryConfig":{"enabled":true,"idleMinutes":15,"da
 
 病灶:合約是散文 + regex。委派靠解析 `DELEGATE:` bullet、review verdict 靠關鍵字、比對不到**默默預設 approve**;近期一連串 delegation loop 修復都是這裡的症狀。
 
-| # | 項目 | 內容 |
-|---|---|---|
-| 1 | 結構化報告 schema | `{status, verdict, summary, artifacts[], questions[], next_action}`,zod 驗證,失敗明確退回重試 |
-| 2 | 單一結果通道 | 結果只走 webhook;stdout 降為純 log(消滅 stdout/webhook 雙通道 race 與約 200 行重複邏輯) |
-| 3 | 廢 regex verdict | verdict 改必填欄位,移除「默認 approve」 |
+| # | 項目 | 內容 | 狀態 |
+|---|---|---|---|
+| 1 | 結構化報告 schema | `agentReportSchema`(A2A 對齊),webhook `report` 欄位 + 輸出內 JSON 區塊抽取,散文 DELEGATE 降為 legacy fallback | ✅ **Stage A 已實裝**(2026-08-04) |
+| 2 | 單一結果通道 | 結果只走單一通道;stdout/webhook race 隨 a2a adapter 遷移消滅 | ⏳ Stage B(a2a agent 路徑) |
+| 3 | 廢 regex verdict | verdict 無法辨識 → 退回重試(card review 走 feedback requeue、message review 走 retry channel),**「默認 approve」已移除**;report verdict 優先於散文 | ✅ **Stage A 已實裝**(2026-08-04) |
 
 特性:不改變任何使用者可見行為,風險低,是所有後續改動的地基。可向下相容分階段上(舊格式暫收、標記 deprecated)。
 
