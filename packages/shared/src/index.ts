@@ -245,6 +245,29 @@ export const updateAgentSchema = createAgentSchema.omit({ adapterType: true, cap
   capabilities: z.array(z.string().trim().min(1).max(80)).optional(),
 });
 
+// A2A-aligned structured agent report (docs/a2a-adapter-design.md §3.2).
+// Carried as a DataPart in A2A messages, or as the optional `report` field of
+// the task-complete webhook. Prose DELEGATE blocks remain a legacy fallback.
+export const agentReportDelegationSchema = z.object({
+  to: z.string().trim().max(80).optional(),
+  objective: z.string().trim().min(1).max(2000),
+  outputFormat: z.string().trim().max(1000).optional(),
+  boundaries: z.string().trim().max(1000).optional(),
+  effort: z.enum(['small', 'medium', 'large']).optional(),
+  mode: z.enum(['subroutine', 'handoff']).default('subroutine'),
+});
+export const agentReportSchema = z.object({
+  kind: z.literal('megacorps-report'),
+  status: z.enum(['completed', 'input_required', 'failed', 'rejected']),
+  verdict: z.enum(['approved', 'revision_requested', 'escalate']).optional(),
+  summary: z.string().trim().min(1).max(4000),
+  questions: z.array(z.string().trim().min(1).max(1000)).max(10).optional(),
+  delegations: z.array(agentReportDelegationSchema).max(8).optional(),
+  artifactRefs: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
+});
+export type AgentReportDelegation = z.infer<typeof agentReportDelegationSchema>;
+export type AgentReport = z.infer<typeof agentReportSchema>;
+
 export const createAgentRuntimeSchema = z.object({
   companyId: z.string().uuid().optional(),
   name: z.string().trim().min(1).max(120),
