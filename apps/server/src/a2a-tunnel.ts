@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { Socket } from 'node:net';
 
@@ -16,7 +16,11 @@ export type TunnelTarget = {
   remotePort: number;
 };
 
-type SpawnedChild = Pick<ChildProcess, 'kill' | 'on' | 'killed'> & { once?: ChildProcess['once'] };
+type SpawnedChild = {
+  kill: () => unknown;
+  on: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  killed: boolean;
+};
 
 export type TunnelDeps = {
   spawnFn: (command: string, args: string[]) => SpawnedChild;
@@ -113,7 +117,7 @@ export async function ensureA2aTunnel(target: TunnelTarget, deps: TunnelDeps = d
   });
 
   const ready = waitUntilReady(exitState, localPort, deps).then(() => localPort).catch((error) => {
-    if (!child.killed) child.kill('SIGTERM');
+    if (!child.killed) child.kill();
     if (tunnels.get(key)?.child === child) tunnels.delete(key);
     throw error;
   });
@@ -123,7 +127,7 @@ export async function ensureA2aTunnel(target: TunnelTarget, deps: TunnelDeps = d
 
 export function closeAllA2aTunnels(): void {
   for (const state of tunnels.values()) {
-    if (!state.child.killed) state.child.kill('SIGTERM');
+    if (!state.child.killed) state.child.kill();
   }
   tunnels.clear();
 }

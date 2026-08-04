@@ -69,11 +69,12 @@ function fakeFetch(handler: (url: string, init: RequestInit) => { status?: numbe
 }
 
 test('sendA2aMessage posts JSON-RPC SendMessage and returns the normalized outcome', async () => {
-  let captured: { url: string; body: any; auth: string | null } | null = null;
+  const capturedCalls: Array<{ url: string; body: any; auth: string | null }> = [];
   const fetchImpl = fakeFetch((url, init) => {
     const headers = new Headers(init.headers as HeadersInit);
-    captured = { url, body: JSON.parse(String(init.body)), auth: headers.get('authorization') };
-    return { body: { jsonrpc: '2.0', id: captured.body.id, result: { task: task('TASK_STATE_COMPLETED', 'ok done') } } };
+    const body = JSON.parse(String(init.body));
+    capturedCalls.push({ url, body, auth: headers.get('authorization') });
+    return { body: { jsonrpc: '2.0', id: body.id, result: { task: task('TASK_STATE_COMPLETED', 'ok done') } } };
   });
   const outcome = await sendA2aMessage({
     baseUrl: 'http://gateway.example:9900/ribel',
@@ -84,13 +85,13 @@ test('sendA2aMessage posts JSON-RPC SendMessage and returns the normalized outco
     fetchImpl,
   });
   assert.equal(outcome.text, 'ok done');
-  assert.ok(captured);
-  assert.equal(captured!.url, 'http://gateway.example:9900/ribel');
-  assert.equal(captured!.auth, 'Bearer tok-1');
-  assert.equal(captured!.body.method, 'SendMessage');
-  assert.equal(captured!.body.params.message.contextId, 'ctx-9');
-  assert.equal(captured!.body.params.message.role, 'ROLE_USER');
-  assert.equal(captured!.body.params.message.parts[0].text, 'do the thing');
+  const captured = capturedCalls[0]!;
+  assert.equal(captured.url, 'http://gateway.example:9900/ribel');
+  assert.equal(captured.auth, 'Bearer tok-1');
+  assert.equal(captured.body.method, 'SendMessage');
+  assert.equal(captured.body.params.message.contextId, 'ctx-9');
+  assert.equal(captured.body.params.message.role, 'ROLE_USER');
+  assert.equal(captured.body.params.message.parts[0].text, 'do the thing');
 });
 
 test('sendA2aMessage throws on JSON-RPC error responses', async () => {

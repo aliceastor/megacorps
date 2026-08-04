@@ -3,6 +3,7 @@ import type { AgentLike, TaskContext, TaskResult } from './hermes.ts';
 import { dispatchToHermesGateway } from './hermes-gateway.ts';
 import { dispatchToHermesSsh } from './hermes-ssh.ts';
 import { dispatchToOpenClaw, dispatchToWebhook } from './webhook.ts';
+import { dispatchToA2a } from './a2a.ts';
 
 export type AdapterDispatchHooks = {
   // Incremental stdout/text chunks while the adapter run is still in flight.
@@ -16,6 +17,7 @@ registry.set('hermes-ssh', { dispatch: dispatchToHermesSsh });
 registry.set('codex-app', { dispatch: dispatchToCodexApp });
 registry.set('webhook', { dispatch: dispatchToWebhook });
 registry.set('openclaw', { dispatch: dispatchToOpenClaw });
+registry.set('a2a', { dispatch: dispatchToA2a });
 export function getAdapter(type: string): AgentAdapter {
   const adapter = registry.get(type);
   if (!adapter) throw new Error(`Adapter not registered: ${type}`);
