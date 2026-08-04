@@ -1,5 +1,7 @@
 # Stage B: A2A Adapter(純傳輸模式)Implementation Plan
 
+> **STATUS: ✅ 全部完成(2026-08-05)** — commits `51ae4db`(Task 1)、`6e3fc33`(Task 2)、`4ea0cb2`(Task 3)、`0149ef6`(Task 4)。全套 114 測試綠、typecheck 綠。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 新增 `a2a` adapter type:MegaCorps 經 SSH tunnel(或直連 URL)以 A2A JSON-RPC 呼叫 Hermes 0.20 gateway,行為與 hermes-ssh 等價(同 prompt、同 TaskResult),逐 agent opt-in。

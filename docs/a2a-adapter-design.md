@@ -120,7 +120,9 @@ A2A Artifact → `work_products` 一對一寫入:`artifactId → metadata.a2aArt
 
 ## 7. Adapter 實作規格
 
-### 7.1 Stage B:純傳輸模式(先行)
+### 7.1 Stage B:純傳輸模式(先行)✅ 已實裝 2026-08-05
+
+> 實作偏離:未使用 `@a2a-js/sdk`(proto 生成型別過重),改為自寫薄 JSON-RPC client([a2a-client.ts](../apps/server/src/a2a-client.ts)),對齊 Hermes JSON-RPC binding;未來需要 gRPC/push 再引入 SDK。SSE streaming 暫未實作(非串流 SendMessage + timeout)。
 
 `adapters/a2a.ts` 實作與現有 adapter 相同的 `dispatch(agent, task) → TaskResult` 介面:
 

@@ -13,7 +13,7 @@
 | Workflow P0 | 結構化報告、單一結果通道、廢 regex verdict——**直接採 A2A 資料模型** | ❌ 未做(**建議的下一步**) |
 | Workflow P1 | input-required 狀態機(由 A2A 取代)、兩種委派模式、委派樹邊界、檔案整合 | ❌ 未做 |
 | Workflow P2 | artifact 一等公民(由 A2A 取代)、per-agent token、policy-gated 人審 | ❌ 未做 |
-| `a2a` adapter | MegaCorps 作為 A2A client 直連 Hermes 0.2 的 A2A server | ❌ 未做(規格待確認) |
+| `a2a` adapter | MegaCorps 作為 A2A client 直連 Hermes 0.20 的 A2A server | ✅ **Stage B 完成**(2026-08-05):`a2a-client.ts` + `a2a-tunnel.ts` + `adapters/a2a.ts`,純傳輸模式,逐 agent opt-in;Stage C(原生 task 模式/input-required)未做 |
 
 ---
 
@@ -60,7 +60,7 @@ PUT /api/agents/<id>  body: {"memoryConfig":{"enabled":true,"idleMinutes":15,"da
 | # | 項目 | 內容 | 狀態 |
 |---|---|---|---|
 | 1 | 結構化報告 schema | `agentReportSchema`(A2A 對齊),webhook `report` 欄位 + 輸出內 JSON 區塊抽取,散文 DELEGATE 降為 legacy fallback | ✅ **Stage A 已實裝**(2026-08-04) |
-| 2 | 單一結果通道 | 結果只走單一通道;stdout/webhook race 隨 a2a adapter 遷移消滅 | ⏳ Stage B(a2a agent 路徑) |
+| 2 | 單一結果通道 | 結果只走單一通道;stdout/webhook race 隨 a2a adapter 遷移消滅 | 🔄 **Stage B 已出貨 a2a 傳輸路徑**(2026-08-05);切換 agent 至 `adapterType='a2a'` 即逐步消滅 stdout 撈取;webhook 完全退場在 Stage C |
 | 3 | 廢 regex verdict | verdict 無法辨識 → 退回重試(card review 走 feedback requeue、message review 走 retry channel),**「默認 approve」已移除**;report verdict 優先於散文 | ✅ **Stage A 已實裝**(2026-08-04) |
 
 特性:不改變任何使用者可見行為,風險低,是所有後續改動的地基。可向下相容分階段上(舊格式暫收、標記 deprecated)。
