@@ -13,6 +13,7 @@ import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
 import { agentRuntimeAvailable, createRuntimeAvailabilityCache, type RuntimeAvailabilityCache } from './runner-availability.ts';
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
+import { extractAgentReport } from './agent-report.ts';
 import { notify } from './notifications.ts';
 import { readKanbanTaskTimeoutSeconds, normalizeKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
 import { projectSharedFileSpaceLines } from './project-workspace.ts';
@@ -412,14 +413,27 @@ function explicitReviewDecision(output: string | null | undefined): ReviewDecisi
   return null;
 }
 
-function reviewDecision(output: string, mode: 'quality' | 'help'): ReviewDecision {
+function reviewDecision(output: string, _mode: 'quality' | 'help'): ReviewDecision | null {
   const explicit = explicitReviewDecision(output);
   if (explicit) return explicit;
   if (/\b(escalate|needs[_ -]?higher|needs[_ -]?boss|needs[_ -]?manager|cannot[_ -]?resolve|unable[_ -]?to[_ -]?resolve)\b/i.test(output)) return 'escalate';
   if (/\b(revision[_ -]?requested|request[_ -]?revision|needs[_ -]?rework|redo|retry|reject|rejected|fail|failed|blocked|not\s+approved|not\s+acceptable|cannot\s+approve)\b/i.test(output)) return 'revision_requested';
   if (/\b(pass|approve|approved|done|complete|completed|resolved)\b/i.test(output)) return 'approved';
-  return mode === 'help' ? 'revision_requested' : 'approved';
+  // No silent default: an unmatched review is a malformed review, and the
+  // caller must return it to the reviewer instead of guessing a verdict.
+  return null;
 }
+
+function reportVerdictFromOutput(output: string | null | undefined): ReviewDecision | null {
+  const extraction = extractAgentReport(output);
+  return extraction && 'report' in extraction ? extraction.report.verdict ?? null : null;
+}
+
+function resolveReviewVerdict(output: string | null | undefined, mode: 'quality' | 'help'): ReviewDecision | null {
+  return reportVerdictFromOutput(output) ?? reviewDecision(output ?? '', mode);
+}
+
+const REVIEW_VERDICT_MISSING_MESSAGE = 'review_verdict_missing: Your review did not contain a decision. Return a JSON megacorps-report with "verdict", or an explicit VERDICT: APPROVED | REVISION_REQUESTED | ESCALATE line.';
 
 function cardChangedOutsideCurrentRun(latest: Pick<CardRow, 'columnStatus' | 'activeHeartbeatRunId' | 'executionLockId'> | null | undefined, lockedCard: Pick<CardRow, 'columnStatus'>, runId: string): boolean {
   if (!latest) return false;
@@ -1887,7 +1901,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     if (result.success) await rememberTaskAdapterSession(card, reviewer, 'message_review', result, taskRun.id);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
-    const explicitDecision = explicitReviewDecision(result.output);
+    const explicitDecision = reportVerdictFromOutput(result.output) ?? explicitReviewDecision(result.output);
     const decision = explicitDecision ?? reviewDecision(result.output, report.reviewerScope === 'final' ? 'quality' : 'help');
     if (!result.success && !explicitDecision) {
       const errorMessage = result.output || 'message_review_failed';
@@ -1896,6 +1910,14 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
       if (await requeueMessageTaskAfterFailure({ card, comment: report, taskRun, kind: 'message_review', agentId: reviewer.id, message: errorMessage })) return card;
       await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, report.id));
       await addCardMessage({ cardId: card.id, parentCommentId: report.id, agentId: reviewer.id, action: 'delegate_review_failed', body: errorMessage, delegationStatus: 'failed' });
+      return card;
+    }
+    if (!decision) {
+      await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: REVIEW_VERDICT_MISSING_MESSAGE, durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
+      await completeTaskRun(taskRun.id, { status: 'failed', error: REVIEW_VERDICT_MISSING_MESSAGE, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      if (await requeueMessageTaskAfterFailure({ card, comment: report, taskRun, kind: 'message_review', agentId: reviewer.id, message: REVIEW_VERDICT_MISSING_MESSAGE })) return card;
+      await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, report.id));
+      await addCardMessage({ cardId: card.id, parentCommentId: report.id, agentId: reviewer.id, action: 'delegate_review_failed', body: REVIEW_VERDICT_MISSING_MESSAGE, delegationStatus: 'failed' });
       return card;
     }
     if (decision === 'escalate') {
@@ -2025,7 +2047,18 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
   }
 
   const [request] = comment.parentCommentId ? await db.select().from(cardComments).where(eq(cardComments.id, comment.parentCommentId)).limit(1) : [];
-  const decision = terminalFailure ? 'revision_requested' : explicitReviewDecision(output) ?? reviewDecision(output, comment.reviewerScope === 'final' ? 'quality' : 'help');
+  const decision: ReviewDecision | null = terminalFailure ? 'revision_requested' : resolveReviewVerdict(output, comment.reviewerScope === 'final' ? 'quality' : 'help');
+  if (!decision) {
+    if (actorAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actorAgentId));
+    if (heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: REVIEW_VERDICT_MISSING_MESSAGE, costUsd: input.costUsd?.toString() }).where(eq(heartbeatRuns.id, heartbeatRunId));
+    await completeTaskRun(taskRun.id, { status: 'failed', error: REVIEW_VERDICT_MISSING_MESSAGE, output, costUsd: input.costUsd });
+    if (await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message_review', agentId: actorAgentId, message: REVIEW_VERDICT_MISSING_MESSAGE })) {
+      return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'submitted', delegated: false, reviewerId: comment.reviewerAgentId };
+    }
+    await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
+    await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: actorAgentId, action: 'delegate_review_failed', body: REVIEW_VERDICT_MISSING_MESSAGE, delegationStatus: 'failed' });
+    return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'failed', delegated: false, reviewerId: comment.reviewerAgentId };
+  }
   if (decision === 'revision_requested') {
     await db.update(cardComments).set({ delegationStatus: 'rejected' }).where(eq(cardComments.id, comment.id));
     if (request) {
@@ -2441,7 +2474,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       return latest;
     }
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-    const explicitDecision = explicitReviewDecision(result.output);
+    const explicitDecision = reportVerdictFromOutput(result.output) ?? explicitReviewDecision(result.output);
     if (!result.success && !explicitDecision) {
       throw new Error(adapterFailureMessage('review', result.output));
     }
@@ -2459,6 +2492,18 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       });
     }
     const decision = explicitDecision ?? reviewDecision(result.output, reviewMode);
+    if (!decision) {
+      return sendAgentFeedbackAndRequeue({
+        card,
+        agent: reviewer,
+        kind: 'review',
+        message: REVIEW_VERDICT_MISSING_MESSAGE,
+        runId: run.id,
+        taskRunId: options.taskRunId,
+        output: result.output,
+        result,
+      });
+    }
     const acceptedReviewOutput = result.success || Boolean(explicitDecision);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
 
@@ -2928,6 +2973,7 @@ export const dispatchInternals = {
   dispatchCompletionDecision,
   explicitReviewDecision,
   optionalDelegationInstructions,
+  resolveReviewVerdict,
   reviewDecision,
   terminalMessageTaskCanRun,
 };
