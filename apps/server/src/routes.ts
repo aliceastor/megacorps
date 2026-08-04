@@ -13,6 +13,8 @@ import { adapterRequiresRuntime } from './adapters/config.ts';
 import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions } from './dispatch.ts';
 import { registerChatRoutes } from './chat.ts';
 import { runAgentMaintenance } from './agent-maintenance.ts';
+import { agentReportSchema } from '@megacorps/shared';
+import { delegationLineFromReportItem } from './agent-report.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
@@ -2522,6 +2524,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       costUsd: z.number().nonnegative().optional(),
       pollIntervalSeconds: z.number().int().min(30).max(86_400).nullable().optional(),
       workProducts: z.array(createWorkProductSchema).default([]),
+      report: agentReportSchema.optional(),
     }).safeParse(request.body);
     if (!parsedBody.success) return reply.code(400).send({
       error: 'invalid_body',
@@ -2557,7 +2560,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
     const actorAgentId = webhookTaskRun?.agentId ?? card.assigneeId;
-    const requestedDelegation = delegationItems(executionLog);
+    const structuredDelegations = body.report?.delegations ?? null;
+    if (structuredDelegations?.some((item) => item.mode === 'handoff')) {
+      // Stage D implements ownership transfer; until then a handoff request is
+      // executed as a subroutine delegation so the work still happens.
+      app.log.warn({ cardId: card.id }, 'handoff delegation mode not yet implemented; treating as subroutine');
+    }
+    const requestedDelegation = structuredDelegations
+      ? structuredDelegations.map(delegationLineFromReportItem)
+      : delegationItems(executionLog);
     const escalation = isGuidanceEscalation(requestedStatus, executionLog);
     const escalationReviewerId = escalation ? await resolveIndependentReviewerForCard(card, actorAgentId) : null;
     const topLevelGuidanceAccepted = escalation && !escalationReviewerId;
@@ -2735,7 +2746,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await db.update(taskRuns).set({ status: runStatus, completedAt: new Date(), lockedBy: null, lockedAt: null, error, output: executionLog, costUsd: body.costUsd?.toString(), updatedAt: new Date() }).where(eq(taskRuns.heartbeatRunId, heartbeatRunId));
       }
     }
-    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: actorAgentId, action: webhookAction, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId, requestedStatus, requestedNextStatus, nextStatus, escalation, reviewerId: escalationReviewerId ?? qualityReviewerId, topLevelGuidanceAccepted, externalWaitId, pollIntervalSeconds: body.pollIntervalSeconds ?? null, delegatedViaWebhook, delegationFailed, delegationFailureReason, messageDelegationCount: delegatedRows.length, childBlock } });
+    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: actorAgentId, action: webhookAction, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId, requestedStatus, requestedNextStatus, nextStatus, escalation, reviewerId: escalationReviewerId ?? qualityReviewerId, topLevelGuidanceAccepted, externalWaitId, pollIntervalSeconds: body.pollIntervalSeconds ?? null, delegatedViaWebhook, delegationFailed, delegationFailureReason, messageDelegationCount: delegatedRows.length, childBlock, reportFormat: body.report ? 'structured' : 'legacy' } });
     if (nextStatus === 'in_review' && qualityReviewerId) {
       await createPendingApproval(updatedCard ?? { ...card, columnStatus: nextStatus, reviewerId: qualityReviewerId }, actorAgentId ?? card.assigneeId, 'Webhook completion requires quality review.');
       await enqueueTaskRun(card.id, 'review', 'queue');
