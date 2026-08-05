@@ -42,6 +42,14 @@ test('needsInput routes to help review with a reviewer, blocks without one', () 
   assert.deepEqual(needsInputCompletionDecision(null), { needsHelpReview: true, nextStatus: 'blocked', topLevelGuidanceAccepted: false });
 });
 
+test('delegationBoundsError enforces depth and fanout limits', () => {
+  const { delegationBoundsError } = dispatchInternals;
+  assert.equal(delegationBoundsError({ depth: 0, existingInScope: 0, adding: 3, maxDepth: 3, maxFanout: 16 }), null);
+  assert.match(delegationBoundsError({ depth: 3, existingInScope: 0, adding: 1, maxDepth: 3, maxFanout: 16 }) ?? '', /^delegation_depth_exceeded/);
+  assert.match(delegationBoundsError({ depth: 1, existingInScope: 15, adding: 2, maxDepth: 3, maxFanout: 16 }) ?? '', /^delegation_fanout_exceeded/);
+  assert.equal(delegationBoundsError({ depth: 2, existingInScope: 14, adding: 2, maxDepth: 3, maxFanout: 16 }), null);
+});
+
 test('workProductRowsFromArtifacts maps uri artifacts and skips text-only ones', () => {
   const { workProductRowsFromArtifacts } = dispatchInternals;
   const card = { id: 'card-1', companyId: 'co-1', projectId: 'proj-1' };

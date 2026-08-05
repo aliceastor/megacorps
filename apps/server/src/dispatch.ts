@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lt, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { inferCardTransitionAction, normalizeCardStatus, type CardStatus } from '@megacorps/shared';
 import { db, sql as rawSql } from './db/client.ts';
@@ -697,6 +697,37 @@ export async function enqueueMessageTaskRun(comment: CardCommentRow, kind: Extra
 
 const HANDOFF_MIXED_MESSAGE = 'handoff_must_be_sole_delegation: A handoff transfers card ownership; do not combine it with other delegations. Either hand off the card alone or use "mode":"subroutine" delegations only.';
 
+// Delegation-tree bounds (roadmap P1 #7). Violations throw, and every
+// createMessageDelegations call site already converts throws into agent
+// feedback + retry.
+const MAX_DELEGATION_DEPTH = Math.max(1, Number(process.env.DELEGATION_MAX_DEPTH ?? 3));
+const MAX_DELEGATION_FANOUT = Math.max(1, Number(process.env.DELEGATION_MAX_FANOUT ?? 16));
+const DELEGATION_TREE_TIMEOUT_HOURS = Math.max(1, Number(process.env.DELEGATION_TREE_TIMEOUT_HOURS ?? 24));
+
+function delegationBoundsError(input: { depth: number; existingInScope: number; adding: number; maxDepth?: number; maxFanout?: number }): string | null {
+  const maxDepth = input.maxDepth ?? MAX_DELEGATION_DEPTH;
+  const maxFanout = input.maxFanout ?? MAX_DELEGATION_FANOUT;
+  if (input.depth + 1 > maxDepth) {
+    return `delegation_depth_exceeded: this delegation chain is already ${input.depth} level(s) deep and the limit is ${maxDepth}. Do the work yourself or report back to your reviewer instead of delegating further.`;
+  }
+  if (input.existingInScope + input.adding > maxFanout) {
+    return `delegation_fanout_exceeded: this scope already has ${input.existingInScope} delegation(s) and adding ${input.adding} would exceed the limit of ${maxFanout}. Consolidate the work into fewer, larger delegations.`;
+  }
+  return null;
+}
+
+async function delegationDepthOf(parentCommentId: string | null | undefined): Promise<number> {
+  let depth = 0;
+  let current = parentCommentId ?? null;
+  while (current && depth < 32) {
+    const [row] = await db.select({ parentCommentId: cardComments.parentCommentId, action: cardComments.action }).from(cardComments).where(eq(cardComments.id, current)).limit(1);
+    if (!row) break;
+    if (row.action === 'delegate_request') depth += 1;
+    current = row.parentCommentId;
+  }
+  return depth;
+}
+
 async function resolveHandoffTarget(card: CardRow, fromAgent: AgentRow, item: AgentReportDelegation): Promise<AgentRow> {
   const to = item.to?.trim();
   const reports = await activeDirectReportsForAgent(card.companyId, fromAgent.id);
@@ -719,6 +750,40 @@ function handoffMessageBody(fromAgent: AgentRow, target: AgentRow, item: AgentRe
     item.outputFormat ? `Expected output: ${item.outputFormat}` : '',
     item.boundaries ? `Boundaries: ${item.boundaries}` : '',
   ].filter(Boolean).join('\n');
+}
+
+// Tree-level timeout: a delegate_request stuck before submission for too long
+// is cancelled (not failed — childDelegationsPending only unblocks parents on
+// approved/cancelled), and the requester side is woken up to continue.
+export async function expireStaleDelegations(app: FastifyInstance): Promise<number> {
+  const cutoff = new Date(Date.now() - DELEGATION_TREE_TIMEOUT_HOURS * 3_600_000);
+  const stale = await db.select().from(cardComments).where(and(
+    eq(cardComments.action, 'delegate_request'),
+    inArray(cardComments.delegationStatus, ['queued', 'running', 'waiting']),
+    lt(cardComments.createdAt, cutoff),
+  )).limit(20);
+  let expired = 0;
+  for (const request of stale) {
+    const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, request.cardId), isNull(kanbanCards.deletedAt))).limit(1);
+    if (!card) continue;
+    await db.update(cardComments).set({ delegationStatus: 'cancelled' }).where(eq(cardComments.id, request.id));
+    await db.update(taskRuns).set({ status: 'cancelled', completedAt: new Date(), lockedBy: null, lockedAt: null, error: 'delegation_tree_timeout', updatedAt: new Date() })
+      .where(and(eq(taskRuns.messageCommentId, request.id), eq(taskRuns.status, 'queued')));
+    await addCardMessage({ cardId: card.id, parentCommentId: request.id, agentId: request.agentId, action: 'delegate_timeout', body: `Delegation timed out after ${DELEGATION_TREE_TIMEOUT_HOURS}h and was cancelled.`, delegationStatus: 'cancelled' });
+    await addTaskLog({ cardId: card.id, agentId: request.assigneeAgentId, type: 'message_delegation', status: 'warning', message: `Delegation cancelled after ${DELEGATION_TREE_TIMEOUT_HOURS}h tree timeout.`, output: request.body });
+    if (request.parentCommentId) {
+      const [parentRequest] = await db.select().from(cardComments).where(eq(cardComments.id, request.parentCommentId)).limit(1);
+      if (parentRequest && !(await childDelegationsPending(parentRequest.id))) {
+        await db.update(cardComments).set({ delegationStatus: 'queued' }).where(eq(cardComments.id, parentRequest.id));
+        await enqueueMessageTaskRun({ ...parentRequest, delegationStatus: 'queued' }, 'message');
+      }
+    } else if (!isTerminalCardStatus(card.columnStatus)) {
+      try { await enqueueTaskRun(card.id, 'dispatch', 'queue'); } catch (error) { app.log.warn({ error, cardId: card.id }, 'delegation timeout re-dispatch skipped'); }
+    }
+    expired += 1;
+  }
+  if (expired > 0) app.log.info({ expired }, 'expired stale delegation requests');
+  return expired;
 }
 
 // Webhook-path handoff: ownership transfer requested through the task-complete
@@ -762,6 +827,12 @@ export async function createMessageDelegations(parent: CardRow, leader: AgentRow
   sourceOutput?: string | null;
 } = {}): Promise<CardCommentRow[]> {
   if (titles.length === 0) return [];
+  const depth = await delegationDepthOf(input.parentCommentId);
+  const scopeFilter = input.parentCommentId ? eq(cardComments.parentCommentId, input.parentCommentId) : isNull(cardComments.parentCommentId);
+  const [existingScope] = await db.select({ count: drizzleSql<number>`count(*)::int` }).from(cardComments)
+    .where(and(eq(cardComments.cardId, parent.id), eq(cardComments.action, 'delegate_request'), scopeFilter));
+  const boundsError = delegationBoundsError({ depth, existingInScope: existingScope?.count ?? 0, adding: titles.length });
+  if (boundsError) throw new Error(boundsError);
   const allDirectReports = await db.select().from(agents).where(and(eq(agents.companyId, parent.companyId), eq(agents.bossId, leader.id), eq(agents.isActive, true), isNull(agents.deletedAt)));
   const directReports = await activeDirectReportsForAgent(parent.companyId, leader.id);
   if (directReports.length === 0) return [];
@@ -3043,6 +3114,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
     result.activeCompanies = activeCompanyIds.length;
 
     if (activeCompanyIds.length > 0) {
+      await expireStaleDelegations(app);
       await spawnDueScheduledCards(app, activeCompanyIds);
       // Only statuses the loop can act on; done/blocked/cancelled/in_progress cards
       // used to be loaded and skipped one by one, which scales badly with board size.
@@ -3140,6 +3212,7 @@ export const dispatchInternals = {
   collaborationModeRequiresDelegation,
   companyStructureLines,
   completionStatusForQualityGate,
+  delegationBoundsError,
   delegationItems,
   delegationSourceContextForPrompt,
   dispatchCompletionDecision,
