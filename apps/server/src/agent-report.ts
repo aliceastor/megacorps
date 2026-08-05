@@ -69,6 +69,29 @@ export function extractAgentReport(output: string | null | undefined): AgentRepo
   return lastError ? { error: lastError } : null;
 }
 
+export type StructuredDelegationPlan = {
+  handoff: AgentReportDelegation | null;
+  subroutineLines: string[];
+  mixed: boolean;
+};
+
+// Splits a structured report's delegations into ownership-transfer (handoff)
+// vs subroutine work. `mixed` flags plans that combine a handoff with anything
+// else — ambiguous ownership, rejected by callers.
+export function structuredDelegationPlan(output: string | null | undefined): StructuredDelegationPlan | null {
+  const extraction = extractAgentReport(output);
+  if (!extraction || !('report' in extraction)) return null;
+  const delegations = extraction.report.delegations ?? [];
+  if (delegations.length === 0) return null;
+  const handoffs = delegations.filter((item) => item.mode === 'handoff');
+  const subroutines = delegations.filter((item) => item.mode !== 'handoff');
+  return {
+    handoff: handoffs[0] ?? null,
+    subroutineLines: subroutines.map(delegationLineFromReportItem),
+    mixed: handoffs.length > 1 || (handoffs.length > 0 && subroutines.length > 0),
+  };
+}
+
 export function delegationLineFromReportItem(item: AgentReportDelegation): string {
   const parts = [item.objective];
   if (item.outputFormat) parts.push(`output: ${item.outputFormat}`);

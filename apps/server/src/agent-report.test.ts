@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { agentReportSchema } from '@megacorps/shared';
-import { delegationLineFromReportItem, extractAgentReport } from './agent-report.ts';
+import { delegationLineFromReportItem, extractAgentReport, structuredDelegationPlan } from './agent-report.ts';
 
 test('agentReportSchema accepts a complete report', () => {
   const parsed = agentReportSchema.parse({
@@ -93,4 +93,30 @@ test('delegationLineFromReportItem formats assignee prefix and constraints', () 
 test('delegationLineFromReportItem clips very long lines', () => {
   const line = delegationLineFromReportItem({ objective: 'x'.repeat(600), mode: 'subroutine' });
   assert.ok(line.length <= 500);
+});
+
+function reportWith(delegations: unknown[]): string {
+  return `\`\`\`json\n${JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'plan', delegations })}\n\`\`\``;
+}
+
+test('structuredDelegationPlan splits handoff from subroutine work', () => {
+  const plan = structuredDelegationPlan(reportWith([{ to: 'ribel', objective: 'Own the rest of this card', mode: 'handoff' }]));
+  assert.ok(plan);
+  assert.equal(plan.handoff?.to, 'ribel');
+  assert.equal(plan.subroutineLines.length, 0);
+  assert.equal(plan.mixed, false);
+});
+
+test('structuredDelegationPlan flags mixed handoff and subroutines', () => {
+  const plan = structuredDelegationPlan(reportWith([
+    { to: 'ribel', objective: 'take over', mode: 'handoff' },
+    { objective: 'also research this', mode: 'subroutine' },
+  ]));
+  assert.ok(plan);
+  assert.equal(plan.mixed, true);
+});
+
+test('structuredDelegationPlan returns null without a report or delegations', () => {
+  assert.equal(structuredDelegationPlan('DELEGATE:\n- prose only'), null);
+  assert.equal(structuredDelegationPlan(reportWith([])), null);
 });

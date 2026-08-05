@@ -13,7 +13,8 @@ import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
 import { agentRuntimeAvailable, createRuntimeAvailabilityCache, type RuntimeAvailabilityCache } from './runner-availability.ts';
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
-import { extractAgentReport } from './agent-report.ts';
+import { extractAgentReport, structuredDelegationPlan } from './agent-report.ts';
+import type { AgentReportDelegation } from '@megacorps/shared';
 import type { TaskResult } from './adapters/hermes.ts';
 import { notify } from './notifications.ts';
 import { readKanbanTaskTimeoutSeconds, normalizeKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
@@ -687,6 +688,66 @@ export async function enqueueMessageTaskRun(comment: CardCommentRow, kind: Extra
     details: { cardId: card.id, kind, reviewerScope: comment.reviewerScope ?? null },
   });
   return run;
+}
+
+const HANDOFF_MIXED_MESSAGE = 'handoff_must_be_sole_delegation: A handoff transfers card ownership; do not combine it with other delegations. Either hand off the card alone or use "mode":"subroutine" delegations only.';
+
+async function resolveHandoffTarget(card: CardRow, fromAgent: AgentRow, item: AgentReportDelegation): Promise<AgentRow> {
+  const to = item.to?.trim();
+  const reports = await activeDirectReportsForAgent(card.companyId, fromAgent.id);
+  const match = to
+    ? reports.find((report) => report.slug === to || report.name.toLowerCase() === to.toLowerCase())
+    : undefined;
+  const [target] = match
+    ? await db.select().from(agents).where(and(eq(agents.id, match.id), eq(agents.isActive, true), isNull(agents.deletedAt))).limit(1)
+    : [];
+  if (!target) {
+    throw new Error(`handoff_target_not_found: "${to ?? '(missing "to")'}" is not an available direct report. Available direct reports: ${reports.map((report) => report.slug).join(', ') || 'none'}. Use "mode":"subroutine" if you only need help, or hand off to an available direct report.`);
+  }
+  return target;
+}
+
+function handoffMessageBody(fromAgent: AgentRow, target: AgentRow, item: AgentReportDelegation): string {
+  return [
+    `Card ownership handed off to ${target.name} (${target.slug}) by ${fromAgent.name}.`,
+    item.objective,
+    item.outputFormat ? `Expected output: ${item.outputFormat}` : '',
+    item.boundaries ? `Boundaries: ${item.boundaries}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+// Webhook-path handoff: ownership transfer requested through the task-complete
+// webhook. The dispatch adapter path has its own inline variant so the card
+// move commits atomically with heartbeat completion.
+export async function performWebhookHandoff(card: CardRow, fromAgent: AgentRow, item: AgentReportDelegation, input: { taskRunId?: string | null; heartbeatRunId?: string | null; sourceOutput: string; costUsd?: number }): Promise<CardRow> {
+  const target = await resolveHandoffTarget(card, fromAgent, item);
+  const [updated] = await db.update(kanbanCards).set({
+    assigneeId: target.id,
+    reviewerId: null,
+    columnStatus: 'todo',
+    sessionId: null,
+    executionLog: input.sourceOutput,
+    retryCount: 0,
+    nextRunAt: null,
+    completedAt: null,
+    lastError: null,
+    executionLockId: null,
+    executionLockedByAgentId: null,
+    executionLockedAt: null,
+    executionLockExpiresAt: null,
+    activeHeartbeatRunId: null,
+    updatedAt: new Date(),
+  }).where(eq(kanbanCards.id, card.id)).returning();
+  await db.update(agents).set({ isBusy: false }).where(eq(agents.id, fromAgent.id));
+  if (input.heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), error: null, costUsd: input.costUsd?.toString() }).where(eq(heartbeatRuns.id, input.heartbeatRunId));
+  if (input.taskRunId) await db.update(taskRuns).set({ status: 'success', completedAt: new Date(), lockedBy: null, lockedAt: null, output: input.sourceOutput, costUsd: input.costUsd?.toString(), updatedAt: new Date() }).where(eq(taskRuns.id, input.taskRunId));
+  await addStageLog(card.id, fromAgent.id, card.columnStatus ?? 'in_progress', 'todo', 'handoff');
+  await addCardMessage({ cardId: card.id, agentId: fromAgent.id, action: 'handoff', body: handoffMessageBody(fromAgent, target, item) });
+  await addTaskLog({ cardId: card.id, agentId: fromAgent.id, type: 'handoff', status: 'success', message: `Card handed off to ${target.name} (${target.slug}).`, output: input.sourceOutput });
+  await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: fromAgent.id, agentId: fromAgent.id, action: 'dispatch.handoff', entityType: 'card', entityId: card.id, details: { toAgentId: target.id, toSlug: target.slug, taskRunId: input.taskRunId ?? null, via: 'webhook' } });
+  await enqueueTaskRun(card.id, 'dispatch', 'queue');
+  if (!updated) throw new Error('card_update_failed');
+  return updated;
 }
 
 export async function createMessageDelegations(parent: CardRow, leader: AgentRow, titles: string[], input: {
@@ -1852,7 +1913,20 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'delegate_failed', body: errorMessage, delegationStatus: 'failed' });
       return card;
     }
-    const delegated = await createMessageDelegations(card, agent, delegationItems(result.output), { parentCommentId: comment.id, reviewerScope: 'phase', sourceTaskRunId: taskRun.id, sourceOutput: result.output });
+    const messagePlan = structuredDelegationPlan(result.output);
+    if (messagePlan?.handoff || messagePlan?.mixed) {
+      // A delegate does not own the card, so ownership transfer is not theirs
+      // to request; retry with subroutine delegations or a plain report.
+      const handoffError = messagePlan.mixed
+        ? HANDOFF_MIXED_MESSAGE
+        : 'handoff_not_allowed_in_delegation: You are working a Message Board delegation and do not own this card. Use "mode":"subroutine" delegations, or report your result and let the card owner decide.';
+      await completeTaskRun(taskRun.id, { status: 'failed', error: handoffError, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      if (await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message', agentId: agent.id, message: handoffError })) return card;
+      await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
+      await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'delegate_failed', body: handoffError, delegationStatus: 'failed' });
+      return card;
+    }
+    const delegated = await createMessageDelegations(card, agent, messagePlan ? messagePlan.subroutineLines : delegationItems(result.output), { parentCommentId: comment.id, reviewerScope: 'phase', sourceTaskRunId: taskRun.id, sourceOutput: result.output });
     if (delegated.length > 0) {
       await db.update(cardComments).set({ delegationStatus: 'waiting' }).where(eq(cardComments.id, comment.id));
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'agent_delegated', body: result.output, delegationStatus: 'waiting' });
@@ -2218,9 +2292,54 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       throw new Error(adapterFailureMessage('dispatch', result.output));
     }
     await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
+    const structuredPlan = structuredDelegationPlan(result.output);
+    if (structuredPlan?.mixed) {
+      await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+      return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: HANDOFF_MIXED_MESSAGE, runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
+    }
+    if (structuredPlan?.handoff) {
+      const handoffBudgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+      let handoffTarget: AgentRow;
+      try {
+        handoffTarget = await resolveHandoffTarget(card, agent, structuredPlan.handoff);
+      } catch (error) {
+        return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: error instanceof Error ? error.message : 'handoff_target_not_found', runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
+      }
+      const updated = await db.transaction(async (tx) => {
+        await tx.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
+        const [row] = await tx.update(kanbanCards).set({
+          assigneeId: handoffTarget.id,
+          reviewerId: null,
+          columnStatus: 'todo',
+          sessionId: null,
+          executionLog: result.output,
+          costUsd: result.costUsd.toString(),
+          retryCount: 0,
+          nextRunAt: null,
+          completedAt: null,
+          lastError: null,
+          executionLockId: null,
+          executionLockedByAgentId: null,
+          executionLockedAt: null,
+          executionLockExpiresAt: null,
+          activeHeartbeatRunId: null,
+          updatedAt: new Date(),
+        }).where(eq(kanbanCards.id, card.id)).returning();
+        await tx.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), durationSeconds: result.durationSeconds, error: null, costUsd: result.costUsd.toString() }).where(eq(heartbeatRuns.id, run.id));
+        return row;
+      });
+      await addStageLog(card.id, agent.id, 'in_progress', 'todo', 'handoff');
+      await addCardMessage({ cardId: card.id, agentId: agent.id, action: 'handoff', body: handoffMessageBody(agent, handoffTarget, structuredPlan.handoff) });
+      await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'handoff', status: 'success', message: `Card handed off to ${handoffTarget.name} (${handoffTarget.slug}).`, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: 'dispatch.handoff', entityType: 'card', entityId: card.id, details: { runId: run.id, toAgentId: handoffTarget.id, toSlug: handoffTarget.slug, budgetPaused: handoffBudgetPaused, via: 'dispatch' } });
+      await completeTaskRun(options.taskRunId, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      await enqueueTaskRun(card.id, 'dispatch', 'queue');
+      if (!updated) throw new Error('card_update_failed');
+      return updated;
+    }
     let delegatedRows: Awaited<ReturnType<typeof createMessageDelegations>>;
     try {
-      delegatedRows = await createMessageDelegations(card, agent, delegationItems(result.output), { reviewerScope: 'final', sourceTaskRunId: options.taskRunId ?? null, sourceOutput: result.output });
+      delegatedRows = await createMessageDelegations(card, agent, structuredPlan ? structuredPlan.subroutineLines : delegationItems(result.output), { reviewerScope: 'final', sourceTaskRunId: options.taskRunId ?? null, sourceOutput: result.output });
     } catch (error) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       return sendAgentFeedbackAndRequeue({

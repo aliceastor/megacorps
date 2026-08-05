@@ -10,7 +10,7 @@ import { db } from './db/client.ts';
 import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
-import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions } from './dispatch.ts';
+import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions, performWebhookHandoff } from './dispatch.ts';
 import { registerChatRoutes } from './chat.ts';
 import { runAgentMaintenance } from './agent-maintenance.ts';
 import { agentReportSchema } from '@megacorps/shared';
@@ -2609,10 +2609,25 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
     const actorAgentId = webhookTaskRun?.agentId ?? card.assigneeId;
     const structuredDelegations = body.report?.delegations ?? null;
-    if (structuredDelegations?.some((item) => item.mode === 'handoff')) {
-      // Stage D implements ownership transfer; until then a handoff request is
-      // executed as a subroutine delegation so the work still happens.
-      app.log.warn({ cardId: card.id }, 'handoff delegation mode not yet implemented; treating as subroutine');
+    const handoffItems = structuredDelegations?.filter((item) => item.mode === 'handoff') ?? [];
+    if (handoffItems.length > 0) {
+      const [handoffAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
+      if (!handoffAgent) return reply.code(409).send({ error: 'handoff_agent_unknown', message: 'handoff_agent_unknown: the reporting agent could not be resolved for this card.' });
+      if (handoffItems.length > 1 || (structuredDelegations?.length ?? 0) > 1) {
+        return reply.code(409).send({ error: 'handoff_must_be_sole_delegation', message: 'handoff_must_be_sole_delegation: A handoff transfers card ownership; send it as the only delegation item.' });
+      }
+      try {
+        const updated = await performWebhookHandoff(card, handoffAgent, handoffItems[0]!, {
+          taskRunId,
+          heartbeatRunId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId,
+          sourceOutput: executionLog,
+          costUsd: body.costUsd,
+        });
+        return { ok: true, cardId: card.id, taskRunId: taskRunId ?? null, newStatus: updated.columnStatus, handoff: true, assigneeId: updated.assigneeId };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'handoff_failed';
+        return reply.code(409).send({ error: 'handoff_failed', message });
+      }
     }
     const requestedDelegation = structuredDelegations
       ? structuredDelegations.map(delegationLineFromReportItem)
