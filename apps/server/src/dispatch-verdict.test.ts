@@ -35,3 +35,22 @@ test('structured report verdict wins over prose keywords', () => {
 test('resolveReviewVerdict returns null for chatty output without any verdict', () => {
   assert.equal(resolveReviewVerdict('Overall the direction is intriguing; let me summarize what I saw.', 'quality'), null);
 });
+
+test('needsInput routes to help review with a reviewer, blocks without one', () => {
+  const { needsInputCompletionDecision } = dispatchInternals;
+  assert.deepEqual(needsInputCompletionDecision('reviewer-1'), { needsHelpReview: true, nextStatus: 'needs_review', topLevelGuidanceAccepted: false });
+  assert.deepEqual(needsInputCompletionDecision(null), { needsHelpReview: true, nextStatus: 'blocked', topLevelGuidanceAccepted: false });
+});
+
+test('workProductRowsFromArtifacts maps uri artifacts and skips text-only ones', () => {
+  const { workProductRowsFromArtifacts } = dispatchInternals;
+  const card = { id: 'card-1', companyId: 'co-1', projectId: 'proj-1' };
+  const rows = workProductRowsFromArtifacts(card as any, 'agent-1', 'run-1', [
+    { artifactId: 'a1', name: 'PR', uri: 'https://github.com/x/y/pull/3' },
+    { artifactId: 'a2', text: 'inline only' },
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.url, 'https://github.com/x/y/pull/3');
+  assert.equal(rows[0]?.title, 'PR');
+  assert.deepEqual(rows[0]?.metadata, { a2aArtifactId: 'a1' });
+});

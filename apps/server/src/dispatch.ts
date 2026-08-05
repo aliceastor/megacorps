@@ -14,6 +14,7 @@ import { agentRuntimeAvailable, createRuntimeAvailabilityCache, type RuntimeAvai
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { extractAgentReport } from './agent-report.ts';
+import type { TaskResult } from './adapters/hermes.ts';
 import { notify } from './notifications.ts';
 import { readKanbanTaskTimeoutSeconds, normalizeKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
 import { projectSharedFileSpaceLines } from './project-workspace.ts';
@@ -312,6 +313,44 @@ async function promptVisibleAgents(companyId: string, agentRows: CompanyStructur
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// input-required (A2A native mode): a mid-task question rides the existing
+// help-review machinery — reviewer answers, card returns to todo, agent resumes
+// with the same context. With nobody to ask, block instead of silently
+// accepting the question as done.
+function needsInputCompletionDecision(effectiveReviewerId: string | null): { needsHelpReview: boolean; nextStatus: CardStatus; topLevelGuidanceAccepted: boolean } {
+  return {
+    needsHelpReview: true,
+    nextStatus: effectiveReviewerId ? 'needs_review' : 'blocked',
+    topLevelGuidanceAccepted: false,
+  };
+}
+
+function workProductRowsFromArtifacts(
+  card: Pick<CardRow, 'id' | 'companyId' | 'projectId'>,
+  agentId: string | null,
+  taskRunId: string | null,
+  artifacts: TaskResult['artifacts'],
+): Array<typeof workProducts.$inferInsert> {
+  return (artifacts ?? [])
+    .filter((artifact) => typeof artifact.uri === 'string' && artifact.uri)
+    .map((artifact) => ({
+      companyId: card.companyId,
+      cardId: card.id,
+      projectId: card.projectId ?? null,
+      agentId,
+      taskRunId,
+      type: 'external',
+      title: (artifact.name ?? artifact.artifactId).slice(0, 200),
+      url: artifact.uri!,
+      metadata: { a2aArtifactId: artifact.artifactId },
+    }));
+}
+
+async function recordA2aArtifacts(card: Pick<CardRow, 'id' | 'companyId' | 'projectId'>, agentId: string | null, taskRunId: string | null | undefined, artifacts: TaskResult['artifacts']): Promise<void> {
+  const rows = workProductRowsFromArtifacts(card, agentId, taskRunId ?? null, artifacts);
+  if (rows.length > 0) await db.insert(workProducts).values(rows);
 }
 
 function dispatchCompletionDecision(output: string | null | undefined, effectiveReviewerId: string | null): { needsHelpReview: boolean; nextStatus: CardStatus; topLevelGuidanceAccepted: boolean } {
@@ -1843,6 +1882,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       metadata: { requestCommentId: comment.id, taskRunId: taskRun.id },
     });
     await db.update(cardComments).set({ delegationStatus: 'submitted' }).where(eq(cardComments.id, comment.id));
+    await recordA2aArtifacts(card, agent.id, taskRun.id, result.artifacts);
     await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'message_delegation', status: 'success', message: 'Message Board delegation report submitted for review.', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     await completeTaskRun(taskRun.id, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (report?.reviewerAgentId && report.reviewerAgentId !== agent.id) {
@@ -2267,7 +2307,10 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       });
     }
     const effectiveReviewerId = resolveEffectiveReviewerId(card, agent);
-    const { needsHelpReview, nextStatus, topLevelGuidanceAccepted } = dispatchCompletionDecision(result.output, effectiveReviewerId);
+    const needsInputQuestion = result.needsInput?.question ?? null;
+    const { needsHelpReview, nextStatus, topLevelGuidanceAccepted } = needsInputQuestion
+      ? needsInputCompletionDecision(effectiveReviewerId)
+      : dispatchCompletionDecision(result.output, effectiveReviewerId);
     const childBlock = await completionBlockedByChildren(card, nextStatus);
     const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : nextStatus;
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
@@ -2282,10 +2325,11 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         sessionId: result.sessionId,
         costUsd: result.costUsd.toString(),
         reviewerId: effectiveReviewerId,
+        reviewFeedback: needsInputQuestion ?? undefined,
         retryCount: 0,
         nextRunAt: null,
         completedAt: effectiveNextStatus === 'done' ? new Date() : null,
-        lastError: null,
+        lastError: needsInputQuestion && effectiveNextStatus === 'blocked' ? `agent_question_unanswerable: ${needsInputQuestion.slice(0, 500)}` : null,
         executionLockId: null,
         executionLockedByAgentId: null,
         executionLockedAt: null,
@@ -2303,6 +2347,10 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       return row;
     });
     if (effectiveNextStatus !== 'in_progress') await addStageLog(card.id, agent.id, 'in_progress', effectiveNextStatus, 'dispatch');
+    if (needsInputQuestion) {
+      await addCardMessage({ cardId: card.id, agentId: agent.id, action: 'agent_question', body: needsInputQuestion });
+    }
+    await recordA2aArtifacts(card, agent.id, options.taskRunId, result.artifacts);
     if (effectiveNextStatus === 'needs_review') {
       await notify({ companyId: card.companyId, type: 'needs_review', title: `Help review requested: ${card.title}`, body: `${agent.name} requested reviewer guidance.`, entityType: 'card', entityId: card.id, cardId: card.id, agentId: agent.id });
     }
@@ -2972,10 +3020,12 @@ export const dispatchInternals = {
   delegationSourceContextForPrompt,
   dispatchCompletionDecision,
   explicitReviewDecision,
+  needsInputCompletionDecision,
   optionalDelegationInstructions,
   resolveReviewVerdict,
   reviewDecision,
   terminalMessageTaskCanRun,
+  workProductRowsFromArtifacts,
 };
 
 function clipText(value: string | null | undefined, maxChars: number): string {
