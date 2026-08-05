@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { agentReportSchema, type AgentReport } from '@megacorps/shared';
 
 // Minimal A2A v1.0 JSON-RPC client. Deliberately not @a2a-js/sdk: our only
 // peer is the Hermes gateway's JSON-RPC binding, and the SDK's proto-generated
@@ -14,11 +15,20 @@ export type A2aTaskState =
   | 'canceled'
   | 'rejected';
 
+export type A2aArtifactRef = {
+  artifactId: string;
+  name?: string;
+  uri?: string;
+  text?: string;
+};
+
 export type A2aSendOutcome = {
   text: string;
   contextId: string | null;
   taskId: string | null;
   state: A2aTaskState | null;
+  report: AgentReport | null;
+  artifacts: A2aArtifactRef[];
 };
 
 const STATE_SUFFIXES: Array<[string, A2aTaskState]> = [
@@ -62,6 +72,61 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function dataFromParts(parts: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(parts)) return [];
+  const found: Record<string, unknown>[] = [];
+  for (const part of parts) {
+    const record = asRecord(part);
+    if (!record) continue;
+    const flat = asRecord(record.data);
+    if (flat) { found.push(flat); continue; }
+    const content = asRecord(record.content);
+    if (content && content.$case === 'data') {
+      const value = asRecord(content.value);
+      if (value) found.push(value);
+    }
+  }
+  return found;
+}
+
+function reportFromParts(parts: unknown): AgentReport | null {
+  for (const data of dataFromParts(parts)) {
+    if (data.kind !== 'megacorps-report') continue;
+    const parsed = agentReportSchema.safeParse(data);
+    if (parsed.success) return parsed.data;
+  }
+  return null;
+}
+
+function uriFromParts(parts: unknown): string | undefined {
+  if (!Array.isArray(parts)) return undefined;
+  for (const part of parts) {
+    const record = asRecord(part);
+    if (!record) continue;
+    if (typeof record.uri === 'string' && record.uri) return record.uri;
+    const file = asRecord(record.file);
+    if (file && typeof file.uri === 'string' && file.uri) return file.uri;
+  }
+  return undefined;
+}
+
+function artifactRefs(artifacts: unknown): A2aArtifactRef[] {
+  if (!Array.isArray(artifacts)) return [];
+  const refs: A2aArtifactRef[] = [];
+  for (const artifact of artifacts) {
+    const record = asRecord(artifact);
+    if (!record) continue;
+    const ref: A2aArtifactRef = { artifactId: typeof record.artifactId === 'string' && record.artifactId ? record.artifactId : randomUUID() };
+    if (typeof record.name === 'string' && record.name) ref.name = record.name;
+    const uri = uriFromParts(record.parts);
+    if (uri) ref.uri = uri;
+    const text = textFromParts(record.parts);
+    if (text) ref.text = text;
+    refs.push(ref);
+  }
+  return refs;
+}
+
 function looksLikeTask(record: Record<string, unknown>): boolean {
   return 'status' in record || ('id' in record && 'contextId' in record && !('parts' in record));
 }
@@ -95,6 +160,8 @@ export function normalizeA2aSendResult(result: unknown): A2aSendOutcome {
       contextId: typeof task.contextId === 'string' && task.contextId ? task.contextId : null,
       taskId: typeof task.id === 'string' && task.id ? task.id : null,
       state: normalizeState(status?.state),
+      report: reportFromParts(statusMessage?.parts),
+      artifacts: artifactRefs(task.artifacts),
     };
   }
 
@@ -104,10 +171,56 @@ export function normalizeA2aSendResult(result: unknown): A2aSendOutcome {
       contextId: typeof message.contextId === 'string' && message.contextId ? message.contextId : null,
       taskId: typeof message.taskId === 'string' && message.taskId ? message.taskId : null,
       state: null,
+      report: reportFromParts(message.parts),
+      artifacts: [],
     };
   }
 
-  return { text: '', contextId: null, taskId: null, state: null };
+  return { text: '', contextId: null, taskId: null, state: null, report: null, artifacts: [] };
+}
+
+// Python json.dumps(value, sort_keys=True, ensure_ascii=False) equivalent —
+// Hermes signs push payloads over exactly this serialization.
+export function pythonSortedJson(value: unknown): string {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : JSON.stringify(value);
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => pythonSortedJson(item)).join(', ')}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}: ${pythonSortedJson(record[key])}`).join(', ')}}`;
+}
+
+export function verifyA2aPushSignature(payload: unknown, secret: string, signature: string | null | undefined): boolean {
+  if (!secret || !signature) return false;
+  const expected = createHmac('sha256', secret).update(pythonSortedJson(payload), 'utf8').digest('hex');
+  const provided = signature.trim().toLowerCase();
+  if (provided.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(provided, 'utf8'));
+}
+
+export type A2aPushEvent = {
+  taskId: string;
+  contextId: string;
+  state: A2aTaskState | null;
+  text: string;
+};
+
+export function parseA2aPushPayload(body: unknown): A2aPushEvent | null {
+  const root = asRecord(body);
+  const update = asRecord(root?.statusUpdate);
+  if (!update) return null;
+  const taskId = typeof update.taskId === 'string' ? update.taskId : '';
+  const contextId = typeof update.contextId === 'string' ? update.contextId : '';
+  if (!taskId && !contextId) return null;
+  const status = asRecord(update.status);
+  return {
+    taskId,
+    contextId,
+    state: normalizeState(status?.state),
+    text: textFromParts(asRecord(status?.message)?.parts),
+  };
 }
 
 export type A2aRpcOptions = {
