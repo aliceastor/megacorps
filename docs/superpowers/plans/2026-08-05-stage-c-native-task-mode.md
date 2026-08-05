@@ -1,5 +1,7 @@
 # Stage C: A2A 原生 Task 模式 Implementation Plan
 
+> **STATUS: ✅ 全部完成(2026-08-05)** — commits `91c0c5d`(Task 1)、`6741207`(Task 2)、`414ee50`(Task 3)、`98ff0af`(Task 4)。全套 126 測試綠、typecheck 綠。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** a2a adapter 升級原生模式:DataPart 結構化報告、A2A Artifact → work_products、`input-required` 中途提問流(頂層卡片複用 needs_review 機制)、HMAC push 備援(對帳加速器)。

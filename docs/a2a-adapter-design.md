@@ -135,7 +135,9 @@ A2A Artifact → `work_products` 一對一寫入:`artifactId → metadata.a2aArt
 - 逾時:`readKanbanTaskTimeoutSeconds()`;超時 `CancelTask` + 標記失敗
 - 錯誤分類:tunnel/HTTP 層失敗 → `dispatch_adapter_failed:` 前綴(走 retry/backoff,不走「格式錯誤」通道)
 
-### 7.2 Stage C:原生 task 模式
+### 7.2 Stage C:原生 task 模式 ✅ 已實裝 2026-08-05
+
+> 實裝註記:(1) DataPart 報告由 adapter 以 fenced JSON 併回 output,Stage A 抽取器直接生效,dispatch 對 A2A 零感知;(2) 頂層 input-required 複用 help-review 機制(無 reviewer 則 blocked),委派場景走現有 report/review 鏈;(3) **push 語意修正**:push 不是備援完成通道,而是「對帳加速器」——驗簽(`X-A2A-Signature`,HMAC-SHA256 over Python sorted-keys JSON)後僅清除重試 backoff 的 `nextRunAt`,結果一律走 adapter 單一通道,避免重造雙通道 race;(4) contextId 由 adapter 預生成(`a2a-ctx-*`)作為 push 關聯鍵。
 
 - 啟用 `agentReportSchema` DataPart 解析、Artifact → work_products、`input-required` 流(§6)
 - 長任務備援:向 Hermes 註冊 push-notification config(HMAC 驗簽端點 `POST /api/a2a/push`),SSE 斷線時靠 push + `GetTask` 對帳

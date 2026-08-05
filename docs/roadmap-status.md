@@ -13,7 +13,7 @@
 | Workflow P0 | 結構化報告、單一結果通道、廢 regex verdict——**直接採 A2A 資料模型** | ❌ 未做(**建議的下一步**) |
 | Workflow P1 | input-required 狀態機(由 A2A 取代)、兩種委派模式、委派樹邊界、檔案整合 | ❌ 未做 |
 | Workflow P2 | artifact 一等公民(由 A2A 取代)、per-agent token、policy-gated 人審 | ❌ 未做 |
-| `a2a` adapter | MegaCorps 作為 A2A client 直連 Hermes 0.20 的 A2A server | ✅ **Stage B 完成**(2026-08-05):`a2a-client.ts` + `a2a-tunnel.ts` + `adapters/a2a.ts`,純傳輸模式,逐 agent opt-in;Stage C(原生 task 模式/input-required)未做 |
+| `a2a` adapter | MegaCorps 作為 A2A client 直連 Hermes 0.20 的 A2A server | ✅ **Stage B+C 完成**(2026-08-05):純傳輸 + 原生 task 模式(DataPart 報告、Artifact→work_products、input-required、HMAC push 對帳加速器);逐 agent opt-in |
 
 ---
 
@@ -88,7 +88,7 @@ Hermes 0.2 已支持 A2A(server 端),因此不需要自建 wrapper 服務;MegaCo
 
 | # | 項目 | 解決的問題 | 業界對照 |
 |---|---|---|---|
-| 4 | 統一狀態機 + `input-required` | **由 A2A 協議直接取代**(採 A2A 後即內建);剩餘工作是 card/delegation 兩套狀態機向 A2A 八態收斂 | A2A task lifecycle |
+| 4 | 統一狀態機 + `input-required` | ✅ **Stage C 已實裝**(2026-08-05,a2a 路徑):頂層卡片提問走 help-review 機制(無 reviewer 則 blocked + 問題入 lastError),委派提問走現有 report/review 鏈;兩套狀態機的完整收斂留待後續 | A2A task lifecycle |
 | 5 | 委派兩種模式 | 每個委派標記 `handoff`(所有權移轉)或 `subroutine`(子程序呼叫),覆蓋單一迴圈表達不了的 case | OpenAI Agents SDK |
 | 6 | Messages/Tasks 分流 + task spec | 輕量問答不生審核鏈;取消「必須委派一次」,委派必附目標/輸出格式/邊界/effort | A2A、Anthropic |
 | 7 | 委派樹邊界 | 深度上限、fan-out 上限、子樹預算 rollup、樹級 timeout;malformed 重試消耗計數 | — |
@@ -98,7 +98,7 @@ Hermes 0.2 已支持 A2A(server 端),因此不需要自建 wrapper 服務;MegaCo
 
 | # | 項目 | 內容 |
 |---|---|---|
-| 9 | work_products 升級 artifact 一等公民 | id/型別/版本,報告引用 artifact 而非全文轉述(表已存在,未成為報告主體) |
+| 9 | work_products 升級 artifact 一等公民 | 🔄 **部分實裝**(Stage C,2026-08-05):A2A Artifact(uri 型)自動落地 work_products(`metadata.a2aArtifactId`);報告以 `artifactRefs` 引用的完整閉環待後續 |
 | 10 | Per-agent API token | 取代單一 global token,workspace 檔案/artifact 有真實歸屬 |
 | 11 | Policy-gated 人審 + 單一收件匣 | 只攔不可逆/對外/最終 merge;移除「無 reviewer 自動 done」 |
 
