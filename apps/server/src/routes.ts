@@ -15,6 +15,7 @@ import { registerChatRoutes } from './chat.ts';
 import { runAgentMaintenance } from './agent-maintenance.ts';
 import { agentReportSchema } from '@megacorps/shared';
 import { delegationLineFromReportItem } from './agent-report.ts';
+import { parseA2aPushPayload, verifyA2aPushSignature } from './a2a-client.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
@@ -2502,6 +2503,53 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
     await db.delete(knowledgeDocs).where(eq(knowledgeDocs.id, id));
     return { ok: true };
+  });
+
+  // A2A push notifications (Hermes gateway → MegaCorps). Reconciliation
+  // accelerator only: correlates by contextId and clears a retry backoff so
+  // the next cron tick re-dispatches immediately. It never completes runs or
+  // moves cards directly — results flow through the single adapter channel.
+  app.post('/api/a2a/push', async (request, reply) => {
+    const event = parseA2aPushPayload(request.body);
+    if (!event) return reply.code(400).send({ error: 'invalid_push_payload' });
+    const [session] = event.contextId
+      ? await db.select().from(adapterSessions).where(and(
+        eq(adapterSessions.adapterType, 'a2a'),
+        eq(adapterSessions.adapterSessionId, event.contextId),
+      )).orderBy(desc(adapterSessions.updatedAt)).limit(1)
+      : [];
+    if (!session) return reply.code(202).send({ ok: true, matched: false });
+    const [agent] = await db.select().from(agents).where(and(eq(agents.id, session.agentId), isNull(agents.deletedAt))).limit(1);
+    if (!agent) return reply.code(202).send({ ok: true, matched: false });
+    const configValue = (key: string) => {
+      const raw = (agent.adapterConfig as Record<string, unknown> | null)?.[key];
+      return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
+    };
+    const pushSecret = configValue('a2aPushSecret') ?? configValue('a2aBearerToken');
+    if (pushSecret) {
+      const header = request.headers['x-a2a-signature'];
+      const signature = Array.isArray(header) ? header[0] : header;
+      if (!verifyA2aPushSignature(request.body, pushSecret, signature)) return reply.code(401).send({ error: 'invalid_push_signature' });
+    }
+    let accelerated = false;
+    if (session.scopeType === 'card' && event.state && ['completed', 'input_required', 'failed'].includes(event.state)) {
+      const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, session.scopeId), isNull(kanbanCards.deletedAt))).limit(1);
+      if (card && card.columnStatus === 'todo' && card.nextRunAt && card.nextRunAt > new Date()) {
+        await db.update(kanbanCards).set({ nextRunAt: null, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
+        accelerated = true;
+      }
+    }
+    await db.insert(activityLog).values({
+      companyId: agent.companyId,
+      actorType: 'system',
+      actorId: 'a2a-push',
+      agentId: agent.id,
+      action: 'a2a.push_received',
+      entityType: 'agent',
+      entityId: agent.id,
+      details: { taskId: event.taskId, contextId: event.contextId, state: event.state, scopeType: session.scopeType, scopeId: session.scopeId, accelerated, signed: Boolean(pushSecret) },
+    });
+    return { ok: true, matched: true, accelerated };
   });
 
   app.post('/api/webhook/task-complete', async (request, reply) => {
