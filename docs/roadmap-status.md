@@ -10,9 +10,9 @@
 | 設計文件 | workflow 檢討 + 記憶生命週期設計 | ✅ 完成(commit `27829d9`) |
 | 記憶生命週期 Phase 1 | 下班整理 maintenance run 全套 | ✅ 完成(commit `e13ab54`,已 push) |
 | 記憶生命週期 Phase 2 | Admin UI、談話後自動整理、失敗通知 | ⏸ 擱置(等痛了再做) |
-| Workflow P0 | 結構化報告、單一結果通道、廢 regex verdict——**直接採 A2A 資料模型** | ❌ 未做(**建議的下一步**) |
-| Workflow P1 | input-required 狀態機(由 A2A 取代)、兩種委派模式、委派樹邊界、檔案整合 | ❌ 未做 |
-| Workflow P2 | artifact 一等公民(由 A2A 取代)、per-agent token、policy-gated 人審 | ❌ 未做 |
+| Workflow P0 | 結構化報告、單一結果通道、廢 regex verdict——直接採 A2A 資料模型 | ✅ **Stage A 完成**(#2 的完全收斂隨 agent 遷移 a2a) |
+| Workflow P1 | input-required、兩種委派模式、委派樹邊界(#8 檔案整合除外) | ✅ **Stage C+D 完成**(#6 messages 分流、#7 預算 rollup 依 YAGNI 延後;**#8 branch-per-card + merge queue 未做**) |
+| Workflow P2 | artifact 一等公民(部分)、per-agent token、policy-gated 人審 | 🔄 #9 部分完成;#10/#11 未做 |
 | `a2a` adapter | MegaCorps 作為 A2A client 直連 Hermes 0.20 的 A2A server | ✅ **Stage B+C 完成**(2026-08-05):純傳輸 + 原生 task 模式(DataPart 報告、Artifact→work_products、input-required、HMAC push 對帳加速器);逐 agent opt-in |
 
 ---
@@ -89,9 +89,9 @@ Hermes 0.2 已支持 A2A(server 端),因此不需要自建 wrapper 服務;MegaCo
 | # | 項目 | 解決的問題 | 業界對照 |
 |---|---|---|---|
 | 4 | 統一狀態機 + `input-required` | ✅ **Stage C 已實裝**(2026-08-05,a2a 路徑):頂層卡片提問走 help-review 機制(無 reviewer 則 blocked + 問題入 lastError),委派提問走現有 report/review 鏈;兩套狀態機的完整收斂留待後續 | A2A task lifecycle |
-| 5 | 委派兩種模式 | 每個委派標記 `handoff`(所有權移轉)或 `subroutine`(子程序呼叫),覆蓋單一迴圈表達不了的 case | OpenAI Agents SDK |
-| 6 | Messages/Tasks 分流 + task spec | 輕量問答不生審核鏈;取消「必須委派一次」,委派必附目標/輸出格式/邊界/effort | A2A、Anthropic |
-| 7 | 委派樹邊界 | 深度上限、fan-out 上限、子樹預算 rollup、樹級 timeout;malformed 重試消耗計數 | — |
+| 5 | 委派兩種模式 | ✅ **Stage D 已實裝**(2026-08-05):`mode:'handoff'` 真正移轉卡片所有權(assignee 換人、review 鏈重解析、原 agent 退場);delegate 不得 handoff 不屬於自己的卡;handoff 不可與其他委派混搭 | OpenAI Agents SDK |
+| 6 | Messages/Tasks 分流 + task spec | 🔄 **部分實裝**(Stage D):「必須委派一次」硬規則已取消(prompt 引導保留);task spec(objective/outputFormat/boundaries/effort)Stage A 已入 schema。**Messages 分流延後**:委派 + input-required 已覆蓋現有互動需求,無真實 consumer 前不建(YAGNI) | A2A、Anthropic |
+| 7 | 委派樹邊界 | 🔄 **部分實裝**(Stage D):深度上限(`DELEGATION_MAX_DEPTH`=3)、fan-out 上限(`DELEGATION_MAX_FANOUT`=16/scope)、樹級 timeout(`DELEGATION_TREE_TIMEOUT_HOURS`=24,逾時標 cancelled 並喚醒母節點)。**預算 rollup 延後**:per-agent/per-card 預算已存在,子樹加總待有實際需求 | — |
 | 8 | Branch-per-card + 序列整合 | 同卡收斂一條 branch;merge queue 一次合一個;衝突回派原 agent;讀平行、寫串行 | Vibe Kanban、Cognition/Anthropic 共識 |
 
 ## ❌ 未做:Workflow P2

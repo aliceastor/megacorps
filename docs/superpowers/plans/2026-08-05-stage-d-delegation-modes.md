@@ -1,5 +1,7 @@
 # Stage D: 委派模式與樹邊界 Implementation Plan
 
+> **STATUS: ✅ 全部完成(2026-08-05)** — commits `c3c7606`(Task 1)、`63250f8`(Task 2)、`586ed9d`(Task 3)。全套 130 測試綠、typecheck 綠。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** handoff(所有權移轉)成真、取消「必須委派一次」硬規則(planner 自決 + task spec)、委派樹加上深度/fan-out/時間邊界。
