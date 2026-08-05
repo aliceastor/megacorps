@@ -56,23 +56,80 @@ test('a2a dispatch tunnels to the gateway and returns the agent reply', async ()
   assert.match(captured[0]!.body.params.message.parts[0].text, /MegaCorps/);
 });
 
-test('a2a dispatch resumes a live context and skips fallback contexts', async () => {
+test('a2a dispatch resumes a live context and regenerates legacy fallback contexts', async () => {
   const captured: Captured[] = [];
   const dispatch = createA2aDispatch({ fetchImpl: fakeRpcFetch(completedTask('ok'), captured), tunnelFn: async () => 45_678 });
   await dispatch({ ...agent, currentSessionId: 'ctx-prior' }, task);
   assert.equal(captured[0]!.body.params.message.contextId, 'ctx-prior');
   await dispatch({ ...agent, currentSessionId: 'a2a-fallback-123' }, task);
-  assert.equal(captured[1]!.body.params.message.contextId, undefined);
+  assert.match(captured[1]!.body.params.message.contextId, /^a2a-ctx-/);
 });
 
-test('a2a dispatch generates a fallback session id when the gateway omits contextId', async () => {
+test('a2a dispatch pre-generates a context id and keeps it when the gateway omits one', async () => {
+  const captured: Captured[] = [];
   const dispatch = createA2aDispatch({
-    fetchImpl: fakeRpcFetch({ message: { messageId: 'm1', parts: [{ text: 'reply' }] } }),
+    fetchImpl: fakeRpcFetch({ message: { messageId: 'm1', parts: [{ text: 'reply' }] } }, captured),
     tunnelFn: async () => 45_678,
   });
   const result = await dispatch(agent, task);
   assert.equal(result.success, true);
-  assert.match(result.sessionId, /^a2a-fallback-/);
+  assert.match(result.sessionId, /^a2a-ctx-/);
+  assert.equal(captured[0]!.body.params.message.contextId, result.sessionId);
+});
+
+test('a2a dispatch registers a push notification callback', async () => {
+  const captured: Captured[] = [];
+  const dispatch = createA2aDispatch({ fetchImpl: fakeRpcFetch(completedTask('ok'), captured), tunnelFn: async () => 45_678 });
+  await dispatch(agent, task);
+  assert.equal(
+    captured[0]!.body.params.configuration.taskPushNotificationConfig.url,
+    'http://localhost:4000/api/a2a/push',
+  );
+  await dispatch({ ...agent, adapterConfig: { ...agent.adapterConfig, a2aPushEnabled: false } }, task);
+  assert.equal(captured[1]!.body.params.configuration, undefined);
+});
+
+test('a2a dispatch maps input-required to needsInput and stays successful', async () => {
+  const asking = {
+    task: {
+      id: 'task-q', contextId: 'ctx-q',
+      status: { state: 'TASK_STATE_INPUT_REQUIRED', message: { parts: [{ text: 'Which environment should I target?' }] } },
+    },
+  };
+  const dispatch = createA2aDispatch({ fetchImpl: fakeRpcFetch(asking), tunnelFn: async () => 45_678 });
+  const result = await dispatch(agent, task);
+  assert.equal(result.success, true);
+  assert.equal(result.needsInput?.question, 'Which environment should I target?');
+  assert.equal(result.turnId, 'task-q');
+});
+
+test('a2a dispatch embeds a DataPart report into the output as fenced JSON', async () => {
+  const withReport = {
+    task: {
+      id: 't', contextId: 'c',
+      status: {
+        state: 'TASK_STATE_COMPLETED',
+        message: { parts: [{ text: 'all done' }, { data: { kind: 'megacorps-report', status: 'completed', summary: 'structured done' } }] },
+      },
+    },
+  };
+  const dispatch = createA2aDispatch({ fetchImpl: fakeRpcFetch(withReport), tunnelFn: async () => 45_678 });
+  const result = await dispatch(agent, task);
+  assert.match(result.output, /all done/);
+  assert.match(result.output, /```json\n\{"kind":"megacorps-report"/);
+});
+
+test('a2a dispatch passes artifact references through', async () => {
+  const withArtifacts = {
+    task: {
+      id: 't', contextId: 'c',
+      status: { state: 'TASK_STATE_COMPLETED', message: { parts: [{ text: 'done' }] } },
+      artifacts: [{ artifactId: 'a1', name: 'PR', parts: [{ uri: 'https://github.com/x/y/pull/2' }] }],
+    },
+  };
+  const dispatch = createA2aDispatch({ fetchImpl: fakeRpcFetch(withArtifacts), tunnelFn: async () => 45_678 });
+  const result = await dispatch(agent, task);
+  assert.equal(result.artifacts?.[0]?.uri, 'https://github.com/x/y/pull/2');
 });
 
 test('a2a dispatch marks failed task states as unsuccessful', async () => {

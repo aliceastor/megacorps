@@ -1,6 +1,17 @@
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
 export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' | 'maintenance'; taskRunId?: string | null };
-export type TaskResult = { success: boolean; output: string; sessionId: string; turnId?: string | null; tokensUsed: number; costUsd: number; durationSeconds: number };
+export type TaskResult = {
+  success: boolean;
+  output: string;
+  sessionId: string;
+  turnId?: string | null;
+  tokensUsed: number;
+  costUsd: number;
+  durationSeconds: number;
+  // Native A2A task-mode extensions (optional; legacy adapters never set them).
+  needsInput?: { question: string } | null;
+  artifacts?: Array<{ artifactId: string; name?: string; uri?: string; text?: string }>;
+};
 export type AgentLike = {
   id?: string;
   name?: string;
@@ -43,7 +54,7 @@ function configuredString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function megacorpsApiUrl(agent: AgentLike): string {
+export function megacorpsApiUrl(agent: AgentLike): string {
   return configuredString(agent.adapterConfig?.megacorpsApiUrl)
     ?? configuredString(agent.adapterConfig?.callbackUrl)
     ?? configuredString(agent.adapterConfig?.webhookBaseUrl)

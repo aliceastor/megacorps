@@ -256,6 +256,7 @@ export async function a2aRpc(method: string, params: unknown, options: A2aRpcOpt
 export type SendA2aMessageOptions = A2aRpcOptions & {
   text: string;
   contextId?: string | null;
+  configuration?: Record<string, unknown> | null;
 };
 
 export async function sendA2aMessage(options: SendA2aMessageOptions): Promise<A2aSendOutcome> {
@@ -265,7 +266,9 @@ export async function sendA2aMessage(options: SendA2aMessageOptions): Promise<A2
     parts: [{ text: options.text }],
   };
   if (options.contextId) message.contextId = options.contextId;
-  const result = await a2aRpc('SendMessage', { message }, options);
+  const params: Record<string, unknown> = { message };
+  if (options.configuration) params.configuration = options.configuration;
+  const result = await a2aRpc('SendMessage', params, options);
   return normalizeA2aSendResult(result);
 }
 

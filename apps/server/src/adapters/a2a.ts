@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { sendA2aMessage } from '../a2a-client.ts';
 import { ensureA2aTunnel, type TunnelTarget } from '../a2a-tunnel.ts';
 import { assertAdapterTargetAllowed, getAdapterNumberConfig, getAdapterOptionalStringConfig } from './config.ts';
-import { buildAgentPrompt, estimateCost, estimateTokens, type AgentLike, type TaskContext, type TaskResult } from './hermes.ts';
+import { buildAgentPrompt, estimateCost, estimateTokens, megacorpsApiUrl, type AgentLike, type TaskContext, type TaskResult } from './hermes.ts';
 import { resolveHermesSshConnectionConfig } from './hermes-ssh.ts';
 
 // Stage B pure-transport adapter (docs/a2a-adapter-design.md §7.1): same
@@ -11,6 +11,7 @@ import { resolveHermesSshConnectionConfig } from './hermes-ssh.ts';
 // DataPart reports, input-required handling) is Stage C.
 
 const FALLBACK_CONTEXT_PREFIX = 'a2a-fallback-';
+const GENERATED_CONTEXT_PREFIX = 'a2a-ctx-';
 const DEFAULT_A2A_PORT = 9900;
 const TIMEOUT_MARGIN_MS = 10_000;
 
@@ -55,26 +56,42 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
     try {
       const baseUrl = await resolveBaseUrl(agent, deps);
       const url = `${baseUrl}${agentPath(agent)}`;
+      // Pre-generate the contextId when there is no resumable one: it is the
+      // correlation key for push reconciliation even when SendMessage times out.
       const priorContext = agent.currentSessionId && !agent.currentSessionId.startsWith(FALLBACK_CONTEXT_PREFIX)
         ? agent.currentSessionId
         : null;
+      const contextId = priorContext ?? `${GENERATED_CONTEXT_PREFIX}${randomUUID()}`;
+      const pushEnabled = agent.adapterConfig?.a2aPushEnabled !== false;
       const outcome = await sendA2aMessage({
         baseUrl: url,
         text: prompt,
-        contextId: priorContext,
+        contextId,
+        configuration: pushEnabled
+          ? { taskPushNotificationConfig: { url: `${megacorpsApiUrl(agent)}/api/a2a/push` } }
+          : null,
         bearerToken: getAdapterOptionalStringConfig(agent, 'a2aBearerToken', 'A2A_BEARER_TOKEN') ?? null,
         timeoutMs: (task.timeoutSeconds ?? 300) * 1000 + TIMEOUT_MARGIN_MS,
         fetchImpl: deps.fetchImpl,
       });
       const failedState = outcome.state === 'failed' || outcome.state === 'canceled' || outcome.state === 'rejected';
-      const tokensUsed = estimateTokens(prompt) + estimateTokens(outcome.text);
+      let output = outcome.text || (failedState ? `a2a_task_${outcome.state}` : '');
+      // Surface a DataPart report to the Stage A extractor by embedding it as a
+      // fenced JSON block; dispatch-side parsing then needs no A2A awareness.
+      if (outcome.report && !output.includes('megacorps-report')) {
+        output = `${output}\n\n\`\`\`json\n${JSON.stringify(outcome.report)}\n\`\`\``.trim();
+      }
+      const tokensUsed = estimateTokens(prompt) + estimateTokens(output);
       return {
         success: !failedState,
-        output: outcome.text || (failedState ? `a2a_task_${outcome.state}` : ''),
-        sessionId: outcome.contextId ?? `${FALLBACK_CONTEXT_PREFIX}${randomUUID()}`,
+        output,
+        sessionId: outcome.contextId ?? contextId,
+        turnId: outcome.taskId,
         tokensUsed,
         costUsd: estimateCost(tokensUsed),
         durationSeconds: durationSeconds(),
+        needsInput: outcome.state === 'input_required' ? { question: outcome.text || 'The agent asked for clarification but sent no question text.' } : null,
+        artifacts: outcome.artifacts,
       };
     } catch (error) {
       return {
