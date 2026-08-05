@@ -288,7 +288,12 @@ export async function collaborationDelegationRequirement(card: CardRow, agentId:
   const reports = await activeDirectReportsForAgent(card.companyId, agentId);
   if (reports.length === 0) return { required: false, alreadyDelegated: false, reports };
   const alreadyDelegated = await actorHasDelegatedInScope(card.id, agentId, parentCommentId);
-  return { required: !alreadyDelegated, alreadyDelegated, reports };
+  // Stage D (roadmap P1 #6): mandatory-delegation is now advisory. The planner
+  // decides whether to delegate; prompts still carry the collaboration
+  // guidance, but no completion is bounced for skipping delegation. All
+  // enforcement call sites read `required` from here, so this single switch
+  // retires the hard rule.
+  return { required: false, alreadyDelegated, reports };
 }
 
 function messageDelegationRequirementFeedback(reports: DelegationReport[]): string {
