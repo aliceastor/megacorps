@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Activity as ActivityIcon, Clock, FileText, Loader2, Play, Server } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
@@ -12,6 +12,25 @@ type CronRun = { id: string; name: string; source: string; status: string; error
 type CronStatus = { enabled: boolean; intervalMs: number; running: boolean; lastStatus: string; lastStartedAt?: string | null; lastCompletedAt?: string | null; lastError?: string | null; recentRuns: CronRun[] };
 type PromptLog = { id: string; companyId: string; agentId?: string | null; cardId?: string | null; projectId?: string | null; goalId?: string | null; heartbeatRunId?: string | null; taskRunId?: string | null; chatSessionId?: string | null; source: string; adapterType: string; title: string; prompt: string; promptHash: string; metadata?: unknown; createdAt?: string };
 type LogTab = 'prompts' | 'runs' | 'activity' | 'api';
+type AgentRef = { id: string; name: string; companyId: string };
+
+// Every outbound prompt is already logged; the missing piece was being able to
+// ask "what did this agent actually receive, on the board versus in chat".
+const KANBAN_SOURCES = new Set(['dispatch', 'review', 'message', 'message_review']);
+
+function contextModeOf(metadata: unknown): string | null {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const mode = (metadata as { contextMode?: unknown }).contextMode;
+  return typeof mode === 'string' ? mode : null;
+}
+
+function contextModeLabel(mode: string | null): string {
+  if (mode === 'full_bootstrap') return 'bootstrap (full context injected)';
+  if (mode === 'adapter_session_delta') return 'continuation (delta only)';
+  if (mode === 'adapter_session_continuation') return 'continuation (no re-injection)';
+  if (mode === 'adapter_session_continuation_refresh') return 'continuation (context re-injected: it changed)';
+  return mode ?? 'unknown';
+}
 
 export function LogsPage() {
   const { t } = useLocale();
@@ -22,6 +41,9 @@ export function LogsPage() {
   const [taskRuns, setTaskRuns] = useState<TaskRun[]>([]);
   const [cron, setCron] = useState<CronStatus | null>(null);
   const [tab, setTab] = useState<LogTab>('prompts');
+  const [agentRefs, setAgentRefs] = useState<AgentRef[]>([]);
+  const [agentFilter, setAgentFilter] = useState('all');
+  const [surfaceFilter, setSurfaceFilter] = useState<'all' | 'kanban' | 'chat'>('all');
   const [filter, setFilter] = useState('');
   const [cronRunning, setCronRunning] = useState(false);
 
@@ -41,8 +63,10 @@ export function LogsPage() {
       safe(api<HeartbeatRun[]>('/api/heartbeat-runs?limit=300'), []),
       safe(api<TaskRun[]>('/api/task-runs?limit=300'), []),
       safe(api<CronStatus>('/api/cron/status'), null),
-    ]).then(([promptRows, apiLogs, activityLogs, heartbeatRows, taskRunRows, cronStatus]) => {
+      safe(api<AgentRef[]>('/api/agents'), []),
+    ]).then(([promptRows, apiLogs, activityLogs, heartbeatRows, taskRunRows, cronStatus, agentRows]) => {
       setPromptLogs(promptRows);
+      setAgentRefs(agentRows);
       setLogs(apiLogs);
       setActivity(activityLogs);
       setRuns(heartbeatRows);
@@ -52,6 +76,15 @@ export function LogsPage() {
   }
 
   useEffect(() => { void refresh(); }, []);
+  // Read the deep-link filters from the URL rather than useSearchParams, which
+  // would force this whole page behind a Suspense boundary at build time.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const agentId = params.get('agentId');
+    const surface = params.get('surface');
+    if (agentId) setAgentFilter(agentId);
+    if (surface === 'kanban' || surface === 'chat') setSurfaceFilter(surface);
+  }, []);
 
   async function runCronNow() {
     setCronRunning(true);
@@ -64,7 +97,13 @@ export function LogsPage() {
   }
 
   const needle = filter.toLowerCase();
-  const visiblePrompts = promptLogs.filter((log) => !needle || `${log.source} ${log.adapterType} ${log.title} ${log.agentId ?? ''} ${log.cardId ?? ''} ${log.chatSessionId ?? ''} ${log.prompt}`.toLowerCase().includes(needle));
+  const agentNameById = useMemo(() => new Map(agentRefs.map((agent) => [agent.id, agent.name])), [agentRefs]);
+  const visiblePrompts = promptLogs.filter((log) => {
+    if (agentFilter !== 'all' && log.agentId !== agentFilter) return false;
+    if (surfaceFilter === 'kanban' && !KANBAN_SOURCES.has(log.source)) return false;
+    if (surfaceFilter === 'chat' && log.source !== 'chat') return false;
+    return !needle || `${log.source} ${log.adapterType} ${log.title} ${agentNameById.get(log.agentId ?? '') ?? ''} ${log.agentId ?? ''} ${log.cardId ?? ''} ${log.chatSessionId ?? ''} ${log.prompt}`.toLowerCase().includes(needle);
+  });
   const visible = logs.filter((log) => !needle || `${log.method} ${log.path} ${log.error ?? ''}`.toLowerCase().includes(needle));
   const visibleActivity = activity.filter((event) => !needle || `${event.action} ${event.entityType} ${event.entityId}`.toLowerCase().includes(needle));
   const visibleRuns = runs.filter((run) => !needle || `${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(needle));
@@ -88,15 +127,32 @@ export function LogsPage() {
     </div>
     {tab === 'prompts' && <section className="card section-card">
       <h2>{t('logs.outboundPrompts')}</h2>
+      <p className="field-hint">Exactly what each agent was sent, on the Kanban board and in Direct Chat. Bootstrap turns carry the full context; continuations carry only what changed.</p>
+      <div className="form-grid">
+        <label className="field-label">Agent
+          <select className="input" value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}>
+            <option value="all">All agents</option>
+            {agentRefs.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+          </select>
+        </label>
+        <label className="field-label">Surface
+          <select className="input" value={surfaceFilter} onChange={(event) => setSurfaceFilter(event.target.value as 'all' | 'kanban' | 'chat')}>
+            <option value="all">Kanban and Direct Chat</option>
+            <option value="kanban">Kanban only</option>
+            <option value="chat">Direct Chat only</option>
+          </select>
+        </label>
+      </div>
       <div className="table-list">
         {visiblePrompts.length === 0 ? <p className="field-hint">{t('logs.noPrompts')}</p> : visiblePrompts.map((log) => <article className="list-row prompt-log-row" key={log.id}>
           <div className="prompt-log-head">
-            <b><FileText size={14} /> {log.source} / {log.adapterType}</b>
+            <b><FileText size={14} /> {KANBAN_SOURCES.has(log.source) ? 'Kanban' : log.source === 'chat' ? 'Direct Chat' : log.source} · {log.source} / {log.adapterType}</b>
             <span>{log.createdAt ? new Date(log.createdAt).toLocaleString() : ''}</span>
           </div>
           <p>{log.title}</p>
           <div className="log-meta">
-            <span>agent {log.agentId ?? 'none'}</span>
+            <span>injection {contextModeLabel(contextModeOf(log.metadata))}</span>
+            <span>agent {agentNameById.get(log.agentId ?? '') ?? log.agentId ?? 'none'}</span>
             <span>card {log.cardId ?? 'none'}</span>
             <span>project {log.projectId ?? 'none'}</span>
             <span>chat {log.chatSessionId ?? 'none'}</span>

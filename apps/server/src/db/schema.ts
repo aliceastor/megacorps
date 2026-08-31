@@ -516,6 +516,9 @@ export const chatSessions = pgTable('chat_sessions', {
   title: text('title').notNull(),
   status: text('status').notNull().default('active'),
   agentSessionId: text('agent_session_id'),
+  // Hash of the standing context (company, goals, project config, position
+  // prompt) as last injected. Continuation turns re-inject only when it moves.
+  bootstrapContextHash: text('bootstrap_context_hash'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });

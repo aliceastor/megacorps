@@ -17,7 +17,12 @@ const migrations: Migration[] = [
   { version: 5, name: 'agent-memory-config', run: runAgentMemoryConfig },
   { version: 6, name: 'workspace-file-concurrency', run: runWorkspaceFileConcurrency },
   { version: 7, name: 'project-soft-delete', run: runProjectSoftDelete },
+  { version: 8, name: 'chat-bootstrap-context-hash', run: runChatBootstrapContextHash },
 ];
+
+async function runChatBootstrapContextHash(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS bootstrap_context_hash TEXT;`);
+}
 
 async function runProjectSoftDelete(): Promise<void> {
   await sql.unsafe(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;

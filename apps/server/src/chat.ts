@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createChatMessageSchema, createChatSessionSchema } from '@megacorps/shared';
 import { and, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
@@ -27,6 +28,10 @@ const DIRECT_CHAT_BOOTSTRAP_MESSAGE_LIMIT = 30;
 const DIRECT_CHAT_CONTINUATION_MESSAGE_LIMIT = 40;
 const DIRECT_CHAT_CONTINUATION_HISTORY_CHARS = 12_000;
 const DIRECT_CHAT_CARD_INDEX_LIMIT = 60;
+
+function contextHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
 
 function titleFromMessage(body: string, agentName: string): string {
   const firstLine = body.replace(/\s+/g, ' ').trim().slice(0, 72);
@@ -135,7 +140,7 @@ async function buildChatCardIndex(companyId: string, projectId: string | null): 
   ].join('\n');
 }
 
-function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string, continuation = false, cardIndex = ''): string {
+function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string, continuation = false, cardIndex = '', refreshedContext = ''): string {
   if (continuation) {
     const latest = [...history].reverse().find((message) => message.authorType === 'user') ?? history[history.length - 1];
     return [
@@ -146,6 +151,7 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
         `Agent name: ${agent.name}`,
         `Adapter: ${agent.adapterType}`,
       ].join('\n'),
+      refreshedContext ? `Standing context changed since your last turn in this session. This replaces what you were told before:\n${refreshedContext}` : '',
       cardIndex,
       'Recent conversation transcript:',
       formatChatHistoryForPrompt(history, DIRECT_CHAT_CONTINUATION_HISTORY_CHARS),
@@ -371,9 +377,21 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         includeGoals: false,
         includeInvocationPositionPrompt: false,
       });
-      const goalContext = handOffContextToAdapter ? '' : await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
+      // Standing context is built on every turn but injected only when it is
+      // new to this session: once at bootstrap, and again whenever the company
+      // mission, goals, project config, or position prompt actually change.
+      // The Kanban board snapshot is deliberately not part of the hash — it
+      // moves constantly, and the card index below already keeps it current.
+      const standingContext = await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
+      const standingContextHash = contextHash(standingContext);
+      const contextStale = session.bootstrapContextHash !== null && session.bootstrapContextHash !== standingContextHash;
+      const goalContext = handOffContextToAdapter ? '' : standingContext;
+      const refreshedContext = handOffContextToAdapter && contextStale ? standingContext : '';
       const cardIndex = handOffContextToAdapter ? await buildChatCardIndex(session.companyId, session.projectId ?? null) : '';
-      const prompt = buildChatPrompt(company, agent, history, kanbanContext, goalContext, handOffContextToAdapter, cardIndex);
+      const prompt = buildChatPrompt(company, agent, history, kanbanContext, goalContext, handOffContextToAdapter, cardIndex, refreshedContext);
+      const contextMode = handOffContextToAdapter
+        ? refreshedContext ? 'adapter_session_continuation_refresh' : 'adapter_session_continuation'
+        : 'full_bootstrap';
       const executionAgent = await buildExecutionAgent(agent, existingChatSessionId);
       const chatTask = { id: `chat-${session.id}`, title: session.title, body: prompt, timeoutSeconds: await readChatTaskTimeoutSeconds(), kind: 'chat' as const };
       await recordPromptLog({
@@ -386,7 +404,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         adapterType: agent.adapterType ?? 'hermes-ssh',
         title: session.title,
         prompt: promptSnapshotForAdapter(executionAgent, chatTask),
-        metadata: { adapterSessionId: existingChatSessionId, userMessageId: userMessage.id, megacorpsPromptChars: prompt.length, contextMode: handOffContextToAdapter ? 'adapter_session_continuation' : 'full_bootstrap', chatHistoryMessages: history.length },
+        metadata: { adapterSessionId: existingChatSessionId, userMessageId: userMessage.id, megacorpsPromptChars: prompt.length, contextMode, standingContextHash, chatHistoryMessages: history.length },
       });
       // Stream partial output to the requesting user only (targeted live event);
       // throttled so a chatty adapter cannot flood the socket.
@@ -465,6 +483,9 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       }).returning();
       const [updatedSession] = await db.update(chatSessions).set({
         agentSessionId: result.sessionId,
+        // Only record the hash once the turn actually reached the agent, so a
+        // failed run does not mark stale context as delivered.
+        bootstrapContextHash: standingContextHash,
         updatedAt: new Date(),
       }).where(eq(chatSessions.id, session.id)).returning();
       await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: overBudget ? 'chat.budget_hard_stop' : 'chat.reply_received', sessionId: session.id, details: { runId: run.id, costUsd: result.costUsd, overBudget, monthlyExceeded, taskExceeded } });

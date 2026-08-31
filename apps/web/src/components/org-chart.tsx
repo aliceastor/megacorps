@@ -2,7 +2,8 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowUpDown, Ban, CheckCircle2, Loader2, Pause, Pencil, Plus, Save, Search, Trash2, Wifi, X } from 'lucide-react';
+import { ArrowUpDown, Ban, CheckCircle2, FileText, Loader2, Pause, Pencil, Plus, Save, Search, Trash2, Wifi, X } from 'lucide-react';
+import Link from 'next/link';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
@@ -608,6 +609,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
                       <div className="action-row compact">
                         <button className="btn icon-btn" aria-label={`${t('common.edit')} ${agent.name}`} title={t('common.edit')} onClick={() => setSelected(agent)}><Pencil size={14} /></button>
                         <button className="btn icon-btn" aria-label={`${t('agents.test')} ${agent.name}`} title={t('agents.testConnection')} disabled={testing === agent.id} onClick={() => agentAction(agent.id, `/api/agents/${agent.id}/test-connection`, t('agents.connectionSuccessful'))}><Wifi size={14} /></button>
+                        <Link className="btn icon-btn" aria-label={`Injected context for ${agent.name}`} title="Injected context: what this agent was actually sent" href={`/logs?agentId=${agent.id}`}><FileText size={14} /></Link>
                         {agent.isActive ? <button className="btn icon-btn" aria-label={`${t('agents.pause')} ${agent.name}`} title={t('agents.pause')} onClick={() => agentAction(agent.id, `/api/agents/${agent.id}/pause`, t('agents.agentPaused'))}><Pause size={14} /></button> : <button className="btn icon-btn" aria-label={`${t('agents.resume')} ${agent.name}`} title={t('agents.resume')} onClick={() => agentAction(agent.id, `/api/agents/${agent.id}/resume`, t('agents.agentResumed'))}><CheckCircle2 size={14} /></button>}
                       </div>
                     </td>

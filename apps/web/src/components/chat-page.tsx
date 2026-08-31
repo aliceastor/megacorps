@@ -1,7 +1,8 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { BriefcaseBusiness, Building2, Circle, Loader2, MessageSquare, Plus, Send } from 'lucide-react';
+import { BriefcaseBusiness, Building2, Circle, FileText, Loader2, MessageSquare, Plus, Send } from 'lucide-react';
+import Link from 'next/link';
 import { ApiError, api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 import { Markdown } from './markdown';
@@ -331,7 +332,12 @@ export function ChatPage() {
   return <div className="chat-page">
     <div className="page-head">
       <div><h1>Direct Chat</h1><p>{selectedCompany ? selectedCompany.name : 'Company'} / {selectedProject?.name ?? (projectFilter === '__none' ? 'No project' : 'All projects')} / {selectedAgent ? selectedAgent.name : 'Agent sessions'}</p></div>
-      <button className="btn" onClick={() => void refreshBase()} disabled={loading}>{loading ? <Loader2 size={14} className="spin" /> : <MessageSquare size={14} />} Refresh</button>
+      <div className="page-head-actions">
+        <Link className="btn" href={selectedAgent ? `/logs?agentId=${selectedAgent.id}&surface=chat` : '/logs?surface=chat'} title="See exactly what this agent was sent in Direct Chat">
+          <FileText size={14} /> Injected context
+        </Link>
+        <button className="btn" onClick={() => void refreshBase()} disabled={loading}>{loading ? <Loader2 size={14} className="spin" /> : <MessageSquare size={14} />} Refresh</button>
+      </div>
     </div>
 
     {error && <p className="form-error">{error}</p>}
