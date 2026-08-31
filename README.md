@@ -28,7 +28,7 @@ Remote Docker note:
 - The web client now tries the same-origin Next proxy first: `/api/proxy/...`. The web server forwards to `SERVER_API_URL`, which Docker Compose defaults to `http://server:4000`.
 - Direct browser-host `:4000` and baked `NEXT_PUBLIC_API_URL` are retained only as fallbacks. This avoids browser-side failures where `localhost:4000` or a stale LAN IP is unreachable from the user's browser.
 - Set `SERVER_API_URL` for the web container when the API is not reachable at `http://server:4000`. Set `NEXT_PUBLIC_API_URL` only when you intentionally want a direct browser fallback.
-- `docker-compose.deploy.yml` connects `megacorps-server` to the external `hermes_default` Docker network so the `hermes-ssh` runtime can use Docker DNS names such as `hermes-suite`. Ensure that external network exists before deploying that compose file.
+- `docker-compose.deploy.yml` includes postgres (named volume `postgres_data`); `DATABASE_URL` defaults to that bundled instance and is no longer required. It also connects `megacorps-server` to the external `hermes_default` Docker network so the `hermes-ssh` runtime can use Docker DNS names such as `hermes-suite`. Ensure that external network exists before deploying that compose file.
 
 ## Scripts
 
@@ -328,7 +328,7 @@ No pnpm. No Redis.
 ## Production launch checklist
 
 - Put the app behind TLS, a reverse proxy, and external rate limits in addition to the in-app limiter.
-- Set strong `WEBHOOK_SHARED_SECRET`, SSH keys, and external database credentials. Use `BOOTSTRAP_TOKEN` only temporarily for admin recovery, then remove it. The session signing secret is generated automatically into DB `app_settings.auth.jwt_secret`.
+- Set strong `WEBHOOK_SHARED_SECRET` and SSH keys. Deploy compose ships postgres; override `DATABASE_URL` only if you point at a different instance. Use `BOOTSTRAP_TOKEN` only temporarily for admin recovery, then remove it. The session signing secret is generated automatically into DB `app_settings.auth.jwt_secret`.
 - Encrypt or externalize adapter/runtime secrets before multi-user production.
 - Move the current in-process DB task-run worker into a separate sidecar/replica-safe worker for heavy production usage.
 - Extend company-scoped membership/RBAC with invite flow, service-agent keys, and emergency break-glass admin policy.

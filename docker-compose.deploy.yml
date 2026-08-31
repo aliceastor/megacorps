@@ -7,7 +7,7 @@ services:
     container_name: megacorps-gitea
     restart: unless-stopped
     environment:
-      GITEA__server__ROOT_URL: ${GITEA_EXTERNAL_URL:?Set GITEA_EXTERNAL_URL, e.g. http://nas.lan:3300}/
+      GITEA__server__ROOT_URL: ${GITEA_EXTERNAL_URL:-http://192.168.1.180:3300}/
       GITEA__server__HTTP_PORT: "3000"
       GITEA__security__INSTALL_LOCK: "true"
       GITEA__service__DISABLE_REGISTRATION: "true"
@@ -33,6 +33,24 @@ services:
     networks:
       - megacorps
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: megacorps-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-megacorps}
+      POSTGRES_USER: ${POSTGRES_USER:-megacorps}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-megacorps_dev_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - megacorps
+
   server:
     # Pushed by GitHub Actions in aliceastor/megacorps. To retarget to
     # ghcr.io/meaadore1221-afk/*, see .github/workflows/docker.yml
@@ -40,10 +58,13 @@ services:
     image: ghcr.io/aliceastor/megacorps-server:latest
     container_name: megacorps-server
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       PORT: 4000
-      DATABASE_URL: ${DATABASE_URL:?Set external PostgreSQL connection string}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://megacorps:megacorps_dev_password@postgres:5432/megacorps}
       WEB_ORIGIN: ${WEB_ORIGIN:?Set WEB_ORIGIN}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-}
@@ -135,6 +156,7 @@ networks:
     external: true
 
 volumes:
+  postgres_data:
   server_data:
   server_ssh_keys:
   web_cache:
