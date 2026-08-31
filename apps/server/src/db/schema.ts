@@ -124,6 +124,11 @@ export const agents = pgTable('agents', {
   isBusy: boolean('is_busy').default(false),
   isActive: boolean('is_active').default(true),
   currentSessionId: text('current_session_id'),
+  // Per-agent MegaCorps API token, stored raw because it is re-injected into
+  // every outbound prompt (same trust model as webhookSharedSecret in
+  // adapterConfig). Prompt logs redact it on write.
+  apiToken: text('api_token'),
+  apiTokenUpdatedAt: timestamp('api_token_updated_at', { withTimezone: true }),
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 }, (table) => ({ companySlugUnique: unique().on(table.companyId, table.slug) }));

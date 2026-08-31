@@ -18,7 +18,14 @@ const migrations: Migration[] = [
   { version: 6, name: 'workspace-file-concurrency', run: runWorkspaceFileConcurrency },
   { version: 7, name: 'project-soft-delete', run: runProjectSoftDelete },
   { version: 8, name: 'chat-bootstrap-context-hash', run: runChatBootstrapContextHash },
+  { version: 9, name: 'agent-api-tokens', run: runAgentApiTokens },
 ];
+
+async function runAgentApiTokens(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS api_token TEXT;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS api_token_updated_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS agents_api_token_idx ON agents(api_token) WHERE api_token IS NOT NULL;`);
+}
 
 async function runChatBootstrapContextHash(): Promise<void> {
   await sql.unsafe(`ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS bootstrap_context_hash TEXT;`);

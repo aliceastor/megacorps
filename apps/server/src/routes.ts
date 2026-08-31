@@ -20,6 +20,7 @@ import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
 import { registerTrashRoutes } from './trash-routes.ts';
+import { authenticateAgentToken, looksLikeAgentToken, previewAgentToken, revokeAgentToken, rotateAgentToken } from './agent-auth.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
@@ -368,7 +369,14 @@ function preserveRedactedSecrets(input: unknown, existing: unknown): unknown {
 }
 
 function redactAgent<T extends { adapterConfig?: unknown }>(agent: T): T {
-  return { ...agent, adapterConfig: redactSecrets(agent.adapterConfig) } as T;
+  const record = agent as T & { apiToken?: string | null };
+  // The raw per-agent token exists only for prompt injection; API responses
+  // carry a preview, never the token itself.
+  return {
+    ...agent,
+    adapterConfig: redactSecrets(agent.adapterConfig),
+    ...('apiToken' in record ? { apiToken: previewAgentToken(record.apiToken) } : {}),
+  } as T;
 }
 
 function redactRuntime<T extends { config?: unknown }>(runtime: T): T {
@@ -2092,6 +2100,28 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'agent.deleted', entityType: 'agent', entityId: id, details: { name: agent.name } });
     return { ok: true };
   });
+  // Per-agent token lifecycle. The raw token is returned exactly once, from
+  // the rotate that created it; afterwards only the preview is visible.
+  app.post('/api/agents/:id/token', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const companyId = await agentCompanyId(id);
+    if (!companyId) return reply.code(404).send({ error: 'agent_not_found' });
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
+    const rotated = await rotateAgentToken(id);
+    if (!rotated) return reply.code(404).send({ error: 'agent_not_found' });
+    await db.insert(activityLog).values({ companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: id, action: 'agent.token_rotated', entityType: 'agent', entityId: id, details: { preview: previewAgentToken(rotated.token) } });
+    return { ok: true, agentId: id, apiToken: rotated.token, apiTokenPreview: previewAgentToken(rotated.token), updatedAt: rotated.updatedAt };
+  });
+  app.delete('/api/agents/:id/token', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const companyId = await agentCompanyId(id);
+    if (!companyId) return reply.code(404).send({ error: 'agent_not_found' });
+    const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
+    const revoked = await revokeAgentToken(id);
+    if (!revoked) return reply.code(404).send({ error: 'agent_not_found' });
+    await db.insert(activityLog).values({ companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: id, action: 'agent.token_revoked', entityType: 'agent', entityId: id, details: {} });
+    return { ok: true, agentId: id };
+  });
   app.post('/api/agents/:id/pause', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const companyId = await agentCompanyId(id);
@@ -2731,15 +2761,26 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/webhook/task-complete', async (request, reply) => {
-    const expectedSecret = await configuredWebhookSharedSecret();
-    if (!expectedSecret) return reply.code(503).send({ error: 'webhook_secret_not_configured' });
-    if (expectedSecret.length < 16) return reply.code(503).send({ error: 'webhook_secret_too_short' });
     const headerSecret = request.headers['x-megacorps-webhook-secret'];
     const bearer = typeof request.headers.authorization === 'string' && request.headers.authorization.startsWith('Bearer ')
       ? request.headers.authorization.slice('Bearer '.length)
       : undefined;
     const providedSecret = Array.isArray(headerSecret) ? headerSecret[0] : headerSecret;
-    if (!safeSecretEqual(providedSecret, expectedSecret) && !safeSecretEqual(bearer, expectedSecret)) return reply.code(401).send({ error: 'webhook_auth_required' });
+
+    // A per-agent token authenticates the specific agent; the legacy shared
+    // secret authenticates "some runtime of ours" with no identity. Prefer the
+    // former — it makes the caller's identity trustworthy in logs and lets a
+    // single compromised agent be revoked alone.
+    let callerAgent: Awaited<ReturnType<typeof authenticateAgentToken>> = null;
+    if (looksLikeAgentToken(bearer)) {
+      callerAgent = await authenticateAgentToken(bearer);
+      if (!callerAgent) return reply.code(401).send({ error: 'agent_token_invalid' });
+    } else {
+      const expectedSecret = await configuredWebhookSharedSecret();
+      if (!expectedSecret) return reply.code(503).send({ error: 'webhook_secret_not_configured' });
+      if (expectedSecret.length < 16) return reply.code(503).send({ error: 'webhook_secret_too_short' });
+      if (!safeSecretEqual(providedSecret, expectedSecret) && !safeSecretEqual(bearer, expectedSecret)) return reply.code(401).send({ error: 'webhook_auth_required' });
+    }
     const parsedBody = z.object({
       cardId: z.string().uuid(),
       taskRunId: z.string().uuid().optional(),
@@ -2768,6 +2809,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     });
     const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, body.cardId), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
+    // An agent token is scoped to its own company; a report against another
+    // company's card is refused outright, whatever the payload claims.
+    if (callerAgent && callerAgent.companyId !== card.companyId) {
+      return reply.code(403).send({ error: 'agent_company_mismatch', detail: 'This agent token belongs to a different company than the card.' });
+    }
+    if (callerAgent) {
+      await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'agent', actorId: callerAgent.id, agentId: callerAgent.id, action: 'webhook.agent_report', entityType: 'card', entityId: card.id, details: { status: body.status, taskRunId: taskRunId ?? null, viaAgentToken: true } });
+    }
     if (body.workProducts.some((product) => product.projectId && product.projectId !== card.projectId)) return reply.code(400).send({ error: 'work_product_project_mismatch' });
     const [webhookTaskRun] = taskRunId ? await db.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).limit(1) : [];
     if (taskRunId && !webhookTaskRun) return reply.code(404).send({ error: 'task_run_not_found' });

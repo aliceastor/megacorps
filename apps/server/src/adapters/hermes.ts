@@ -22,6 +22,7 @@ export type AgentLike = {
   runtimeId?: string | null;
   hermesProfile: string | null;
   currentSessionId: string | null;
+  apiToken?: string | null;
   adapterConfig?: Record<string, unknown> | null;
 };
 
@@ -113,6 +114,13 @@ This session is only for consolidating your own memory and skills. Do not call t
 
   const apiUrl = megacorpsApiUrl(agent);
   const taskWebhookSecret = webhookSharedSecret(agent);
+  // Per-agent token wins over the shared secret: the webhook then knows which
+  // agent is reporting instead of trusting whatever the payload claims.
+  const webhookAuthLine = agent.apiToken
+    ? `Header: Authorization: Bearer ${agent.apiToken}`
+    : taskWebhookSecret
+      ? `Header: X-MegaCorps-Webhook-Secret: ${taskWebhookSecret}`
+      : 'Webhook auth: no shared secret was provided in your runtime config.';
   const webhookBodyExample = task.taskRunId
     ? `{ "cardId": "${task.id}", "taskRunId": "${task.taskRunId}", "status": "done", "summary": "...", "output": "..." }`
     : `{ "cardId": "${task.id}", "status": "done", "summary": "...", "output": "..." }`;
@@ -139,7 +147,7 @@ ${task.body}
 === Instructions ===
 When you complete this task, POST your results to:
 POST ${apiUrl}/api/webhook/task-complete
-${taskWebhookSecret ? `Header: X-MegaCorps-Webhook-Secret: ${taskWebhookSecret}` : 'Webhook auth: no shared secret was provided in your runtime config.'}
+${webhookAuthLine}
 Body: ${webhookBodyExample}
 
 Prefer including a structured "report" field in the webhook body:

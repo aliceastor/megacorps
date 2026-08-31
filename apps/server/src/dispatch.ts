@@ -1338,6 +1338,7 @@ export async function buildExecutionAgent(agent: AgentRow, currentSessionId?: st
     runtimeId: agent.runtimeId,
     hermesProfile: agent.hermesProfile,
     currentSessionId: currentSessionId === undefined ? agent.currentSessionId : currentSessionId,
+    apiToken: agent.apiToken ?? null,
     adapterConfig: {
       ...runtimeConfig,
       ...configuredAdapterOverrides(agent.adapterConfig as Record<string, unknown> | null),
