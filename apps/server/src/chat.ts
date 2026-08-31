@@ -6,7 +6,7 @@ import { requireAnyVisibleCompany, requireCompanyRole } from './access.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { stripHermesSessionMetadata } from './adapters/hermes.ts';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, positions, projects } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, kanbanCards, positions, projects } from './db/schema.ts';
 import { budgetOk, buildCompanyKanbanContext, buildExecutionAgent, getBudgetGuard } from './dispatch.ts';
 import { publishLiveEvent } from './live.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
@@ -14,6 +14,7 @@ import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { projectSharedFileSpaceLines } from './project-workspace.ts';
 import { readChatTaskTimeoutSeconds } from './runtime-settings.ts';
+import { applyChatWorkItems, extractChatWorkItems, formatChatWorkItemOutcomes } from './chat-work-items.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -25,6 +26,7 @@ type RuntimeRow = typeof agentRuntimes.$inferSelect;
 const DIRECT_CHAT_BOOTSTRAP_MESSAGE_LIMIT = 30;
 const DIRECT_CHAT_CONTINUATION_MESSAGE_LIMIT = 40;
 const DIRECT_CHAT_CONTINUATION_HISTORY_CHARS = 12_000;
+const DIRECT_CHAT_CARD_INDEX_LIMIT = 60;
 
 function titleFromMessage(body: string, agentName: string): string {
   const firstLine = body.replace(/\s+/g, ' ').trim().slice(0, 72);
@@ -112,7 +114,28 @@ function formatChatHistoryForPrompt(history: ChatMessageRow[], budgetChars?: num
   ].join('\n\n');
 }
 
-function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string, continuation = false): string {
+// Continuation turns deliberately skip the full Kanban snapshot — the adapter
+// session already carries it. But a chat reply can now ask MegaCorps to update
+// a card by id, so a continuation still needs a current index of what those
+// ids are; without it the agent can only ever create new cards.
+async function buildChatCardIndex(companyId: string, projectId: string | null): Promise<string> {
+  const rows = await db.select({ id: kanbanCards.id, title: kanbanCards.title, status: kanbanCards.columnStatus })
+    .from(kanbanCards)
+    .where(and(
+      eq(kanbanCards.companyId, companyId),
+      isNull(kanbanCards.deletedAt),
+      projectId ? eq(kanbanCards.projectId, projectId) : isNull(kanbanCards.projectId),
+    ))
+    .orderBy(desc(kanbanCards.updatedAt))
+    .limit(DIRECT_CHAT_CARD_INDEX_LIMIT);
+  if (rows.length === 0) return 'Kanban card index: no cards in this scope yet.';
+  return [
+    'Kanban card index (current, use these ids for update_card):',
+    ...rows.map((row) => `- ${row.id} [${row.status ?? 'todo'}] ${row.title.slice(0, 120)}`),
+  ].join('\n');
+}
+
+function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string, continuation = false, cardIndex = ''): string {
   if (continuation) {
     const latest = [...history].reverse().find((message) => message.authorType === 'user') ?? history[history.length - 1];
     return [
@@ -123,6 +146,7 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
         `Agent name: ${agent.name}`,
         `Adapter: ${agent.adapterType}`,
       ].join('\n'),
+      cardIndex,
       'Recent conversation transcript:',
       formatChatHistoryForPrompt(history, DIRECT_CHAT_CONTINUATION_HISTORY_CHARS),
       'Latest user message:',
@@ -348,7 +372,8 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         includeInvocationPositionPrompt: false,
       });
       const goalContext = handOffContextToAdapter ? '' : await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
-      const prompt = buildChatPrompt(company, agent, history, kanbanContext, goalContext, handOffContextToAdapter);
+      const cardIndex = handOffContextToAdapter ? await buildChatCardIndex(session.companyId, session.projectId ?? null) : '';
+      const prompt = buildChatPrompt(company, agent, history, kanbanContext, goalContext, handOffContextToAdapter, cardIndex);
       const executionAgent = await buildExecutionAgent(agent, existingChatSessionId);
       const chatTask = { id: `chat-${session.id}`, title: session.title, body: prompt, timeoutSeconds: await readChatTaskTimeoutSeconds(), kind: 'chat' as const };
       await recordPromptLog({
@@ -444,8 +469,38 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       }).where(eq(chatSessions.id, session.id)).returning();
       await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: overBudget ? 'chat.budget_hard_stop' : 'chat.reply_received', sessionId: session.id, details: { runId: run.id, costUsd: result.costUsd, overBudget, monthlyExceeded, taskExceeded } });
       if (agentMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: agentMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'agent', agentId: session.agentId, runId: run.id } });
+
+      // The agent cannot reach the board itself from a chat turn, so a
+      // megacorps-chat-actions block in its reply is applied here on the
+      // chatting user's authority. Failures are reported back into the thread
+      // rather than thrown: the reply itself is already saved and valid.
+      const workItems = extractChatWorkItems(result.output);
+      let workItemMessage: ChatMessageRow | undefined;
+      if (workItems) {
+        const body = 'error' in workItems
+          ? `The agent proposed Kanban updates but the block could not be read: ${workItems.error}`
+          : formatChatWorkItemOutcomes(await applyChatWorkItems({
+            companyId: session.companyId,
+            projectId: session.projectId ?? null,
+            chatSessionId: session.id,
+            user,
+            agentId: agent.id,
+            agentName: agent.name,
+          }, workItems.actions));
+        [workItemMessage] = await db.insert(chatMessages).values({
+          sessionId: session.id,
+          companyId: session.companyId,
+          agentId: session.agentId,
+          userId: user.id,
+          authorType: 'system',
+          body,
+          metadata: { runId: run.id, chatActions: true },
+        }).returning();
+        if (workItemMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: workItemMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'system', agentId: session.agentId, runId: run.id } });
+      }
+
       publishLiveEvent({ type: 'chat.reply.finished', companyId: session.companyId, entityType: 'chat_session', entityId: session.id, sessionId: session.id, projectId: session.projectId, data: { agentId: agent.id, runId: run.id, status: 'success' } });
-      return { session: updatedSession, userMessage, agentMessage };
+      return { session: updatedSession, userMessage, agentMessage, ...(workItemMessage ? { workItemMessage } : {}) };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'agent_chat_failed';
       await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));

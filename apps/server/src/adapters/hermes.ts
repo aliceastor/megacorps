@@ -81,7 +81,22 @@ Session: ${agent.currentSessionId ?? 'new'}
 === Conversation ===
 ${task.body}
 
-Respond to the user directly. Do not report task completion or call the Kanban webhook unless the user explicitly asks you to create or update MegaCorps work items.`;
+Respond to the user directly.
+
+=== Following Up On The Kanban Board ===
+This chat and the Kanban board are separate contexts, so anything agreed here
+is invisible to the board unless you say so. When the user asks you to do,
+track, schedule, or change a piece of work, end your reply with a fenced JSON
+block and MegaCorps will apply it to the board on the user's behalf:
+
+\`\`\`json
+{ "kind": "megacorps-chat-actions", "actions": [
+  { "action": "create_card", "title": "Short task title", "body": "What to do and what done looks like.", "priority": "normal", "assigneeSlug": "optional-agent-slug" },
+  { "action": "update_card", "cardId": "uuid-from-the-kanban-context", "status": "in_progress", "body": "optional replacement body" }
+] }
+\`\`\`
+
+Rules: priority is low|normal|high|urgent. status is todo|in_progress|in_review|needs_review|waiting_on_external|done|blocked|cancelled. Only use a cardId that appears in the Kanban context you were given. Prefer update_card over create_card when the work already has a card. Omit the block entirely for ordinary conversation — questions, explanations, and advice do not belong on the board. Do not call the Kanban webhook and do not call session-auth endpoints such as POST /api/cards from a chat turn; this block is your channel.`;
   }
 
   if (task.kind === 'maintenance') {

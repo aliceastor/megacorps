@@ -268,6 +268,35 @@ export const agentReportSchema = z.object({
 export type AgentReportDelegation = z.infer<typeof agentReportDelegationSchema>;
 export type AgentReport = z.infer<typeof agentReportSchema>;
 
+// Direct Chat is a separate world from the Kanban board: an agent asked in
+// chat to "add that to the board" has no session cookie and cannot call
+// POST /api/cards itself. Instead it emits this block in its reply and the
+// server applies it on the chatting user's behalf, the same way a DELEGATE
+// block is turned into delegation requests server-side.
+export const chatWorkItemActionSchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('create_card'),
+    title: z.string().trim().min(1).max(200),
+    body: z.string().trim().min(1).max(20_000),
+    priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
+    assigneeSlug: z.string().trim().min(1).max(120).nullable().optional(),
+  }),
+  z.object({
+    action: z.literal('update_card'),
+    cardId: z.string().uuid(),
+    title: z.string().trim().min(1).max(200).optional(),
+    body: z.string().trim().min(1).max(20_000).optional(),
+    status: z.enum(cardStatuses).optional(),
+    priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
+  }),
+]);
+export const chatWorkItemsSchema = z.object({
+  kind: z.literal('megacorps-chat-actions'),
+  actions: z.array(chatWorkItemActionSchema).min(1).max(10),
+});
+export type ChatWorkItemAction = z.infer<typeof chatWorkItemActionSchema>;
+export type ChatWorkItems = z.infer<typeof chatWorkItemsSchema>;
+
 export const createAgentRuntimeSchema = z.object({
   companyId: z.string().uuid().optional(),
   name: z.string().trim().min(1).max(120),

@@ -5,10 +5,10 @@ const DELEGATION_LINE_MAX = 500;
 
 export type AgentReportExtraction = { report: AgentReport } | { error: string };
 
-function balancedJsonCandidates(text: string): string[] {
-  // Collect top-level {...} spans that contain the report marker. A simple
-  // depth counter is enough here: report JSON is machine-written and the
-  // marker check filters out prose braces before any parse attempt.
+function balancedJsonCandidates(text: string, marker: string): string[] {
+  // Collect top-level {...} spans that contain the marker. A simple depth
+  // counter is enough here: the JSON is machine-written and the marker check
+  // filters out prose braces before any parse attempt.
   const candidates: string[] = [];
   let depth = 0;
   let start = -1;
@@ -30,7 +30,7 @@ function balancedJsonCandidates(text: string): string[] {
       if (depth > 0) depth -= 1;
       if (depth === 0 && start >= 0) {
         const span = text.slice(start, i + 1);
-        if (span.includes(REPORT_MARKER)) candidates.push(span);
+        if (span.includes(marker)) candidates.push(span);
         start = -1;
       }
     }
@@ -38,17 +38,24 @@ function balancedJsonCandidates(text: string): string[] {
   return candidates;
 }
 
-export function extractAgentReport(output: string | null | undefined): AgentReportExtraction | null {
+// Fenced blocks first, then the bare text: agents that wrap their JSON in
+// ```json fences are the common case, and scanning fences alone keeps
+// surrounding prose braces out of the candidate list.
+export function markedJsonCandidates(output: string | null | undefined, marker: string): string[] {
   const text = output ?? '';
-  if (!text.includes(REPORT_MARKER)) return null;
-
+  if (!text.includes(marker)) return [];
   const candidates: string[] = [];
   const fencePattern = /```(?:json)?\s*\n?([\s\S]*?)```/gi;
   for (const match of text.matchAll(fencePattern)) {
     const body = match[1]?.trim() ?? '';
-    if (body.includes(REPORT_MARKER)) candidates.push(...balancedJsonCandidates(body));
+    if (body.includes(marker)) candidates.push(...balancedJsonCandidates(body, marker));
   }
-  if (candidates.length === 0) candidates.push(...balancedJsonCandidates(text));
+  if (candidates.length === 0) candidates.push(...balancedJsonCandidates(text, marker));
+  return candidates;
+}
+
+export function extractAgentReport(output: string | null | undefined): AgentReportExtraction | null {
+  const candidates = markedJsonCandidates(output, REPORT_MARKER);
   if (candidates.length === 0) return null;
 
   let lastError: string | null = null;
