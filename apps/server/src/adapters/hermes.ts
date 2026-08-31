@@ -60,6 +60,7 @@ export function megacorpsApiUrl(agent: AgentLike): string {
     ?? configuredString(agent.adapterConfig?.callbackUrl)
     ?? configuredString(agent.adapterConfig?.webhookBaseUrl)
     ?? configuredString(agent.adapterConfig?.publicApiUrl)
+    ?? configuredString(process.env.INTERNAL_API_URL)
     ?? configuredString(process.env.MEGACORPS_API_URL)
     ?? configuredString(process.env.MEGACORPS_PUBLIC_URL)
     ?? 'http://localhost:4000';

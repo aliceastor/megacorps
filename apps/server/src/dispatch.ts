@@ -8,7 +8,7 @@ import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
 import { buildAgentDigest } from './agent-digest.ts';
-import { giteaAuthenticatedCloneUrl } from './gitea.ts';
+import { giteaAuthenticatedCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv } from './gitea.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 import { recordStageAction } from './card-actions.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
@@ -517,11 +517,18 @@ function agentWorkspaceLines(company: typeof companies.$inferSelect | null | und
   });
 }
 
+function agentFacingRepoUrl(project: { repoUrl?: string | null; repoProvider?: string | null } | null | undefined): string | null {
+  if (!project?.repoUrl) return null;
+  if (project.repoProvider === 'gitea-local') return giteaCloneUrlForAgent(project.repoUrl, giteaConfigFromEnv());
+  return project.repoUrl;
+}
+
 function projectRepoLines(company: typeof companies.$inferSelect | null | undefined, project: ProjectRow | null | undefined, runtime?: RuntimeRow | null, agent?: { slug?: string | null } | null): string[] {
   if (!project) return ['Project repository: none', ...agentWorkspaceLines(company, null, agent, runtime), ...runtimeLocalLines(runtime)];
+  const repoUrl = agentFacingRepoUrl(project);
   return [
     `Project repository provider: ${project.repoProvider ?? 'github'}`,
-    `Project repository URL: ${project.repoUrl ?? 'not configured'}`,
+    `Project repository URL: ${repoUrl ?? 'not configured'}`,
     `Project work path: ${project.workPath ?? 'project root'}`,
     ...agentWorkspaceLines(company, project, agent, runtime),
     ...runtimeLocalLines(runtime),
@@ -540,7 +547,8 @@ function projectRepoLines(company: typeof companies.$inferSelect | null | undefi
 function projectGitProtocol(company: typeof companies.$inferSelect | null | undefined, project: ProjectRow | null | undefined, card: CardRow, agent: AgentRow | null | undefined, runtime?: RuntimeRow | null): string {
   const localRoots = runtimeLocalLines(runtime).join('\n');
   const workspaceLines = agentWorkspaceLines(company, project, agent, runtime).join('\n');
-  if (!project?.repoUrl) return [
+  const repoUrl = agentFacingRepoUrl(project);
+  if (!project || !repoUrl) return [
     'No repository is configured for this project. Do not invent shared local file paths; use runtime-local scratch only for temporary work and report external work products by URL when available.',
     workspaceLines,
     localRoots,
@@ -553,7 +561,7 @@ function projectGitProtocol(company: typeof companies.$inferSelect | null | unde
   const giteaCredentialLines = project.repoProvider === 'gitea-local' && agent?.giteaUsername && agent.giteaToken
     ? [
       `Git credentials (yours alone; do not share): username ${agent.giteaUsername}, token ${agent.giteaToken}.`,
-      `Authenticated clone URL: ${giteaAuthenticatedCloneUrl(project.repoUrl, agent.giteaUsername, agent.giteaToken)}`,
+      `Authenticated clone URL: ${giteaAuthenticatedCloneUrl(repoUrl, agent.giteaUsername, agent.giteaToken)}`,
     ]
     : [];
   const publishLines = project.publishRepoUrl
@@ -564,7 +572,7 @@ function projectGitProtocol(company: typeof companies.$inferSelect | null | unde
     : [];
   return [
     'Repository workflow:',
-    `1. Use repo ${project.repoUrl}.`,
+    `1. Use repo ${repoUrl}.`,
     ...giteaCredentialLines,
     ...publishLines,
     workspaceLines,

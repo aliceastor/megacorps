@@ -21,7 +21,7 @@ import { registerLifecycleRoutes } from './lifecycle-routes.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
 import { registerTrashRoutes } from './trash-routes.ts';
 import { authenticateAgentToken, looksLikeAgentToken, previewAgentToken, revokeAgentToken, rotateAgentToken } from './agent-auth.ts';
-import { addGiteaCollaborator, ensureGiteaAgentAccount, ensureGiteaOrg, ensureGiteaRepo, ensureGiteaRepoWebhook, giteaConfigFromEnv } from './gitea.ts';
+import { addGiteaCollaborator, ensureGiteaAgentAccount, ensureGiteaOrg, ensureGiteaRepo, ensureGiteaRepoWebhook, giteaConfigFromEnv, giteaWebhookCallbackUrl } from './gitea.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
@@ -2267,7 +2267,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           }
         }
         try {
-          await ensureGiteaRepoWebhook(gitea, orgSlug, repo.repoSlug, `${process.env.MEGACORPS_API_URL ?? process.env.MEGACORPS_PUBLIC_URL ?? 'http://server:4000'}/api/gitea/events?token=${await giteaWebhookToken()}`);
+          await ensureGiteaRepoWebhook(gitea, orgSlug, repo.repoSlug, giteaWebhookCallbackUrl(process.env, await giteaWebhookToken()));
         } catch (error) {
           app.log.warn({ error }, 'gitea webhook registration failed; push events will not reach MegaCorps');
         }

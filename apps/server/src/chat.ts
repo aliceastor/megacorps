@@ -17,7 +17,7 @@ import { workspaceProtocolLines } from './workspace-paths.ts';
 import { readChatTaskTimeoutSeconds } from './runtime-settings.ts';
 import { applyChatWorkItems, extractChatWorkItems, formatChatWorkItemOutcomes } from './chat-work-items.ts';
 import { buildAgentDigest } from './agent-digest.ts';
-import { giteaAuthenticatedCloneUrl } from './gitea.ts';
+import { giteaAuthenticatedCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv } from './gitea.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -70,11 +70,14 @@ function projectRepoContext(company: CompanyRow | null | undefined, project: Pro
     runtimeLocalContext(runtime),
     'Repository rule: no repo is configured, so do not invent shared local workspace paths. Runtime-local scratch is only for temporary work.',
   ].join('\n');
+  const repoUrl = project.repoProvider === 'gitea-local' && project.repoUrl
+    ? giteaCloneUrlForAgent(project.repoUrl, giteaConfigFromEnv())
+    : project.repoUrl;
   return [
     `Project repository provider: ${project.repoProvider ?? 'github'}`,
-    `Project repository URL: ${project.repoUrl ?? 'not configured'}`,
-    project.repoProvider === 'gitea-local' && project.repoUrl && agent?.giteaUsername && agent.giteaToken
-      ? `Git credentials (yours alone): username ${agent.giteaUsername}, token ${agent.giteaToken}; authenticated clone URL ${giteaAuthenticatedCloneUrl(project.repoUrl, agent.giteaUsername, agent.giteaToken)}`
+    `Project repository URL: ${repoUrl ?? 'not configured'}`,
+    project.repoProvider === 'gitea-local' && repoUrl && agent?.giteaUsername && agent.giteaToken
+      ? `Git credentials (yours alone): username ${agent.giteaUsername}, token ${agent.giteaToken}; authenticated clone URL ${giteaAuthenticatedCloneUrl(repoUrl, agent.giteaUsername, agent.giteaToken)}`
       : '',
     project.publishRepoUrl ? `Publish target: ${project.publishRepoUrl}${project.publishToken ? ' (auth token available in task prompts)' : ''}` : '',
     `Project work path: ${project.workPath ?? 'project root'}`,
@@ -87,7 +90,7 @@ function projectRepoContext(company: CompanyRow | null | undefined, project: Pro
     `Completion policy: ${project.completionPolicy ?? 'push_or_pr'}`,
     project.setupCommand ? `Setup command: ${project.setupCommand}` : '',
     project.testCommand ? `Test command: ${project.testCommand}` : '',
-    project.repoUrl
+    repoUrl
       ? 'Repository rule: use your runtime-owned local clone under the runtime-local workspace root when configured, stay inside the project work path unless explicitly required, pull/rebase before code changes, commit and push/PR completed work, and report PR/commit/preview links rather than local-only paths.'
       : 'Repository rule: no repo is configured, so do not invent shared local workspace paths. Runtime-local scratch is only for temporary work.',
     'Deliverable rule: durable reports, exports, handoff docs, and other non-code files belong in the project repo (e.g. a deliverables/ or docs/ folder), committed and pushed, then reported as workProducts — not only as /tmp files.',

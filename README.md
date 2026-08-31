@@ -30,6 +30,53 @@ Remote Docker note:
 - Set `SERVER_API_URL` for the web container when the API is not reachable at `http://server:4000`. Set `NEXT_PUBLIC_API_URL` only when you intentionally want a direct browser fallback.
 - `docker-compose.deploy.yml` includes postgres (named volume `postgres_data`); `DATABASE_URL` defaults to that bundled instance and is no longer required. It also connects `megacorps-server` to the external `hermes_default` Docker network so the `hermes-ssh` runtime can use Docker DNS names such as `hermes-suite`. Ensure that external network exists before deploying that compose file.
 
+## Network Topology
+
+Keep browser-facing URLs and container-internal URLs separate. Agents, Gitea webhooks, and the Next.js proxy should never be pointed at a host-mapped LAN IP if they run on a Docker network that cannot hairpin back to the host (macvlan in particular).
+
+| Who | Talks to | Address |
+| --- | --- | --- |
+| Browser | MegaCorps web UI | host-mapped web port, e.g. `http://192.168.1.180:3000` |
+| Browser | MegaCorps API | same-origin `/api/proxy/...`, then `SERVER_API_URL` (`http://server:4000`). Fallbacks: host `:4000`, `NEXT_PUBLIC_API_URL`, `MEGACORPS_PUBLIC_URL` |
+| Agent runtime (Hermes, A2A, Codex) | MegaCorps task-complete / A2A push | `INTERNAL_API_URL` (then `MEGACORPS_API_URL` → `MEGACORPS_PUBLIC_URL`). Adapter `megacorpsApiUrl` still overrides. Same-compose: `http://server:4000` or `http://megacorps-server:4000` |
+| MegaCorps server | Gitea API | `GITEA_URL`, default `http://gitea:3000` |
+| Agent runtime | Gitea git clone | `GITEA_INTERNAL_URL` or `GITEA_URL`. UI still shows `GITEA_EXTERNAL_URL` |
+| Browser | Gitea UI / repo htmlUrl | `GITEA_EXTERNAL_URL` / `GITEA__server__ROOT_URL`, e.g. `http://192.168.1.180:3300` |
+| Gitea | MegaCorps push webhook | internal API chain (`INTERNAL_API_URL` → `MEGACORPS_API_URL` → `MEGACORPS_PUBLIC_URL`, default `http://server:4000`) |
+
+Same-host Docker example:
+
+```
+INTERNAL_API_URL=http://server:4000
+MEGACORPS_PUBLIC_URL=http://localhost:4000
+NEXT_PUBLIC_API_URL=http://localhost:4000
+GITEA_URL=http://gitea:3000
+GITEA_EXTERNAL_URL=http://localhost:3300
+```
+
+Cross-host / NAS with a macvlan agent runtime:
+
+```
+INTERNAL_API_URL=http://megacorps-server:4000
+MEGACORPS_PUBLIC_URL=http://192.168.1.180:4000
+NEXT_PUBLIC_API_URL=http://192.168.1.180:4000
+GITEA_URL=http://gitea:3000
+GITEA_EXTERNAL_URL=http://192.168.1.180:3300
+```
+
+Leave runtime `megacorpsApiUrl` empty unless a specific agent must override the env chain.
+
+## Troubleshooting
+
+### Agent on a macvlan network cannot reach the host-mapped MegaCorps port
+
+Symptom: Hermes/A2A task-complete callbacks fail with HTTP `000` / no route to host. Cards sit in `blocked` after A2A timeouts. Setting `MEGACORPS_API_URL` or `GITEA_EXTERNAL_URL` to a Docker service name (`http://megacorps-server:4000`, `http://gitea:3000`) restores callbacks but then the Projects UI shows those internal clone URLs to browsers.
+
+Root cause: Docker macvlan does not let a container reach the host's own mapped ports (for example `http://192.168.1.180:4000` from `hermes-suite`). Service-name URLs work on the compose network, but they are not browser-reachable.
+
+Fix: keep internal and external URLs on different variables. Set `INTERNAL_API_URL` (and optionally `GITEA_INTERNAL_URL`) to the compose DNS name the agent can reach. Keep `MEGACORPS_PUBLIC_URL` / `NEXT_PUBLIC_API_URL` / `GITEA_EXTERNAL_URL` as the host-mapped addresses browsers use. Agent prompts and Gitea webhooks follow the internal chain; the UI keeps showing the external clone/html URLs.
+
+
 ## Scripts
 
 - `npm run test`

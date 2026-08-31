@@ -12,19 +12,27 @@ import { agents } from './db/schema.ts';
 export type GiteaConfig = {
   // Where the MegaCorps server reaches Gitea (compose-internal).
   apiUrl: string;
-  // Where agents and browsers reach Gitea; clone URLs use this.
+  // Where agents/runtimes clone (compose DNS / internal network).
+  internalUrl: string;
+  // Where browsers and the UI display/htmlUrl Gitea.
   externalUrl: string;
   adminToken?: string;
   adminUsername?: string;
   adminPassword?: string;
 };
 
+function stripTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
 export function giteaConfigFromEnv(env: NodeJS.ProcessEnv = process.env): GiteaConfig | null {
   const apiUrl = env.GITEA_URL?.trim();
   if (!apiUrl) return null;
+  const strippedApi = stripTrailingSlash(apiUrl);
   return {
-    apiUrl: apiUrl.replace(/\/+$/, ''),
-    externalUrl: (env.GITEA_EXTERNAL_URL?.trim() || apiUrl).replace(/\/+$/, ''),
+    apiUrl: strippedApi,
+    internalUrl: stripTrailingSlash(env.GITEA_INTERNAL_URL?.trim() || strippedApi),
+    externalUrl: stripTrailingSlash(env.GITEA_EXTERNAL_URL?.trim() || apiUrl),
     adminToken: env.GITEA_ADMIN_TOKEN?.trim() || undefined,
     adminUsername: env.GITEA_ADMIN_USERNAME?.trim() || undefined,
     adminPassword: env.GITEA_ADMIN_PASSWORD?.trim() || undefined,
@@ -74,8 +82,34 @@ export function giteaAgentUsername(agentSlug: string): string {
   return `agent-${giteaSlug(agentSlug)}`;
 }
 
-export function giteaCloneUrl(externalUrl: string, orgSlug: string, repoSlug: string): string {
-  return `${externalUrl.replace(/\/+$/, '')}/${orgSlug}/${repoSlug}.git`;
+export function giteaCloneUrl(baseUrl: string, orgSlug: string, repoSlug: string): string {
+  return `${stripTrailingSlash(baseUrl)}/${orgSlug}/${repoSlug}.git`;
+}
+
+function rewriteUrlOrigin(url: string, fromBase: string, toBase: string): string {
+  const from = stripTrailingSlash(fromBase);
+  const to = stripTrailingSlash(toBase);
+  if (!from || from === to) return url;
+  if (url === from || url.startsWith(`${from}/`)) return `${to}${url.slice(from.length)}`;
+  return url;
+}
+
+// Rewrite a stored (UI/external) clone URL onto the agent-reachable origin.
+export function giteaCloneUrlForAgent(storedCloneUrl: string, config: GiteaConfig | null): string {
+  if (!config) return storedCloneUrl;
+  const fromExternal = rewriteUrlOrigin(storedCloneUrl, config.externalUrl, config.internalUrl);
+  if (fromExternal !== storedCloneUrl) return fromExternal;
+  return rewriteUrlOrigin(storedCloneUrl, config.apiUrl, config.internalUrl);
+}
+
+export function giteaWebhookCallbackUrl(env: NodeJS.ProcessEnv = process.env, token: string): string {
+  const base = stripTrailingSlash(
+    env.INTERNAL_API_URL?.trim()
+    || env.MEGACORPS_API_URL?.trim()
+    || env.MEGACORPS_PUBLIC_URL?.trim()
+    || 'http://server:4000',
+  );
+  return `${base}/api/gitea/events?token=${token}`;
 }
 
 // Credential-embedded clone URL for prompts. Prompt logging redacts the
@@ -106,6 +140,7 @@ export async function ensureGiteaRepo(config: GiteaConfig, orgSlug: string, proj
   }
   return {
     repoSlug,
+    // Stored/UI clone + html URLs stay on the browser-facing origin.
     cloneUrl: giteaCloneUrl(config.externalUrl, orgSlug, repoSlug),
     htmlUrl: `${config.externalUrl}/${orgSlug}/${repoSlug}`,
   };

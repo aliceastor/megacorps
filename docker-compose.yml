@@ -28,6 +28,7 @@ services:
     container_name: megacorps-gitea
     restart: unless-stopped
     environment:
+      # Browser-facing origin only. Agent clone URLs use GITEA_URL / GITEA_INTERNAL_URL.
       GITEA__server__ROOT_URL: ${GITEA_EXTERNAL_URL:-http://localhost:3300}/
       GITEA__server__HTTP_PORT: "3000"
       GITEA__security__INSTALL_LOCK: "true"
@@ -89,6 +90,7 @@ services:
       HERMES_SSH_KEY_PATH: ${HERMES_SSH_KEY_PATH:-/home/megacorps/.ssh/id_ed25519}
       HERMES_SSH_COMMAND: ${HERMES_SSH_COMMAND:-hermes}
       GITEA_URL: ${GITEA_URL:-http://gitea:3000}
+      GITEA_INTERNAL_URL: ${GITEA_INTERNAL_URL:-}
       GITEA_EXTERNAL_URL: ${GITEA_EXTERNAL_URL:-http://localhost:3300}
       GITEA_ADMIN_TOKEN: ${GITEA_ADMIN_TOKEN:-}
       GITEA_ADMIN_USERNAME: ${GITEA_ADMIN_USERNAME:-megacorps-admin}
@@ -104,6 +106,7 @@ services:
       CODEX_APP_SANDBOX: ${CODEX_APP_SANDBOX:-workspace-write}
       CODEX_APP_EXPERIMENTAL_API: ${CODEX_APP_EXPERIMENTAL_API:-false}
       CODEX_APP_TIMEOUT_SECONDS: ${CODEX_APP_TIMEOUT_SECONDS:-300}
+      INTERNAL_API_URL: ${INTERNAL_API_URL:-}
       MEGACORPS_API_URL: ${MEGACORPS_API_URL:-}
       MEGACORPS_PUBLIC_URL: ${MEGACORPS_PUBLIC_URL:-}
       ADAPTER_ENV_FALLBACK_ENABLED: ${ADAPTER_ENV_FALLBACK_ENABLED:-false}

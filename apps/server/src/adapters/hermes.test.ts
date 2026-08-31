@@ -1,7 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildAgentPrompt, buildHermesCliCommand, extractSessionId, hermesTaskResult, estimateTokens, stripHermesSessionMetadata } from './hermes.ts';
+import { buildAgentPrompt, buildHermesCliCommand, extractSessionId, hermesTaskResult, estimateTokens, megacorpsApiUrl, stripHermesSessionMetadata } from './hermes.ts';
 import { buildHermesSshRemoteCommand, resolveHermesSshConnectionConfig } from './hermes-ssh.ts';
+
+function withEnv<T>(values: Record<string, string | undefined>, fn: () => T): T {
+  const previous: Record<string, string | undefined> = {};
+  for (const key of Object.keys(values)) previous[key] = process.env[key];
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
 
 test('extracts Hermes session IDs from stdout', () => {
   assert.equal(extractSessionId('ok\nSession: 20260604_120102_abc123\n'), '20260604_120102_abc123');
@@ -187,6 +204,65 @@ test('agent prompts prefer megacorpsApiUrl while accepting legacy publicApiUrl',
 
   assert.match(prompt, /http:\/\/megacorps\.example:4000\/api\/webhook\/task-complete/);
   assert.doesNotMatch(prompt, /legacy\.example/);
+});
+
+test('megacorpsApiUrl prefers INTERNAL_API_URL over public API env vars', () => {
+  withEnv({
+    INTERNAL_API_URL: 'http://megacorps-server:4000',
+    MEGACORPS_API_URL: 'http://192.168.1.180:4000',
+    MEGACORPS_PUBLIC_URL: 'http://nas.lan:4000',
+  }, () => {
+    assert.equal(
+      megacorpsApiUrl({ hermesProfile: 'alice', currentSessionId: null, adapterConfig: {} }),
+      'http://megacorps-server:4000',
+    );
+    const prompt = buildAgentPrompt({
+      hermesProfile: 'alice',
+      currentSessionId: null,
+      adapterConfig: {},
+    }, { id: 'card-1', title: 'Smoke', body: 'Return OK.' });
+    assert.match(prompt, /http:\/\/megacorps-server:4000\/api\/webhook\/task-complete/);
+    assert.doesNotMatch(prompt, /192\.168\.1\.180/);
+  });
+});
+
+test('megacorpsApiUrl keeps adapter overrides ahead of INTERNAL_API_URL', () => {
+  withEnv({
+    INTERNAL_API_URL: 'http://megacorps-server:4000',
+    MEGACORPS_API_URL: 'http://192.168.1.180:4000',
+  }, () => {
+    assert.equal(
+      megacorpsApiUrl({
+        hermesProfile: 'alice',
+        currentSessionId: null,
+        adapterConfig: { megacorpsApiUrl: 'http://runtime.internal:4000' },
+      }),
+      'http://runtime.internal:4000',
+    );
+  });
+});
+
+test('megacorpsApiUrl falls back through MEGACORPS_API_URL then MEGACORPS_PUBLIC_URL', () => {
+  withEnv({
+    INTERNAL_API_URL: undefined,
+    MEGACORPS_API_URL: 'http://192.168.1.180:4000',
+    MEGACORPS_PUBLIC_URL: 'http://nas.lan:4000',
+  }, () => {
+    assert.equal(
+      megacorpsApiUrl({ hermesProfile: 'alice', currentSessionId: null, adapterConfig: {} }),
+      'http://192.168.1.180:4000',
+    );
+  });
+  withEnv({
+    INTERNAL_API_URL: ' ',
+    MEGACORPS_API_URL: undefined,
+    MEGACORPS_PUBLIC_URL: 'http://nas.lan:4000',
+  }, () => {
+    assert.equal(
+      megacorpsApiUrl({ hermesProfile: 'alice', currentSessionId: null, adapterConfig: {} }),
+      'http://nas.lan:4000',
+    );
+  });
 });
 
 test('agent prompts include webhook shared secret header when configured', () => {
