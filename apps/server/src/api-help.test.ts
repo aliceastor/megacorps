@@ -125,6 +125,20 @@ const registeredRoutes = [
   ['GET', '/api/cron/status'],
   ['GET', '/api/cron/runs'],
   ['POST', '/api/cron/run'],
+  ['POST', '/api/agents/:id/token'],
+  ['DELETE', '/api/agents/:id/token'],
+  ['POST', '/api/agents/:id/gitea'],
+  ['POST', '/api/agents/:id/maintenance'],
+  ['POST', '/api/gitea/events'],
+  ['POST', '/api/a2a/push'],
+  ['GET', '/api/trash'],
+  ['POST', '/api/trash/restore'],
+  ['GET', '/api/notifications'],
+  ['POST', '/api/notifications/:id/read'],
+  ['POST', '/api/notifications/read-all'],
+  ['GET', '/api/search'],
+  ['GET', '/api/dashboard/timeseries'],
+  ['GET', '/api/cards/:id/assignment-history'],
 ] as const;
 
 test('api help includes response examples and rate-limit notes for every endpoint', () => {

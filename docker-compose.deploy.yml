@@ -1,4 +1,38 @@
 services:
+  gitea:
+    # Built-in git server, fully self-bootstrapping: the command migrates the
+    # DB and creates the admin account (GITEA_ADMIN_*) before the web server
+    # starts. MegaCorps administers orgs/repos/agent accounts via its API.
+    image: gitea/gitea:1.22-rootless
+    container_name: megacorps-gitea
+    restart: unless-stopped
+    environment:
+      GITEA__server__ROOT_URL: ${GITEA_EXTERNAL_URL:?Set GITEA_EXTERNAL_URL, e.g. http://nas.lan:3300}/
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__webhook__ALLOWED_HOST_LIST: "*"
+      GITEA_ADMIN_USERNAME: ${GITEA_ADMIN_USERNAME:-megacorps-admin}
+      GITEA_ADMIN_PASSWORD: ${GITEA_ADMIN_PASSWORD:?Set a real GITEA_ADMIN_PASSWORD for deployment}
+    command: >-
+      sh -c 'gitea migrate &&
+      (gitea admin user create --admin --username "$$GITEA_ADMIN_USERNAME" --password "$$GITEA_ADMIN_PASSWORD" --email admin@megacorps.local ||
+      echo "gitea admin already exists") &&
+      exec gitea web'
+    volumes:
+      - gitea_data:/var/lib/gitea
+      - gitea_config:/etc/gitea
+    ports:
+      - "${GITEA_HTTP_PORT:-3300}:3000"
+      - "${GITEA_SSH_PORT:-3322}:2222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/api/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - megacorps
+
   server:
     # Pushed by GitHub Actions in aliceastor/megacorps. To retarget to
     # ghcr.io/meaadore1221-afk/*, see .github/workflows/docker.yml
@@ -60,6 +94,14 @@ services:
       TASK_RUN_WORKER_INTERVAL_MS: ${TASK_RUN_WORKER_INTERVAL_MS:-2000}
       TASK_RUN_WORKER_BATCH_SIZE: ${TASK_RUN_WORKER_BATCH_SIZE:-2}
       TASK_RUN_WORKER_ID: ${TASK_RUN_WORKER_ID:-megacorps-server}
+      KANBAN_TASK_TIMEOUT_SECONDS: ${KANBAN_TASK_TIMEOUT_SECONDS:-300}
+      CHAT_TASK_TIMEOUT_SECONDS: ${CHAT_TASK_TIMEOUT_SECONDS:-300}
+      PROVISIONING_SWEEP_ENABLED: ${PROVISIONING_SWEEP_ENABLED:-true}
+      GITEA_URL: ${GITEA_URL:-http://gitea:3000}
+      GITEA_EXTERNAL_URL: ${GITEA_EXTERNAL_URL:-}
+      GITEA_ADMIN_TOKEN: ${GITEA_ADMIN_TOKEN:-}
+      GITEA_ADMIN_USERNAME: ${GITEA_ADMIN_USERNAME:-megacorps-admin}
+      GITEA_ADMIN_PASSWORD: ${GITEA_ADMIN_PASSWORD:-}
     ports:
       - "4000:4000"
     volumes:
@@ -96,3 +138,5 @@ volumes:
   server_data:
   server_ssh_keys:
   web_cache:
+  gitea_data:
+  gitea_config:
