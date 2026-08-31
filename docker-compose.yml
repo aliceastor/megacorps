@@ -33,12 +33,27 @@ services:
       GITEA__security__INSTALL_LOCK: "true"
       GITEA__service__DISABLE_REGISTRATION: "true"
       GITEA__webhook__ALLOWED_HOST_LIST: "*"
+      GITEA_ADMIN_USERNAME: ${GITEA_ADMIN_USERNAME:-megacorps-admin}
+      GITEA_ADMIN_PASSWORD: ${GITEA_ADMIN_PASSWORD:-megacorps_gitea_password}
+    # The entrypoint still renders app.ini from the GITEA__ env vars, then runs
+    # this instead of the default CMD: migrate the DB and make sure the admin
+    # account exists before the web server starts. Fully unattended first boot.
+    command: >-
+      sh -c 'gitea migrate &&
+      (gitea admin user create --admin --username "$$GITEA_ADMIN_USERNAME" --password "$$GITEA_ADMIN_PASSWORD" --email admin@megacorps.local ||
+      echo "gitea admin already exists") &&
+      exec gitea web'
     volumes:
       - gitea_data:/var/lib/gitea
       - gitea_config:/etc/gitea
     ports:
       - "${GITEA_HTTP_PORT:-3300}:3000"
       - "${GITEA_SSH_PORT:-3322}:2222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/api/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     networks:
       - megacorps
 
@@ -76,8 +91,8 @@ services:
       GITEA_URL: ${GITEA_URL:-http://gitea:3000}
       GITEA_EXTERNAL_URL: ${GITEA_EXTERNAL_URL:-http://localhost:3300}
       GITEA_ADMIN_TOKEN: ${GITEA_ADMIN_TOKEN:-}
-      GITEA_ADMIN_USERNAME: ${GITEA_ADMIN_USERNAME:-}
-      GITEA_ADMIN_PASSWORD: ${GITEA_ADMIN_PASSWORD:-}
+      GITEA_ADMIN_USERNAME: ${GITEA_ADMIN_USERNAME:-megacorps-admin}
+      GITEA_ADMIN_PASSWORD: ${GITEA_ADMIN_PASSWORD:-megacorps_gitea_password}
       HERMES_SSH_OPTIONS: ${HERMES_SSH_OPTIONS:-}
       CODEX_APP_TRANSPORT: ${CODEX_APP_TRANSPORT:-stdio}
       CODEX_APP_COMMAND: ${CODEX_APP_COMMAND:-codex}

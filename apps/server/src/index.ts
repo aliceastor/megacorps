@@ -8,6 +8,7 @@ import { registerRoutes } from './routes.ts';
 import { startDispatchLoop } from './dispatch.ts';
 import { startMaintenanceLoop } from './agent-maintenance.ts';
 import { startRetentionLoop } from './retention.ts';
+import { startProvisioningSweep } from './bootstrap-provisioning.ts';
 import { registerRequestLogging } from './request-log.ts';
 import { registerRateLimit } from './rate-limit.ts';
 import { registerCsrfOriginCheck } from './csrf.ts';
@@ -38,6 +39,7 @@ export async function buildServer() {
   startDispatchLoop(app);
   startMaintenanceLoop(app);
   startRetentionLoop(app);
+  startProvisioningSweep(app);
   return app;
 }
 
