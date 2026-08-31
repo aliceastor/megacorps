@@ -157,6 +157,10 @@ Prefer including a structured "report" field in the webhook body:
 "report": { "kind": "megacorps-report", "status": "completed", "summary": "...", "delegations": [{ "to": "<direct-report-slug>", "objective": "...", "effort": "small" }] }
 The legacy DELEGATE block still works but is deprecated.
 
+To ask another agent a question WITHOUT delegating work, add mentions to the report:
+"mentions": [{ "to": "<agent-slug>", "question": "..." }]
+MegaCorps posts each question to this card's message board and the target agent answers in the same thread shortly after; check the message board on your next turn for the answer. Use a mention when you need information or a decision from a peer; use a delegation only when transferring actual work. Maximum 3 mentions per report.
+
 If you are delegating to direct reports, POST status "in_progress" and include a DELEGATE block in summary/output. Do not mark the parent card done and do not try to create Kanban cards yourself; MegaCorps will create same-card Message Board delegation requests.
 If the work is complete but needs QA, POST status "in_review" with the completed output.
 If you cannot solve the task, do not mark it done. POST status "needs_review" with attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs:

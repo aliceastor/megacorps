@@ -18,7 +18,7 @@ import { extractAgentReport, structuredDelegationPlan } from './agent-report.ts'
 import type { AgentReportDelegation } from '@megacorps/shared';
 import type { TaskResult } from './adapters/hermes.ts';
 import { notify } from './notifications.ts';
-import { readKanbanTaskTimeoutSeconds, normalizeKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
+import { readChatTaskTimeoutSeconds, readKanbanTaskTimeoutSeconds, normalizeKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
 import { projectSharedFileSpaceLines } from './project-workspace.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
@@ -751,6 +751,153 @@ function handoffMessageBody(fromAgent: AgentRow, target: AgentRow, item: AgentRe
     item.outputFormat ? `Expected output: ${item.outputFormat}` : '',
     item.boundaries ? `Boundaries: ${item.boundaries}` : '',
   ].filter(Boolean).join('\n');
+}
+
+// === Peer questions (@mention) ===============================================
+// Agents previously had no lateral channel at all: needing another agent's
+// answer meant blocking the card and waiting for a human to carry the message.
+// A report can now carry mentions ({ to: slug, question }); each becomes a
+// peer_question comment on the card's message board addressed to the target
+// agent, and the dispatch cron answers it with a small bounded turn whose
+// reply lands in the same thread. Deliberately not the delegation pipeline:
+// no reviewer, no card stage change, no ownership transfer — just a question.
+
+const PEER_MENTIONS_PER_REPORT = 3;
+const PEER_QUESTIONS_PER_AUTHOR_PER_CARD = 5;
+const PEER_QUESTION_SWEEP_BATCH = 5;
+
+export type PeerMention = { to: string; question: string };
+
+export function peerMentionsFromOutput(output: string | null | undefined, report?: { mentions?: PeerMention[] } | null): PeerMention[] {
+  if (report?.mentions?.length) return report.mentions.slice(0, PEER_MENTIONS_PER_REPORT);
+  const extraction = extractAgentReport(output);
+  if (extraction && 'report' in extraction && extraction.report.mentions?.length) return extraction.report.mentions.slice(0, PEER_MENTIONS_PER_REPORT);
+  return [];
+}
+
+export async function processPeerMentions(card: CardRow, author: AgentRow, mentions: PeerMention[]): Promise<number> {
+  let created = 0;
+  for (const mention of mentions.slice(0, PEER_MENTIONS_PER_REPORT)) {
+    const [target] = await db.select().from(agents).where(and(
+      eq(agents.companyId, card.companyId),
+      eq(agents.slug, mention.to),
+      isNull(agents.deletedAt),
+    )).limit(1);
+    if (!target || target.id === author.id || target.isActive === false) {
+      await addCardMessage({ cardId: card.id, authorType: 'system', action: 'peer_question_failed', body: `@${mention.to} could not be resolved to another active agent in this company, so this question was not delivered.\n\nQuestion from ${author.name}: ${mention.question}` });
+      continue;
+    }
+    // Loop guard: peer answers never spawn mentions themselves (only task
+    // reports are scanned), and each author gets a hard per-card budget.
+    const asked = await db.select({ id: cardComments.id }).from(cardComments)
+      .where(and(eq(cardComments.cardId, card.id), eq(cardComments.action, 'peer_question'), eq(cardComments.agentId, author.id)));
+    if (asked.length >= PEER_QUESTIONS_PER_AUTHOR_PER_CARD) {
+      await addCardMessage({ cardId: card.id, authorType: 'system', action: 'peer_question_failed', body: `${author.name} has reached the limit of ${PEER_QUESTIONS_PER_AUTHOR_PER_CARD} peer questions on this card; the question to @${mention.to} was not delivered.` });
+      continue;
+    }
+    const comment = await addCardMessage({
+      cardId: card.id,
+      agentId: author.id,
+      assigneeAgentId: target.id,
+      action: 'peer_question',
+      body: mention.question,
+      delegationStatus: 'queued',
+      metadata: { peerQuestion: true, targetSlug: target.slug },
+    });
+    if (!comment) continue;
+    created += 1;
+    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: author.id, agentId: author.id, action: 'peer_question.asked', entityType: 'card_comment', entityId: comment.id, details: { cardId: card.id, to: target.slug } });
+    publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'peer_question.asked' });
+  }
+  return created;
+}
+
+async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: CardCommentRow, target: AgentRow, authorName: string): Promise<boolean> {
+  if (!(await budgetOk(target))) return false;
+  if (!(await claimAgentCapacity(target))) return false;
+  const now = new Date();
+  const [run] = await db.insert(heartbeatRuns).values({ companyId: card.companyId, cardId: card.id, agentId: target.id, source: 'peer_question', status: 'running', startedAt: now }).returning();
+  if (!run) {
+    await db.update(agents).set({ isBusy: false }).where(eq(agents.id, target.id));
+    return false;
+  }
+  try {
+    const adapter = getAdapter(target.adapterType ?? 'hermes-ssh');
+    // Fresh session on purpose: a peer answer is one bounded turn, and the
+    // target's cross-surface digest supplies its working memory.
+    const executionAgent = await buildExecutionAgent(target, null);
+    const digest = (await buildAgentDigest(target.id, card.companyId)).text;
+    const prompt = [
+      `A colleague agent asked you a question on the MegaCorps card message board. Answer it from your own knowledge and recent work.`,
+      `Card: ${card.title} (stage ${card.columnStatus ?? 'todo'})`,
+      `Card brief:\n${clipText(card.body, 2000)}`,
+      digest,
+      `Question from ${authorName}:`,
+      comment.body,
+      'Reply with the answer text only. Your reply is posted back to the same message board thread automatically — do not call any webhook, do not create or update cards, and do not delegate. If you genuinely do not know, say so and name who or what might.',
+    ].filter(Boolean).join('\n\n');
+    const task = { id: `peer-${comment.id}`, title: `Peer question on: ${card.title}`, body: prompt, timeoutSeconds: await readChatTaskTimeoutSeconds(), kind: 'chat' as const };
+    await recordPromptLog({
+      companyId: card.companyId,
+      agentId: target.id,
+      cardId: card.id,
+      projectId: card.projectId,
+      heartbeatRunId: run.id,
+      source: 'peer_question',
+      adapterType: target.adapterType ?? 'hermes-ssh',
+      title: task.title,
+      prompt: promptSnapshotForAdapter(executionAgent, task),
+      metadata: { peerQuestionCommentId: comment.id, megacorpsPromptChars: prompt.length, contextMode: 'full_bootstrap' },
+    });
+    const result = await adapter.dispatch(executionAgent, task);
+    if (!result.success) throw new Error(result.output || 'peer_answer_failed');
+    await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: target.id, action: 'peer_answer', body: result.output, delegationStatus: 'done' });
+    await db.update(cardComments).set({ delegationStatus: 'done' }).where(eq(cardComments.id, comment.id));
+    await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), durationSeconds: result.durationSeconds, outputTokens: result.tokensUsed, costUsd: result.costUsd.toString() }).where(eq(heartbeatRuns.id, run.id));
+    await db.insert(costEvents).values({ companyId: card.companyId, agentId: target.id, projectId: card.projectId, provider: target.adapterType ?? 'unknown', model: target.hermesProfile ?? 'peer-question', outputTokens: result.tokensUsed, costUsd: result.costUsd.toString() });
+    await db.update(agents).set({ isBusy: false, spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${result.costUsd}` }).where(eq(agents.id, target.id));
+    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: target.id, agentId: target.id, action: 'peer_question.answered', entityType: 'card_comment', entityId: comment.id, details: { cardId: card.id } });
+    publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'peer_question.answered' });
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'peer_answer_failed';
+    // One failed attempt ends the question rather than retrying forever; the
+    // asking agent sees the failure in the thread and can re-ask.
+    await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
+    await addCardMessage({ cardId: card.id, parentCommentId: comment.id, authorType: 'system', action: 'peer_question_failed', body: `Peer answer from ${target.name} failed: ${clipText(message, 1000)}` });
+    await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
+    await db.update(agents).set({ isBusy: false }).where(eq(agents.id, target.id));
+    app.log.warn({ error: message, cardId: card.id, commentId: comment.id }, 'peer question answer failed');
+    return false;
+  }
+}
+
+// Runs from the dispatch cron tick: answers queued peer questions whose target
+// agent is currently free. Questions whose target stays busy simply wait for a
+// later tick — capacity is respected the same way task dispatch respects it.
+export async function sweepPeerQuestions(app: FastifyInstance): Promise<number> {
+  const queued = await db.select().from(cardComments)
+    .where(and(eq(cardComments.action, 'peer_question'), eq(cardComments.delegationStatus, 'queued')))
+    .orderBy(cardComments.createdAt)
+    .limit(PEER_QUESTION_SWEEP_BATCH);
+  let answered = 0;
+  for (const comment of queued) {
+    const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, comment.cardId), isNull(kanbanCards.deletedAt))).limit(1);
+    if (!card) {
+      await db.update(cardComments).set({ delegationStatus: 'cancelled' }).where(eq(cardComments.id, comment.id));
+      continue;
+    }
+    const [target] = comment.assigneeAgentId ? await db.select().from(agents).where(and(eq(agents.id, comment.assigneeAgentId), isNull(agents.deletedAt))).limit(1) : [];
+    if (!target || target.isActive === false) {
+      await db.update(cardComments).set({ delegationStatus: 'cancelled' }).where(eq(cardComments.id, comment.id));
+      await addCardMessage({ cardId: card.id, parentCommentId: comment.id, authorType: 'system', action: 'peer_question_failed', body: 'The target agent is no longer available; this peer question was cancelled.' });
+      continue;
+    }
+    if (target.isBusy) continue;
+    const [author] = comment.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, comment.agentId)).limit(1) : [];
+    if (await answerPeerQuestion(app, card, comment, target, author?.name ?? 'a colleague agent')) answered += 1;
+  }
+  return answered;
 }
 
 // Tree-level timeout: a delegate_request stuck before submission for too long
@@ -1992,6 +2139,8 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       return card;
     }
     const messagePlan = structuredDelegationPlan(result.output);
+    const messagePeerMentions = peerMentionsFromOutput(result.output);
+    if (messagePeerMentions.length) { try { await processPeerMentions(card, agent, messagePeerMentions); } catch { /* question delivery must never fail the run */ } }
     if (messagePlan?.handoff || messagePlan?.mixed) {
       // A delegate does not own the card, so ownership transfer is not theirs
       // to request; retry with subroutine delegations or a plain report.
@@ -2189,6 +2338,10 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
       return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'failed', delegated: false, reviewerId: comment.reviewerAgentId };
     }
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), isNull(agents.deletedAt))).limit(1) : [];
+    const webhookMessageMentions = actorAgent ? peerMentionsFromOutput(output) : [];
+    if (actorAgent && webhookMessageMentions.length) {
+      try { await processPeerMentions(card, actorAgent, webhookMessageMentions); } catch { /* question delivery must never fail the run */ }
+    }
     const delegated = actorAgent
       ? await createMessageDelegations(card, actorAgent, delegationItems(output), { parentCommentId: comment.id, reviewerScope: 'phase', sourceTaskRunId: taskRun.id, sourceOutput: output })
       : [];
@@ -2371,6 +2524,8 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     }
     await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
     const structuredPlan = structuredDelegationPlan(result.output);
+    const dispatchPeerMentions = peerMentionsFromOutput(result.output);
+    if (dispatchPeerMentions.length) { try { await processPeerMentions(card, agent, dispatchPeerMentions); } catch { /* question delivery must never fail the run */ } }
     if (structuredPlan?.mixed) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: HANDOFF_MIXED_MESSAGE, runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
@@ -3118,6 +3273,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
     if (activeCompanyIds.length > 0) {
       await expireStaleDelegations(app);
       await spawnDueScheduledCards(app, activeCompanyIds);
+      try { await sweepPeerQuestions(app); } catch (error) { app.log.warn({ error }, 'peer question sweep failed'); }
       // Only statuses the loop can act on; done/blocked/cancelled/in_progress cards
       // used to be loaded and skipped one by one, which scales badly with board size.
       const cards = await db.select().from(kanbanCards).where(and(

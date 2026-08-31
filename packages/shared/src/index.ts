@@ -256,6 +256,13 @@ export const agentReportDelegationSchema = z.object({
   effort: z.enum(['small', 'medium', 'large']).optional(),
   mode: z.enum(['subroutine', 'handoff']).default('subroutine'),
 });
+// Peer question: ask another agent (by slug) something without delegating work
+// to them. MegaCorps posts it to the card message board and schedules a small
+// answer turn for the target agent; the answer lands in the same thread.
+export const agentReportMentionSchema = z.object({
+  to: z.string().trim().min(1).max(120),
+  question: z.string().trim().min(1).max(2000),
+});
 export const agentReportSchema = z.object({
   kind: z.literal('megacorps-report'),
   status: z.enum(['completed', 'input_required', 'failed', 'rejected']),
@@ -263,8 +270,10 @@ export const agentReportSchema = z.object({
   summary: z.string().trim().min(1).max(4000),
   questions: z.array(z.string().trim().min(1).max(1000)).max(10).optional(),
   delegations: z.array(agentReportDelegationSchema).max(8).optional(),
+  mentions: z.array(agentReportMentionSchema).max(3).optional(),
   artifactRefs: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
 });
+export type AgentReportMention = z.infer<typeof agentReportMentionSchema>;
 export type AgentReportDelegation = z.infer<typeof agentReportDelegationSchema>;
 export type AgentReport = z.infer<typeof agentReportSchema>;
 
