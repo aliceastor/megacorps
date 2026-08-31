@@ -94,9 +94,6 @@ const registeredRoutes = [
   ['GET', '/api/projects'],
   ['POST', '/api/projects'],
   ['PUT', '/api/projects/:id'],
-  ['GET', '/api/projects/:id/workspace-files'],
-  ['PUT', '/api/projects/:id/workspace-files'],
-  ['DELETE', '/api/projects/:id/workspace-files'],
   ['DELETE', '/api/projects/:id'],
   ['GET', '/api/goals'],
   ['POST', '/api/goals'],
@@ -139,7 +136,6 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.match(catalog.architecture.model, /multi-agent control plane/i);
   assert.match(catalog.architecture.model, /deterministic tools/i);
   assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Projects' && surface.purpose.includes('Project Authority')));
-  assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Workspace' && surface.purpose.includes('shared file authority')));
   assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Positions' && surface.primaryApi.includes('/api/positions')));
   assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'External Events' && surface.primaryApi.includes('/api/external-events')));
   assert.ok(catalog.architecture.surfaces.some((surface) => surface.name === 'Tools' && surface.primaryApi.includes('/api/tools')));
@@ -149,7 +145,6 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/cards/:id/context-requests' && endpoint.group === 'Kanban Lifecycle'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/cards/:id/external-waits' && endpoint.group === 'External Events'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/tools' && endpoint.group === 'Tools'));
-  assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/projects/:id/workspace-files' && endpoint.summary.includes('Bearer')));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/auth/bootstrap'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/runner/task-runs/claim' && endpoint.auth === 'runner'));
   assert.ok(catalog.endpoints.some((endpoint) => endpoint.path === '/api/agent/cards/:id/claim' && endpoint.auth === 'agent-session'));
@@ -158,7 +153,7 @@ test('api help includes response examples and rate-limit notes for every endpoin
   const webhookEndpoint = catalog.endpoints.find((endpoint) => endpoint.path === '/api/webhook/task-complete');
   assert.match(webhookEndpoint?.summary ?? '', /queues quality review/i);
   assert.match(webhookEndpoint?.summary ?? '', /one-time per agent/i);
-  assert.match(webhookEndpoint?.summary ?? '', /\/workspaces\/\{companySlug\}\/\{projectSlug\}\/deliverables/);
+  assert.match(webhookEndpoint?.summary ?? '', /committed and pushed to the project repo/);
   const runnerCompleteEndpoint = catalog.endpoints.find((endpoint) => endpoint.path === '/api/runner/task-runs/:id/complete');
   assert.match(runnerCompleteEndpoint?.summary ?? '', /quality review/i);
   assert.ok(catalog.cli.commands.some((command) => command.command === 'apply' && command.auth === 'session'));

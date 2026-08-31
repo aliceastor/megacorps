@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, BriefcaseBusiness, Building2, ChartGantt, CircleHelp, Clock3, FileClock, FolderGit2, FolderOpen, Kanban, LayoutDashboard, Languages, LogOut, PanelLeftClose, PanelLeftOpen, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, Trash2, User, Check, type LucideIcon } from 'lucide-react';
+import { BookOpen, BriefcaseBusiness, Building2, ChartGantt, CircleHelp, Clock3, FileClock, FolderGit2, Kanban, LayoutDashboard, Languages, LogOut, PanelLeftClose, PanelLeftOpen, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, Trash2, User, Check, type LucideIcon } from 'lucide-react';
 import { useLocale, localeList, localeNames } from '@/lib/locale-context';
 import { api } from '@/lib/api';
 import { AppMouseMotion } from '@/components/app-mouse-motion';
@@ -20,7 +20,6 @@ const nav: NavItem[] = [
   { href: '/positions', labelKey: 'nav.positions', fallback: 'Positions', icon: BriefcaseBusiness },
   { href: '/agents', labelKey: 'nav.agents', fallback: 'Agents', icon: Network },
   { href: '/projects', labelKey: 'nav.projects', fallback: 'Projects', icon: FolderGit2 },
-  { href: '/workspaces', labelKey: 'nav.workspaces', fallback: 'Workspace', icon: FolderOpen },
   { href: '/knowledge', labelKey: 'nav.knowledge', fallback: 'Knowledge', icon: BookOpen },
   { href: '/kanban', labelKey: 'nav.kanban', fallback: 'Kanban', icon: Kanban },
   { href: '/chat', labelKey: 'nav.chat', fallback: 'Direct Chat', icon: MessageSquare },
