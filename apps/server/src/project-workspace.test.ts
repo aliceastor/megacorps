@@ -43,3 +43,10 @@ test('project workspace paths normalize within the project namespace', () => {
     /workspace_path_must_not_contain_parent_segments/,
   );
 });
+
+test('projectSharedFileSpaceLines teaches the concurrency contract', () => {
+  const text = projectSharedFileSpaceLines({ slug: 'mega-corps' }, { id: 'p1', name: 'Tubelike Research' }, 'card-1').join('\n');
+  assert.match(text, /expectedVersion/);
+  assert.match(text, /workspace_file_version_conflict/);
+  assert.match(text, /workspace-files\/lock/);
+});

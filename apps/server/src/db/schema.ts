@@ -225,6 +225,14 @@ export const projectWorkspaceFiles = pgTable('project_workspace_files', {
   encoding: text('encoding').notNull().default('utf-8'),
   sizeBytes: integer('size_bytes').notNull().default(0),
   metadata: jsonb('metadata').default({}),
+  // Optimistic concurrency: writers pass the version they read, so two agents
+  // editing the same file cannot silently overwrite each other.
+  version: integer('version').notNull().default(1),
+  // Advisory lock, held by a free-form label (agent slug or user id) and always
+  // TTL-bounded so a crashed holder cannot wedge the file.
+  lockedBy: text('locked_by'),
+  lockedAt: timestamp('locked_at', { withTimezone: true }),
+  lockExpiresAt: timestamp('lock_expires_at', { withTimezone: true }),
   createdByUserId: uuid('created_by_user_id').references(() => users.id),
   updatedByUserId: uuid('updated_by_user_id').references(() => users.id),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),

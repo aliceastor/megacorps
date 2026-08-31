@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { and, desc, eq, inArray, isNull, ne, sql as drizzleSql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lte, ne, or, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createPositionSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateAgentSchema, updateCardSchema, updateCompanyMembershipSchema, validateCardTransition } from '@megacorps/shared';
@@ -215,6 +215,23 @@ async function adminSettingsResponse(apiToken?: string) {
   };
 }
 
+// Multiple agents share one project file space, so writes are guarded two ways:
+// an optimistic version every writer must echo back, and an optional advisory
+// lock for longer edits. The lock is always TTL-bounded — an agent that dies
+// mid-task must not leave a file permanently unwritable.
+const WORKSPACE_LOCK_DEFAULT_TTL_SECONDS = 300;
+const WORKSPACE_LOCK_MIN_TTL_SECONDS = 30;
+const WORKSPACE_LOCK_MAX_TTL_SECONDS = 3600;
+const workspaceLockHolderSchema = z.string().trim().min(1).max(120);
+
+type WorkspaceLockRow = { lockedBy: string | null; lockExpiresAt: Date | null };
+
+function activeLockHolder(row: WorkspaceLockRow | null | undefined, now = new Date()): string | null {
+  if (!row?.lockedBy) return null;
+  if (row.lockExpiresAt && row.lockExpiresAt.getTime() <= now.getTime()) return null;
+  return row.lockedBy;
+}
+
 const workspaceFileQuerySchema = z.object({
   path: z.string().trim().min(1).max(2000).optional(),
   prefix: z.string().trim().min(1).max(2000).optional(),
@@ -233,10 +250,26 @@ const workspaceFileUpsertSchema = z.object({
   encoding: z.enum(['utf-8', 'base64']).default('utf-8'),
   cardId: z.string().uuid().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  // 0 asserts the file does not exist yet; n > 0 asserts it is still at n.
+  expectedVersion: z.number().int().min(0).max(2_000_000_000).optional(),
+  holder: workspaceLockHolderSchema.optional(),
 });
 
 const workspaceFileDeleteQuerySchema = z.object({
   path: z.string().trim().min(1).max(2000),
+  expectedVersion: z.coerce.number().int().min(1).max(2_000_000_000).optional(),
+  holder: workspaceLockHolderSchema.optional(),
+});
+
+const workspaceFileLockSchema = z.object({
+  path: z.string().trim().min(1).max(2000),
+  holder: workspaceLockHolderSchema,
+  ttlSeconds: z.number().int().min(WORKSPACE_LOCK_MIN_TTL_SECONDS).max(WORKSPACE_LOCK_MAX_TTL_SECONDS).optional(),
+});
+
+const workspaceFileUnlockQuerySchema = z.object({
+  path: z.string().trim().min(1).max(2000),
+  holder: workspaceLockHolderSchema,
 });
 
 function workspaceFileSizeBytes(body: string, encoding: 'utf-8' | 'base64'): number {
@@ -257,6 +290,9 @@ function serializeWorkspaceFile(row: WorkspaceFileResponseRow, includeBody: bool
     encoding: row.encoding,
     sizeBytes: row.sizeBytes,
     metadata: row.metadata ?? {},
+    version: row.version,
+    lockedBy: activeLockHolder(row),
+    lockExpiresAt: activeLockHolder(row) ? row.lockExpiresAt : null,
     createdByUserId: row.createdByUserId,
     updatedByUserId: row.updatedByUserId,
     createdAt: row.createdAt,
@@ -2336,6 +2372,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           encoding: projectWorkspaceFiles.encoding,
           sizeBytes: projectWorkspaceFiles.sizeBytes,
           metadata: projectWorkspaceFiles.metadata,
+          version: projectWorkspaceFiles.version,
+          lockedBy: projectWorkspaceFiles.lockedBy,
+          lockedAt: projectWorkspaceFiles.lockedAt,
+          lockExpiresAt: projectWorkspaceFiles.lockExpiresAt,
           createdByUserId: projectWorkspaceFiles.createdByUserId,
           updatedByUserId: projectWorkspaceFiles.updatedByUserId,
           createdAt: projectWorkspaceFiles.createdAt,
@@ -2361,6 +2401,41 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (!card || card.companyId !== context.project.companyId || card.projectId !== id) return reply.code(400).send({ error: 'workspace_file_card_mismatch', cardId: input.cardId });
     }
     const now = new Date();
+    const [existing] = await db.select().from(projectWorkspaceFiles)
+      .where(and(eq(projectWorkspaceFiles.projectId, id), eq(projectWorkspaceFiles.path, path))).limit(1);
+
+    const holdingAgent = activeLockHolder(existing, now);
+    if (holdingAgent && holdingAgent !== input.holder) {
+      return reply.code(409).send({ error: 'workspace_file_locked', path, lockedBy: holdingAgent, lockExpiresAt: existing?.lockExpiresAt ?? null, version: existing?.version ?? null });
+    }
+
+    // Version gate. A writer that never read the file cannot know it is about
+    // to clobber another agent's save, so an unconditional write to an existing
+    // file is refused rather than silently accepted.
+    if (!existing) {
+      if (input.expectedVersion !== undefined && input.expectedVersion > 0) {
+        return reply.code(409).send({ error: 'workspace_file_not_found', path, expectedVersion: input.expectedVersion });
+      }
+    } else if (input.expectedVersion === undefined) {
+      return reply.code(409).send({
+        error: 'workspace_file_version_required',
+        path,
+        version: existing.version,
+        detail: `This file already exists at version ${existing.version}. Read it first and resend the write with "expectedVersion": ${existing.version}.`,
+      });
+    } else if (input.expectedVersion === 0) {
+      return reply.code(409).send({ error: 'workspace_file_already_exists', path, version: existing.version });
+    } else if (input.expectedVersion !== existing.version) {
+      return reply.code(409).send({
+        error: 'workspace_file_version_conflict',
+        path,
+        version: existing.version,
+        expectedVersion: input.expectedVersion,
+        updatedAt: existing.updatedAt,
+        detail: `Another writer saved this file since you read it. Re-read version ${existing.version}, merge your change into it, and write again.`,
+      });
+    }
+
     const values = {
       companyId: context.project.companyId,
       projectId: id,
@@ -2375,9 +2450,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       updatedByUserId: context.user.id,
       updatedAt: now,
     };
-    const [file] = await db.insert(projectWorkspaceFiles).values(values).onConflictDoUpdate({
-      target: [projectWorkspaceFiles.projectId, projectWorkspaceFiles.path],
-      set: {
+
+    let file: typeof projectWorkspaceFiles.$inferSelect | undefined;
+    if (existing) {
+      // Re-check the version inside the UPDATE so two writers that both passed
+      // the read above cannot both commit.
+      [file] = await db.update(projectWorkspaceFiles).set({
         cardId: values.cardId,
         body: values.body,
         contentType: values.contentType,
@@ -2385,12 +2463,80 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         sizeBytes: values.sizeBytes,
         metadata: values.metadata,
         updatedByUserId: values.updatedByUserId,
+        version: existing.version + 1,
         updatedAt: now,
-      },
-    }).returning();
-    if (file) publishLiveEvent({ type: 'project.workspace_file.upserted', companyId: file.companyId, entityType: 'projectWorkspaceFile', entityId: file.id });
+      }).where(and(eq(projectWorkspaceFiles.id, existing.id), eq(projectWorkspaceFiles.version, existing.version))).returning();
+      if (!file) {
+        const [current] = await db.select({ version: projectWorkspaceFiles.version, updatedAt: projectWorkspaceFiles.updatedAt })
+          .from(projectWorkspaceFiles).where(eq(projectWorkspaceFiles.id, existing.id)).limit(1);
+        return reply.code(409).send({ error: 'workspace_file_version_conflict', path, version: current?.version ?? null, expectedVersion: input.expectedVersion, updatedAt: current?.updatedAt ?? null });
+      }
+    } else {
+      try {
+        [file] = await db.insert(projectWorkspaceFiles).values({ ...values, version: 1 }).returning();
+      } catch {
+        // Lost the create race against another writer on the same path.
+        const [current] = await db.select({ version: projectWorkspaceFiles.version }).from(projectWorkspaceFiles)
+          .where(and(eq(projectWorkspaceFiles.projectId, id), eq(projectWorkspaceFiles.path, path))).limit(1);
+        return reply.code(409).send({ error: 'workspace_file_already_exists', path, version: current?.version ?? null });
+      }
+    }
+
     if (!file) return reply.code(500).send({ error: 'workspace_file_upsert_failed' });
+    publishLiveEvent({ type: 'project.workspace_file.upserted', companyId: file.companyId, entityType: 'projectWorkspaceFile', entityId: file.id });
     return { file: serializeWorkspaceFile(file, true) };
+  });
+
+  app.post('/api/projects/:id/workspace-files/lock', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const context = await requireProjectRole(request, reply, id, 'operator'); if (!context) return reply;
+    const input = workspaceFileLockSchema.parse(request.body);
+    let path: string;
+    try {
+      path = normalizeProjectWorkspacePath(context.company, context.project, input.path);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : 'workspace_path_invalid' });
+    }
+    const [existing] = await db.select().from(projectWorkspaceFiles)
+      .where(and(eq(projectWorkspaceFiles.projectId, id), eq(projectWorkspaceFiles.path, path))).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'workspace_file_not_found', path });
+    const now = new Date();
+    const holder = activeLockHolder(existing, now);
+    if (holder && holder !== input.holder) {
+      return reply.code(409).send({ error: 'workspace_file_locked', path, lockedBy: holder, lockExpiresAt: existing.lockExpiresAt });
+    }
+    const ttl = input.ttlSeconds ?? WORKSPACE_LOCK_DEFAULT_TTL_SECONDS;
+    // Re-assert the previous holder in the WHERE clause so two racing acquirers
+    // cannot both believe they won.
+    const [locked] = await db.update(projectWorkspaceFiles)
+      .set({ lockedBy: input.holder, lockedAt: now, lockExpiresAt: new Date(now.getTime() + ttl * 1000) })
+      .where(and(
+        eq(projectWorkspaceFiles.id, existing.id),
+        holder
+          ? eq(projectWorkspaceFiles.lockedBy, holder)
+          : or(isNull(projectWorkspaceFiles.lockedBy), lte(projectWorkspaceFiles.lockExpiresAt, now)),
+      )).returning();
+    if (!locked) return reply.code(409).send({ error: 'workspace_file_locked', path });
+    return { file: serializeWorkspaceFile(locked, false), lock: { holder: input.holder, expiresAt: locked.lockExpiresAt, ttlSeconds: ttl } };
+  });
+
+  app.delete('/api/projects/:id/workspace-files/lock', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const context = await requireProjectRole(request, reply, id, 'operator'); if (!context) return reply;
+    const query = workspaceFileUnlockQuerySchema.parse(request.query);
+    let path: string;
+    try {
+      path = normalizeProjectWorkspacePath(context.company, context.project, query.path);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : 'workspace_path_invalid' });
+    }
+    const [existing] = await db.select().from(projectWorkspaceFiles)
+      .where(and(eq(projectWorkspaceFiles.projectId, id), eq(projectWorkspaceFiles.path, path))).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'workspace_file_not_found', path });
+    const holder = activeLockHolder(existing);
+    if (holder && holder !== query.holder) return reply.code(409).send({ error: 'workspace_file_locked', path, lockedBy: holder, lockExpiresAt: existing.lockExpiresAt });
+    await db.update(projectWorkspaceFiles).set({ lockedBy: null, lockedAt: null, lockExpiresAt: null }).where(eq(projectWorkspaceFiles.id, existing.id));
+    return { ok: true, path };
   });
   app.delete('/api/projects/:id/workspace-files', async (request, reply) => {
     const id = (request.params as { id: string }).id;
@@ -2401,6 +2547,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       path = normalizeProjectWorkspacePath(context.company, context.project, query.path);
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : 'workspace_path_invalid' });
+    }
+    const [existing] = await db.select().from(projectWorkspaceFiles)
+      .where(and(eq(projectWorkspaceFiles.projectId, id), eq(projectWorkspaceFiles.path, path))).limit(1);
+    if (existing) {
+      const holder = activeLockHolder(existing);
+      if (holder && holder !== query.holder) {
+        return reply.code(409).send({ error: 'workspace_file_locked', path, lockedBy: holder, lockExpiresAt: existing.lockExpiresAt });
+      }
+      // Deleting is as destructive as overwriting, so it honours the same
+      // version gate when the caller supplies one.
+      if (query.expectedVersion !== undefined && query.expectedVersion !== existing.version) {
+        return reply.code(409).send({ error: 'workspace_file_version_conflict', path, version: existing.version, expectedVersion: query.expectedVersion });
+      }
     }
     const deleted = await db.delete(projectWorkspaceFiles).where(and(eq(projectWorkspaceFiles.projectId, id), eq(projectWorkspaceFiles.path, path))).returning({ id: projectWorkspaceFiles.id, companyId: projectWorkspaceFiles.companyId });
     if (deleted[0]) publishLiveEvent({ type: 'project.workspace_file.deleted', companyId: deleted[0].companyId, entityType: 'projectWorkspaceFile', entityId: deleted[0].id });

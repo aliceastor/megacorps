@@ -15,7 +15,15 @@ const migrations: Migration[] = [
   { version: 3, name: 'message-board-delegation-schema', run: runMessageBoardDelegationSchema },
   { version: 4, name: 'project-workspace-files', run: runProjectWorkspaceFiles },
   { version: 5, name: 'agent-memory-config', run: runAgentMemoryConfig },
+  { version: 6, name: 'workspace-file-concurrency', run: runWorkspaceFileConcurrency },
 ];
+
+async function runWorkspaceFileConcurrency(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE project_workspace_files ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE project_workspace_files ADD COLUMN IF NOT EXISTS locked_by TEXT;
+ALTER TABLE project_workspace_files ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ;
+ALTER TABLE project_workspace_files ADD COLUMN IF NOT EXISTS lock_expires_at TIMESTAMPTZ;`);
+}
 
 async function runAgentMemoryConfig(): Promise<void> {
   await sql.unsafe(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS memory_config JSONB DEFAULT '{}';

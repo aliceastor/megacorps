@@ -40,7 +40,9 @@ export function projectSharedFileSpaceLines(company: CompanyWorkspaceRef | null 
     project?.workspacePathHint ? `Runtime-local workspace hint: ${project.workspacePathHint}` : '',
     'Cross-host agents must use the MegaCorps API with Authorization: Bearer <MEGACORPS_API_TOKEN>; do not assume this path is mounted on every Hermes host.',
     `Pull file API: GET /api/projects/${projectId}/workspace-files?path=${deliverables}<filename>`,
-    `Push file API: PUT /api/projects/${projectId}/workspace-files with JSON { "path": "${deliverables}<filename>", "body": "...", "contentType": "text/markdown" }`,
+    `Push file API: PUT /api/projects/${projectId}/workspace-files with JSON { "path": "${deliverables}<filename>", "body": "...", "contentType": "text/markdown", "expectedVersion": <version> }`,
+    'Concurrency rule: other agents share this file space. Every file carries a "version". To create a file send "expectedVersion": 0. To change an existing file, GET it first and send back the "version" you read as "expectedVersion". A 409 workspace_file_version_conflict means someone else saved in the meantime: re-read the file, merge your change into the newer content, and write again. Never retry by dropping expectedVersion.',
+    `Long-edit lock (optional): POST /api/projects/${projectId}/workspace-files/lock with { "path": "...", "holder": "<your agent slug>", "ttlSeconds": 300 } before a long edit, and DELETE the same path with ?holder=<your agent slug> when done. Locks expire on their own, so a lock is a courtesy to other agents, not a substitute for expectedVersion.`,
     'Use this project shared file space for durable reports, exports, handoff docs, and non-code deliverables.',
     'Runtime-local scratch paths such as /tmp are temporary only. Final deliverables must be attached as workProducts with a URL/path that points to the project shared file space or another durable location.',
   ].filter(Boolean);
