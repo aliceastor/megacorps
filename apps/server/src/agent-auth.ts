@@ -18,6 +18,19 @@ export function looksLikeAgentToken(value: string | null | undefined): value is 
   return typeof value === 'string' && value.startsWith(AGENT_TOKEN_PREFIX);
 }
 
+export type GiteaProvisionAuthDecision =
+  | { mode: 'operator' }
+  | { mode: 'agent'; agentId: string }
+  | { error: 'agent_token_invalid'; status: 401 }
+  | { error: 'agent_token_forbidden'; status: 403 };
+
+export function decideGiteaProvisionAuth(pathAgentId: string, bearer: string | null | undefined, callerAgentId: string | null): GiteaProvisionAuthDecision {
+  if (!looksLikeAgentToken(bearer)) return { mode: 'operator' };
+  if (!callerAgentId) return { error: 'agent_token_invalid', status: 401 };
+  if (callerAgentId !== pathAgentId) return { error: 'agent_token_forbidden', status: 403 };
+  return { mode: 'agent', agentId: callerAgentId };
+}
+
 export function previewAgentToken(token: string | null | undefined): string | null {
   if (!token) return null;
   return `${token.slice(0, AGENT_TOKEN_PREFIX.length + 4)}...${token.slice(-4)}`;

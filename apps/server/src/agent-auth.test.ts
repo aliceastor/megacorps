@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { agentTokenMatches, generateAgentToken, looksLikeAgentToken, previewAgentToken } from './agent-auth.ts';
+import { agentTokenMatches, decideGiteaProvisionAuth, generateAgentToken, looksLikeAgentToken, previewAgentToken } from './agent-auth.ts';
 import { buildAgentPrompt } from './adapters/hermes.ts';
 import { redactPromptForLog } from './prompt-logs.ts';
 
@@ -47,4 +47,14 @@ test('prompt logs redact the injected agent token', () => {
   const redacted = redactPromptForLog(prompt);
   assert.doesNotMatch(redacted, /mcagt_test_token_abc/);
   assert.match(redacted, /Authorization\s*:\s*\[redacted\]/i);
+});
+
+test('per-agent tokens may provision only their own Gitea identity', () => {
+  const self = '11111111-1111-1111-1111-111111111111';
+  const other = '22222222-2222-2222-2222-222222222222';
+  assert.deepEqual(decideGiteaProvisionAuth(self, null, null), { mode: 'operator' });
+  assert.deepEqual(decideGiteaProvisionAuth(self, 'mca_operator_token', null), { mode: 'operator' });
+  assert.deepEqual(decideGiteaProvisionAuth(self, 'mcagt_deadbeef', null), { error: 'agent_token_invalid', status: 401 });
+  assert.deepEqual(decideGiteaProvisionAuth(self, 'mcagt_deadbeef', other), { error: 'agent_token_forbidden', status: 403 });
+  assert.deepEqual(decideGiteaProvisionAuth(self, 'mcagt_deadbeef', self), { mode: 'agent', agentId: self });
 });

@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { generateAgentToken } from './agent-auth.ts';
 import { db } from './db/client.ts';
 import { agents, companies, projects } from './db/schema.ts';
-import { addGiteaCollaborator, ensureGiteaAgentAccount, ensureGiteaOrg, ensureGiteaRepo, giteaConfigFromEnv } from './gitea.ts';
+import { addGiteaCollaborator, ensureGiteaAgentAccount, ensureGiteaOrg, ensureGiteaRepo, ensureGiteaRepoWebhook, ensureGiteaWebhookToken, giteaConfigFromEnv, giteaWebhookCallbackUrl, isGiteaProvisioningRetryable } from './gitea.ts';
 
 // Deploy-time reconciliation: identity is not something an operator should
 // hand out by hand. Every boot walks the fleet and fills whatever is missing —
@@ -61,6 +61,11 @@ export async function reconcileGiteaProvisioning(app: FastifyInstance): Promise<
       const [fresh] = await db.select({ giteaUsername: agents.giteaUsername }).from(agents).where(eq(agents.id, agent.id)).limit(1);
       if (fresh?.giteaUsername) await addGiteaCollaborator(gitea, orgSlug, repo.repoSlug, fresh.giteaUsername);
     }
+    try {
+      await ensureGiteaRepoWebhook(gitea, orgSlug, repo.repoSlug, giteaWebhookCallbackUrl(process.env, await ensureGiteaWebhookToken()));
+    } catch (error) {
+      app.log.warn({ error, projectId: project.id }, 'gitea webhook registration failed; push events will not reach MegaCorps');
+    }
   }
 
   if (accounts > 0 || repos > 0) app.log.info({ accounts, repos }, 'reconciled Gitea accounts and repos');
@@ -85,8 +90,9 @@ export function startProvisioningSweep(app: FastifyInstance): void {
         return;
       } catch (error) {
         const message = error instanceof Error ? error.message : 'unknown Gitea error';
-        if (attempt === GITEA_RETRY_ATTEMPTS) {
-          app.log.error({ error: message }, 'Gitea provisioning reconciliation gave up; run POST /api/agents/:id/gitea manually or restart the server');
+        const retryable = isGiteaProvisioningRetryable(error);
+        if (!retryable || attempt === GITEA_RETRY_ATTEMPTS) {
+          app.log.error({ error: message, attempt, retryable }, 'Gitea provisioning reconciliation gave up; run POST /api/agents/:id/gitea manually or restart the server');
           return;
         }
         app.log.warn({ error: message, attempt }, 'Gitea not ready yet; retrying provisioning reconciliation');

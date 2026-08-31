@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { db } from './db/client.ts';
-import { agents } from './db/schema.ts';
+import { agents, appSettings } from './db/schema.ts';
 
 // Built-in Gitea integration. MegaCorps administers the bundled Gitea: it
 // creates one org per company, one repo per gitea-local project, and one
@@ -25,10 +25,14 @@ function stripTrailingSlash(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
+function stripApiPrefix(url: string): string {
+  return stripTrailingSlash(url).replace(/\/api\/v1$/i, '');
+}
+
 export function giteaConfigFromEnv(env: NodeJS.ProcessEnv = process.env): GiteaConfig | null {
   const apiUrl = env.GITEA_URL?.trim();
   if (!apiUrl) return null;
-  const strippedApi = stripTrailingSlash(apiUrl);
+  const strippedApi = stripApiPrefix(apiUrl);
   return {
     apiUrl: strippedApi,
     internalUrl: stripTrailingSlash(env.GITEA_INTERNAL_URL?.trim() || strippedApi),
@@ -37,6 +41,11 @@ export function giteaConfigFromEnv(env: NodeJS.ProcessEnv = process.env): GiteaC
     adminUsername: env.GITEA_ADMIN_USERNAME?.trim() || undefined,
     adminPassword: env.GITEA_ADMIN_PASSWORD?.trim() || undefined,
   };
+}
+
+export function giteaRequestUrl(config: GiteaConfig, path: string): string {
+  const prefix = path.startsWith('/') ? path : `/${path}`;
+  return `${stripApiPrefix(config.apiUrl)}/api/v1${prefix}`;
 }
 
 export function giteaConfigured(): boolean {
@@ -51,18 +60,33 @@ function adminAuthHeader(config: GiteaConfig): string {
   throw new Error('gitea_admin_credentials_missing: set GITEA_ADMIN_TOKEN or GITEA_ADMIN_USERNAME/GITEA_ADMIN_PASSWORD');
 }
 
-type GiteaFetchOptions = { method?: string; body?: unknown; allow?: number[]; fetchImpl?: typeof fetch };
+type GiteaFetchOptions = { method?: string; body?: unknown; allow?: number[]; fetchImpl?: typeof fetch; auth?: 'admin' | 'basic' };
+
+function basicAuthHeader(config: GiteaConfig): string {
+  if (!config.adminUsername || !config.adminPassword) {
+    throw new Error('gitea_admin_credentials_missing: Gitea 1.22 token creation requires GITEA_ADMIN_USERNAME/GITEA_ADMIN_PASSWORD (Basic auth)');
+  }
+  return `Basic ${Buffer.from(`${config.adminUsername}:${config.adminPassword}`).toString('base64')}`;
+}
 
 async function giteaFetch(config: GiteaConfig, path: string, options: GiteaFetchOptions = {}): Promise<{ status: number; json: unknown }> {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const response = await fetchImpl(`${config.apiUrl}/api/v1${path}`, {
-    method: options.method ?? 'GET',
-    headers: {
-      'content-type': 'application/json',
-      authorization: adminAuthHeader(config),
-    },
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
-  });
+  const url = giteaRequestUrl(config, path);
+  const authorization = options.auth === 'basic' ? basicAuthHeader(config) : adminAuthHeader(config);
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: options.method ?? 'GET',
+      headers: {
+        'content-type': 'application/json',
+        authorization,
+      },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'unknown fetch error';
+    throw new Error(`gitea_unreachable: ${options.method ?? 'GET'} ${url} failed: ${detail}`);
+  }
   const allowed = options.allow ?? [];
   if (!response.ok && !allowed.includes(response.status)) {
     const text = await response.text().catch(() => '');
@@ -70,6 +94,42 @@ async function giteaFetch(config: GiteaConfig, path: string, options: GiteaFetch
   }
   const json = await response.json().catch(() => null);
   return { status: response.status, json };
+}
+
+export function isGiteaProvisioningRetryable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  if (message.startsWith('gitea_unreachable:')) return true;
+  if (/\b(ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed)\b/i.test(message)) return true;
+  const http = message.match(/^gitea_http_(\d+)/);
+  if (!http) return false;
+  const status = Number(http[1]);
+  return status === 429 || status >= 500;
+}
+
+export async function createGiteaAccessToken(config: GiteaConfig, username: string, fetchImpl?: typeof fetch): Promise<string> {
+  const tokenName = `megacorps-${createHash('sha256').update(`${username}-${Date.now()}`).digest('hex').slice(0, 12)}`;
+  // Gitea 1.22 has POST /api/v1/users/{username}/tokens (Basic + self-or-admin),
+  // not /admin/users/{username}/tokens. Token minting also rejects access-token auth.
+  const created = await giteaFetch(config, `/users/${username}/tokens`, {
+    method: 'POST',
+    body: { name: tokenName, scopes: ['write:repository', 'read:user'] },
+    fetchImpl,
+    auth: 'basic',
+  });
+  const token = (created.json as { sha1?: string; token?: string } | null)?.sha1
+    ?? (created.json as { sha1?: string; token?: string } | null)?.token;
+  if (!token) throw new Error('gitea_token_create_failed: Gitea did not return a token value');
+  return token;
+}
+
+export async function ensureGiteaWebhookToken(): Promise<string> {
+  const key = 'gitea.webhook_token';
+  const [row] = await db.select({ value: appSettings.value }).from(appSettings).where(eq(appSettings.key, key)).limit(1);
+  if (row?.value) return row.value;
+  const generated = randomBytes(24).toString('base64url');
+  await db.insert(appSettings).values({ key, value: generated }).onConflictDoNothing();
+  const [after] = await db.select({ value: appSettings.value }).from(appSettings).where(eq(appSettings.key, key)).limit(1);
+  return after?.value ?? generated;
 }
 
 export function giteaSlug(value: string): string {
@@ -170,14 +230,7 @@ export async function ensureGiteaAgentAccount(config: GiteaConfig, agent: { id: 
   }
   // A fresh token every provisioning pass: tokens cannot be read back from
   // Gitea, so losing the DB copy means re-issuing, and the name must be unique.
-  const tokenName = `megacorps-${createHash('sha256').update(`${agent.id}-${Date.now()}`).digest('hex').slice(0, 12)}`;
-  const created = await giteaFetch(config, `/admin/users/${username}/tokens`, {
-    method: 'POST',
-    body: { name: tokenName, scopes: ['write:repository', 'read:user'] },
-    fetchImpl,
-  });
-  const token = (created.json as { sha1?: string } | null)?.sha1;
-  if (!token) throw new Error('gitea_token_create_failed: Gitea did not return a token value');
+  const token = await createGiteaAccessToken(config, username, fetchImpl);
   await db.update(agents).set({ giteaUsername: username, giteaToken: token }).where(eq(agents.id, agent.id));
   return { username, token };
 }

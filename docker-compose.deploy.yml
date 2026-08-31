@@ -32,7 +32,8 @@ services:
       timeout: 5s
       retries: 10
     networks:
-      - megacorps
+      megacorps:
+        ipv4_address: 172.16.22.6
 
   postgres:
     image: postgres:16-alpine
@@ -50,7 +51,8 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - megacorps
+      megacorps:
+        ipv4_address: 172.16.22.8
 
   server:
     # Pushed by GitHub Actions in aliceastor/megacorps. To retarget to
@@ -92,8 +94,8 @@ services:
       CODEX_APP_SANDBOX: ${CODEX_APP_SANDBOX:-workspace-write}
       CODEX_APP_EXPERIMENTAL_API: ${CODEX_APP_EXPERIMENTAL_API:-false}
       CODEX_APP_TIMEOUT_SECONDS: ${CODEX_APP_TIMEOUT_SECONDS:-300}
-      INTERNAL_API_URL: ${INTERNAL_API_URL:-}
-      MEGACORPS_API_URL: ${MEGACORPS_API_URL:-}
+      INTERNAL_API_URL: ${INTERNAL_API_URL:-http://172.16.22.4:4000}
+      MEGACORPS_API_URL: ${MEGACORPS_API_URL:-http://172.16.22.4:4000}
       MEGACORPS_PUBLIC_URL: ${MEGACORPS_PUBLIC_URL:-}
       ADAPTER_ENV_FALLBACK_ENABLED: ${ADAPTER_ENV_FALLBACK_ENABLED:-false}
       ADAPTER_TARGET_ALLOWLIST: ${ADAPTER_TARGET_ALLOWLIST:-}
@@ -121,8 +123,8 @@ services:
       CHAT_TASK_TIMEOUT_SECONDS: ${CHAT_TASK_TIMEOUT_SECONDS:-300}
       PROVISIONING_SWEEP_ENABLED: ${PROVISIONING_SWEEP_ENABLED:-true}
       GITEA_URL: ${GITEA_URL:-http://gitea:3000}
-      GITEA_INTERNAL_URL: ${GITEA_INTERNAL_URL:-}
-      GITEA_EXTERNAL_URL: ${GITEA_EXTERNAL_URL:-}
+      GITEA_INTERNAL_URL: ${GITEA_INTERNAL_URL:-http://172.16.22.6:3000}
+      GITEA_EXTERNAL_URL: ${GITEA_EXTERNAL_URL:-http://192.168.1.180:3300}
       GITEA_ADMIN_TOKEN: ${GITEA_ADMIN_TOKEN:-}
       GITEA_ADMIN_USERNAME: ${GITEA_ADMIN_USERNAME:-megacorps-admin}
       GITEA_ADMIN_PASSWORD: ${GITEA_ADMIN_PASSWORD:-}
@@ -132,8 +134,9 @@ services:
       - server_data:/app/data
       - server_ssh_keys:/home/megacorps/.ssh
     networks:
-      - megacorps
-      - hermes_default
+      megacorps:
+        ipv4_address: 172.16.22.4
+      hermes_default:
 
   web:
     image: ghcr.io/aliceastor/megacorps-web:latest
@@ -150,11 +153,18 @@ services:
     volumes:
       - web_cache:/app/apps/web/.next/cache
     networks:
-      - megacorps
+      megacorps:
+        ipv4_address: 172.16.22.7
 
 networks:
   megacorps:
     driver: bridge
+    ipam:
+      config:
+        # Pinned so macvlan agents (hermes on lan170, 172.16.22.5) can reach
+        # MegaCorps/Gitea by IP. Do not assign .5 — that is hermes-ribel.
+        - subnet: 172.16.22.0/24
+          gateway: 172.16.22.1
   hermes_default:
     external: true
 

@@ -20,8 +20,8 @@ import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
 import { registerTrashRoutes } from './trash-routes.ts';
-import { authenticateAgentToken, looksLikeAgentToken, previewAgentToken, revokeAgentToken, rotateAgentToken } from './agent-auth.ts';
-import { addGiteaCollaborator, ensureGiteaAgentAccount, ensureGiteaOrg, ensureGiteaRepo, ensureGiteaRepoWebhook, giteaConfigFromEnv, giteaWebhookCallbackUrl } from './gitea.ts';
+import { authenticateAgentToken, decideGiteaProvisionAuth, looksLikeAgentToken, previewAgentToken, revokeAgentToken, rotateAgentToken } from './agent-auth.ts';
+import { addGiteaCollaborator, ensureGiteaAgentAccount, ensureGiteaOrg, ensureGiteaRepo, ensureGiteaRepoWebhook, ensureGiteaWebhookToken, giteaConfigFromEnv, giteaWebhookCallbackUrl } from './gitea.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
@@ -158,16 +158,11 @@ function setSessionCookie(reply: FastifyReply, token: string): void {
   reply.setCookie('session', token, { httpOnly: true, sameSite: 'strict', path: '/', secure: sessionCookieSecure() });
 }
 
-// Random, generated once, stored in app_settings: authenticates Gitea push
-// webhooks by URL token.
-async function giteaWebhookToken(): Promise<string> {
-  const key = 'gitea.webhook_token';
-  const [row] = await db.select({ value: appSettings.value }).from(appSettings).where(eq(appSettings.key, key)).limit(1);
-  if (row?.value) return row.value;
-  const generated = randomBytes(24).toString('base64url');
-  await db.insert(appSettings).values({ key, value: generated }).onConflictDoNothing();
-  const [after] = await db.select({ value: appSettings.value }).from(appSettings).where(eq(appSettings.key, key)).limit(1);
-  return after?.value ?? generated;
+function bearerFromRequest(request: FastifyRequest): string | null {
+  const header = request.headers.authorization;
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value?.startsWith('Bearer ')) return null;
+  return value.slice('Bearer '.length).trim() || null;
 }
 
 function safeSecretEqual(provided: string | undefined, expected: string): boolean {
@@ -2267,7 +2262,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           }
         }
         try {
-          await ensureGiteaRepoWebhook(gitea, orgSlug, repo.repoSlug, giteaWebhookCallbackUrl(process.env, await giteaWebhookToken()));
+          await ensureGiteaRepoWebhook(gitea, orgSlug, repo.repoSlug, giteaWebhookCallbackUrl(process.env, await ensureGiteaWebhookToken()));
         } catch (error) {
           app.log.warn({ error }, 'gitea webhook registration failed; push events will not reach MegaCorps');
         }
@@ -2498,7 +2493,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // consumed the raw body here; the token is random and intranet-only.
   app.post('/api/gitea/events', async (request, reply) => {
     const token = (request.query as { token?: string }).token;
-    const expected = await giteaWebhookToken();
+    const expected = await ensureGiteaWebhookToken();
     if (!token || !safeSecretEqual(token, expected)) return reply.code(401).send({ error: 'gitea_webhook_auth_required' });
     const body = request.body as { ref?: string; repository?: { full_name?: string }; commits?: Array<{ id?: string; message?: string }>; pusher?: { username?: string } } | null;
     const repoFullName = body?.repository?.full_name ?? 'unknown/unknown';
@@ -2532,7 +2527,22 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const id = (request.params as { id: string }).id;
     const [agent] = await db.select().from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
-    const user = await requireCompanyRole(request, reply, agent.companyId, 'operator'); if (!user) return reply;
+    const bearer = bearerFromRequest(request);
+    let actorType: 'user' | 'agent' = 'user';
+    let actorId: string;
+    let userId: string | null = null;
+    if (looksLikeAgentToken(bearer)) {
+      const caller = await authenticateAgentToken(bearer);
+      const decision = decideGiteaProvisionAuth(id, bearer, caller?.id ?? null);
+      if ('error' in decision) return reply.code(decision.status).send({ error: decision.error });
+      actorType = 'agent';
+      actorId = id;
+    } else {
+      const user = await requireCompanyRole(request, reply, agent.companyId, 'operator'); if (!user) return reply;
+      actorType = 'user';
+      actorId = user.id;
+      userId = user.id;
+    }
     const gitea = giteaConfigFromEnv();
     if (!gitea) return reply.code(503).send({ error: 'gitea_not_configured' });
     try {
@@ -2546,7 +2556,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           await addGiteaCollaborator(gitea, orgSlug, repo.repoSlug, account.username);
         }
       }
-      await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.gitea_provisioned', entityType: 'agent', entityId: agent.id, details: { username: account.username, repos: giteaProjects.length } });
+      await db.insert(activityLog).values({ companyId: agent.companyId, actorType, actorId, userId, agentId: agent.id, action: 'agent.gitea_provisioned', entityType: 'agent', entityId: agent.id, details: { username: account.username, repos: giteaProjects.length } });
       return { ok: true, agentId: agent.id, username: account.username, token: account.token, repos: giteaProjects.length };
     } catch (error) {
       return reply.code(502).send({ error: 'gitea_provisioning_failed', detail: error instanceof Error ? error.message : 'unknown Gitea error' });

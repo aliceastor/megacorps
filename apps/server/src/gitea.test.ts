@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { giteaAgentUsername, giteaAuthenticatedCloneUrl, giteaCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv, giteaSlug, giteaWebhookCallbackUrl } from './gitea.ts';
+import { createGiteaAccessToken, giteaAgentUsername, giteaAuthenticatedCloneUrl, giteaCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv, giteaRequestUrl, giteaSlug, giteaWebhookCallbackUrl, isGiteaProvisioningRetryable } from './gitea.ts';
 import { redactPromptForLog } from './prompt-logs.ts';
 
 test('giteaSlug normalizes names to Gitea-safe slugs', () => {
@@ -81,4 +81,60 @@ test('prompt logs redact git credentials in URLs and credential lines', () => {
   assert.doesNotMatch(redacted, /supersecrettoken123/);
   assert.doesNotMatch(redacted, /4f3a2b1c9d8e7f6a5b4c/);
   assert.match(redacted, /http:\/\/\[redacted\]@gitea\.lan:3300/);
+});
+
+test('giteaRequestUrl always prefixes /api/v1 and does not double it', () => {
+  const config = giteaConfigFromEnv({ GITEA_URL: 'http://gitea:3000/' } as NodeJS.ProcessEnv)!;
+  assert.equal(giteaRequestUrl(config, '/users/agent-alice/tokens'), 'http://gitea:3000/api/v1/users/agent-alice/tokens');
+  const alreadyPrefixed = giteaConfigFromEnv({ GITEA_URL: 'http://gitea:3000/api/v1' } as NodeJS.ProcessEnv)!;
+  assert.equal(giteaRequestUrl(alreadyPrefixed, '/orgs'), 'http://gitea:3000/api/v1/orgs');
+});
+
+test('createGiteaAccessToken uses Gitea 1.22 user token API with Basic admin auth', async () => {
+  const calls: Array<{ url: string; method?: string; authorization?: string; body?: string }> = [];
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push({
+      url: String(url),
+      method: init?.method,
+      authorization: (init?.headers as Record<string, string> | undefined)?.authorization,
+      body: typeof init?.body === 'string' ? init.body : undefined,
+    });
+    return new Response(JSON.stringify({ sha1: 'gitea-token-value', name: 'megacorps' }), { status: 201, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const config = giteaConfigFromEnv({
+    GITEA_URL: 'http://gitea:3000',
+    GITEA_ADMIN_TOKEN: 'gitea_admin_pat',
+    GITEA_ADMIN_USERNAME: 'megacorps-admin',
+    GITEA_ADMIN_PASSWORD: 's3cret',
+  } as NodeJS.ProcessEnv)!;
+  const token = await createGiteaAccessToken(config, 'agent-alice', fetchImpl);
+  assert.equal(token, 'gitea-token-value');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.url, 'http://gitea:3000/api/v1/users/agent-alice/tokens');
+  assert.equal(calls[0]?.method, 'POST');
+  assert.equal(calls[0]?.authorization, `Basic ${Buffer.from('megacorps-admin:s3cret').toString('base64')}`);
+  assert.doesNotMatch(calls[0]?.url ?? '', /\/admin\/users\//);
+  assert.match(calls[0]?.body ?? '', /write:repository/);
+});
+
+test('isGiteaProvisioningRetryable retries unavailability, not path 404s', () => {
+  assert.equal(isGiteaProvisioningRetryable(new Error('gitea_unreachable: GET http://gitea:3000/api/v1/orgs failed: fetch failed')), true);
+  assert.equal(isGiteaProvisioningRetryable(new Error('gitea_http_503: GET /orgs failed')), true);
+  assert.equal(isGiteaProvisioningRetryable(new Error('gitea_http_429: GET /orgs failed')), true);
+  assert.equal(isGiteaProvisioningRetryable(new Error('gitea_http_404: POST /admin/users/agent-alice/tokens failed: 404 page not found')), false);
+  assert.equal(isGiteaProvisioningRetryable(new Error('gitea_http_401: GET /admin/users failed')), false);
+  assert.equal(isGiteaProvisioningRetryable(new Error('gitea_admin_credentials_missing: set GITEA_ADMIN_TOKEN or GITEA_ADMIN_USERNAME/GITEA_ADMIN_PASSWORD')), false);
+  assert.equal(isGiteaProvisioningRetryable(new Error('gitea_token_create_failed: Gitea did not return a token value')), false);
+});
+
+test('giteaCloneUrlForAgent rewrites onto a pinned bridge IP internal origin', () => {
+  const config = giteaConfigFromEnv({
+    GITEA_URL: 'http://gitea:3000',
+    GITEA_INTERNAL_URL: 'http://172.16.22.6:3000',
+    GITEA_EXTERNAL_URL: 'http://192.168.1.180:3300',
+  } as NodeJS.ProcessEnv);
+  assert.equal(
+    giteaCloneUrlForAgent('http://192.168.1.180:3300/auroria/testing-new-system.git', config),
+    'http://172.16.22.6:3000/auroria/testing-new-system.git',
+  );
 });
