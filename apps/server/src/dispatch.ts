@@ -20,7 +20,7 @@ import type { AgentReportDelegation } from '@megacorps/shared';
 import type { TaskResult } from './adapters/hermes.ts';
 import { notify } from './notifications.ts';
 import { readChatTaskTimeoutSeconds, readKanbanTaskTimeoutSeconds, normalizeKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
-import { projectSharedFileSpaceLines } from './project-workspace.ts';
+import { workspaceProtocolLines } from './workspace-paths.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -506,13 +506,24 @@ function runtimeLocalLines(runtime: RuntimeRow | null | undefined): string[] {
   ];
 }
 
-function projectRepoLines(company: typeof companies.$inferSelect | null | undefined, project: ProjectRow | null | undefined, runtime?: RuntimeRow | null): string[] {
-  if (!project) return ['Project repository: none', ...projectSharedFileSpaceLines(company, null), ...runtimeLocalLines(runtime)];
+function agentWorkspaceLines(company: typeof companies.$inferSelect | null | undefined, project: ProjectRow | null | undefined, agent: { slug?: string | null } | null | undefined, runtime?: RuntimeRow | null): string[] {
+  return workspaceProtocolLines({
+    companySlug: company?.slug ?? 'company',
+    agentSlug: agent?.slug ?? 'agent',
+    projectName: project?.name ?? null,
+    mountRoot: runtime?.nfsMountRoot ?? null,
+    localWorkspaceRoot: runtime?.localWorkspaceRoot ?? null,
+    nfsShareUrl: company?.nfsShareUrl ?? null,
+  });
+}
+
+function projectRepoLines(company: typeof companies.$inferSelect | null | undefined, project: ProjectRow | null | undefined, runtime?: RuntimeRow | null, agent?: { slug?: string | null } | null): string[] {
+  if (!project) return ['Project repository: none', ...agentWorkspaceLines(company, null, agent, runtime), ...runtimeLocalLines(runtime)];
   return [
     `Project repository provider: ${project.repoProvider ?? 'github'}`,
     `Project repository URL: ${project.repoUrl ?? 'not configured'}`,
     `Project work path: ${project.workPath ?? 'project root'}`,
-    ...projectSharedFileSpaceLines(company, project),
+    ...agentWorkspaceLines(company, project, agent, runtime),
     ...runtimeLocalLines(runtime),
     `Default branch: ${project.defaultBranch ?? 'main'}`,
     `Protected branches: ${(project.protectedBranches ?? ['main', 'master']).join(', ') || 'none'}`,
@@ -528,10 +539,10 @@ function projectRepoLines(company: typeof companies.$inferSelect | null | undefi
 
 function projectGitProtocol(company: typeof companies.$inferSelect | null | undefined, project: ProjectRow | null | undefined, card: CardRow, agent: AgentRow | null | undefined, runtime?: RuntimeRow | null): string {
   const localRoots = runtimeLocalLines(runtime).join('\n');
-  const sharedFiles = projectSharedFileSpaceLines(company, project, card.id).join('\n');
+  const workspaceLines = agentWorkspaceLines(company, project, agent, runtime).join('\n');
   if (!project?.repoUrl) return [
     'No repository is configured for this project. Do not invent shared local file paths; use runtime-local scratch only for temporary work and report external work products by URL when available.',
-    sharedFiles,
+    workspaceLines,
     localRoots,
   ].join('\n');
   const branchPattern = project.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}';
@@ -553,19 +564,19 @@ function projectGitProtocol(company: typeof companies.$inferSelect | null | unde
     : [];
   return [
     'Repository workflow:',
-    `1. Use repo ${project.repoUrl}. Your local clone path is runtime-owned; MegaCorps does not assume a shared folder path.`,
+    `1. Use repo ${project.repoUrl}.`,
     ...giteaCredentialLines,
     ...publishLines,
+    workspaceLines,
     localRoots,
-    `Project file space:\n${sharedFiles}`,
-    `2. Clone/cache the repo under the runtime-local workspace root when configured; otherwise choose a safe local folder owned by your runtime.`,
+    `2. Clone the repo into your workspace path above when the shared mount is configured; otherwise clone under the runtime-local workspace root.`,
     `3. Treat project work path as ${project.workPath ?? 'project root'}. Stay inside that path unless the task explicitly requires a broader change.`,
     project.pullBeforeRun === false ? '4. Pull-before-run is disabled for this project.' : `4. Before editing, fetch the latest ${project.defaultBranch ?? 'main'} and pull/rebase so your local workspace is current.`,
     `5. Work on branch ${branch}; do not push directly to protected branches (${(project.protectedBranches ?? ['main', 'master']).join(', ') || 'none'}).`,
     project.setupCommand ? `6. Run setup when needed: ${project.setupCommand}` : '6. Run project setup only when needed and report any failure.',
     project.testCommand ? `7. Validate with: ${project.testCommand}` : '7. Run the most relevant tests/checks available in the repo/work path.',
     project.pushAfterRun === false ? '8. Push-after-run is disabled; report the local result and blocker clearly.' : `8. Commit and push your branch when work is complete. Prefer a pull request when policy is ${project.completionPolicy ?? 'push_or_pr'}.`,
-    '9. Put durable non-code deliverables, reports, exports, and handoff docs in the project deliverables path, then include them as workProducts in the webhook payload.',
+    '9. Durable non-code deliverables, reports, exports, and handoff docs belong in the project repo too (e.g. a deliverables/ or docs/ folder): commit and push them, then reference them as workProducts. Use the company shared directory only for company-wide reference material, never as the primary home of task output.',
     '10. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, file, or external metadata as applicable. Never use runtime-local file paths as the final artifact reference unless the user explicitly asked for local-only work.',
     '11. If you report status=waiting_on_external, include pollIntervalSeconds when polling is appropriate. Choose the interval yourself based on the external system, minimum 30 seconds.',
   ].join('\n');
@@ -3578,7 +3589,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
       `Task budget limit: ${focusCard.taskBudgetLimit ?? 'not set'}`,
       `Department: ${focusCard.departmentId ? departmentById.get(focusCard.departmentId)?.name ?? focusCard.departmentId : 'none'}`,
       `Project: ${focusCard.projectId ? projectById.get(focusCard.projectId)?.name ?? focusCard.projectId : 'none'}`,
-      includeFocusProjectRepo ? `Project repo:\n${projectRepoLines(company, focusCard.projectId ? projectById.get(focusCard.projectId) : null, focusAssigneeRuntime).join('\n')}` : '',
+      includeFocusProjectRepo ? `Project repo:\n${projectRepoLines(company, focusCard.projectId ? projectById.get(focusCard.projectId) : null, focusAssigneeRuntime, focusAssignee ?? null).join('\n')}` : '',
       `Goal: ${focusCard.goalId ? goalById.get(focusCard.goalId)?.title ?? focusCard.goalId : 'none'}`,
       `Applicable goals:\n${applicableGoals(companyGoals, { departmentId: focusCard.departmentId, projectId: focusCard.projectId, selectedGoalId: focusCard.goalId }).map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
       `Assignee: ${focusAssignee?.name ?? (focusCard.assigneeId ? 'unavailable' : 'unassigned')}`,

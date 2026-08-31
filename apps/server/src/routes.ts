@@ -1203,6 +1203,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         name: input.name,
         slug: input.slug,
         mission: input.mission ?? null,
+        nfsShareUrl: input.nfsShareUrl ?? null,
         dispatchIntervalSeconds: input.dispatchIntervalSeconds,
         autoDispatchEnabled: input.autoDispatchEnabled,
       }).returning();
@@ -1231,6 +1232,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       name: input.name,
       slug: input.slug,
       mission: input.mission,
+      nfsShareUrl: input.nfsShareUrl,
       dispatchIntervalSeconds: input.dispatchIntervalSeconds,
       autoDispatchEnabled: input.autoDispatchEnabled,
     }).where(eq(companies.id, id)).returning();
@@ -2280,6 +2282,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       companyId,
       localWorkspaceRoot: optionalText(input.localWorkspaceRoot) ?? null,
       localScratchRoot: optionalText(input.localScratchRoot) ?? null,
+      nfsMountRoot: optionalText(input.nfsMountRoot) ?? null,
     }).returning();
     return reply.code(201).send(row ? redactRuntime(row) : row);
   });
@@ -2296,6 +2299,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       adapterType: input.adapterType,
       localWorkspaceRoot: optionalText(input.localWorkspaceRoot),
       localScratchRoot: optionalText(input.localScratchRoot),
+      nfsMountRoot: optionalText(input.nfsMountRoot),
       config: nextConfig,
       isActive: input.isActive,
       updatedAt: new Date(),

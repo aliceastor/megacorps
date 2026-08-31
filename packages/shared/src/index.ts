@@ -186,6 +186,7 @@ export const createCompanySchema = z.object({
   name: z.string().trim().min(1).max(160),
   slug: z.string().trim().regex(/^[a-z0-9-]+$/).max(80),
   mission: z.string().trim().max(2000).optional(),
+  nfsShareUrl: z.string().trim().max(1000).nullable().optional(),
   dispatchIntervalSeconds: z.number().int().min(5).max(3600).default(10),
   autoDispatchEnabled: z.boolean().default(true),
 });
@@ -320,6 +321,7 @@ export const createAgentRuntimeSchema = z.object({
   adapterType: z.enum(agentAdapterTypes),
   localWorkspaceRoot: z.string().trim().max(1000).nullable().optional(),
   localScratchRoot: z.string().trim().max(1000).nullable().optional(),
+  nfsMountRoot: z.string().trim().max(1000).nullable().optional(),
   config: z.record(z.string(), z.unknown()).default({}),
   isActive: z.boolean().default(true),
 });

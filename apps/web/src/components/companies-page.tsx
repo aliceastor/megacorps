@@ -5,7 +5,7 @@ import { Building2, Plus, Save, Target, Trash2 } from 'lucide-react';
 import { ApiError, api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
-type Company = { id: string; name: string; slug: string; mission?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean; createdAt?: string };
+type Company = { id: string; name: string; slug: string; mission?: string | null; nfsShareUrl?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean; createdAt?: string };
 type Department = { id: string; companyId: string; name: string; slug: string };
 type Agent = { id: string; companyId: string };
 type Project = { id: string; companyId: string };
@@ -53,6 +53,7 @@ export function CompaniesPage() {
   const [companyName, setCompanyName] = useState('');
   const [companySlug, setCompanySlug] = useState('');
   const [mission, setMission] = useState('');
+  const [nfsShareUrl, setNfsShareUrl] = useState('');
   const [dispatchInterval, setDispatchInterval] = useState(10);
   const [autoDispatch, setAutoDispatch] = useState(true);
   const [goalTitle, setGoalTitle] = useState('');
@@ -105,6 +106,7 @@ export function CompaniesPage() {
     setCompanyName(company.name);
     setCompanySlug(company.slug);
     setMission(company.mission ?? '');
+    setNfsShareUrl(company.nfsShareUrl ?? '');
     setDispatchInterval(company.dispatchIntervalSeconds ?? 10);
     setAutoDispatch(company.autoDispatchEnabled !== false);
     setError('');
@@ -135,6 +137,7 @@ export function CompaniesPage() {
         name: companyName.trim(),
         slug: companySlug.trim(),
         mission,
+        nfsShareUrl: nfsShareUrl.trim() || null,
         dispatchIntervalSeconds: dispatchInterval,
         autoDispatchEnabled: autoDispatch,
       };
@@ -217,6 +220,10 @@ export function CompaniesPage() {
             <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={autoDispatch} onChange={(event) => setAutoDispatch(event.target.checked)} /> {t('companies.autoDispatchTodo')}</label>
           </div>
           <label className="field-label">{t('companies.mission')}<textarea className="input" rows={4} value={mission} onChange={(event) => setMission(event.target.value)} /></label>
+          <label className="field-label">NFS share URL
+            <span className="field-hint">Informational: where the company shared root export lives (e.g. nfs://nas/megacorps). Each runtime records its own local mount point in Settings.</span>
+            <input className="input" value={nfsShareUrl} onChange={(event) => setNfsShareUrl(event.target.value)} />
+          </label>
           <div className="action-row">
             <button className="btn btn-primary" disabled={busy || !companyName.trim() || !companySlug.trim()} onClick={saveCompany}><Save size={15} /> {t('companies.saveCompany')}</button>
             <button className="btn" disabled={busy || !selectedCompany || !canDeleteSelectedCompany} title={deleteCompanyTitle} onClick={deleteCompany} style={{ color: 'var(--danger)' }}><Trash2 size={15} /> {t('companies.deleteCompany')}</button>

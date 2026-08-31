@@ -27,6 +27,9 @@ export const companies = pgTable('companies', {
   name: text('name').notNull(),
   slug: text('slug').notNull().unique(),
   mission: text('mission'),
+  // Informational: where the company's shared NFS export lives (for humans and
+  // the UI). Runtimes mount it themselves and record their local mount root.
+  nfsShareUrl: text('nfs_share_url'),
   dispatchIntervalSeconds: integer('dispatch_interval_seconds').default(10),
   autoDispatchEnabled: boolean('auto_dispatch_enabled').default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
@@ -148,6 +151,9 @@ export const agentRuntimes = pgTable('agent_runtimes', {
   adapterType: text('adapter_type').notNull(),
   localWorkspaceRoot: text('local_workspace_root'),
   localScratchRoot: text('local_scratch_root'),
+  // Where this runtime mounted the company NFS root share. Agent workspaces
+  // resolve to {mount}/{companySlug}/agents/{agentSlug}/project/{projectSlug}.
+  nfsMountRoot: text('nfs_mount_root'),
   config: jsonb('config').default({}),
   isActive: boolean('is_active').default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),

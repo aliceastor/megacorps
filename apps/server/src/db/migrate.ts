@@ -21,7 +21,13 @@ const migrations: Migration[] = [
   { version: 9, name: 'agent-api-tokens', run: runAgentApiTokens },
   { version: 10, name: 'agent-notes-and-digest', run: runAgentNotesAndDigest },
   { version: 11, name: 'gitea-integration', run: runGiteaIntegration },
+  { version: 12, name: 'nfs-workspace-convention', run: runNfsWorkspaceConvention },
 ];
+
+async function runNfsWorkspaceConvention(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS nfs_mount_root TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS nfs_share_url TEXT;`);
+}
 
 async function runGiteaIntegration(): Promise<void> {
   await sql.unsafe(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS gitea_username TEXT;

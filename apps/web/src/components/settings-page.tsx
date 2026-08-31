@@ -4,7 +4,7 @@ import { Save, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
-type Runtime = { id: string; companyId?: string | null; name: string; adapterType: string; localWorkspaceRoot?: string | null; localScratchRoot?: string | null; config: Record<string, unknown>; isActive?: boolean };
+type Runtime = { id: string; companyId?: string | null; name: string; adapterType: string; localWorkspaceRoot?: string | null; localScratchRoot?: string | null; nfsMountRoot?: string | null; config: Record<string, unknown>; isActive?: boolean };
 type RuntimeHealth = { runtimeId: string; name: string; adapterType: string; status: string; isActive: boolean; agents: number; activeAgents: number; busyAgents: number; lastRunAt?: string | null; lastRunStatus?: string | null; lastError?: string | null; capabilities?: string[] };
 type Company = { id: string; name: string; slug: string; mission?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean };
 type Department = { id: string; companyId: string; name: string; slug: string };
@@ -90,6 +90,7 @@ export function SettingsPage() {
   const [runtimeName, setRuntimeName] = useState('Hermes SSH Runtime');
   const [runtimeAdapter, setRuntimeAdapter] = useState('hermes-ssh');
   const [runtimeLocalWorkspaceRoot, setRuntimeLocalWorkspaceRoot] = useState('');
+  const [runtimeNfsMountRoot, setRuntimeNfsMountRoot] = useState('');
   const [runtimeLocalScratchRoot, setRuntimeLocalScratchRoot] = useState('');
   const [runtimeActive, setRuntimeActive] = useState(true);
   const [runtimeConfig, setRuntimeConfig] = useState<Record<string, unknown>>({});
@@ -175,6 +176,7 @@ export function SettingsPage() {
     setRuntimeName(runtime.name);
     setRuntimeAdapter(runtime.adapterType);
     setRuntimeLocalWorkspaceRoot(runtime.localWorkspaceRoot ?? '');
+    setRuntimeNfsMountRoot(runtime.nfsMountRoot ?? '');
     setRuntimeLocalScratchRoot(runtime.localScratchRoot ?? '');
     setRuntimeActive(runtime.isActive !== false);
     setRuntimeConfigState(runtime.config ?? {});
@@ -198,6 +200,7 @@ export function SettingsPage() {
       name: runtimeName,
       adapterType: runtimeAdapter,
       localWorkspaceRoot: runtimeLocalWorkspaceRoot.trim() || null,
+      nfsMountRoot: runtimeNfsMountRoot.trim() || null,
       localScratchRoot: runtimeLocalScratchRoot.trim() || null,
       isActive: runtimeActive,
       config: runtimeConfig,
@@ -277,6 +280,10 @@ export function SettingsPage() {
           <label className="field-label">{t('settings.localScratchRoot')}
             <span className="field-hint">{t('settings.scratchRootHint')}</span>
             <input className="input" value={runtimeLocalScratchRoot} onChange={(event) => setRuntimeLocalScratchRoot(event.target.value)} />
+          </label>
+          <label className="field-label">NFS mount root
+            <span className="field-hint">Where this runtime mounted the company shared NFS root (e.g. /mnt/megacorps or \\nas\megacorps). Agent workspaces resolve under it; leave empty when this runtime has no mount.</span>
+            <input className="input" value={runtimeNfsMountRoot} onChange={(event) => setRuntimeNfsMountRoot(event.target.value)} />
           </label>
         </div>
         <label className="check-row"><input type="checkbox" checked={runtimeActive} onChange={(event) => setRuntimeActive(event.target.checked)} /> {t('settings.runtimeActive')}</label>

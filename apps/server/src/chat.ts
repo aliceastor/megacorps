@@ -13,7 +13,7 @@ import { publishLiveEvent } from './live.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
-import { projectSharedFileSpaceLines } from './project-workspace.ts';
+import { workspaceProtocolLines } from './workspace-paths.ts';
 import { readChatTaskTimeoutSeconds } from './runtime-settings.ts';
 import { applyChatWorkItems, extractChatWorkItems, formatChatWorkItemOutcomes } from './chat-work-items.ts';
 import { buildAgentDigest } from './agent-digest.ts';
@@ -52,10 +52,21 @@ function runtimeLocalContext(runtime: RuntimeRow | null | undefined): string {
   ].join('\n');
 }
 
+function agentWorkspaceContext(company: CompanyRow | null | undefined, project: ProjectRow | null | undefined, runtime: RuntimeRow | null | undefined, agent: AgentRow | null | undefined): string {
+  return workspaceProtocolLines({
+    companySlug: company?.slug ?? 'company',
+    agentSlug: agent?.slug ?? 'agent',
+    projectName: project?.name ?? null,
+    mountRoot: runtime?.nfsMountRoot ?? null,
+    localWorkspaceRoot: runtime?.localWorkspaceRoot ?? null,
+    nfsShareUrl: company?.nfsShareUrl ?? null,
+  }).join('\n');
+}
+
 function projectRepoContext(company: CompanyRow | null | undefined, project: ProjectRow | null | undefined, runtime?: RuntimeRow | null, agent?: AgentRow | null): string {
   if (!project) return [
     'Project repository: none',
-    projectSharedFileSpaceLines(company, null).join('\n'),
+    agentWorkspaceContext(company, null, runtime, agent),
     runtimeLocalContext(runtime),
     'Repository rule: no repo is configured, so do not invent shared local workspace paths. Runtime-local scratch is only for temporary work.',
   ].join('\n');
@@ -67,7 +78,7 @@ function projectRepoContext(company: CompanyRow | null | undefined, project: Pro
       : '',
     project.publishRepoUrl ? `Publish target: ${project.publishRepoUrl}${project.publishToken ? ' (auth token available in task prompts)' : ''}` : '',
     `Project work path: ${project.workPath ?? 'project root'}`,
-    projectSharedFileSpaceLines(company, project).join('\n'),
+    agentWorkspaceContext(company, project, runtime, agent),
     runtimeLocalContext(runtime),
     `Default branch: ${project.defaultBranch ?? 'main'}`,
     `Task branch pattern: ${project.workBranchPattern ?? 'megacorps/card-{cardId}-{agentSlug}'}`,
@@ -79,7 +90,7 @@ function projectRepoContext(company: CompanyRow | null | undefined, project: Pro
     project.repoUrl
       ? 'Repository rule: use your runtime-owned local clone under the runtime-local workspace root when configured, stay inside the project work path unless explicitly required, pull/rebase before code changes, commit and push/PR completed work, and report PR/commit/preview links rather than local-only paths.'
       : 'Repository rule: no repo is configured, so do not invent shared local workspace paths. Runtime-local scratch is only for temporary work.',
-    'Deliverable rule: durable reports, exports, handoff docs, and other non-code files belong in the project shared file space and should be reported as workProducts or durable URLs/paths, not only as /tmp files.',
+    'Deliverable rule: durable reports, exports, handoff docs, and other non-code files belong in the project repo (e.g. a deliverables/ or docs/ folder), committed and pushed, then reported as workProducts — not only as /tmp files.',
   ].filter(Boolean).join('\n');
 }
 
