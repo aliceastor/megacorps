@@ -9,7 +9,9 @@ type Project = {
   companyId: string;
   name: string;
   description?: string | null;
-  repoProvider?: 'github' | 'gitlab' | 'gitea' | 'generic' | null;
+  repoProvider?: 'github' | 'gitlab' | 'gitea' | 'gitea-local' | 'generic' | null;
+  publishRepoUrl?: string | null;
+  publishToken?: string | null;
   repoUrl?: string | null;
   workPath?: string | null;
   defaultBranch?: string | null;
@@ -65,7 +67,9 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
   const [selectedProjectId, setSelectedProjectId] = useState('__none');
   const [projectName, setProjectName] = useState('');
   const [projectDescription, setProjectDescription] = useState('');
-  const [repoProvider, setRepoProvider] = useState<'github' | 'gitlab' | 'gitea' | 'generic'>('github');
+  const [repoProvider, setRepoProvider] = useState<'github' | 'gitlab' | 'gitea' | 'gitea-local' | 'generic'>('github');
+  const [publishRepoUrl, setPublishRepoUrl] = useState('');
+  const [publishToken, setPublishToken] = useState('');
   const [repoUrl, setRepoUrl] = useState('');
   const [workPath, setWorkPath] = useState('');
   const [defaultBranch, setDefaultBranch] = useState('main');
@@ -128,6 +132,8 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
     setTestCommand(selectedProject.testCommand ?? '');
     setRuntimeServicesJson(JSON.stringify(selectedProject.runtimeServices ?? {}, null, 2));
     setWorkspacePathHint(selectedProject.workspacePathHint ?? '');
+    setPublishRepoUrl(selectedProject.publishRepoUrl ?? '');
+    setPublishToken(selectedProject.publishToken ?? '');
     setGoalTitle('');
     setGoalBody('');
   }, [selectedProject?.id]);
@@ -165,6 +171,8 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
       testCommand: testCommand || null,
       runtimeServices,
       workspacePathHint: workspacePathHint || null,
+      publishRepoUrl: publishRepoUrl || null,
+      publishToken: publishToken || null,
     };
   }
 
@@ -318,11 +326,14 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
             <label className="field-label">Repo provider<select className="input" value={repoProvider} onChange={(event) => setRepoProvider(event.target.value as typeof repoProvider)}>
               <option value="github">GitHub</option>
               <option value="gitlab">GitLab</option>
-              <option value="gitea">Gitea</option>
+              <option value="gitea">Gitea (external)</option>
+              <option value="gitea-local">Gitea (built-in, auto-provisioned)</option>
               <option value="generic">Generic Git</option>
             </select></label>
             <label className="field-label">Default branch<input className="input" value={defaultBranch} onChange={(event) => setDefaultBranch(event.target.value)} /></label>
-            <label className="field-label field-wide">Repository URL<input className="input" value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="https://github.com/org/repo" /></label>
+            <label className="field-label field-wide">Repository URL<input className="input" value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder={repoProvider === 'gitea-local' ? 'Leave empty — the built-in Gitea repo is created and filled in automatically' : 'https://github.com/org/repo'} /></label>
+            <label className="field-label field-wide">Publish repo URL<input className="input" value={publishRepoUrl} onChange={(event) => setPublishRepoUrl(event.target.value)} placeholder="Optional, e.g. a GitHub Pages repo the agent pushes publishable output to" /></label>
+            <label className="field-label field-wide">Publish token<input className="input" type="password" value={publishToken} onChange={(event) => setPublishToken(event.target.value)} placeholder="Optional token injected into task prompts for the publish push" /></label>
             <label className="field-label field-wide">Project work path<input className="input" value={workPath} onChange={(event) => setWorkPath(event.target.value)} placeholder="Repo/workspace-relative path, e.g. apps/server or reports/final" /></label>
             <label className="field-label">Protected branches<input className="input" value={protectedBranches} onChange={(event) => setProtectedBranches(event.target.value)} placeholder="main, master, production" /></label>
             <label className="field-label field-wide">Work branch pattern<input className="input" value={workBranchPattern} onChange={(event) => setWorkBranchPattern(event.target.value)} /></label>

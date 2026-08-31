@@ -26,11 +26,16 @@ const headerSecretPattern = /((?:Header:\s*)?(?:X-MegaCorps-Webhook-Secret|Autho
 const bearerPattern = /(Bearer\s+)[A-Za-z0-9._~+/-]+=*/gi;
 const secretKeyPattern = /(?:api[_-]?key|token|secret|password|bearer[_-]?token|webhook[_-]?shared[_-]?secret|webhook[_-]?secret|codex[_-]?ws[_-]?token)/i;
 
+const urlCredentialPattern = /(https?:\/\/)[^\/\s:@]+:[^\/\s@]+@/gi;
+const gitCredentialLinePattern = /((?:token|password)\s*[:=]?\s*)[A-Za-z0-9._~+\/-]{12,}/gi;
+
 export function redactPromptForLog(prompt: string): string {
   return prompt
     .replace(jsonSecretPattern, '$1[redacted]$3')
     .replace(headerSecretPattern, '$1[redacted]')
-    .replace(bearerPattern, '$1[redacted]');
+    .replace(bearerPattern, '$1[redacted]')
+    .replace(urlCredentialPattern, '$1[redacted]@')
+    .replace(gitCredentialLinePattern, '$1[redacted]');
 }
 
 function promptHash(prompt: string): string {

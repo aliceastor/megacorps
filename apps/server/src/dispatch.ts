@@ -8,6 +8,7 @@ import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
 import { buildAgentDigest } from './agent-digest.ts';
+import { giteaAuthenticatedCloneUrl } from './gitea.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 import { recordStageAction } from './card-actions.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
@@ -538,9 +539,23 @@ function projectGitProtocol(company: typeof companies.$inferSelect | null | unde
     .replaceAll('{cardId}', card.id.slice(0, 8))
     .replaceAll('{agentSlug}', agent?.slug ?? 'agent')
     .replaceAll('{projectId}', project.id.slice(0, 8));
+  const giteaCredentialLines = project.repoProvider === 'gitea-local' && agent?.giteaUsername && agent.giteaToken
+    ? [
+      `Git credentials (yours alone; do not share): username ${agent.giteaUsername}, token ${agent.giteaToken}.`,
+      `Authenticated clone URL: ${giteaAuthenticatedCloneUrl(project.repoUrl, agent.giteaUsername, agent.giteaToken)}`,
+    ]
+    : [];
+  const publishLines = project.publishRepoUrl
+    ? [
+      `Publish target: ${project.publishRepoUrl}${project.publishToken ? ` (auth token: ${project.publishToken})` : ''}.`,
+      'Publishing is your job when the task asks for it: push the publishable content to the publish target yourself and report the resulting URL as a workProduct. Never push secrets or non-publishable internals there.',
+    ]
+    : [];
   return [
     'Repository workflow:',
     `1. Use repo ${project.repoUrl}. Your local clone path is runtime-owned; MegaCorps does not assume a shared folder path.`,
+    ...giteaCredentialLines,
+    ...publishLines,
     localRoots,
     `Project file space:\n${sharedFiles}`,
     `2. Clone/cache the repo under the runtime-local workspace root when configured; otherwise choose a safe local folder owned by your runtime.`,

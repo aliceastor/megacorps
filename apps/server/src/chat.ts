@@ -17,6 +17,7 @@ import { projectSharedFileSpaceLines } from './project-workspace.ts';
 import { readChatTaskTimeoutSeconds } from './runtime-settings.ts';
 import { applyChatWorkItems, extractChatWorkItems, formatChatWorkItemOutcomes } from './chat-work-items.ts';
 import { buildAgentDigest } from './agent-digest.ts';
+import { giteaAuthenticatedCloneUrl } from './gitea.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -51,7 +52,7 @@ function runtimeLocalContext(runtime: RuntimeRow | null | undefined): string {
   ].join('\n');
 }
 
-function projectRepoContext(company: CompanyRow | null | undefined, project: ProjectRow | null | undefined, runtime?: RuntimeRow | null): string {
+function projectRepoContext(company: CompanyRow | null | undefined, project: ProjectRow | null | undefined, runtime?: RuntimeRow | null, agent?: AgentRow | null): string {
   if (!project) return [
     'Project repository: none',
     projectSharedFileSpaceLines(company, null).join('\n'),
@@ -61,6 +62,10 @@ function projectRepoContext(company: CompanyRow | null | undefined, project: Pro
   return [
     `Project repository provider: ${project.repoProvider ?? 'github'}`,
     `Project repository URL: ${project.repoUrl ?? 'not configured'}`,
+    project.repoProvider === 'gitea-local' && project.repoUrl && agent?.giteaUsername && agent.giteaToken
+      ? `Git credentials (yours alone): username ${agent.giteaUsername}, token ${agent.giteaToken}; authenticated clone URL ${giteaAuthenticatedCloneUrl(project.repoUrl, agent.giteaUsername, agent.giteaToken)}`
+      : '',
+    project.publishRepoUrl ? `Publish target: ${project.publishRepoUrl}${project.publishToken ? ' (auth token available in task prompts)' : ''}` : '',
     `Project work path: ${project.workPath ?? 'project root'}`,
     projectSharedFileSpaceLines(company, project).join('\n'),
     runtimeLocalContext(runtime),
@@ -89,7 +94,7 @@ async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, pr
   return [
     `Project: ${project?.name ?? 'No project / general chat'}`,
     project?.description ? `Project description: ${project.description}` : '',
-    projectRepoContext(company, project, runtime),
+    projectRepoContext(company, project, runtime, agent),
     `Department: ${department?.name ?? 'none'}`,
     positionPrompt ? `Position prompt:\n${positionPrompt}` : '',
     `Company goals:\n${companyGoals.filter((goal) => !goal.departmentId && !goal.projectId).map(formatGoal).join('\n') || 'none'}`,

@@ -17,6 +17,31 @@ services:
     networks:
       - megacorps
 
+  gitea:
+    # Built-in git server. MegaCorps administers it: one org per company, one
+    # repo per gitea-local project, one account per agent. First boot: open
+    # http://<host>:3300, the install screen is pre-locked by INSTALL_LOCK, so
+    # just create the admin user matching GITEA_ADMIN_USERNAME/PASSWORD in .env
+    # (or run: docker exec megacorps-gitea gitea admin user create --admin
+    # --username <user> --password <pass> --email admin@megacorps.local).
+    image: gitea/gitea:1.22-rootless
+    container_name: megacorps-gitea
+    restart: unless-stopped
+    environment:
+      GITEA__server__ROOT_URL: ${GITEA_EXTERNAL_URL:-http://localhost:3300}/
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__webhook__ALLOWED_HOST_LIST: "*"
+    volumes:
+      - gitea_data:/var/lib/gitea
+      - gitea_config:/etc/gitea
+    ports:
+      - "${GITEA_HTTP_PORT:-3300}:3000"
+      - "${GITEA_SSH_PORT:-3322}:2222"
+    networks:
+      - megacorps
+
   server:
     # Pushed by GitHub Actions in aliceastor/megacorps. If you re-target
     # the meaadore1221-afk registry, update this image ref.
@@ -48,6 +73,11 @@ services:
       HERMES_SSH_PORT: ${HERMES_SSH_PORT:-22}
       HERMES_SSH_KEY_PATH: ${HERMES_SSH_KEY_PATH:-/home/megacorps/.ssh/id_ed25519}
       HERMES_SSH_COMMAND: ${HERMES_SSH_COMMAND:-hermes}
+      GITEA_URL: ${GITEA_URL:-http://gitea:3000}
+      GITEA_EXTERNAL_URL: ${GITEA_EXTERNAL_URL:-http://localhost:3300}
+      GITEA_ADMIN_TOKEN: ${GITEA_ADMIN_TOKEN:-}
+      GITEA_ADMIN_USERNAME: ${GITEA_ADMIN_USERNAME:-}
+      GITEA_ADMIN_PASSWORD: ${GITEA_ADMIN_PASSWORD:-}
       HERMES_SSH_OPTIONS: ${HERMES_SSH_OPTIONS:-}
       CODEX_APP_TRANSPORT: ${CODEX_APP_TRANSPORT:-stdio}
       CODEX_APP_COMMAND: ${CODEX_APP_COMMAND:-codex}
@@ -125,6 +155,8 @@ services:
 volumes:
   postgres_data:
   server_ssh_keys:
+  gitea_data:
+  gitea_config:
 
 networks:
   megacorps:

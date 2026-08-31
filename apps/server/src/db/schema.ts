@@ -93,6 +93,10 @@ export const projects = pgTable('projects', {
   testCommand: text('test_command'),
   runtimeServices: jsonb('runtime_services').default({}),
   workspacePathHint: text('workspace_path_hint'),
+  // Optional publish target (e.g. a GitHub Pages repo). MegaCorps only stores
+  // and injects these; the publishing push is done by the agent in-task.
+  publishRepoUrl: text('publish_repo_url'),
+  publishToken: text('publish_token'),
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
@@ -129,6 +133,10 @@ export const agents = pgTable('agents', {
   // adapterConfig). Prompt logs redact it on write.
   apiToken: text('api_token'),
   apiTokenUpdatedAt: timestamp('api_token_updated_at', { withTimezone: true }),
+  // Gitea identity for the built-in git server: commits carry the real agent,
+  // and the token is injected into task prompts as git credentials.
+  giteaUsername: text('gitea_username'),
+  giteaToken: text('gitea_token'),
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 }, (table) => ({ companySlugUnique: unique().on(table.companyId, table.slug) }));

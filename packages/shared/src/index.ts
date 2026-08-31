@@ -377,7 +377,7 @@ export const createProjectSchema = z.object({
   companyId: z.string().uuid().optional(),
   name: z.string().trim().min(1).max(160),
   description: z.string().trim().max(4000).optional(),
-  repoProvider: z.enum(['github', 'gitlab', 'gitea', 'generic']).default('github'),
+  repoProvider: z.enum(['github', 'gitlab', 'gitea', 'gitea-local', 'generic']).default('github'),
   repoUrl: z.string().trim().max(1000).nullable().optional(),
   workPath: projectWorkPathSchema.nullable().optional(),
   defaultBranch: z.string().trim().min(1).max(120).default('main'),
@@ -390,6 +390,8 @@ export const createProjectSchema = z.object({
   testCommand: z.string().trim().max(2000).nullable().optional(),
   runtimeServices: z.record(z.string(), z.unknown()).default({}),
   workspacePathHint: z.string().trim().max(1000).nullable().optional(),
+  publishRepoUrl: z.string().trim().max(1000).nullable().optional(),
+  publishToken: z.string().trim().max(500).nullable().optional(),
 });
 
 export const createGoalSchema = z.object({

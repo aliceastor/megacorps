@@ -20,7 +20,15 @@ const migrations: Migration[] = [
   { version: 8, name: 'chat-bootstrap-context-hash', run: runChatBootstrapContextHash },
   { version: 9, name: 'agent-api-tokens', run: runAgentApiTokens },
   { version: 10, name: 'agent-notes-and-digest', run: runAgentNotesAndDigest },
+  { version: 11, name: 'gitea-integration', run: runGiteaIntegration },
 ];
+
+async function runGiteaIntegration(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS gitea_username TEXT;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS gitea_token TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS publish_repo_url TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS publish_token TEXT;`);
+}
 
 async function runAgentNotesAndDigest(): Promise<void> {
   await sql.unsafe(`CREATE TABLE IF NOT EXISTS agent_notes (

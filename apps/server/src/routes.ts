@@ -21,6 +21,7 @@ import { registerLifecycleRoutes } from './lifecycle-routes.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
 import { registerTrashRoutes } from './trash-routes.ts';
 import { authenticateAgentToken, looksLikeAgentToken, previewAgentToken, revokeAgentToken, rotateAgentToken } from './agent-auth.ts';
+import { addGiteaCollaborator, ensureGiteaAgentAccount, ensureGiteaOrg, ensureGiteaRepo, ensureGiteaRepoWebhook, giteaConfigFromEnv } from './gitea.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
@@ -156,6 +157,18 @@ function sessionCookieSecure(): boolean {
 
 function setSessionCookie(reply: FastifyReply, token: string): void {
   reply.setCookie('session', token, { httpOnly: true, sameSite: 'strict', path: '/', secure: sessionCookieSecure() });
+}
+
+// Random, generated once, stored in app_settings: authenticates Gitea push
+// webhooks by URL token.
+async function giteaWebhookToken(): Promise<string> {
+  const key = 'gitea.webhook_token';
+  const [row] = await db.select({ value: appSettings.value }).from(appSettings).where(eq(appSettings.key, key)).limit(1);
+  if (row?.value) return row.value;
+  const generated = randomBytes(24).toString('base64url');
+  await db.insert(appSettings).values({ key, value: generated }).onConflictDoNothing();
+  const [after] = await db.select({ value: appSettings.value }).from(appSettings).where(eq(appSettings.key, key)).limit(1);
+  return after?.value ?? generated;
 }
 
 function safeSecretEqual(provided: string | undefined, expected: string): boolean {
@@ -2081,6 +2094,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
     const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, positionId: input.positionId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, capabilities: input.capabilities ?? [], memoryConfig: input.memoryConfig ?? {}, maxConcurrent: input.maxConcurrent ?? 1, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
     if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
+    // Best-effort Gitea identity at birth; a failure here is recoverable later
+    // via POST /api/agents/:id/gitea and must not fail agent creation.
+    const giteaAtCreate = giteaConfigFromEnv();
+    if (agent && giteaAtCreate) {
+      try { await ensureGiteaAgentAccount(giteaAtCreate, agent); }
+      catch (error) { app.log.warn({ error, agentId: agent.id }, 'gitea account provisioning at agent creation failed'); }
+    }
     return reply.code(201).send(agent ? redactAgent(agent) : agent);
   });
   app.delete('/api/agents/:id', async (request, reply) => {
@@ -2326,12 +2346,43 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = createProjectSchema.parse(request.body);
     const companyId = input.companyId ?? await defaultCompanyId();
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
+    // Built-in Gitea provisioning: a gitea-local project gets its org and repo
+    // created (and every active company agent added as a collaborator) before
+    // the row is written, so the repoUrl is real from the very first dispatch.
+    let provisionedRepoUrl: string | null = null;
+    if (input.repoProvider === 'gitea-local' && !input.repoUrl) {
+      const gitea = giteaConfigFromEnv();
+      if (!gitea) return reply.code(503).send({ error: 'gitea_not_configured', detail: 'Set GITEA_URL (and admin credentials) to use the built-in Gitea provider.' });
+      try {
+        const [company] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
+        if (!company) return reply.code(404).send({ error: 'company_not_found' });
+        const orgSlug = await ensureGiteaOrg(gitea, company);
+        const repo = await ensureGiteaRepo(gitea, orgSlug, { name: input.name }, { defaultBranch: input.defaultBranch });
+        const companyAgents = await db.select().from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.deletedAt)));
+        for (const companyAgent of companyAgents) {
+          try {
+            const account = await ensureGiteaAgentAccount(gitea, companyAgent);
+            await addGiteaCollaborator(gitea, orgSlug, repo.repoSlug, account.username);
+          } catch (error) {
+            app.log.warn({ error, agentId: companyAgent.id }, 'gitea agent provisioning failed; agent can be provisioned later via POST /api/agents/:id/gitea');
+          }
+        }
+        try {
+          await ensureGiteaRepoWebhook(gitea, orgSlug, repo.repoSlug, `${process.env.MEGACORPS_API_URL ?? process.env.MEGACORPS_PUBLIC_URL ?? 'http://server:4000'}/api/gitea/events?token=${await giteaWebhookToken()}`);
+        } catch (error) {
+          app.log.warn({ error }, 'gitea webhook registration failed; push events will not reach MegaCorps');
+        }
+        provisionedRepoUrl = repo.cloneUrl;
+      } catch (error) {
+        return reply.code(502).send({ error: 'gitea_provisioning_failed', detail: error instanceof Error ? error.message : 'unknown Gitea error' });
+      }
+    }
     const [row] = await db.insert(projects).values({
       companyId,
       name: input.name,
       description: input.description,
       repoProvider: input.repoProvider,
-      repoUrl: input.repoUrl ?? null,
+      repoUrl: input.repoUrl ?? provisionedRepoUrl,
       workPath: input.workPath || null,
       defaultBranch: input.defaultBranch,
       protectedBranches: input.protectedBranches,
@@ -2343,6 +2394,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       testCommand: input.testCommand ?? null,
       runtimeServices: input.runtimeServices,
       workspacePathHint: input.workspacePathHint ?? null,
+      publishRepoUrl: input.publishRepoUrl ?? null,
+      publishToken: input.publishToken ?? null,
     }).returning();
     if (row) publishLiveEvent({ type: 'project.created', companyId: row.companyId, entityType: 'project', entityId: row.id });
     return reply.code(201).send(row);
@@ -2370,6 +2423,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       testCommand: input.testCommand,
       runtimeServices: input.runtimeServices,
       workspacePathHint: input.workspacePathHint,
+      publishRepoUrl: input.publishRepoUrl,
+      publishToken: input.publishToken,
       updatedAt: new Date(),
     }).where(eq(projects.id, id)).returning();
     if (!row) return reply.code(404).send({ error: 'project_not_found' });
@@ -2758,6 +2813,66 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       details: { taskId: event.taskId, contextId: event.contextId, state: event.state, scopeType: session.scopeType, scopeId: session.scopeId, accelerated, signed: Boolean(pushSecret) },
     });
     return { ok: true, matched: true, accelerated };
+  });
+
+  // Push events from the bundled Gitea. Auth is a URL token (set when the
+  // webhook is registered) rather than HMAC, because Fastify has already
+  // consumed the raw body here; the token is random and intranet-only.
+  app.post('/api/gitea/events', async (request, reply) => {
+    const token = (request.query as { token?: string }).token;
+    const expected = await giteaWebhookToken();
+    if (!token || !safeSecretEqual(token, expected)) return reply.code(401).send({ error: 'gitea_webhook_auth_required' });
+    const body = request.body as { ref?: string; repository?: { full_name?: string }; commits?: Array<{ id?: string; message?: string }>; pusher?: { username?: string } } | null;
+    const repoFullName = body?.repository?.full_name ?? 'unknown/unknown';
+    const orgSlug = repoFullName.split('/')[0] ?? '';
+    const [company] = await db.select().from(companies).where(eq(companies.slug, orgSlug)).limit(1);
+    const companyId = company?.id ?? await defaultCompanyId();
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: 'system',
+      actorId: 'gitea',
+      action: 'gitea.push',
+      entityType: 'repository',
+      entityId: companyId,
+      details: {
+        repository: repoFullName,
+        ref: body?.ref ?? null,
+        commits: body?.commits?.length ?? 0,
+        pusher: body?.pusher?.username ?? null,
+        lastCommit: body?.commits?.[body.commits.length - 1]?.message?.slice(0, 200) ?? null,
+      },
+    });
+    publishLiveEvent({ type: 'gitea.push', companyId, entityType: 'repository', entityId: companyId });
+    return { ok: true };
+  });
+
+  // Provision (or re-provision) the Gitea identity for one agent and grant it
+  // write access to every gitea-local project repo in its company. Returns the
+  // token so an operator can hand it to an externally-managed runtime; task
+  // prompts inject it automatically either way.
+  app.post('/api/agents/:id/gitea', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const [agent] = await db.select().from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
+    if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
+    const user = await requireCompanyRole(request, reply, agent.companyId, 'operator'); if (!user) return reply;
+    const gitea = giteaConfigFromEnv();
+    if (!gitea) return reply.code(503).send({ error: 'gitea_not_configured' });
+    try {
+      const account = await ensureGiteaAgentAccount(gitea, agent);
+      const [company] = await db.select().from(companies).where(eq(companies.id, agent.companyId)).limit(1);
+      const giteaProjects = await db.select().from(projects).where(and(eq(projects.companyId, agent.companyId), eq(projects.repoProvider, 'gitea-local'), isNull(projects.deletedAt)));
+      if (company) {
+        const orgSlug = await ensureGiteaOrg(gitea, company);
+        for (const project of giteaProjects) {
+          const repo = await ensureGiteaRepo(gitea, orgSlug, { name: project.name }, { defaultBranch: project.defaultBranch ?? 'main' });
+          await addGiteaCollaborator(gitea, orgSlug, repo.repoSlug, account.username);
+        }
+      }
+      await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.gitea_provisioned', entityType: 'agent', entityId: agent.id, details: { username: account.username, repos: giteaProjects.length } });
+      return { ok: true, agentId: agent.id, username: account.username, token: account.token, repos: giteaProjects.length };
+    } catch (error) {
+      return reply.code(502).send({ error: 'gitea_provisioning_failed', detail: error instanceof Error ? error.message : 'unknown Gitea error' });
+    }
   });
 
   app.post('/api/webhook/task-complete', async (request, reply) => {
