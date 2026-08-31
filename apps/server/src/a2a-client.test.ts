@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { normalizeA2aSendResult, parseA2aPushPayload, pythonSortedJson, sendA2aMessage, verifyA2aPushSignature } from './a2a-client.ts';
+import { normalizeA2aSendResult, parseA2aPushPayload, pythonSortedJson, sendA2aMessage, stripInlineReasoning, verifyA2aPushSignature } from './a2a-client.ts';
 import { createHmac } from 'node:crypto';
 
 const task = (state: string, text: string, extra: Record<string, unknown> = {}) => ({
@@ -185,4 +185,41 @@ test('parseA2aPushPayload reads a statusUpdate push body', () => {
   });
   assert.deepEqual(parsed, { taskId: 't9', contextId: 'ctx-9', state: 'input_required', text: 'which env?' });
   assert.equal(parseA2aPushPayload({ nonsense: true }), null);
+});
+
+test('normalizeA2aSendResult drops parts tagged as reasoning', () => {
+  const outcome = normalizeA2aSendResult({
+    task: {
+      id: 'task-r', contextId: 'ctx-r',
+      status: { state: 'TASK_STATE_COMPLETED', message: { parts: [
+        { text: 'first I check the repo layout', metadata: { type: 'reasoning' } },
+        { text: 'then weigh two options', kind: 'thought' },
+        { text: 'weighing again', thought: true },
+        { content: { $case: 'reasoning', value: 'proto-shaped reasoning' } },
+        { text: 'Done: migration applied.' },
+      ] } },
+    },
+  });
+  assert.equal(outcome.text, 'Done: migration applied.');
+});
+
+test('normalizeA2aSendResult strips inline think tags in every half-open shape', () => {
+  const paired = normalizeA2aSendResult({ task: task('completed', '<think>plan the edit</think>\nApplied the patch.') });
+  assert.equal(paired.text, 'Applied the patch.');
+
+  const orphanClose = normalizeA2aSendResult({ task: task('completed', 'plan the edit</think>\nApplied the patch.') });
+  assert.equal(orphanClose.text, 'Applied the patch.');
+
+  const orphanOpen = normalizeA2aSendResult({ task: task('completed', 'Applied the patch.\n<think>now double check') });
+  assert.equal(orphanOpen.text, 'Applied the patch.');
+});
+
+test('normalizeA2aSendResult keeps the raw text when a reply is nothing but reasoning', () => {
+  const outcome = normalizeA2aSendResult({ task: task('completed', '<think>still deciding</think>') });
+  assert.equal(outcome.text, '<think>still deciding</think>');
+});
+
+test('stripInlineReasoning leaves ordinary text and unrelated tags alone', () => {
+  assert.equal(stripInlineReasoning('Plain answer with no tags.'), 'Plain answer with no tags.');
+  assert.equal(stripInlineReasoning('Use <div> for layout.'), 'Use <div> for layout.');
 });

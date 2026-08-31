@@ -29,7 +29,7 @@ import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { listNotifications, markAllNotificationsRead, markNotificationRead, notify, unreadNotificationCount } from './notifications.ts';
 import { notifications } from './db/schema.ts';
 import { API_TOKEN_HASH_SETTING, readApiTokenSettings, revokeApiToken, rotateApiToken } from './api-token.ts';
-import { KANBAN_TASK_TIMEOUT_SETTING, readKanbanTaskTimeoutSeconds, setKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
+import { CHAT_TASK_TIMEOUT_SETTING, KANBAN_TASK_TIMEOUT_SETTING, readChatTaskTimeoutSeconds, readKanbanTaskTimeoutSeconds, setChatTaskTimeoutSeconds, setKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
 import { normalizeProjectWorkspacePath, normalizeProjectWorkspacePrefix } from './project-workspace.ts';
 
 async function defaultCompanyId(): Promise<string> {
@@ -205,6 +205,7 @@ async function adminSettingsResponse(apiToken?: string) {
   return {
     signupEnabled: await signupEnabled(),
     kanbanTaskTimeoutSeconds: await readKanbanTaskTimeoutSeconds(),
+    chatTaskTimeoutSeconds: await readChatTaskTimeoutSeconds(),
     apiTokenConfigured: tokenSettings.configured,
     apiTokenPreview: tokenSettings.preview,
     apiTokenUpdatedAt: tokenSettings.updatedAt,
@@ -706,6 +707,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = adminUpdateSettingsSchema.parse(request.body);
     if (input.signupEnabled !== undefined) await setSettingValue(SIGNUP_ENABLED_SETTING, input.signupEnabled ? 'true' : 'false');
     if (input.kanbanTaskTimeoutSeconds !== undefined) await setKanbanTaskTimeoutSeconds(input.kanbanTaskTimeoutSeconds);
+    if (input.chatTaskTimeoutSeconds !== undefined) await setChatTaskTimeoutSeconds(input.chatTaskTimeoutSeconds);
     const rotated = input.apiTokenAction === 'rotate' ? await rotateApiToken(user.id) : null;
     if (input.apiTokenAction === 'revoke') await revokeApiToken();
     const companyId = await defaultCompanyId();
@@ -716,8 +718,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       userId: user.id,
       action: 'admin.settings.updated',
       entityType: 'app_settings',
-      entityId: input.apiTokenAction ? API_TOKEN_HASH_SETTING : input.kanbanTaskTimeoutSeconds !== undefined ? KANBAN_TASK_TIMEOUT_SETTING : SIGNUP_ENABLED_SETTING,
-      details: { signupEnabled: input.signupEnabled, kanbanTaskTimeoutSeconds: input.kanbanTaskTimeoutSeconds, apiTokenAction: input.apiTokenAction },
+      entityId: input.apiTokenAction ? API_TOKEN_HASH_SETTING : input.kanbanTaskTimeoutSeconds !== undefined ? KANBAN_TASK_TIMEOUT_SETTING : input.chatTaskTimeoutSeconds !== undefined ? CHAT_TASK_TIMEOUT_SETTING : SIGNUP_ENABLED_SETTING,
+      details: { signupEnabled: input.signupEnabled, kanbanTaskTimeoutSeconds: input.kanbanTaskTimeoutSeconds, chatTaskTimeoutSeconds: input.chatTaskTimeoutSeconds, apiTokenAction: input.apiTokenAction },
     });
     return adminSettingsResponse(rotated?.token);
   });
@@ -2417,7 +2419,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       [promptLogUsage],
       [workspaceFileUsage],
     ] = await Promise.all([
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(kanbanCards).where(eq(kanbanCards.projectId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(kanbanCards).where(and(eq(kanbanCards.projectId, id), isNull(kanbanCards.deletedAt))),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(workProducts).where(eq(workProducts.projectId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(chatSessions).where(eq(chatSessions.projectId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(costEvents).where(eq(costEvents.projectId, id)),

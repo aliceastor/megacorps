@@ -13,6 +13,7 @@ import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.t
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { projectSharedFileSpaceLines } from './project-workspace.ts';
+import { readChatTaskTimeoutSeconds } from './runtime-settings.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -349,7 +350,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       const goalContext = handOffContextToAdapter ? '' : await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
       const prompt = buildChatPrompt(company, agent, history, kanbanContext, goalContext, handOffContextToAdapter);
       const executionAgent = await buildExecutionAgent(agent, existingChatSessionId);
-      const chatTask = { id: `chat-${session.id}`, title: session.title, body: prompt, timeoutSeconds: 300, kind: 'chat' as const };
+      const chatTask = { id: `chat-${session.id}`, title: session.title, body: prompt, timeoutSeconds: await readChatTaskTimeoutSeconds(), kind: 'chat' as const };
       await recordPromptLog({
         companyId: session.companyId,
         agentId: agent.id,

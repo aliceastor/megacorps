@@ -4842,7 +4842,17 @@ button.card {
 
 .chat-list-item:hover { background: color-mix(in srgb, var(--primary) 8%, transparent); border-color: color-mix(in srgb, var(--primary) 24%, var(--border)); }
 .chat-list-item.active { background: var(--primary-soft); border-color: color-mix(in srgb, var(--primary) 46%, var(--border)); }
-.chat-list-item span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.chat-list-item span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  /* A long project description must not stretch its row over the neighbours. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
 
 .chat-list-item.agent {
   grid-template-columns: auto minmax(0, 1fr) auto;

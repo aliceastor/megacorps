@@ -351,7 +351,7 @@ export function ChatPage() {
           <button className={`chat-list-item ${projectFilter === '__none' ? 'active' : ''}`} onClick={() => { setProjectFilter('__none'); setSessionId(''); setMessages([]); }}><b>No project</b><span>General chat</span></button>
           {companyProjects.map((project) => <button className={`chat-list-item ${project.id === projectFilter ? 'active' : ''}`} key={project.id} onClick={() => { setProjectFilter(project.id); setSessionId(''); setMessages([]); }}>
             <b>{project.name}</b>
-            <span>{project.description || 'Project chat'}</span>
+            <span title={project.description || 'Project chat'}>{project.description || 'Project chat'}</span>
           </button>)}
         </div>
         <div className="chat-rail-head"><MessageSquare size={16} /><b>Agents</b></div>

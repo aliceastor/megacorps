@@ -52,12 +52,65 @@ function normalizeState(raw: unknown): A2aTaskState | null {
   return null;
 }
 
+// Reasoning suppression. Some models stream chain-of-thought back over A2A —
+// either as its own part (tagged in metadata/kind) or inline in the answer text
+// via <think> tags. Neither belongs in a card output or a chat bubble, so both
+// are stripped here: textFromParts feeds SendMessage, push events, and
+// artifacts alike, so this one choke point covers every A2A read path.
+const REASONING_MARKERS = new Set([
+  'reasoning',
+  'reasoning_content',
+  'reasoningcontent',
+  'thought',
+  'thoughts',
+  'thinking',
+  'chain_of_thought',
+  'chainofthought',
+  'cot',
+  'internal',
+]);
+
+const REASONING_TAGS = ['think', 'thinking', 'thought', 'reasoning', 'antml:thinking'];
+
+function markedAsReasoning(value: unknown): boolean {
+  return typeof value === 'string' && REASONING_MARKERS.has(value.trim().toLowerCase().replace(/[- ]/g, '_'));
+}
+
+function isReasoningPart(record: Record<string, unknown>): boolean {
+  if (record.thought === true || record.isThought === true || record.reasoning === true) return true;
+  if (markedAsReasoning(record.kind) || markedAsReasoning(record.type)) return true;
+  const metadata = asRecord(record.metadata);
+  if (metadata && (markedAsReasoning(metadata.kind) || markedAsReasoning(metadata.type) || metadata.thought === true || metadata.reasoning === true)) return true;
+  const content = asRecord(record.content);
+  return Boolean(content && markedAsReasoning(content.$case));
+}
+
+// Strips paired <think>...</think> blocks, plus the two half-open shapes that
+// show up when a gateway consumes one side of the tag pair as a control token.
+export function stripInlineReasoning(text: string): string {
+  if (!text || !text.includes('<')) return text;
+  let stripped = text;
+  for (const tag of REASONING_TAGS) {
+    const name = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    stripped = stripped.replace(new RegExp(`<${name}\\b[^>]*>[\\s\\S]*?</${name}\\s*>`, 'gi'), '');
+    // Orphan close tag (opening token was swallowed): everything before it is reasoning.
+    stripped = stripped.replace(new RegExp(`^[\\s\\S]*?</${name}\\s*>`, 'i'), '');
+    // Orphan open tag (response was cut off mid-thought): everything after it is reasoning.
+    stripped = stripped.replace(new RegExp(`<${name}\\b[^>]*>[\\s\\S]*$`, 'i'), '');
+  }
+  const trimmed = stripped.trim();
+  // Never trade a whole answer for an empty string: if a model replied with
+  // nothing but reasoning, the raw text is still more useful than silence.
+  return trimmed || text;
+}
+
 function textFromParts(parts: unknown): string {
   if (!Array.isArray(parts)) return '';
   const chunks: string[] = [];
   for (const part of parts) {
     if (!part || typeof part !== 'object') continue;
     const record = part as Record<string, unknown>;
+    if (isReasoningPart(record)) continue;
     if (typeof record.text === 'string') {
       chunks.push(record.text);
       continue;
@@ -65,7 +118,7 @@ function textFromParts(parts: unknown): string {
     const content = record.content as Record<string, unknown> | undefined;
     if (content && content.$case === 'text' && typeof content.value === 'string') chunks.push(content.value);
   }
-  return chunks.join('\n').trim();
+  return stripInlineReasoning(chunks.join('\n').trim()).trim();
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
