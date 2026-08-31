@@ -19,6 +19,7 @@ import { parseA2aPushPayload, verifyA2aPushSignature } from './a2a-client.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
+import { registerTrashRoutes } from './trash-routes.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
@@ -308,7 +309,7 @@ async function requireProjectRole(request: FastifyRequest, reply: FastifyReply, 
     workspacePathHint: projects.workspacePathHint,
     companyName: companies.name,
     companySlug: companies.slug,
-  }).from(projects).innerJoin(companies, eq(projects.companyId, companies.id)).where(eq(projects.id, projectId)).limit(1);
+  }).from(projects).innerJoin(companies, eq(projects.companyId, companies.id)).where(and(eq(projects.id, projectId), isNull(projects.deletedAt))).limit(1);
   if (!project) {
     await reply.code(404).send({ error: 'project_not_found' });
     return null;
@@ -512,7 +513,7 @@ async function ensureCompanyReferences(companyId: string, input: CompanyReferenc
     if (!row) throw new Error('position_company_mismatch');
   }
   if (input.projectId) {
-    const [row] = await db.select({ id: projects.id }).from(projects).where(and(eq(projects.id, input.projectId), eq(projects.companyId, companyId))).limit(1);
+    const [row] = await db.select({ id: projects.id }).from(projects).where(and(eq(projects.id, input.projectId), eq(projects.companyId, companyId), isNull(projects.deletedAt))).limit(1);
     if (!row) throw new Error('project_company_mismatch');
   }
   if (input.goalId) {
@@ -556,6 +557,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await registerCronRoutes(app);
   await registerRunnerRoutes(app);
   await registerLifecycleRoutes(app);
+  await registerTrashRoutes(app);
   app.get('/api/help', async (request, reply) => {
     const query = request.query as { format?: string };
     if (query.format === 'markdown' || query.format === 'md') {
@@ -1070,7 +1072,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         .limit(limit),
       db.select({ id: projects.id, name: projects.name, companyId: projects.companyId })
         .from(projects)
-        .where(and(inArray(projects.companyId, companyIds), drizzleSql`${projects.name} ILIKE ${pattern}`))
+        .where(and(inArray(projects.companyId, companyIds), isNull(projects.deletedAt), drizzleSql`${projects.name} ILIKE ${pattern}`))
         .limit(limit),
       db.select({ id: companies.id, name: companies.name, slug: companies.slug })
         .from(companies)
@@ -1240,7 +1242,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       [promptLogUsage],
     ] = await Promise.all([
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(departments).where(eq(departments.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(projects).where(eq(projects.companyId, id)),
+      db.select({ count: drizzleSql<number>`count(*)::int` }).from(projects).where(and(eq(projects.companyId, id), isNull(projects.deletedAt))),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(goals).where(eq(goals.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(agentRuntimes).where(eq(agentRuntimes.companyId, id)),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(agents).where(eq(agents.companyId, id)),
@@ -2288,7 +2290,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string };
     if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
-    return db.select().from(projects).where(query.companyId ? eq(projects.companyId, query.companyId) : inArray(projects.companyId, access.companyIds)).orderBy(desc(projects.createdAt));
+    return db.select().from(projects).where(and(query.companyId ? eq(projects.companyId, query.companyId) : inArray(projects.companyId, access.companyIds), isNull(projects.deletedAt))).orderBy(desc(projects.createdAt));
   });
   app.post('/api/projects', async (request, reply) => {
     const input = createProjectSchema.parse(request.body);
@@ -2565,11 +2567,26 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (deleted[0]) publishLiveEvent({ type: 'project.workspace_file.deleted', companyId: deleted[0].companyId, entityType: 'projectWorkspaceFile', entityId: deleted[0].id });
     return { ok: true };
   });
+  // Deleting a project used to be a hard delete gated on the project being
+  // completely empty, so any project that had ever run a task was permanently
+  // undeletable. It is now an archive: reversible from the trash, and nothing
+  // referencing it is destroyed. ?purge=true still does the irreversible
+  // delete, and keeps the emptiness check for exactly that reason.
   app.delete('/api/projects/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
-    const [existing] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
+    const purge = (request.query as { purge?: string }).purge === 'true';
+    const [existing] = await db.select().from(projects).where(and(eq(projects.id, id), isNull(projects.deletedAt))).limit(1);
     if (!existing) return reply.code(404).send({ error: 'project_not_found' });
-    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    const user = await requireCompanyRole(request, reply, existing.companyId, purge ? 'admin' : 'operator'); if (!user) return reply;
+
+    if (!purge) {
+      const now = new Date();
+      await db.update(projects).set({ deletedAt: now, updatedAt: now }).where(eq(projects.id, id));
+      await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'project.archived', entityType: 'project', entityId: id, details: { name: existing.name } });
+      publishLiveEvent({ type: 'project.deleted', companyId: existing.companyId, entityType: 'project', entityId: id });
+      return { ok: true, archived: true };
+    }
+
     const [
       [cardUsage],
       [workProductUsage],
@@ -2939,7 +2956,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await db.insert(costEvents).values({ companyId: card.companyId, agentId: actorAgentId, cardId: card.id, projectId: card.projectId, goalId: card.goalId, provider: 'webhook', model: 'external', costUsd: body.costUsd.toString() });
     }
     if (body.workProducts.length > 0) {
-      const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
+      const [project] = card.projectId ? await db.select().from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1) : [];
       const insertedProducts = await db.insert(workProducts).values(body.workProducts.map((product) => ({
         companyId: card.companyId,
         cardId: card.id,

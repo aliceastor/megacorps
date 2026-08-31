@@ -3121,6 +3121,9 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
       const cards = await db.select().from(kanbanCards).where(and(
         inArray(kanbanCards.companyId, activeCompanyIds),
         isNull(kanbanCards.deletedAt),
+        // A card whose project was archived must stop being worked on, or the
+        // board keeps dispatching invisible work.
+        drizzleSql`NOT EXISTS (SELECT 1 FROM projects p WHERE p.id = ${kanbanCards.projectId} AND p.deleted_at IS NOT NULL)`,
         inArray(kanbanCards.columnStatus, ['backlog', 'todo', 'in_review', 'needs_review']),
       ));
       result.cardsScanned = cards.length;
@@ -3292,7 +3295,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
     db.select().from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.deletedAt))),
     db.select().from(departments).where(eq(departments.companyId, companyId)),
     db.select().from(positions).where(eq(positions.companyId, companyId)),
-    db.select().from(projects).where(eq(projects.companyId, companyId)),
+    db.select().from(projects).where(and(eq(projects.companyId, companyId), isNull(projects.deletedAt))),
     db.select().from(goals).where(eq(goals.companyId, companyId)),
     db.select().from(kanbanCards).where(and(eq(kanbanCards.companyId, companyId), isNull(kanbanCards.deletedAt))).orderBy(desc(kanbanCards.updatedAt)),
     db.select().from(agentRuntimes).where(eq(agentRuntimes.companyId, companyId)),
@@ -3699,7 +3702,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
     ].join('\n\n');
   }
   const [company] = await db.select().from(companies).where(eq(companies.id, card.companyId)).limit(1);
-  const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
+  const [project] = card.projectId ? await db.select().from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1) : [];
   const [assignee] = card.assigneeId ? await db.select().from(agents).where(and(eq(agents.id, card.assigneeId), isNull(agents.deletedAt))).limit(1) : [];
   const [runtime] = assignee?.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, assignee.runtimeId)).limit(1) : [];
   const reports = await activeDirectReportsForCard(card);

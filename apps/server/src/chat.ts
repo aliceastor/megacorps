@@ -74,7 +74,7 @@ function projectRepoContext(company: CompanyRow | null | undefined, project: Pro
 
 async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, projectId: string | null): Promise<string> {
   const [company] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
-  const [project] = projectId ? await db.select().from(projects).where(eq(projects.id, projectId)).limit(1) : [];
+  const [project] = projectId ? await db.select().from(projects).where(and(eq(projects.id, projectId), isNull(projects.deletedAt))).limit(1) : [];
   const [runtime] = agent.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, agent.runtimeId)).limit(1) : [];
   const [department] = agent.departmentId ? await db.select().from(departments).where(eq(departments.id, agent.departmentId)).limit(1) : [];
   const [position] = agent.positionId ? await db.select().from(positions).where(and(eq(positions.id, agent.positionId), eq(positions.companyId, companyId))).limit(1) : [];
@@ -214,7 +214,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     if (agent.companyId !== input.companyId) return reply.code(400).send({ error: 'agent_company_mismatch' });
     if (input.projectId) {
-      const [project] = await db.select({ id: projects.id }).from(projects).where(and(eq(projects.id, input.projectId), eq(projects.companyId, input.companyId))).limit(1);
+      const [project] = await db.select({ id: projects.id }).from(projects).where(and(eq(projects.id, input.projectId), eq(projects.companyId, input.companyId), isNull(projects.deletedAt))).limit(1);
       if (!project) return reply.code(400).send({ error: 'project_company_mismatch' });
     }
     const [session] = await db.insert(chatSessions).values({

@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, BriefcaseBusiness, Building2, ChartGantt, CircleHelp, Clock3, FileClock, FolderGit2, FolderOpen, Kanban, LayoutDashboard, Languages, LogOut, PanelLeftClose, PanelLeftOpen, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, User, Check, type LucideIcon } from 'lucide-react';
+import { BookOpen, BriefcaseBusiness, Building2, ChartGantt, CircleHelp, Clock3, FileClock, FolderGit2, FolderOpen, Kanban, LayoutDashboard, Languages, LogOut, PanelLeftClose, PanelLeftOpen, MessageSquare, Moon, Network, Settings, ShieldCheck, Sun, Trash2, User, Check, type LucideIcon } from 'lucide-react';
 import { useLocale, localeList, localeNames } from '@/lib/locale-context';
 import { api } from '@/lib/api';
 import { AppMouseMotion } from '@/components/app-mouse-motion';
@@ -29,6 +29,7 @@ const nav: NavItem[] = [
 ];
 
 const utilityNav: NavItem[] = [
+  { href: '/trash', labelKey: 'nav.trash', fallback: 'Trash', icon: Trash2 },
   { href: '/settings', labelKey: 'nav.settings', fallback: 'Settings', icon: Settings },
 ];
 

@@ -16,7 +16,13 @@ const migrations: Migration[] = [
   { version: 4, name: 'project-workspace-files', run: runProjectWorkspaceFiles },
   { version: 5, name: 'agent-memory-config', run: runAgentMemoryConfig },
   { version: 6, name: 'workspace-file-concurrency', run: runWorkspaceFileConcurrency },
+  { version: 7, name: 'project-soft-delete', run: runProjectSoftDelete },
 ];
+
+async function runProjectSoftDelete(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS projects_company_deleted_idx ON projects(company_id, deleted_at);`);
+}
 
 async function runWorkspaceFileConcurrency(): Promise<void> {
   await sql.unsafe(`ALTER TABLE project_workspace_files ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;

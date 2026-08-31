@@ -51,7 +51,7 @@ function projectErrorMessage(error: unknown, fallback: string): string {
     const data = error.data as { error?: unknown; blocking?: unknown };
     if (data.error === 'project_not_empty') {
       const blocking = formatBlocking(data.blocking);
-      return `Project still has linked records${blocking ? ` (${blocking})` : ''}.`;
+      return `Project still has linked records${blocking ? ` (${blocking})` : ''}, so it cannot be permanently deleted. Archiving it instead keeps the records and can be undone from Trash.`;
     }
   }
   return error instanceof Error ? error.message : fallback;

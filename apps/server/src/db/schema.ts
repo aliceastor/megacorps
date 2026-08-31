@@ -93,6 +93,7 @@ export const projects = pgTable('projects', {
   testCommand: text('test_command'),
   runtimeServices: jsonb('runtime_services').default({}),
   workspacePathHint: text('workspace_path_hint'),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });

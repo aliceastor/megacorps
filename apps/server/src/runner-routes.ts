@@ -93,7 +93,7 @@ async function taskRunPayload(run: typeof taskRuns.$inferSelect) {
   const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, run.cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) return null;
   const [agent] = run.agentId ? await db.select().from(agents).where(and(eq(agents.id, run.agentId), isNull(agents.deletedAt))).limit(1) : [];
-  const [project] = card.projectId ? await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1) : [];
+  const [project] = card.projectId ? await db.select().from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1) : [];
   const [runtime] = agent?.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, agent.runtimeId)).limit(1) : [];
   return { taskRun: run, card, agent: agent ? redactAgent(agent) : null, project: project ?? null, runtime: redactRuntime(runtime) };
 }
