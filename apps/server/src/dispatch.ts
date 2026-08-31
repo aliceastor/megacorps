@@ -7,6 +7,7 @@ import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
+import { buildAgentDigest } from './agent-digest.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 import { recordStageAction } from './card-actions.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
@@ -3710,6 +3711,11 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
   const delegationAlreadySatisfied = card.assigneeId ? await actorHasDelegatedInScope(card.id, card.assigneeId, null) : false;
   const docs = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.companyId, card.companyId)).orderBy(desc(knowledgeDocs.updatedAt)).limit(10);
   const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.assigneeId, includeFocusProjectRepo: false });
+  // Cross-surface digest: what this agent did and concluded elsewhere (other
+  // cards, Direct Chat notes) so a fresh Kanban session starts with the same
+  // memory the chat sessions see. Continuation turns skip it — the adapter
+  // session already carries the bootstrap version.
+  const digest = assignee ? (await buildAgentDigest(assignee.id, card.companyId)).text : '';
   const matchingDocs = docs.filter((doc) => {
     const tags = doc.tags ?? [];
     return tags.length === 0 || tags.some((tag) => (card.tags ?? []).includes(tag));
@@ -3722,6 +3728,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
       `Stage: ${card.columnStatus ?? 'todo'}`,
       'Use the Kanban context snapshot below as the source of truth for assignee, department, project, goals, company structure, parent chain, dependencies, message board, lifecycle logs, and prior output.',
     ].join('\n'),
+    digest,
     kanbanContext ? `Kanban context snapshot:\n${kanbanContext}` : '',
     matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
     `Repository protocol:\n${projectGitProtocol(company, project, card, assignee, runtime)}`,

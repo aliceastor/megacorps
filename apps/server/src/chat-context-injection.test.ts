@@ -30,3 +30,19 @@ test('the bootstrap turn carries the full context and no refresh banner', () => 
   assert.match(prompt, /Goal context:/);
   assert.match(prompt, /Kanban context snapshot:/);
 });
+
+test('a continuation injects the digest only when it is provided as changed', () => {
+  const digest = '=== Your Recent Activity (all MegaCorps surfaces) ===\n\nYour own notes from recent conversations:\n- (2026-08-31) Use v2 format.';
+  const withDigest = chatInternals.buildChatPrompt(undefined, agent, history, '', '', true, '', '', digest);
+  assert.match(withDigest, /Your activity elsewhere moved since your last turn/);
+  assert.match(withDigest, /Use v2 format\./);
+  const without = chatInternals.buildChatPrompt(undefined, agent, history, '', '', true, '', '');
+  assert.doesNotMatch(without, /Your activity elsewhere moved/);
+});
+
+test('the bootstrap turn carries the digest inline', () => {
+  const digest = '=== Your Recent Activity (all MegaCorps surfaces) ===\n\nYour open Kanban cards:\n- [todo] Ship it';
+  const prompt = chatInternals.buildChatPrompt(undefined, agent, history, 'ctx', 'goals', false, '', '', digest);
+  assert.match(prompt, /=== Your Recent Activity/);
+  assert.doesNotMatch(prompt, /Your activity elsewhere moved/);
+});

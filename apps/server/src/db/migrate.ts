@@ -19,7 +19,22 @@ const migrations: Migration[] = [
   { version: 7, name: 'project-soft-delete', run: runProjectSoftDelete },
   { version: 8, name: 'chat-bootstrap-context-hash', run: runChatBootstrapContextHash },
   { version: 9, name: 'agent-api-tokens', run: runAgentApiTokens },
+  { version: 10, name: 'agent-notes-and-digest', run: runAgentNotesAndDigest },
 ];
+
+async function runAgentNotesAndDigest(): Promise<void> {
+  await sql.unsafe(`CREATE TABLE IF NOT EXISTS agent_notes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id UUID NOT NULL REFERENCES companies(id),
+  agent_id UUID NOT NULL REFERENCES agents(id),
+  chat_session_id UUID REFERENCES chat_sessions(id),
+  card_id UUID REFERENCES kanban_cards(id),
+  body TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS agent_notes_agent_created_idx ON agent_notes(agent_id, created_at DESC);
+ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS digest_hash TEXT;`);
+}
 
 async function runAgentApiTokens(): Promise<void> {
   await sql.unsafe(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS api_token TEXT;

@@ -16,6 +16,7 @@ import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { projectSharedFileSpaceLines } from './project-workspace.ts';
 import { readChatTaskTimeoutSeconds } from './runtime-settings.ts';
 import { applyChatWorkItems, extractChatWorkItems, formatChatWorkItemOutcomes } from './chat-work-items.ts';
+import { buildAgentDigest } from './agent-digest.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -140,7 +141,7 @@ async function buildChatCardIndex(companyId: string, projectId: string | null): 
   ].join('\n');
 }
 
-function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string, continuation = false, cardIndex = '', refreshedContext = ''): string {
+function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string, continuation = false, cardIndex = '', refreshedContext = '', digest = ''): string {
   if (continuation) {
     const latest = [...history].reverse().find((message) => message.authorType === 'user') ?? history[history.length - 1];
     return [
@@ -152,6 +153,7 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
         `Adapter: ${agent.adapterType}`,
       ].join('\n'),
       refreshedContext ? `Standing context changed since your last turn in this session. This replaces what you were told before:\n${refreshedContext}` : '',
+      digest ? `Your activity elsewhere moved since your last turn in this session (updated digest):\n${digest}` : '',
       cardIndex,
       'Recent conversation transcript:',
       formatChatHistoryForPrompt(history, DIRECT_CHAT_CONTINUATION_HISTORY_CHARS),
@@ -161,6 +163,7 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
   }
   return [
     kanbanContext ? '' : company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
+    digest,
     `Goal context:\n${goalContext}`,
     [
       `Agent name: ${agent.name}`,
@@ -388,9 +391,15 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       const goalContext = handOffContextToAdapter ? '' : standingContext;
       const refreshedContext = handOffContextToAdapter && contextStale ? standingContext : '';
       const cardIndex = handOffContextToAdapter ? await buildChatCardIndex(session.companyId, session.projectId ?? null) : '';
-      const prompt = buildChatPrompt(company, agent, history, kanbanContext, goalContext, handOffContextToAdapter, cardIndex, refreshedContext);
+      // Cross-surface digest: injected at bootstrap, and again on a
+      // continuation only when its hash moved — i.e. when the agent's world
+      // outside this chat (cards, reviews, its own notes) actually changed.
+      const agentDigest = await buildAgentDigest(agent.id, session.companyId);
+      const digestStale = session.digestHash !== null && session.digestHash !== agentDigest.hash;
+      const digestForPrompt = handOffContextToAdapter ? (digestStale ? agentDigest.text : '') : agentDigest.text;
+      const prompt = buildChatPrompt(company, agent, history, kanbanContext, goalContext, handOffContextToAdapter, cardIndex, refreshedContext, digestForPrompt);
       const contextMode = handOffContextToAdapter
-        ? refreshedContext ? 'adapter_session_continuation_refresh' : 'adapter_session_continuation'
+        ? refreshedContext || digestForPrompt ? 'adapter_session_continuation_refresh' : 'adapter_session_continuation'
         : 'full_bootstrap';
       const executionAgent = await buildExecutionAgent(agent, existingChatSessionId);
       const chatTask = { id: `chat-${session.id}`, title: session.title, body: prompt, timeoutSeconds: await readChatTaskTimeoutSeconds(), kind: 'chat' as const };
@@ -483,9 +492,10 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       }).returning();
       const [updatedSession] = await db.update(chatSessions).set({
         agentSessionId: result.sessionId,
-        // Only record the hash once the turn actually reached the agent, so a
-        // failed run does not mark stale context as delivered.
+        // Only record the hashes once the turn actually reached the agent, so
+        // a failed run does not mark stale context as delivered.
         bootstrapContextHash: standingContextHash,
+        digestHash: agentDigest.hash,
         updatedAt: new Date(),
       }).where(eq(chatSessions.id, session.id)).returning();
       await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: overBudget ? 'chat.budget_hard_stop' : 'chat.reply_received', sessionId: session.id, details: { runId: run.id, costUsd: result.costUsd, overBudget, monthlyExceeded, taskExceeded } });

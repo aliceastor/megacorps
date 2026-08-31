@@ -93,11 +93,14 @@ block and MegaCorps will apply it to the board on the user's behalf:
 \`\`\`json
 { "kind": "megacorps-chat-actions", "actions": [
   { "action": "create_card", "title": "Short task title", "body": "What to do and what done looks like.", "priority": "normal", "assigneeSlug": "optional-agent-slug" },
-  { "action": "update_card", "cardId": "uuid-from-the-kanban-context", "status": "in_progress", "body": "optional replacement body" }
+  { "action": "update_card", "cardId": "uuid-from-the-kanban-context", "status": "in_progress", "body": "optional replacement body" },
+  { "action": "note", "body": "One-line conclusion worth remembering, e.g. agreed with the user to use the v2 format." }
 ] }
 \`\`\`
 
-Rules: priority is low|normal|high|urgent. status is todo|in_progress|in_review|needs_review|waiting_on_external|done|blocked|cancelled. Only use a cardId that appears in the Kanban context you were given. Prefer update_card over create_card when the work already has a card. Omit the block entirely for ordinary conversation — questions, explanations, and advice do not belong on the board. Do not call the Kanban webhook and do not call session-auth endpoints such as POST /api/cards from a chat turn; this block is your channel.`;
+Rules: priority is low|normal|high|urgent. status is todo|in_progress|in_review|needs_review|waiting_on_external|done|blocked|cancelled. Only use a cardId that appears in the Kanban context you were given. Prefer update_card over create_card when the work already has a card. Omit the block entirely for ordinary conversation — questions, explanations, and advice do not belong on the board. Do not call the Kanban webhook and do not call session-auth endpoints such as POST /api/cards from a chat turn; this block is your channel.
+
+The "note" action is your own cross-session memory: whenever this conversation reaches a decision, correction, or fact you will need in later work (including your Kanban runs), record it as a note. Notes are injected back to you in future sessions as part of your activity digest. A conversation that changed nothing needs no note.`;
   }
 
   if (task.kind === 'maintenance') {

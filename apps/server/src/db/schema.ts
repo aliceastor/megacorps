@@ -524,8 +524,24 @@ export const chatSessions = pgTable('chat_sessions', {
   // Hash of the standing context (company, goals, project config, position
   // prompt) as last injected. Continuation turns re-inject only when it moves.
   bootstrapContextHash: text('bootstrap_context_hash'),
+  // Hash of the agent's activity digest as last injected into this session, so
+  // continuations re-send the digest only when something actually happened.
+  digestHash: text('digest_hash'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
+
+// Self-notes an agent leaves from Direct Chat ("agreed with the boss to use
+// v2 format"). They feed the cross-surface digest so a conclusion reached in
+// chat is visible on the agent's next Kanban run and vice versa.
+export const agentNotes = pgTable('agent_notes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  agentId: uuid('agent_id').notNull().references(() => agents.id),
+  chatSessionId: uuid('chat_session_id').references(() => chatSessions.id),
+  cardId: uuid('card_id').references(() => kanbanCards.id),
+  body: text('body').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 
 export const chatMessages = pgTable('chat_messages', {

@@ -64,3 +64,17 @@ test('formatChatWorkItemOutcomes marks successes and failures distinctly', () =>
   assert.match(text, /✓ Created card "Rotate token" — created in todo/);
   assert.match(text, /✗ Updated card "c2" — card not found/);
 });
+
+test('extractChatWorkItems accepts a note action', () => {
+  const extraction = extractChatWorkItems('```json\n{ "kind": "megacorps-chat-actions", "actions": [{ "action": "note", "body": "Use v2 format from now on." }] }\n```');
+  assert.ok(extraction && 'actions' in extraction);
+  const [action] = extraction.actions.actions;
+  assert.equal(action?.action, 'note');
+});
+
+test('formatChatWorkItemOutcomes renders note outcomes', () => {
+  const text = formatChatWorkItemOutcomes([
+    { action: 'note', cardId: null, title: null, ok: true, detail: 'noted: Use v2 format from now on.' },
+  ]);
+  assert.match(text, /✓ Self-note — noted: Use v2 format/);
+});

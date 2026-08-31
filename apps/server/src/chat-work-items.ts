@@ -3,7 +3,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { markedJsonCandidates } from './agent-report.ts';
 import { recordCardAction, recordStageAction } from './card-actions.ts';
 import { db } from './db/client.ts';
-import { activityLog, agents, kanbanCards } from './db/schema.ts';
+import { activityLog, agentNotes, agents, kanbanCards } from './db/schema.ts';
 import { publishLiveEvent } from './live.ts';
 
 // Direct Chat sessions and the Kanban board are independent contexts: telling
@@ -42,7 +42,7 @@ function priorityToNumber(priority: string | undefined): number {
 }
 
 export type ChatWorkItemOutcome = {
-  action: 'create_card' | 'update_card';
+  action: 'create_card' | 'update_card' | 'note';
   cardId: string | null;
   title: string | null;
   ok: boolean;
@@ -69,6 +69,20 @@ async function applyOne(input: ApplyInput, action: ChatWorkItemAction): Promise<
   const actor = { type: 'user' as const, id: input.user.id, userId: input.user.id };
   const actorName = input.user.email ?? input.user.id;
   const origin = `Direct Chat with ${input.agentName}`;
+
+  if (action.action === 'note') {
+    // Notes are the agent's own memory, not board state: no card mutation, no
+    // live event — they surface through the cross-surface activity digest.
+    const [note] = await db.insert(agentNotes).values({
+      companyId: input.companyId,
+      agentId: input.agentId,
+      chatSessionId: input.chatSessionId,
+      cardId: action.cardId ?? null,
+      body: action.body,
+    }).returning();
+    if (!note) return { action: 'note', cardId: action.cardId ?? null, title: null, ok: false, detail: 'note insert failed' };
+    return { action: 'note', cardId: action.cardId ?? null, title: null, ok: true, detail: `noted: ${action.body.slice(0, 80)}` };
+  }
 
   if (action.action === 'create_card') {
     const assigneeId = await resolveAssigneeId(input.companyId, action.assigneeSlug);
@@ -168,7 +182,7 @@ export async function applyChatWorkItems(input: ApplyInput, actions: ChatWorkIte
     } catch (error) {
       outcomes.push({
         action: action.action,
-        cardId: action.action === 'update_card' ? action.cardId : null,
+        cardId: action.action === 'update_card' ? action.cardId : action.action === 'note' ? action.cardId ?? null : null,
         title: action.action === 'create_card' ? action.title : null,
         ok: false,
         detail: error instanceof Error ? error.message : 'chat work item failed',
@@ -180,6 +194,7 @@ export async function applyChatWorkItems(input: ApplyInput, actions: ChatWorkIte
 
 export function formatChatWorkItemOutcomes(outcomes: ChatWorkItemOutcome[]): string {
   const lines = outcomes.map((outcome) => {
+    if (outcome.action === 'note') return `${outcome.ok ? '✓' : '✗'} Self-note — ${outcome.detail}`;
     const label = outcome.title ?? outcome.cardId ?? 'card';
     const verb = outcome.action === 'create_card' ? 'Created card' : 'Updated card';
     return `${outcome.ok ? '✓' : '✗'} ${verb} "${label}" — ${outcome.detail}`;

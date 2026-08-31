@@ -289,6 +289,14 @@ export const chatWorkItemActionSchema = z.discriminatedUnion('action', [
     status: z.enum(cardStatuses).optional(),
     priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
   }),
+  // A self-note: "agreed with the user to use the v2 format". Feeds the
+  // cross-surface activity digest so the agent's next Kanban run knows what
+  // was concluded in chat.
+  z.object({
+    action: z.literal('note'),
+    body: z.string().trim().min(1).max(2000),
+    cardId: z.string().uuid().nullable().optional(),
+  }),
 ]);
 export const chatWorkItemsSchema = z.object({
   kind: z.literal('megacorps-chat-actions'),
