@@ -6527,3 +6527,13 @@ button.card:hover {
 
 /* Streaming partial reply */
 .chat-partial-text { opacity: 0.85; }
+
+/* Kanban list view: rows open the card; child cards nest under their parent. */
+.kanban-list-table tbody tr { cursor: pointer; }
+.kanban-list-table tbody tr:hover { background: color-mix(in srgb, var(--primary) 6%, transparent); }
+.kanban-list-table tbody tr.kanban-list-child { color: color-mix(in srgb, var(--foreground) 82%, transparent); }
+.kanban-list-table td, .kanban-list-table th { white-space: nowrap; }
+.kanban-list-table td:nth-child(2) { white-space: normal; min-width: 240px; }
+.runtime-details { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.runtime-details > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.runtime-details[open] > summary { margin-bottom: 8px; }

@@ -1,4 +1,5 @@
 ﻿'use client';
+import { KanbanListView } from './kanban-list-view';
 import { DndContext, type DragEndEvent, useDraggable, useDroppable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -486,6 +487,14 @@ export function KanbanBoard() {
   const [filterAssignee, setFilterAssignee] = useState('');
   const [filterProject, setFilterProject] = useState('');
   const [sortMode, setSortMode] = useState<'priority' | 'company' | 'created_desc' | 'created_asc' | 'updated_desc'>('priority');
+  // List is the manager's default view; the wall stays one toggle away.
+  const [viewMode, setViewMode] = useState<'list' | 'wall'>(() => {
+    try { return window.localStorage.getItem('megacorps.kanbanView') === 'wall' ? 'wall' : 'list'; } catch { return 'list'; }
+  });
+  function switchView(next: 'list' | 'wall') {
+    setViewMode(next);
+    try { window.localStorage.setItem('megacorps.kanbanView', next); } catch { /* per-viewer convenience only */ }
+  }
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -1154,11 +1163,25 @@ export function KanbanBoard() {
         <option value="created_asc">{t('kanban.sortOldest')}</option>
         <option value="updated_desc">{t('kanban.sortUpdated')}</option>
       </select>
+      <div className="tab-row" style={{ margin: 0 }}>
+        <button className={`tab ${viewMode === 'list' ? 'active' : ''}`} onClick={() => switchView('list')}>{t('kanban.viewList')}</button>
+        <button className={`tab ${viewMode === 'wall' ? 'active' : ''}`} onClick={() => switchView('wall')}>{t('kanban.viewWall')}</button>
+      </div>
       <button className="btn" onClick={() => void refresh()}><RefreshCw size={15} /></button>
       <button className="btn btn-primary" onClick={() => setModalOpen(true)}><Plus size={15} /> {t('newCard')}</button>
     </div>
 
-    {loading ? <p style={{ textAlign: 'center', opacity: 0.55 }}>{t('common.loading')}</p> : (
+    {loading ? <p style={{ textAlign: 'center', opacity: 0.55 }}>{t('common.loading')}</p> : viewMode === 'list' ? (
+      <KanbanListView
+        cards={boardCards}
+        agents={agents}
+        departments={departments}
+        projects={projects}
+        statusLabel={(status) => statusLabels[status as CardStatus]?.[locale] ?? status}
+        statusColor={statusColor}
+        onSelect={(card) => { const full = cards.find((item) => item.id === card.id); if (full) { setSelected(full); setTab('details'); } }}
+      />
+    ) : (
       <DndContext onDragEnd={onDragEnd}>
         <div className="kanban-columns">
           {statusGroups.map((group) => <Column
@@ -1274,11 +1297,16 @@ export function KanbanBoard() {
               <label className="field-label">{t('kanban.goal')}<select className="input" value={draft?.goalId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), goalId: e.target.value || null })}><option value="">{t('kanban.goal')}</option>{scopedGoalOptions(goals, { companyId: selected.companyId, departmentId: draft?.departmentId ?? selected.departmentId, projectId: draft?.projectId ?? selected.projectId }).map((goal) => <option value={goal.id} key={goal.id}>{goalScope(goal)} / {goal.title}</option>)}</select></label>
               <label className="field-label">{t('kanban.priority')}<select className="input" value={priorityValue(priorityNumber(draft?.priority ?? selected.priority))} onChange={(e) => setDraft({ ...(draft ?? {}), priority: priorityNumber(e.target.value) })}>{priorities.map((priority) => <option key={priority} value={priority}>{t(`kanban.priority.${priority}`)}</option>)}</select></label>
             </div>
-            <label className="field-label">{t('kanban.tags')}<input className="input" value={(draft?.tags ?? []).join(', ')} onChange={(e) => setDraft({ ...(draft ?? {}), tags: parseCsv(e.target.value) })} /></label>
+            <details className="runtime-details">
+              <summary>{t('kanban.moreFields')}</summary>
+              <label className="field-label">{t('kanban.tags')}<input className="input" value={(draft?.tags ?? []).join(', ')} onChange={(e) => setDraft({ ...(draft ?? {}), tags: parseCsv(e.target.value) })} /></label>
+            </details>
             <label className="field-label">{t('kanban.collaboration')}
-              <select className="input" value={draft?.decisionMode === 'delegate' ? 'collaboration' : 'agent_decides'} onChange={(e) => setDraft({ ...(draft ?? {}), decisionMode: e.target.value === 'collaboration' ? 'delegate' : null })}>
-                <option value="agent_decides">{t('kanban.agentDecides')}</option>
-                <option value="collaboration">{t('kanban.collaborationMode')}</option>
+              <select className="input" value={['auto', 'solo', 'pair', 'swarm'].includes(String(draft?.decisionMode ?? '')) ? String(draft?.decisionMode) : draft?.decisionMode === 'execute' ? 'solo' : 'auto'} onChange={(e) => setDraft({ ...(draft ?? {}), decisionMode: e.target.value })}>
+                <option value="auto">{t('kanban.modeAuto')}</option>
+                <option value="solo">{t('kanban.modeSolo')}</option>
+                <option value="pair">{t('kanban.modePair')}</option>
+                <option value="swarm">{t('kanban.modeSwarm')}</option>
               </select>
             </label>
             <div className="field-label"><span>{t('kanban.dependencies')}</span><DependencyPicker cards={cards} companyId={selected.companyId} projectId={(draft?.projectId ?? selected.projectId) || null} excludeCardId={selected.id} value={draft?.dependencyCardIds ?? []} onChange={(next) => setDraft({ ...(draft ?? {}), dependencyCardIds: next })} /></div>
@@ -1286,6 +1314,8 @@ export function KanbanBoard() {
               <label className="field-label">{t('kanban.maxRetries')}<input className="input" type="number" min={1} max={10} value={Number(draft?.maxRetries ?? 3)} onChange={(e) => setDraft({ ...(draft ?? {}), maxRetries: Number(e.target.value) })} /></label>
               <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={Boolean(draft?.requiresApproval)} onChange={(e) => setDraft({ ...(draft ?? {}), requiresApproval: e.target.checked })} /> {t('kanban.requiresApproval')}</label>
             </div>
+            <details className="runtime-details">
+            <summary>{t('kanban.runtimeDetails')}</summary>
             <div className="meta-grid">
               <span>UUID <b>{selected.id}</b></span>
               <span>{t('kanban.stage')} <b>{selected.columnStatus}</b></span>
@@ -1298,6 +1328,7 @@ export function KanbanBoard() {
               <span>{t('kanban.activeRun')} <b>{selected.activeHeartbeatRunId ?? 'none'}</b></span>
               <span>{t('kanban.lock')} <b>{selected.executionLockId ?? 'none'}</b></span>
             </div>
+            </details>
             {selected.reviewFeedback && <pre className="log-block">{selected.reviewFeedback}</pre>}
             <div className="action-row">
               <button className="btn btn-primary" disabled={busy} onClick={saveSelected}><Save size={15} /> {t('common.save')}</button>
