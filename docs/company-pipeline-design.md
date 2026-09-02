@@ -167,6 +167,7 @@ CV 資料來源:reviewer 在結構化報告填 `score: 0-10`(**加進 `agentRepo
 - `POST /api/approvals/:id/decide` 支援 checkpoint 回答(選項 + 文字)
 - `PUT /api/departments/:id` 支援 `headAgentId`
 - 列表視圖用的 `GET /api/cards?view=tree` 或前端自組
+- `decisionMode` enum 改為 `auto | solo | pair | swarm`(shared schema);舊值 `execute/delegate/hybrid/review/integrate` 讀取時映射(`delegate`→`auto`),不做資料遷移
 
 **Prompt**
 - 撤「child cards are legacy」;加 §3 分工規則與六條限制
@@ -207,7 +208,7 @@ A 是地基;B 是願景的靈魂;E 是「上手好用」的來源。
 - CEO 判斷失誤(小任務走大流程 / 大任務沒 brainstorm):前者成本可接受,後者會在方向確認 checkpoint 被 Client 接住——這正是 checkpoint 阻塞式的價值。
 - 部門主管是 player-coach:允許,prompt 要求優先分配;主管自己接成員卡時審理員不能是自己(規則 4 自動擋)。
 - 一個 agent 同時是多個部門主管:允許但不建議,`head_agent_id` 不設唯一約束。
-- **(待拍板)協作模式的語意**:提案要四模式 solo / delegate / pair / swarm 且預設值前後矛盾(§三說預設 solo,§十一說預設 agent 自行決定)。在本設計裡,拆不拆已由組織結構與資源視圖決定,「強制 delegate」失去必要性;協作模式應退為卡上的**提示/約束**而非流程開關。候選:`auto`(預設,負責人在規則內自決)/ `solo`(禁止拆與委派)/ `pair`(每個 checkpoint 先問審理員,建在 peer @mention 上)/ `swarm`(提示按同構切片平行拆)。
+- ~~協作模式的語意~~:**定案**——協作模式退為卡上的提示/約束,不是流程開關。`decisionMode` 新語意:`auto`(預設;負責人在拆卡規則內自決,有資源視圖支撐)/ `solo`(禁止拆與委派,小任務直通)/ `pair`(每個 checkpoint 先問審理員,建在 peer @mention 上)/ `swarm`(提示按同構切片平行拆)。**「強制 delegate」退場**——`collaborationModeRequiresDelegation` 與現有 `delegate` 值改為 legacy 映射到 `auto`;結構該拆自然會拆,不需要家法。UI 下拉四選項,預設 auto。
 - **(待拍板)免審與「審理員必填」的張力**:提案要小卡可 label 免審;本設計規則 4 要求每張子卡必有審理員。候選折衷:agent 拆出的子卡一律必填(便宜的保險),只有**人**建的卡可以不設審理員。
 - **(待拍板)swarm 的 fan-out 與每節點 3 張上限**:提案的 swarm 例子是 10 檔 → 3 人(合規),100 檔 → 5 人會撞上限。候選:swarm 走公司層級可調的上限(硬上限 5),再多就分輪。
 
