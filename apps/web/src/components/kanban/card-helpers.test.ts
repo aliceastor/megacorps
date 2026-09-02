@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { draftFromCard, isDraftDirty } from './card-helpers.ts';
+import { draftFromCard, isDraftDirty, shouldReseedDraft } from './card-helpers.ts';
 import type { Card } from './card-types.ts';
 
 // The close guard: the panel refuses to close on a backdrop click (and asks on
@@ -52,6 +52,26 @@ test('null and undefined are the same "unset" value; array order matters', () =>
   assert.equal(isDraftDirty({ ...draftFromCard(base), tags: undefined }, base), false);
   const ordered = card({ dependencyCardIds: ['d-1', 'd-2'] });
   assert.equal(isDraftDirty({ ...draftFromCard(ordered), dependencyCardIds: ['d-2', 'd-1'] }, ordered), true);
+});
+
+test('dirtiness is measured against the seed row, so a status change landing under the panel is not an edit', () => {
+  const seed = card({ columnStatus: 'todo' });
+  const draft = draftFromCard(seed);
+  const claimed = card({ columnStatus: 'in_progress', assigneeId: 'a-2' });
+  assert.equal(isDraftDirty(draft, seed), false, 'the board keeps the seed as the baseline');
+  assert.equal(isDraftDirty(draft, claimed), true, 'comparing against the live row would trip the close guard');
+});
+
+test('a fresher row of the same card reseeds a clean draft, never an edited one or an open edit form', () => {
+  const seed = card({ columnStatus: 'todo' });
+  const fresher = card({ columnStatus: 'in_progress', assigneeId: 'a-2' });
+  assert.equal(shouldReseedDraft(draftFromCard(seed), seed, fresher, false), true);
+  assert.equal(shouldReseedDraft(null, seed, fresher, false), true, 'no draft yet: nothing to lose');
+  assert.equal(shouldReseedDraft({ ...draftFromCard(seed), title: 'Renamed' }, seed, fresher, false), false);
+  assert.equal(shouldReseedDraft(draftFromCard(seed), seed, fresher, true), false);
+  assert.equal(shouldReseedDraft(draftFromCard(seed), seed, seed, false), false, 'the row it was seeded from');
+  assert.equal(shouldReseedDraft(draftFromCard(seed), null, fresher, false), false, 'nothing seeded yet');
+  assert.equal(shouldReseedDraft(draftFromCard(seed), seed, card({ id: 'card-2' }), false), false, 'another card is seeded by the id effect');
 });
 
 test('the draft shape matches what the board seeds', () => {

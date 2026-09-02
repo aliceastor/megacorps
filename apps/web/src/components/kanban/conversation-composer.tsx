@@ -66,6 +66,7 @@ export function ConversationComposer({
   addComment,
 }: ConversationComposerProps) {
   const { t } = useLocale();
+  const rootRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingCaretRef = useRef<number | null>(null);
   const listboxId = useId();
@@ -82,11 +83,16 @@ export function ConversationComposer({
   const canSend = !busy && commentBody.trim().length > 0;
   const companyAgents = agents.filter((agent) => !selected.companyId || agent.companyId === selected.companyId);
 
-  // A preselected non-comment action (overview CTA, 留言並暫停) opens and focuses the editor.
+  // A preselected non-comment action (overview CTA, 留言並暫停) opens and focuses
+  // the editor. A change made from inside the composer — the action or author
+  // select — leaves the focus where the reader has it, so arrowing through the
+  // select is not cut short by a jump into the textarea.
   useEffect(() => {
     if (commentAction === 'comment') return;
     setExpanded(true);
-    textareaRef.current?.focus();
+    const root = rootRef.current;
+    const activeInside = Boolean(root && document.activeElement && root.contains(document.activeElement));
+    if (!activeInside) textareaRef.current?.focus();
   }, [commentAction]);
 
   // React moves the caret to the end after a programmatic value change; put it back.
@@ -164,7 +170,7 @@ export function ConversationComposer({
 
   const agentOptions = companyAgents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}{agent.role ? ` / ${agent.role}` : ''}</option>);
 
-  return <div className={`conv-composer ${isExpanded ? '' : 'collapsed'}`} onBlur={onRootBlur}>
+  return <div ref={rootRef} className={`conv-composer ${isExpanded ? '' : 'collapsed'}`} onBlur={onRootBlur}>
     <div className="conv-composer-strip">
       <select className="input compact" aria-label={t('kanban.author')} value={commentAgentId} onChange={(event) => {
         setCommentAgentId(event.target.value);

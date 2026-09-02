@@ -723,6 +723,25 @@ test('highlightMentions bolds @slug tokens by the server rule and ignores e-mail
   assert.deepEqual(highlightMentions('@Ben_2.x-y', []).map((segment) => segment.text), ['@Ben_2.x-y']);
 });
 
+test('highlightMentions uses the server\'s lead set only: a quote, dash, stop or 、 before the @ is plain text', () => {
+  const mentionAgents = agents.map((agent) => ({ slug: agent.slug, name: agent.name }));
+  assert.deepEqual(highlightMentions('"@ben please check"', mentionAgents), [{ type: 'text', text: '"@ben please check"' }]);
+  assert.deepEqual(highlightMentions('—@ben', mentionAgents), [{ type: 'text', text: '—@ben' }]);
+  assert.deepEqual(highlightMentions('已完成。@ben 請審核', mentionAgents), [{ type: 'text', text: '已完成。@ben 請審核' }]);
+  assert.deepEqual(highlightMentions('【@ben】', mentionAgents), [{ type: 'text', text: '【@ben】' }]);
+  assert.deepEqual(highlightMentions('@alice、@ben 請看', mentionAgents), [
+    { type: 'mention', text: '@alice', slug: 'alice', known: true },
+    { type: 'text', text: '、@ben 請看' },
+  ]);
+  assert.deepEqual(highlightMentions('「@ben」好，@cara', mentionAgents), [
+    { type: 'text', text: '「' },
+    { type: 'mention', text: '@ben', slug: 'ben', known: true },
+    { type: 'text', text: '」好，' },
+    { type: 'mention', text: '@cara', slug: 'cara', known: true },
+  ]);
+  assert.deepEqual(highlightMentions('[@ben]（@cara）', mentionAgents).filter((segment) => segment.type === 'mention').map((segment) => segment.slug), ['ben', 'cara']);
+});
+
 test('mentionCandidates prefix-matches slug or name, case-insensitively, at most 6', () => {
   const pool = ['alice', 'ben', 'bella', 'cara', 'dana', 'erin', 'frank', 'gina'].map((slug) => ({ slug, name: slug[0]!.toUpperCase() + slug.slice(1) }));
   assert.deepEqual(mentionCandidates('b', pool).map((agent) => agent.slug), ['ben', 'bella']);

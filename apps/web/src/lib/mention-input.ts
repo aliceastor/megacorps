@@ -1,11 +1,15 @@
 // Caret-side helpers for the composer's @mention autocomplete: which `@token`
 // the caret is in, and how to replace it. Pure and React-free so node:test can
-// pin the rule down; the composer only calls these. The lead rule matches the
-// server's mention regex: "@" at the start or after whitespace / punctuation,
-// so "a@b.com" is never a mention.
+// pin the rule down; the composer only calls these. The lead rule is exactly
+// the server's (apps/server/src/card-mentions.ts MENTION_PATTERN): "@" at the
+// start or after whitespace or one of ( （ , ， : ： ; ； 「 [. So "a@b.com" is
+// never a mention, and neither is "@ben or —@ben: the server would not deliver
+// those, so the popover must not offer them and the @ button spaces them out.
 
 const TOKEN_CHAR = /[\p{L}\p{N}_.-]/u;
-const LEAD_CHAR = /[\s\p{P}]/u;
+/** Character-class body of what may precede an "@" (the server's set); card-conversation.ts builds its highlight regex from it. Keep in step with the server. */
+export const MENTION_LEAD_CHARS = '\\s(（,，:：;；「\\[';
+const LEAD_CHAR = new RegExp(`[${MENTION_LEAD_CHARS}]`, 'u');
 
 /** Longest query the popover reacts to; longer tokens are ordinary text. */
 export const MENTION_QUERY_MAX = 20;

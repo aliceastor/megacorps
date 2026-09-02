@@ -495,6 +495,7 @@ export function CardConversation({ selected, cards, agents, conversation, view, 
   const { t, tf, locale } = useLocale();
   const now = Date.now();
   const listRef = useRef<HTMLDivElement>(null);
+  const tabRef = useRef<HTMLElement>(null);
   const [limit, setLimit] = useState(CONVERSATION_PAGE_SIZE);
   const [pendingNew, setPendingNew] = useState(0);
   const anchorRef = useRef<{ height: number; top: number; sort: ConversationSort } | null>(null);
@@ -507,7 +508,10 @@ export function CardConversation({ selected, cards, agents, conversation, view, 
   }, [selected.id, view.filter, view.sort]);
 
   const mentionAgents = useMemo(() => agents.filter((agent) => agent.slug).map((agent) => ({ slug: agent.slug ?? '', name: agent.name })), [agents]);
-  const scrollContainer = () => listRef.current?.closest<HTMLElement>('.detail-panel') ?? null;
+  // The panel is the scroller. Resolved from the tab section, which is always
+  // rendered, so the scroll listener below exists before any rows arrive (the
+  // list itself renders only once there are rows). Without a panel, the list.
+  const scrollContainer = () => (tabRef.current ?? listRef.current)?.closest<HTMLElement>('.detail-panel') ?? listRef.current ?? null;
   const answerAbove = () => {
     const panel = scrollContainer();
     const cta = panel?.querySelector<HTMLElement>('.overview-cta');
@@ -603,7 +607,7 @@ export function CardConversation({ selected, cards, agents, conversation, view, 
     }
   }
 
-  return <section className="conv-tab" aria-label={t('kanban.tabConversation')}>
+  return <section ref={tabRef} className="conv-tab" aria-label={t('kanban.tabConversation')}>
     <div className="conv-filters" role="toolbar" aria-label={t('kanban.tabConversation')}>
       {FILTERS.map((filter) => <button key={filter} type="button" className={`conv-filter ${view.filter === filter ? 'active' : ''}`} aria-pressed={view.filter === filter} onClick={() => setView({ ...view, filter })}>
         {t(`kanban.convFilter.${filter}`)}<span className="conv-tab-count">{filterCount(filter)}</span>

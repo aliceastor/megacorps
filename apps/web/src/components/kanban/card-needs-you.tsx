@@ -42,7 +42,7 @@ export function CardNeedsYou({ card, approvals, comments, busy, onRunNow, onRevi
       {payload.artifactRefs && payload.artifactRefs.length > 0 && <div className="meta-grid">
         {payload.artifactRefs.map((ref) => <span key={ref}>{/^https?:\/\//.test(ref) ? <a href={ref} target="_blank" rel="noreferrer">{ref}</a> : <code>{ref}</code>}</span>)}
       </div>}
-      <CheckpointAnswerForm approval={variant.approval} disabled={busy} onAnswered={() => onCheckpointAnswered()} />
+      <CheckpointAnswerForm key={variant.approval.id} approval={variant.approval} disabled={busy} onAnswered={() => onCheckpointAnswered()} />
     </section>;
   }
 
@@ -60,7 +60,7 @@ export function CardNeedsYou({ card, approvals, comments, busy, onRunNow, onRevi
   if (variant.kind === 'approval') {
     return <section className="overview-cta" aria-label={t('kanban.filterMyReviews')}>
       <p className="overview-cta-title">{t('kanban.filterMyReviews')}</p>
-      <ApprovalDecisionForm approval={variant.approval} disabled={busy} onDecided={onApprovalDecided} />
+      <ApprovalDecisionForm key={variant.approval.id} approval={variant.approval} disabled={busy} onDecided={onApprovalDecided} />
     </section>;
   }
 

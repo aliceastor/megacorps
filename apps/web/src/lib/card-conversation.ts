@@ -4,6 +4,7 @@
 // rules down; the UI only renders what comes out of buildConversation.
 import { isDelegationReviewComment } from '../components/kanban/card-helpers';
 import type { Agent, Card, CardAction, CardComment, CommentActionMode, ReviewerScope, TaskLog, WorkProduct } from '../components/kanban/card-types';
+import { MENTION_LEAD_CHARS } from './mention-input';
 
 export { isDelegationReviewComment };
 
@@ -851,10 +852,12 @@ export function buildCommentPayload(mode: CommentActionMode, form: CommentCompos
 export type MentionAgent = { slug: string; name: string };
 export type MentionSegment = { type: 'text' | 'mention'; text: string; slug?: string; known?: boolean };
 
-// Same token rule as the server: "@" at the start or after whitespace /
-// punctuation, then [\p{L}\p{N}_.-]{1,64}. "a@b.com" does not match because
-// the "@" follows a letter.
-const MENTION_RE = /(^|[\s\p{P}])@([\p{L}\p{N}_.-]{1,64})/gu;
+// Same token rule as the server (card-mentions.ts MENTION_PATTERN): "@" at the
+// start or after whitespace / ( （ , ， : ： ; ； 「 [, then [\p{L}\p{N}_.-]{1,64}.
+// "a@b.com" does not match because the "@" follows a letter; "@ben and 。@ben
+// do not match either — the server never delivers those, so they must not be
+// shown as sent mentions.
+const MENTION_RE = new RegExp(`(^|[${MENTION_LEAD_CHARS}])@([\\p{L}\\p{N}_.-]{1,64})`, 'gu');
 
 export function highlightMentions(body: string, agents: MentionAgent[] = []): MentionSegment[] {
   const segments: MentionSegment[] = [];

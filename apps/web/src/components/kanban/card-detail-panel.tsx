@@ -180,6 +180,7 @@ export function CardDetailPanel(props: CardDetailPanelProps) {
             onDone={finishEditing}
           />
           : <CardOverview
+            key={selected.id}
             selected={selected}
             cards={props.cards}
             agents={props.agents}

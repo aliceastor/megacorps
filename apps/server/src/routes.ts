@@ -2731,6 +2731,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           summary: body.summary ?? null,
           output: body.output ?? null,
           costUsd: body.costUsd,
+          report: body.report ?? null,
         });
       } catch (error) {
         return reply.code(400).send({ error: error instanceof Error ? error.message : 'message_task_webhook_failed' });

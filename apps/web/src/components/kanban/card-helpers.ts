@@ -106,3 +106,16 @@ export function isDraftDirty(draft: Partial<Card> | null | undefined, card: Card
   const base = draftFromCard(card);
   return (Object.keys(base) as Array<keyof Card>).some((key) => key in draft && !sameValue(draft[key], base[key]));
 }
+
+/**
+ * `selected` was replaced by a fresher row of the same card (a board reload,
+ * an action's response) while the panel stayed open. The draft follows it
+ * unless the reader has the edit form open or has unsaved edits against the
+ * row it was seeded from — a stale draft saved later would post the old stage.
+ * A different card, or the very row the draft came from, is not a reseed.
+ */
+export function shouldReseedDraft(draft: Partial<Card> | null | undefined, base: Card | null, next: Card, editing: boolean): boolean {
+  if (!base || base === next || base.id !== next.id) return false;
+  if (editing) return false;
+  return !isDraftDirty(draft, base);
+}

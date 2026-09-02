@@ -8,6 +8,11 @@
 // a new assignee lacked was one place that says "here is what the previous
 // person actually produced, here is who told you what since, do not start
 // over".
+//
+// Sections are emitted in priority order (open questions, human instructions,
+// latest review, ownership changes, previous runs, work products) so that when
+// the digest has to be clipped it is the bulky, lowest-priority tail that goes;
+// the closing "do not redo finished work" sentence is always kept.
 
 export type HandoverRun = {
   agentId: string | null;
@@ -32,6 +37,7 @@ export type HandoverInput = {
 
 export const HANDOVER_CHAR_LIMIT = 3500;
 export const HANDOVER_LIMITS = { runs: 3, handoffs: 3, instructions: 5, questions: 5, products: 6 } as const;
+const HANDOVER_RUN_OUTPUT_CHARS = 700;
 const HANDOVER_TRUNCATED_TAIL = '\n[handover truncated]';
 
 function flatten(text: string | null | undefined, maxChars: number): string {
@@ -64,17 +70,13 @@ export function formatHandoverSection(input: HandoverInput): string {
 
   const workedBefore = Boolean(input.assigneeId) && runs.some((run) => run.agentId === input.assigneeId);
   const lines: string[] = ['=== Handover: what happened on this card before this run ==='];
-  if (runs.length > 0) {
-    lines.push('Previous runs (newest first):');
-    for (const run of runs) {
-      const who = input.assigneeId && run.agentId === input.assigneeId ? 'you' : run.agentName;
-      const duration = run.durationSeconds === null || run.durationSeconds === undefined ? 'n/a' : `${run.durationSeconds}s`;
-      lines.push(`- ${stamp(run.completedAt)} | ${who} | ${run.kind}/${run.status} | ${duration} | ${flatten(run.output, 1200) || 'no output captured'}`);
-    }
+  if (questions.length > 0) {
+    lines.push('Questions colleagues asked you on this card (MegaCorps answers each one for you in a separate short turn - do not answer them in your notes and do not re-mention the asker; just take them into account):');
+    for (const question of questions) lines.push(`- from ${question.fromName}: ${flatten(question.body, 400)}`);
   }
-  if (handoffs.length > 0) {
-    lines.push('Ownership changes:');
-    for (const handoff of handoffs) lines.push(`- ${stamp(handoff.at)} | ${handoff.fromName} handed off: ${flatten(handoff.body, 400)}`);
+  if (instructions.length > 0) {
+    lines.push('Instructions from humans since the previous run:');
+    for (const item of instructions) lines.push(`- ${stamp(item.at)} | ${item.authorName} (${item.action}): ${flatten(item.body, 600)}`);
   }
   if (latestReview) {
     lines.push(`Latest review: ${latestReview.reviewerName} (${latestReview.action}, ${stamp(latestReview.at)}): ${flatten(latestReview.body, 800)}`);
@@ -82,23 +84,33 @@ export function formatHandoverSection(input: HandoverInput): string {
   if (reviewFeedback && (!latestReview || flatten(latestReview.body, 800) !== flatten(reviewFeedback, 800))) {
     lines.push(`Current review feedback on the card: ${flatten(reviewFeedback, 800)}`);
   }
-  if (instructions.length > 0) {
-    lines.push('Instructions from humans since the previous run:');
-    for (const item of instructions) lines.push(`- ${stamp(item.at)} | ${item.authorName} (${item.action}): ${flatten(item.body, 600)}`);
+  if (handoffs.length > 0) {
+    lines.push('Ownership changes:');
+    for (const handoff of handoffs) lines.push(`- ${stamp(handoff.at)} | ${handoff.fromName} handed off: ${flatten(handoff.body, 400)}`);
   }
-  if (questions.length > 0) {
-    lines.push('Questions waiting for your answer (answer them in your report notes or output; the asker is watching this card):');
-    for (const question of questions) lines.push(`- from ${question.fromName}: ${flatten(question.body, 400)}`);
+  if (runs.length > 0) {
+    lines.push('Previous runs (newest first):');
+    for (const run of runs) {
+      const who = input.assigneeId && run.agentId === input.assigneeId ? 'you' : run.agentName;
+      const duration = run.durationSeconds === null || run.durationSeconds === undefined ? 'n/a' : `${run.durationSeconds}s`;
+      lines.push(`- ${stamp(run.completedAt)} | ${who} | ${run.kind}/${run.status} | ${duration} | ${flatten(run.output, HANDOVER_RUN_OUTPUT_CHARS) || 'no output captured'}`);
+    }
   }
   if (products.length > 0) {
     lines.push('Work products so far:');
     for (const product of products) lines.push(`- ${product.type}: ${product.title}${product.url ? ` (${product.url})` : ''}`);
   }
-  lines.push(workedBefore
+  const closing = workedBefore
     ? 'You worked this card before; continue from your last output. Do not redo finished work: build on the outputs above, and say explicitly in your report what you changed relative to the previous run.'
-    : 'Do not redo finished work: build on the outputs above, and say explicitly in your report what you changed relative to the previous run.');
+    : 'Do not redo finished work: build on the outputs above, and say explicitly in your report what you changed relative to the previous run.';
 
-  const text = lines.join('\n');
+  const body = lines.join('\n');
+  const text = `${body}\n${closing}`;
   if (text.length <= HANDOVER_CHAR_LIMIT) return text;
-  return `${text.slice(0, HANDOVER_CHAR_LIMIT - HANDOVER_TRUNCATED_TAIL.length).trimEnd()}${HANDOVER_TRUNCATED_TAIL}`;
+  // Priority cut: clip the tail of the body (the bulky, lowest-priority
+  // sections come last) but always keep the truncation marker and the closing
+  // instruction, so open questions, human instructions and the "do not redo"
+  // line survive however long the previous run outputs were.
+  const tail = `${HANDOVER_TRUNCATED_TAIL}\n${closing}`;
+  return `${body.slice(0, Math.max(0, HANDOVER_CHAR_LIMIT - tail.length)).trimEnd()}${tail}`;
 }

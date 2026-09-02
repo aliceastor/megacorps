@@ -2959,6 +2959,7 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
   summary?: string | null;
   output?: string | null;
   costUsd?: number;
+  report?: { notes?: string[]; mentions?: PeerMention[] } | null;
 }): Promise<{ ok: true; cardId: string; taskRunId: string; kind: string; newStatus: string; delegated: boolean; reviewerId?: string | null }> {
   const [taskRun] = await db.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).limit(1);
   if (!taskRun || (taskRun.kind !== 'message' && taskRun.kind !== 'message_review') || !taskRun.messageCommentId) throw new Error('message_task_run_not_found');
@@ -2982,11 +2983,11 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
       return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'failed', delegated: false, reviewerId: comment.reviewerAgentId };
     }
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), isNull(agents.deletedAt))).limit(1) : [];
-    const webhookMessageNotes = actorAgent ? reportNotesFromOutput(output) : [];
+    const webhookMessageNotes = actorAgent ? reportNotesFromOutput(output, input.report) : [];
     if (actorAgent && webhookMessageNotes.length) {
       try { await processReportNotes(card, actorAgent, webhookMessageNotes); } catch { /* note delivery must never fail the run */ }
     }
-    const webhookMessageMentions = actorAgent ? peerMentionsFromOutput(output) : [];
+    const webhookMessageMentions = actorAgent ? peerMentionsFromOutput(output, input.report) : [];
     if (actorAgent && webhookMessageMentions.length) {
       try { await processPeerMentions(card, actorAgent, webhookMessageMentions); } catch { /* question delivery must never fail the run */ }
     }

@@ -12,7 +12,7 @@ import { readCardSeen, rememberCardSeen, writeCardSeen } from '@/lib/card-seen';
 import { createKeyedDebounce } from '@/lib/keyed-debounce';
 import { useLocale } from '@/lib/locale-context';
 import { CardDetailPanel } from './kanban/card-detail-panel';
-import { agentDisplayName, goalScope, isDraftDirty, parseCsv, priorityNumber, priorityValue, scopedGoalOptions, statusColor } from './kanban/card-helpers';
+import { agentDisplayName, draftFromCard, goalScope, isDraftDirty, parseCsv, priorityNumber, priorityValue, scopedGoalOptions, shouldReseedDraft, statusColor } from './kanban/card-helpers';
 import { type Agent, type ApiEvent, type CachedRows, type CachedValue, type Card, type CardAction, type CardApproval, type CardComment, type CardDelegationSummary, type CardDetailTab, type CardStatus, type CardTabCache, type CardTabKey, type Company, type Department, type DetailLayout, type Goal, type LocaleLabels, type Project, type SubtreeCard, type TaskLog, type TaskRun, type WorkProduct, priorities, statusLabels, statuses, workProductTypes } from './kanban/card-types';
 import { DependencyPicker } from './kanban/dependency-picker';
 
@@ -350,6 +350,10 @@ export function KanbanBoard() {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [loading, setLoading] = useState(true);
   const selectedIdRef = useRef<string | null>(null);
+  // The card the edit draft was seeded from. The close guard measures the
+  // draft against this row, not the live `selected`: a status or assignee
+  // change landing under an open panel is not an edit the reader made.
+  const draftBaseRef = useRef<Card | null>(null);
   const boardQuery = useQuery({ queryKey: ['kanbanBoard'], queryFn: fetchKanbanBoard });
   const selectedId = selected?.id ?? null;
   // A parent card: rollup set, a split round recorded, or a board card pointing at it.
@@ -367,6 +371,32 @@ export function KanbanBoard() {
   const cardApprovals = selectedId && approvalsQuery.data ? approvalsQuery.data : null;
   const cardChildren = useMemo(() => (selectedId && selectedIsParent && subtreeQuery.data ? subtreeQuery.data.filter((row) => row.depth === 1) : null), [selectedId, selectedIsParent, subtreeQuery.data]);
 
+  // Every selection change goes through here so selectedIdRef is right before
+  // the commit: the loaders compare against it, and a board reload resolves
+  // the selection from it when the rows arrive.
+  function selectCard(card: Card | null) {
+    selectedIdRef.current = card?.id ?? null;
+    setSelected(card);
+  }
+
+  function seedDraft(card: Card) {
+    draftBaseRef.current = card;
+    setDraft(draftFromCard(card));
+  }
+
+  // Selection after a board reload, resolved when the rows arrive rather than
+  // in the render that scheduled it: a panel the reader closed meanwhile stays
+  // closed, a switch to another card sticks, and a card the board's rows do
+  // not include (a child opened from the subtree; GET /api/cards is capped)
+  // stays open. Only card.deleted and deleteSelected close the panel.
+  function syncSelectedWith(nextCards: Card[]) {
+    setSelected((previous) => {
+      const id = selectedIdRef.current;
+      if (!id) return null;
+      return nextCards.find((card) => card.id === id) ?? previous;
+    });
+  }
+
   async function refresh() {
     setLoading(true);
     try {
@@ -380,7 +410,7 @@ export function KanbanBoard() {
       if (!newCompany && nextCompanies[0]) setNewCompany(nextCompanies[0].id);
       const onlyCompany = nextCompanies.length === 1 ? nextCompanies[0] : undefined;
       if (!filterCompany && onlyCompany) setFilterCompany(onlyCompany.id);
-      if (selected) setSelected(nextCards.find((card) => card.id === selected.id) ?? null);
+      syncSelectedWith(nextCards);
     } catch (err) {
       if (isQueryCancellation(err)) return;
       setToast({ message: err instanceof Error ? err.message : t('kanban.loadFailed'), type: 'error' });
@@ -601,7 +631,7 @@ export function KanbanBoard() {
     if (!newCompany && boardQuery.data.companies[0]) setNewCompany(boardQuery.data.companies[0].id);
     const onlyCompany = boardQuery.data.companies.length === 1 ? boardQuery.data.companies[0] : undefined;
     if (!filterCompany && onlyCompany) setFilterCompany(onlyCompany.id);
-    if (selected) setSelected(boardQuery.data.cards.find((card) => card.id === selected.id) ?? null);
+    syncSelectedWith(boardQuery.data.cards);
     setLoading(false);
   }, [boardQuery.data]);
   useEffect(() => {
@@ -614,7 +644,7 @@ export function KanbanBoard() {
       const detail = (event as CustomEvent<LiveEvent>).detail;
       if (!detail?.type) return;
       if (detail.type === 'card.deleted' && detail.cardId === selected?.id) {
-        setSelected(null);
+        selectCard(null);
         void refresh();
         return;
       }
@@ -662,6 +692,7 @@ export function KanbanBoard() {
     setLastSeenAt(seenId ? readCardSeen()[seenId] ?? null : null);
     const markSeen = () => { if (seenId) writeCardSeen(rememberCardSeen(readCardSeen(), seenId, Date.now())); };
     if (!selected) {
+      draftBaseRef.current = null;
       setDraft(null);
       setLogs([]);
       setActions([]);
@@ -672,22 +703,7 @@ export function KanbanBoard() {
       setLogsHasMore(false);
       return;
     }
-    setDraft({
-      title: selected.title,
-      body: selected.body,
-      columnStatus: selected.columnStatus,
-      assigneeId: selected.assigneeId ?? null,
-      reviewerId: selected.reviewerId ?? null,
-      departmentId: selected.departmentId ?? null,
-      projectId: selected.projectId ?? null,
-      goalId: selected.goalId ?? null,
-      priority: selected.priority,
-      tags: selected.tags ?? [],
-      dependencyCardIds: selected.dependencyCardIds ?? [],
-      decisionMode: selected.decisionMode ?? null,
-      requiresApproval: selected.requiresApproval ?? false,
-      maxRetries: selected.maxRetries ?? 3,
-    });
+    seedDraft(selected);
     setCommentDelegateReviewerId(selected.assigneeId ?? selected.reviewerId ?? '');
     const cached = cardTabCache[selected.id] ?? {};
     setComments(cached.comments?.rows ?? []);
@@ -724,6 +740,12 @@ export function KanbanBoard() {
       markSeen();
     };
   }, [selected?.id]);
+  // Same card, fresher row (a reload, an action's response, a live event): a
+  // clean draft follows it so a later save never posts a stale stage. An open
+  // edit form or unsaved edits keep the draft the reader is working on.
+  useEffect(() => {
+    if (selected && shouldReseedDraft(draft, draftBaseRef.current, selected, overviewEditing)) seedDraft(selected);
+  }, [selected]);
 
   const companyNameById = useMemo(() => new Map(companies.map((company) => [company.id, company.name])), [companies]);
   const visibleCards = useMemo(() => cards.filter((card) => {
@@ -805,23 +827,8 @@ export function KanbanBoard() {
   async function updateCard(card: Card, patch: CardUpdatePayload) {
     const updated = await api<Card>(`/api/cards/${card.id}`, { method: 'PUT', body: JSON.stringify({ ...patch, updatedAt: card.updatedAt }) });
     setCards(cards.map((item) => (item.id === updated.id ? updated : item)));
-    setSelected(updated);
-    setDraft({
-      title: updated.title,
-      body: updated.body,
-      columnStatus: updated.columnStatus,
-      assigneeId: updated.assigneeId ?? null,
-      reviewerId: updated.reviewerId ?? null,
-      departmentId: updated.departmentId ?? null,
-      projectId: updated.projectId ?? null,
-      goalId: updated.goalId ?? null,
-      priority: updated.priority,
-      tags: updated.tags ?? [],
-      dependencyCardIds: updated.dependencyCardIds ?? [],
-      decisionMode: updated.decisionMode ?? null,
-      requiresApproval: updated.requiresApproval ?? false,
-      maxRetries: updated.maxRetries ?? 3,
-    });
+    selectCard(updated);
+    seedDraft(updated);
     void loadCardLogs(updated, true);
     void loadCardActions(updated, true);
     void loadCardApiLogs(updated, true);
@@ -860,22 +867,7 @@ export function KanbanBoard() {
 
   function resetDraft() {
     if (!selected) return;
-    setDraft({
-      title: selected.title,
-      body: selected.body,
-      columnStatus: selected.columnStatus,
-      assigneeId: selected.assigneeId ?? null,
-      reviewerId: selected.reviewerId ?? null,
-      departmentId: selected.departmentId ?? null,
-      projectId: selected.projectId ?? null,
-      goalId: selected.goalId ?? null,
-      priority: selected.priority,
-      tags: selected.tags ?? [],
-      dependencyCardIds: selected.dependencyCardIds ?? [],
-      decisionMode: selected.decisionMode ?? null,
-      requiresApproval: selected.requiresApproval ?? false,
-      maxRetries: selected.maxRetries ?? 3,
-    });
+    seedDraft(selected);
   }
 
   async function onDragEnd(event: DragEndEvent) {
@@ -902,7 +894,8 @@ export function KanbanBoard() {
         await refresh();
       } else {
         setCards(cards.map((card) => (card.id === result.id ? result : card)));
-        setSelected(result);
+        // The reader may have closed the panel or moved on while the request ran.
+        if (selectedIdRef.current === result.id) setSelected(result);
         setToast({ message, type: 'success' });
       }
       void queryClient.invalidateQueries({ queryKey: ['kanbanBoard'] });
@@ -923,7 +916,7 @@ export function KanbanBoard() {
       await api(`/api/cards/${selected.id}`, { method: 'DELETE' });
       setCards(cards.filter((card) => card.id !== selected.id).map((card) => (card.parentCardId === selected.id ? { ...card, parentCardId: null } : card)));
       deleteCardTabCache(selected.id);
-      setSelected(null);
+      selectCard(null);
       void queryClient.invalidateQueries({ queryKey: ['kanbanBoard'] });
       setToast({ message: t('kanban.taskDeleted'), type: 'success' });
     } catch (err) {
@@ -1010,9 +1003,12 @@ export function KanbanBoard() {
   }
 
   // Close guard: an edited draft or an unsent comment keeps the panel open when
-  // the backdrop is clicked; the × asks first. The card.deleted live path and
-  // deleteSelected call setSelected(null) directly and bypass this.
-  const draftDirty = Boolean(selected && draft && isDraftDirty(draft, selected));
+  // the backdrop is clicked; the × asks first. "Edited" is measured against the
+  // row the draft was seeded from (draftBaseRef), so a card that changed under
+  // the panel does not trip it. The card.deleted live path and deleteSelected
+  // call selectCard(null) directly and bypass this.
+  const draftBase = draftBaseRef.current;
+  const draftDirty = Boolean(selected && draft && draftBase && isDraftDirty(draft, draftBase));
   const detailDirty = draftDirty || commentBody.trim().length > 0;
   function closePanel(source: 'overlay' | 'button') {
     if (!selected) return;
@@ -1020,12 +1016,12 @@ export function KanbanBoard() {
       if (source === 'overlay') { setToast({ message: t('kanban.closeBlocked'), type: 'error' }); return; }
       if (!window.confirm(t('kanban.closeDiscard'))) return;
     }
-    setSelected(null);
+    selectCard(null);
   }
   function openCard(card: Card) {
     if (selected?.id === card.id) return;
     if (selected && detailDirty && !window.confirm(t('kanban.closeDiscard'))) return;
-    setSelected(cards.find((item) => item.id === card.id) ?? card);
+    selectCard(cards.find((item) => item.id === card.id) ?? card);
     setTab(defaultDetailTab);
   }
   function setDetailLayout(next: DetailLayout) {
@@ -1101,7 +1097,7 @@ export function KanbanBoard() {
         projects={projects}
         statusLabel={(status) => statusLabels[status as CardStatus]?.[locale] ?? status}
         statusColor={statusColor}
-        onSelect={(card) => { const full = cards.find((item) => item.id === card.id); if (full) { setSelected(full); setTab(defaultDetailTab); } }}
+        onSelect={(card) => { const full = cards.find((item) => item.id === card.id); if (full) { selectCard(full); setTab(defaultDetailTab); } }}
       />
     ) : (
       <DndContext onDragEnd={onDragEnd}>
@@ -1112,7 +1108,7 @@ export function KanbanBoard() {
             agents={agents}
             companies={companies}
             cards={cardsForStatusGroup(boardCards, group)}
-            onSelect={(card) => { setSelected(card); setTab(defaultDetailTab); }}
+            onSelect={(card) => { selectCard(card); setTab(defaultDetailTab); }}
           />)}
         </div>
       </DndContext>

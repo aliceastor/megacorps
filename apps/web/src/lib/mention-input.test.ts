@@ -27,6 +27,21 @@ test('mentionQueryAtCaret is null away from a token, after a letter, past a spac
   assert.equal(mentionQueryAtCaret(`@${'x'.repeat(MENTION_QUERY_MAX + 1)}`, MENTION_QUERY_MAX + 2), null);
 });
 
+test('the lead rule is the server\'s: a quote, dash, period, full-width stop or bracket before the @ is not a mention', () => {
+  assert.equal(mentionQueryAtCaret('"@be', 4), null);
+  assert.equal(mentionQueryAtCaret('—@be', 4), null);
+  assert.equal(mentionQueryAtCaret('x.@be', 5), null);
+  assert.equal(mentionQueryAtCaret('好。@be', 5), null);
+  assert.equal(mentionQueryAtCaret('【@be', 4), null);
+  assert.equal(mentionQueryAtCaret('a、@be', 5), null);
+  // ...while the server's own lead set still opens the popover.
+  assert.deepEqual(mentionQueryAtCaret('好，@be', 5), { start: 2, end: 5, query: 'be' });
+  assert.deepEqual(mentionQueryAtCaret('「@be', 4), { start: 1, end: 4, query: 'be' });
+  assert.deepEqual(mentionQueryAtCaret('[@be', 4), { start: 1, end: 4, query: 'be' });
+  assert.deepEqual(mentionQueryAtCaret('a:@be', 5), { start: 2, end: 5, query: 'be' });
+  assert.deepEqual(mentionQueryAtCaret('a；@be', 5), { start: 2, end: 5, query: 'be' });
+});
+
 test('mentionQueryAtCaret clamps an out-of-range caret', () => {
   assert.deepEqual(mentionQueryAtCaret('@ben', 99), { start: 0, end: 4, query: 'ben' });
   assert.equal(mentionQueryAtCaret('@ben', -5), null);
@@ -46,6 +61,8 @@ test('insertMention without a token inserts one at the caret and keeps the lead 
   assert.deepEqual(insertMention('', 0, 'ben'), { text: '@ben ', caret: 5 });
   assert.deepEqual(insertMention('hi ', 3, 'ben'), { text: 'hi @ben ', caret: 8 });
   assert.deepEqual(insertMention('a b', 1, 'ben'), { text: 'a @ben b', caret: 7 });
+  assert.deepEqual(insertMention('"', 1, 'ben'), { text: '" @ben ', caret: 7 }, 'a quote is not a lead char for the server');
+  assert.deepEqual(insertMention('(', 1, 'ben'), { text: '(@ben ', caret: 6 });
 });
 
 test('insertText adds a space before an @ when the previous char is a token char', () => {
@@ -54,6 +71,16 @@ test('insertText adds a space before an @ when the previous char is a token char
   assert.deepEqual(insertText('x\n', 2, '@'), { text: 'x\n@', caret: 3 });
   assert.deepEqual(insertText('a b', 1, '@'), { text: 'a @ b', caret: 3 });
   assert.deepEqual(insertText('abc', 3, 'x'), { text: 'abcx', caret: 4 });
+});
+
+test('the @ button spaces out a quote, dash or full-width stop but not a server-accepted lead char', () => {
+  assert.deepEqual(insertText('say "', 5, '@'), { text: 'say " @', caret: 7 });
+  assert.deepEqual(insertText('x—', 2, '@'), { text: 'x— @', caret: 4 });
+  assert.deepEqual(insertText('好。', 2, '@'), { text: '好。 @', caret: 4 });
+  assert.deepEqual(insertText('(', 1, '@'), { text: '(@', caret: 2 });
+  assert.deepEqual(insertText('好，', 2, '@'), { text: '好，@', caret: 3 });
+  assert.deepEqual(insertText('「', 1, '@'), { text: '「@', caret: 2 });
+  assert.deepEqual(insertText('a:', 2, '@'), { text: 'a:@', caret: 3 });
 });
 
 test('the @ button then a pick round-trips into a valid mention', () => {
