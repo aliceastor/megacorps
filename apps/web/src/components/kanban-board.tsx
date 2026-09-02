@@ -8,7 +8,7 @@ import { Ban, ExternalLink, GripVertical, MessageSquare, Play, Plus, RefreshCw, 
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
-const statuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'done', 'blocked', 'cancelled'] as const;
+const statuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'done', 'blocked', 'cancelled'] as const;
 type CardStatus = (typeof statuses)[number];
 const priorities = ['urgent', 'high', 'normal', 'low'] as const;
 const workProductTypes = ['report', 'file', 'preview_url', 'pull_request', 'commit', 'screenshot', 'artifact', 'external'] as const;
@@ -19,6 +19,7 @@ const statusLabels: Record<CardStatus, LocaleLabels> = {
   in_review: { 'zh-TW': '審核中', en: 'In Review', ja: 'レビュー中' },
   needs_review: { 'zh-TW': '求助審核', en: 'Needs Review', ja: '支援レビュー' },
   waiting_on_external: { 'zh-TW': '等待外部', en: 'Waiting External', ja: '外部待ち' },
+  waiting_on_client: { 'zh-TW': '等你回答', en: 'Waiting Client', ja: 'クライアント待ち' },
   done: { 'zh-TW': '完成', en: 'Done', ja: '完了' },
   blocked: { 'zh-TW': '受阻', en: 'Blocked', ja: 'ブロック' },
   cancelled: { 'zh-TW': '已取消', en: 'Cancelled', ja: 'キャンセル' },
@@ -28,7 +29,7 @@ type StatusGroup = { id: StatusGroupId; statuses: readonly CardStatus[]; dropSta
 const statusGroups: readonly StatusGroup[] = [
   { id: 'todo', statuses: ['todo'], dropStatus: 'todo' },
   { id: 'in_progress', statuses: ['in_progress'], dropStatus: 'in_progress' },
-  { id: 'review', statuses: ['in_review', 'needs_review', 'waiting_on_external'], dropStatus: 'in_review' },
+  { id: 'review', statuses: ['in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client'], dropStatus: 'in_review' },
   { id: 'done', statuses: ['done'], dropStatus: 'done' },
   { id: 'blocked_cancelled', statuses: ['blocked', 'cancelled'], dropStatus: 'blocked' },
 ] as const;
@@ -176,6 +177,7 @@ function statusColor(status: string) {
   if (status === 'in_review') return '#9333ea';
   if (status === 'needs_review') return '#ca8a04';
   if (status === 'waiting_on_external') return '#0d9488';
+  if (status === 'waiting_on_client') return '#f59e0b';
   return 'var(--border)';
 }
 

@@ -84,6 +84,7 @@ function statusPercent(status: string | null | undefined): number {
     case 'in_review': return 80;
     case 'needs_review': return 70;
     case 'waiting_on_external': return 60;
+    case 'waiting_on_client': return 60;
     case 'in_progress': return 50;
     case 'todo': return 10;
     default: return 0;
@@ -118,6 +119,7 @@ async function cardRollup(card: CardRow) {
     : Math.round(subtree.reduce((sum, row, index) => sum + statusPercent(row.columnStatus) * (weights[index] ?? 1), 0) / Math.max(1, totalWeight));
   const blocked = subtree.find((row) => row.columnStatus === 'blocked');
   const waitingExternal = subtree.filter((row) => row.columnStatus === 'waiting_on_external');
+  const waitingClient = subtree.filter((row) => row.columnStatus === 'waiting_on_client');
   const needsReview = subtree.find((row) => row.columnStatus === 'needs_review' || row.columnStatus === 'in_review');
   const active = subtree.find((row) => row.columnStatus === 'in_progress');
   const nextAction = needsReview?.reviewerId
@@ -136,7 +138,7 @@ async function cardRollup(card: CardRow) {
     counts,
     waitingOnExternal: waitingExternal.length,
     rollupPercent,
-    rollupStatus: blocked ? 'blocked' : waitingExternal.length ? 'waiting_on_external' : subtree.length ? 'waiting_on_children' : card.columnStatus ?? 'todo',
+    rollupStatus: blocked ? 'blocked' : waitingClient.length ? 'waiting_on_client' : waitingExternal.length ? 'waiting_on_external' : subtree.length ? 'waiting_on_children' : card.columnStatus ?? 'todo',
     nextAction,
     estimatedDurationMinutes: subtree.reduce((sum, row) => sum + Number(row.estimatedDurationMinutes ?? 0), Number(card.estimatedDurationMinutes ?? 0)),
     budgetAllocated: subtree.reduce((sum, row) => sum + Number(row.taskBudgetLimit ?? 0), Number(card.taskBudgetLimit ?? 0)),

@@ -11,6 +11,7 @@ import { buildAgentDigest } from './agent-digest.ts';
 import { giteaAuthenticatedCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv } from './gitea.ts';
 import { effectiveFanoutCap, evaluateSplitPlan, formatChildOpening, formatSplitAnnouncement, type SplitAgentRef } from './card-splitting.ts';
 import { normalizeDecisionMode, type AgentReportChild } from '@megacorps/shared';
+import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointEligibilityError, checkpointFromOutput, checkpointFromQuestion, checkpointReminderDue, combineCheckpointAnswer, formatCheckpointAnswer, formatCheckpointMessage, type ClientCheckpointRequest } from './client-checkpoints.ts';
 import { setCardDependencies } from './card-dependencies.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 import { recordStageAction } from './card-actions.ts';
@@ -787,6 +788,142 @@ function handoffMessageBody(fromAgent: AgentRow, target: AgentRow, item: AgentRe
     item.objective,
     item.outputFormat ? `Expected output: ${item.outputFormat}` : '',
     item.boundaries ? `Boundaries: ${item.boundaries}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+// === Client checkpoints ========================================================
+// The CEO or a department head stops and asks the client (direction decision or
+// interim-output review). Blocking: the card parks as waiting_on_client and
+// the owner is resumed with the answer injected. Pure parts live in
+// client-checkpoints.ts.
+
+const CLIENT_CHECKPOINT_REMIND_HOURS = Math.max(1, Number(process.env.CLIENT_CHECKPOINT_REMIND_HOURS ?? 4));
+
+export async function agentMayAskClient(companyId: string, agent: AgentRow): Promise<{ isCompanyBoss: boolean; isDepartmentHead: boolean }> {
+  const [position] = agent.positionId
+    ? await db.select({ isCompanyBoss: positions.isCompanyBoss }).from(positions).where(eq(positions.id, agent.positionId)).limit(1)
+    : [];
+  const [head] = await db.select({ id: departments.id }).from(departments)
+    .where(and(eq(departments.companyId, companyId), eq(departments.headAgentId, agent.id))).limit(1);
+  return { isCompanyBoss: Boolean(position?.isCompanyBoss), isDepartmentHead: Boolean(head) };
+}
+
+// Decides whether this completion is a client checkpoint. An explicit
+// report.checkpoint wins; an A2A input_required question on a client-reviewed
+// card from an eligible asker counts too. Ineligible explicit requests are
+// reported on the card and the run completes normally.
+export async function resolveClientCheckpointRequest(card: CardRow, agent: AgentRow, explicit: ClientCheckpointRequest | null, needsInputQuestion: string | null): Promise<ClientCheckpointRequest | null> {
+  const request = explicit ?? (needsInputQuestion && card.requiresApproval ? checkpointFromQuestion(needsInputQuestion) : null);
+  if (!request) return null;
+  const [pending] = await db.select({ id: approvals.id }).from(approvals)
+    .where(and(eq(approvals.cardId, card.id), eq(approvals.type, CLIENT_CHECKPOINT_APPROVAL_TYPE), eq(approvals.status, 'pending'))).limit(1);
+  const may = await agentMayAskClient(card.companyId, agent);
+  const error = checkpointEligibilityError({ ...may, isOwner: card.assigneeId === agent.id, alreadyPending: Boolean(pending) });
+  if (error) {
+    if (explicit) await addCardMessage({ cardId: card.id, authorType: 'system', action: 'client_checkpoint_rejected', body: `Checkpoint request from ${agent.name} was not sent to the client: ${error}` });
+    return null;
+  }
+  return request;
+}
+
+export async function recordClientCheckpoint(card: CardRow, agent: AgentRow, request: ClientCheckpointRequest): Promise<string | null> {
+  const [approval] = await db.insert(approvals).values({
+    companyId: card.companyId,
+    cardId: card.id,
+    requestedByAgentId: agent.id,
+    type: CLIENT_CHECKPOINT_APPROVAL_TYPE,
+    status: 'pending',
+    payload: { ...request, askedByAgentId: agent.id, askedByName: agent.name, cardTitle: card.title, lastRemindedAt: null },
+  }).returning();
+  await addCardMessage({ cardId: card.id, agentId: agent.id, action: 'client_checkpoint_asked', body: formatCheckpointMessage(request, agent.name), metadata: { approvalId: approval?.id ?? null, kind: request.kind } });
+  if (card.parentCardId) {
+    await addCardMessage({ cardId: card.parentCardId, authorType: 'system', action: 'client_checkpoint_asked', body: `Child card "${card.title}" is waiting on the client: ${request.question.slice(0, 200)}`, metadata: { childCardId: card.id, approvalId: approval?.id ?? null } });
+  }
+  await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'approval', status: 'queued', message: `Client checkpoint (${request.kind}) opened; card waits for the client.`, output: request.question });
+  await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: 'client_checkpoint.asked', entityType: 'approval', entityId: approval?.id ?? card.id, details: { cardId: card.id, kind: request.kind } });
+  await notify({ companyId: card.companyId, type: 'client_checkpoint', title: `Your decision is needed: ${card.title}`, body: request.question, entityType: 'approval', entityId: approval?.id ?? card.id, cardId: card.id, agentId: agent.id });
+  publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'client_checkpoint.asked' });
+  return approval?.id ?? null;
+}
+
+// Webhook path: the run is over, the card parks, the client is asked.
+export async function finishRunWaitingOnClient(card: CardRow, agent: AgentRow, request: ClientCheckpointRequest, input: { taskRunId: string | null; heartbeatRunId: string | null; output: string | null; costUsd?: number }): Promise<{ approvalId: string | null }> {
+  await db.update(kanbanCards).set({
+    columnStatus: 'waiting_on_client',
+    executionLog: input.output ?? card.executionLog,
+    nextRunAt: null,
+    executionLockId: null,
+    executionLockedByAgentId: null,
+    executionLockedAt: null,
+    executionLockExpiresAt: null,
+    activeHeartbeatRunId: null,
+    updatedAt: new Date(),
+  }).where(eq(kanbanCards.id, card.id));
+  await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
+  if (input.heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), error: null, costUsd: input.costUsd?.toString() }).where(eq(heartbeatRuns.id, input.heartbeatRunId));
+  await completeTaskRun(input.taskRunId, { status: 'success', output: input.output ?? null, costUsd: input.costUsd });
+  if (card.columnStatus !== 'waiting_on_client') await addStageLog(card.id, agent.id, card.columnStatus ?? null, 'waiting_on_client', 'webhook');
+  const approvalId = await recordClientCheckpoint({ ...card, columnStatus: 'waiting_on_client' }, agent, request);
+  return { approvalId };
+}
+
+type ApprovalRow = typeof approvals.$inferSelect;
+
+// The client answered: record it on the approval and the board, wake the
+// owner. The answer is injected into the owner's next prompt from the
+// approvals history (see clientCheckpointSection).
+export async function answerClientCheckpoint(approval: ApprovalRow, card: CardRow, user: { id: string; email?: string }, input: { answer?: string | null; selectedOption?: string | null }): Promise<void> {
+  const combined = combineCheckpointAnswer(input);
+  const now = new Date();
+  await db.update(approvals).set({ status: 'answered', decisionNote: combined, decidedByUserId: user.id, decidedAt: now, updatedAt: now }).where(eq(approvals.id, approval.id));
+  const payload = (approval.payload ?? {}) as Record<string, unknown>;
+  const question = typeof payload.question === 'string' ? payload.question : card.title;
+  await db.update(kanbanCards).set({ columnStatus: 'in_progress', nextRunAt: null, updatedAt: now }).where(eq(kanbanCards.id, card.id));
+  if (card.columnStatus !== 'in_progress') await addStageLog(card.id, card.assigneeId, card.columnStatus ?? null, 'in_progress', 'user');
+  await addCardMessage({ cardId: card.id, authorType: 'system', action: 'client_checkpoint_answered', body: formatCheckpointAnswer({ question, answer: input.answer?.trim() || null, selectedOption: input.selectedOption?.trim() || null, decidedBy: user.email ?? user.id }), metadata: { approvalId: approval.id } });
+  if (card.parentCardId) {
+    await addCardMessage({ cardId: card.parentCardId, authorType: 'system', action: 'client_checkpoint_answered', body: `Client answered the checkpoint on child card "${card.title}"; work resumes.`, metadata: { childCardId: card.id, approvalId: approval.id } });
+  }
+  await addTaskLog({ cardId: card.id, agentId: card.assigneeId, type: 'approval', status: 'success', message: `Client answered the checkpoint; card resumes.`, output: combined });
+  await addActivity({ companyId: card.companyId, actorType: 'user', actorId: user.id, agentId: card.assigneeId, action: 'client_checkpoint.answered', entityType: 'approval', entityId: approval.id, details: { cardId: card.id, userId: user.id } });
+  publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'client_checkpoint.answered' });
+  await enqueueTaskRun(card.id, 'dispatch', 'queue');
+}
+
+// Dispatch cron: nudge the client about checkpoints left unanswered.
+export async function sweepClientCheckpointReminders(app: FastifyInstance): Promise<number> {
+  const pending = await db.select().from(approvals).where(and(eq(approvals.type, CLIENT_CHECKPOINT_APPROVAL_TYPE), eq(approvals.status, 'pending')));
+  const now = new Date();
+  let sent = 0;
+  for (const approval of pending) {
+    const payload = (approval.payload ?? {}) as Record<string, unknown>;
+    const lastRemindedAt = typeof payload.lastRemindedAt === 'string' ? payload.lastRemindedAt : null;
+    if (!checkpointReminderDue({ createdAt: approval.createdAt, lastRemindedAt }, now, CLIENT_CHECKPOINT_REMIND_HOURS)) continue;
+    await notify({ companyId: approval.companyId, type: 'client_checkpoint_reminder', title: `Still waiting for your decision: ${String(payload.cardTitle ?? 'a card')}`, body: String(payload.question ?? ''), entityType: 'approval', entityId: approval.id, cardId: approval.cardId, agentId: approval.requestedByAgentId });
+    await db.update(approvals).set({ payload: { ...payload, lastRemindedAt: now.toISOString() }, updatedAt: now }).where(eq(approvals.id, approval.id));
+    sent += 1;
+  }
+  if (sent > 0) app.log.info({ sent }, 'client checkpoint reminders sent');
+  return sent;
+}
+
+// Prompt section: the card's checkpoint history, latest first. A fresh answer
+// is the binding instruction for the resumed owner.
+async function clientCheckpointSection(card: CardRow): Promise<string> {
+  const rows = await db.select().from(approvals)
+    .where(and(eq(approvals.cardId, card.id), eq(approvals.type, CLIENT_CHECKPOINT_APPROVAL_TYPE)))
+    .orderBy(desc(approvals.createdAt)).limit(3);
+  if (rows.length === 0) return '';
+  const lines = rows.map((row) => {
+    const payload = (row.payload ?? {}) as Record<string, unknown>;
+    const head = `- [${row.status}] ${String(payload.kind ?? 'direction')}: ${String(payload.question ?? '')}`;
+    return row.decisionNote ? `${head}\n  Client answer: ${row.decisionNote}` : head;
+  });
+  const latest = rows[0];
+  return [
+    'Client checkpoints on this card (latest first):',
+    ...lines,
+    latest?.status === 'answered' ? 'The latest client answer above is binding. Continue from it; do not re-ask what it already settled.' : '',
   ].filter(Boolean).join('\n');
 }
 
@@ -2835,10 +2972,16 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     }
     const effectiveReviewerId = resolveEffectiveReviewerId(card, agent);
     const needsInputQuestion = result.needsInput?.question ?? null;
-    const { needsHelpReview, nextStatus, topLevelGuidanceAccepted } = needsInputQuestion
+    const completionDecision = needsInputQuestion
       ? needsInputCompletionDecision(effectiveReviewerId)
       : dispatchCompletionDecision(result.output, effectiveReviewerId);
-    const childBlock = await completionBlockedByChildren(card, nextStatus);
+    // A client checkpoint overrides the normal completion: the card parks and
+    // nothing downstream (review, done, cascade) happens until the client answers.
+    const checkpointRequest = await resolveClientCheckpointRequest(card, agent, checkpointFromOutput(result.output), needsInputQuestion);
+    const needsHelpReview = checkpointRequest ? false : completionDecision.needsHelpReview;
+    const topLevelGuidanceAccepted = checkpointRequest ? false : completionDecision.topLevelGuidanceAccepted;
+    const nextStatus: CardStatus = checkpointRequest ? 'waiting_on_client' : completionDecision.nextStatus;
+    const childBlock = checkpointRequest ? null : await completionBlockedByChildren(card, nextStatus);
     const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : nextStatus;
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     // Agent release + card stage move + heartbeat completion commit atomically, so a
@@ -2874,9 +3017,10 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       return row;
     });
     if (effectiveNextStatus !== 'in_progress') await addStageLog(card.id, agent.id, 'in_progress', effectiveNextStatus, 'dispatch');
-    if (needsInputQuestion) {
+    if (needsInputQuestion && !checkpointRequest) {
       await addCardMessage({ cardId: card.id, agentId: agent.id, action: 'agent_question', body: needsInputQuestion });
     }
+    if (checkpointRequest) await recordClientCheckpoint(updated ?? card, agent, checkpointRequest);
     await recordA2aArtifacts(card, agent.id, options.taskRunId, result.artifacts);
     if (effectiveNextStatus === 'needs_review') {
       await notify({ companyId: card.companyId, type: 'needs_review', title: `Help review requested: ${card.title}`, body: `${agent.name} requested reviewer guidance.`, entityType: 'card', entityId: card.id, cardId: card.id, agentId: agent.id });
@@ -3449,6 +3593,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
       await expireStaleDelegations(app);
       await spawnDueScheduledCards(app, activeCompanyIds);
       try { await sweepPeerQuestions(app); } catch (error) { app.log.warn({ error }, 'peer question sweep failed'); }
+      try { await sweepClientCheckpointReminders(app); } catch (error) { app.log.warn({ error }, 'client checkpoint reminder sweep failed'); }
       // Only statuses the loop can act on; done/blocked/cancelled/in_progress cards
       // used to be loaded and skipped one by one, which scales badly with board size.
       const cards = await db.select().from(kanbanCards).where(and(
@@ -3846,6 +3991,7 @@ function completionProtocol(card: CardRow, reports: DelegationReport[] = [], opt
     `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, project shared file path/URL, report URL, screenshot URL, artifact URL, or file metadata instead of local-only scratch paths.`,
     `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
     `If you are waiting on CI/CD, deploy, external approval, or another external system, use status="waiting_on_external" and include pollIntervalSeconds based on how often that system should be checked.`,
+    `Client checkpoint: if you are the CEO or a department head and this card genuinely needs the client's decision on direction, or the client's look at interim output, add "checkpoint": { "kind": "direction" | "interim", "question": "...", "options": ["A", "B"], "recommendation": "A", "artifactRefs": ["repo path or URL"] } to your report and stop working; MegaCorps parks the card as waiting_on_client and resumes you with the answer injected. One checkpoint at a time. Members cannot ask the client: use status="needs_review" for your reviewer or report.mentions for a peer.`,
     `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
     `If no reviewer/manager exists above you, provide the best final answer instead of escalating; MegaCorps will accept top-level guidance requests as done.`,
   ].filter(Boolean).join('\n');
@@ -4047,6 +4193,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
       'Fresh Kanban delta:',
       deltaContext,
       await integrationSection(card),
+      await clientCheckpointSection(card),
       'Completion protocol:',
       completionProtocol(card, reports, { delegationAlreadySatisfied }),
     ].filter(Boolean).join('\n\n');
@@ -4078,6 +4225,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
     ].join('\n'),
     digest,
     await integrationSection(card),
+    await clientCheckpointSection(card),
     kanbanContext ? `Kanban context snapshot:\n${kanbanContext}` : '',
     matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
     `Repository protocol:\n${projectGitProtocol(company, project, card, assignee, runtime)}`,

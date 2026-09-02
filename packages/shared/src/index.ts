@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const cardStatuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'done', 'blocked', 'cancelled'] as const;
+export const cardStatuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'done', 'blocked', 'cancelled'] as const;
 export type CardStatus = (typeof cardStatuses)[number];
 export const legacyCardStatusAliases = { backlog: 'todo' } as const;
 const cardStatusInputs = ['backlog', ...cardStatuses] as const;
@@ -8,7 +8,7 @@ export const agentAdapterTypes = ['hermes-ssh', 'hermes-gateway', 'codex-app', '
 export type AgentAdapterType = (typeof agentAdapterTypes)[number];
 export const cardActorTypes = ['user', 'machine', 'system', 'agent:worker', 'agent:reviewer', 'agent:leader'] as const;
 export type CardActorType = (typeof cardActorTypes)[number];
-export const cardTransitionActions = ['claim', 'submit_review', 'request_help', 'wait_external', 'external_success', 'external_failure', 'approve', 'reject', 'complete', 'block', 'cancel', 'release', 'resume', 'reopen', 'manual_move'] as const;
+export const cardTransitionActions = ['claim', 'submit_review', 'request_help', 'wait_external', 'external_success', 'external_failure', 'ask_client', 'client_answered', 'approve', 'reject', 'complete', 'block', 'cancel', 'release', 'resume', 'reopen', 'manual_move'] as const;
 export type CardTransitionAction = (typeof cardTransitionActions)[number];
 
 type CardTransitionDef = {
@@ -24,23 +24,28 @@ const cardTransitionDefs: Record<CardTransitionAction, CardTransitionDef> = {
   wait_external: { from: ['in_progress', 'in_review'], to: 'waiting_on_external', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
   external_success: { from: ['waiting_on_external'], to: 'in_review', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
   external_failure: { from: ['waiting_on_external'], to: 'in_progress', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
+  // Client checkpoint: the CEO or a department head parks the card until the
+  // human client answers a direction or interim-output question.
+  ask_client: { from: ['in_progress', 'in_review'], to: 'waiting_on_client', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
+  client_answered: { from: ['waiting_on_client'], to: 'in_progress', allow: ['user', 'system'] },
   approve: { from: ['in_review', 'needs_review'], to: 'done', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
   reject: { from: ['in_review', 'needs_review'], to: 'todo', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
   complete: { from: ['in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'cancelled'], to: 'done', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
-  block: { from: ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external'], to: 'blocked', allow: ['machine', 'system', 'agent:worker', 'agent:reviewer', 'agent:leader', 'user'] },
-  cancel: { from: ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'blocked'], to: 'cancelled', allow: ['machine', 'system', 'agent:leader', 'user'] },
+  block: { from: ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client'], to: 'blocked', allow: ['machine', 'system', 'agent:worker', 'agent:reviewer', 'agent:leader', 'user'] },
+  cancel: { from: ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'blocked'], to: 'cancelled', allow: ['machine', 'system', 'agent:leader', 'user'] },
   release: { from: ['in_progress'], to: 'todo', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
-  resume: { from: ['blocked', 'cancelled', 'waiting_on_external'], to: 'todo', allow: ['machine', 'system', 'agent:leader', 'user'] },
+  resume: { from: ['blocked', 'cancelled', 'waiting_on_external', 'waiting_on_client'], to: 'todo', allow: ['machine', 'system', 'agent:leader', 'user'] },
   reopen: { from: ['done'], to: 'todo', allow: ['agent:leader', 'user'] },
   manual_move: { from: cardStatuses, to: 'todo', allow: ['user', 'system'] },
 };
 
 const allowedTransitions: Record<CardStatus, CardStatus[]> = {
   todo: ['in_progress', 'blocked', 'cancelled'],
-  in_progress: ['in_review', 'needs_review', 'waiting_on_external', 'done', 'blocked', 'cancelled'],
-  in_review: ['waiting_on_external', 'done', 'todo', 'in_progress', 'blocked', 'cancelled'],
+  in_progress: ['in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'done', 'blocked', 'cancelled'],
+  in_review: ['waiting_on_external', 'waiting_on_client', 'done', 'todo', 'in_progress', 'blocked', 'cancelled'],
   needs_review: ['todo', 'in_progress', 'done', 'blocked', 'cancelled'],
   waiting_on_external: ['in_review', 'in_progress', 'done', 'todo', 'blocked', 'cancelled'],
+  waiting_on_client: ['in_progress', 'todo', 'blocked', 'cancelled'],
   done: ['todo'],
   blocked: ['todo', 'cancelled'],
   cancelled: ['todo', 'done'],
@@ -119,7 +124,7 @@ const createCardBaseSchema = z.object({
   requiresApproval: z.boolean().default(false),
   maxRetries: z.number().int().min(1).max(10).default(3),
   decisionMode: decisionModeSchema.nullable().optional(),
-  rollupStatus: z.enum(['planning', 'delegated', 'waiting_on_children', 'waiting_on_dependencies', 'waiting_on_external', 'integrating', 'ready_for_review', 'done', 'blocked']).nullable().optional(),
+  rollupStatus: z.enum(['planning', 'delegated', 'waiting_on_children', 'waiting_on_dependencies', 'waiting_on_external', 'waiting_on_client', 'integrating', 'ready_for_review', 'done', 'blocked']).nullable().optional(),
   requiredChildPolicy: z.enum(['all_required_accepted', 'all_non_cancelled_accepted', 'threshold', 'manual']).default('all_required_accepted'),
   childRequirementLevel: z.enum(['required', 'optional', 'follow_up']).default('required'),
   estimatedWeight: z.number().nonnegative().nullable().optional(),
@@ -308,6 +313,17 @@ export const agentReportChildSchema = z.object({
   dependsOn: z.array(z.number().int().min(0).max(4)).max(4).optional(),
 });
 export type AgentReportChild = z.infer<typeof agentReportChildSchema>;
+// Client checkpoint: the CEO or a department head asks the human client for a
+// direction decision or a look at interim output. The card parks as
+// waiting_on_client until the client answers; the answer is injected back.
+export const agentReportCheckpointSchema = z.object({
+  kind: z.enum(['direction', 'interim']),
+  question: z.string().trim().min(1).max(2000),
+  options: z.array(z.string().trim().min(1).max(200)).max(6).optional(),
+  recommendation: z.string().trim().max(200).optional(),
+  artifactRefs: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
+});
+export type AgentReportCheckpoint = z.infer<typeof agentReportCheckpointSchema>;
 export const agentReportMentionSchema = z.object({
   to: z.string().trim().min(1).max(120),
   question: z.string().trim().min(1).max(2000),
@@ -321,6 +337,7 @@ export const agentReportSchema = z.object({
   delegations: z.array(agentReportDelegationSchema).max(8).optional(),
   mentions: z.array(agentReportMentionSchema).max(3).optional(),
   children: z.array(agentReportChildSchema).max(5).optional(),
+  checkpoint: agentReportCheckpointSchema.optional(),
   // Reviewer score for the work under review (0-10 rubric); feeds the agent CV.
   score: z.number().int().min(0).max(10).optional(),
   artifactRefs: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
@@ -561,8 +578,11 @@ export const createBudgetPolicySchema = z.object({
 });
 
 export const approvalDecisionSchema = z.object({
-  status: z.enum(['approved', 'rejected', 'revision_requested', 'cancelled']),
+  status: z.enum(['approved', 'rejected', 'revision_requested', 'cancelled', 'answered']),
   decisionNote: z.string().trim().max(4000).optional(),
+  // Client checkpoint answers: a picked option and/or free text.
+  answer: z.string().trim().max(4000).optional(),
+  selectedOption: z.string().trim().max(200).optional(),
 });
 
 export const taskLogTypes = ['dispatch', 'retry', 'review', 'escalation', 'decomposition', 'cascade', 'webhook', 'manual', 'stage', 'comment', 'lock', 'lock_expired', 'recovery', 'cancel', 'budget', 'approval', 'queue'] as const;

@@ -10,7 +10,8 @@ import { db } from './db/client.ts';
 import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
-import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, childrenFromOutput } from './dispatch.ts';
+import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest } from './dispatch.ts';
+import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointFromOutput } from './client-checkpoints.ts';
 import { registerChatRoutes } from './chat.ts';
 import { runAgentMaintenance } from './agent-maintenance.ts';
 import { agentReportSchema } from '@megacorps/shared';
@@ -788,12 +789,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.get('/api/approvals', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { companyId?: string; status?: string; cardId?: string; limit?: string };
+    const query = request.query as { companyId?: string; status?: string; cardId?: string; type?: string; limit?: string };
     if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
     const filters = [
       query.companyId ? eq(approvals.companyId, query.companyId) : inArray(approvals.companyId, access.companyIds),
       query.status ? eq(approvals.status, query.status) : undefined,
       query.cardId ? eq(approvals.cardId, query.cardId) : undefined,
+      query.type ? eq(approvals.type, query.type) : undefined,
     ].filter(Boolean);
     return db.select().from(approvals).where(filters.length ? and(...filters) : undefined).orderBy(desc(approvals.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
   });
@@ -806,6 +808,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [approvalCard] = approval.cardId
       ? await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, approval.cardId), isNull(kanbanCards.deletedAt))).limit(1)
       : [];
+    if (approval.type === CLIENT_CHECKPOINT_APPROVAL_TYPE) {
+      if (approval.status !== 'pending') return reply.code(409).send({ error: 'checkpoint_not_pending', status: approval.status });
+      if (!approvalCard) return reply.code(404).send({ error: 'card_not_found' });
+      if (input.status === 'cancelled') {
+        const [cancelled] = await db.update(approvals).set({ status: 'cancelled', decisionNote: input.decisionNote ?? null, decidedByUserId: user.id, decidedAt: new Date(), updatedAt: new Date() }).where(eq(approvals.id, id)).returning();
+        await db.update(kanbanCards).set({ columnStatus: 'in_progress', updatedAt: new Date() }).where(eq(kanbanCards.id, approvalCard.id));
+        await enqueueTaskRun(approvalCard.id, 'dispatch', 'queue');
+        return cancelled;
+      }
+      if (!input.answer?.trim() && !input.selectedOption?.trim()) {
+        return reply.code(400).send({ error: 'checkpoint_answer_required', message: 'Answer the checkpoint with selectedOption and/or answer text.' });
+      }
+      await answerClientCheckpoint(approval, approvalCard, user, { answer: input.answer ?? input.decisionNote ?? null, selectedOption: input.selectedOption ?? null });
+      const [answered] = await db.select().from(approvals).where(eq(approvals.id, id)).limit(1);
+      return answered;
+    }
+    if (input.status === 'answered') return reply.code(400).send({ error: 'invalid_status', message: 'status=answered is only valid for client_checkpoint approvals.' });
     if (approvalCard && input.status === 'approved') {
       const childBlock = await completionBlockedByChildren(approvalCard, 'done');
       if (childBlock) {
@@ -2707,6 +2726,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const webhookChildren = actorAgent ? childrenFromOutput(executionLog, body.report ?? null) : [];
     if (actorAgent && webhookChildren.length) {
       try { await processChildSplits(card, actorAgent, webhookChildren); } catch (error) { app.log.warn({ error, cardId: card.id }, 'child split processing failed'); }
+    }
+    // Client checkpoint: park the card and ask the client instead of completing.
+    const webhookCheckpoint = actorAgent ? await resolveClientCheckpointRequest(card, actorAgent, checkpointFromOutput(executionLog, body.report ?? null), null) : null;
+    if (webhookCheckpoint && actorAgent) {
+      const parked = await finishRunWaitingOnClient(card, actorAgent, webhookCheckpoint, { taskRunId: taskRunId ?? null, heartbeatRunId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId ?? null, output: executionLog, costUsd: body.costUsd });
+      await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: actorAgentId, action: 'webhook.client_checkpoint', entityType: 'card', entityId: card.id, details: { taskRunId, requestedStatus, approvalId: parked.approvalId } });
+      publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'webhook.client_checkpoint' });
+      return { ok: true, cardId: card.id, taskRunId: taskRunId ?? null, requestedStatus, newStatus: 'waiting_on_client', checkpointId: parked.approvalId };
+    }
+    if (requestedStatus === 'waiting_on_client') {
+      return reply.code(400).send({ error: 'checkpoint_required', message: 'checkpoint_required: status="waiting_on_client" needs a report.checkpoint { kind, question, options?, recommendation?, artifactRefs? }, and only the CEO or a department head who owns the card may ask the client.' });
     }
     let delegationError: string | null = null;
     let delegatedRows: Awaited<ReturnType<typeof createMessageDelegations>> = [];
