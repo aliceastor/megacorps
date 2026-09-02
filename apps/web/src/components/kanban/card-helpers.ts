@@ -1,0 +1,75 @@
+// Pure helpers moved verbatim out of kanban-board.tsx. No React here: the
+// conversation model and its node:test suite import from this file.
+import type { Agent, CardComment, CardPriority, Goal } from './card-types';
+
+export function isDelegationReviewComment(comment: CardComment): boolean {
+  const action = comment.action.toLowerCase();
+  return Boolean(
+    comment.delegationStatus ||
+    comment.assigneeAgentId ||
+    comment.reviewerAgentId ||
+    comment.reviewerScope ||
+    action.startsWith('delegate_') ||
+    action.includes('review'),
+  );
+}
+
+export function delegationReviewTone(comment: CardComment): 'system' | 'error' | 'product' {
+  const token = `${comment.action} ${comment.delegationStatus ?? ''}`.toLowerCase();
+  if (token.includes('failed') || token.includes('error') || token.includes('rejected') || token.includes('blocked')) return 'error';
+  if (token.includes('approved') || token.includes('submitted')) return 'product';
+  return 'system';
+}
+
+export function statusColor(status: string) {
+  if (status === 'done') return '#16a34a';
+  if (status === 'blocked') return '#dc2626';
+  if (status === 'cancelled') return '#64748b';
+  if (status === 'in_progress') return '#2563eb';
+  if (status === 'in_review') return '#9333ea';
+  if (status === 'needs_review') return '#ca8a04';
+  if (status === 'waiting_on_external') return '#0d9488';
+  if (status === 'waiting_on_client') return '#f59e0b';
+  if (status === 'waiting_on_brainstorm') return '#0891b2';
+  return 'var(--border)';
+}
+
+export function goalScope(goal: Goal): string {
+  if (goal.projectId) return 'Project';
+  if (goal.departmentId) return 'Department';
+  return 'Company';
+}
+
+export function scopedGoalOptions(goals: Goal[], input: { companyId?: string; departmentId?: string | null; projectId?: string | null }) {
+  return goals.filter((goal) => {
+    if (input.companyId && goal.companyId !== input.companyId) return false;
+    if (!goal.departmentId && !goal.projectId) return true;
+    if (goal.departmentId && input.departmentId && goal.departmentId === input.departmentId) return true;
+    if (goal.projectId && input.projectId && goal.projectId === input.projectId) return true;
+    return false;
+  });
+}
+
+export function priorityValue(priority: number): CardPriority {
+  if (priority >= 3) return 'urgent';
+  if (priority >= 2) return 'high';
+  if (priority <= -1) return 'low';
+  return 'normal';
+}
+
+export function priorityNumber(priority: string | number | undefined): number {
+  if (typeof priority === 'number') return priority;
+  if (priority === 'urgent') return 3;
+  if (priority === 'high') return 2;
+  if (priority === 'low') return -1;
+  return 0;
+}
+
+export function parseCsv(value: string): string[] {
+  return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+export function agentDisplayName(agent: Agent | undefined): string | null {
+  if (!agent) return null;
+  return [agent.name, agent.role].filter(Boolean).join(' / ');
+}

@@ -2,6 +2,7 @@
 import { useMemo, useState } from 'react';
 import { CornerDownRight } from 'lucide-react';
 import { useLocale } from '@/lib/locale-context';
+import { formatRelative } from '@/lib/relative-time';
 
 // The manager's view of the board: a table, sorted by what moved most recently,
 // with child cards nested under their parent. Scanning beats dragging when you
@@ -36,17 +37,6 @@ type Props = {
   onSelect: (card: ListCard) => void;
 };
 
-function relativeTime(value: string | undefined, now: number): string {
-  if (!value) return '—';
-  const diff = Math.max(0, now - Date.parse(value));
-  const minutes = Math.round(diff / 60_000);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes} min`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours} h`;
-  return `${Math.round(hours / 24)} d`;
-}
-
 function modeLabel(mode: string | null | undefined): string {
   if (!mode) return 'auto';
   if (mode === 'delegate' || mode === 'hybrid' || mode === 'review' || mode === 'integrate') return 'auto';
@@ -55,7 +45,7 @@ function modeLabel(mode: string | null | undefined): string {
 }
 
 export function KanbanListView({ cards, agents, departments, projects, statusLabel, statusColor, onSelect }: Props) {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const [onlyWaitingOnMe, setOnlyWaitingOnMe] = useState(false);
   const [onlyMyReviews, setOnlyMyReviews] = useState(false);
   const now = Date.now();
@@ -134,7 +124,7 @@ export function KanbanListView({ cards, agents, departments, projects, statusLab
             <td>{card.reviewerId ? name(agents, card.reviewerId) : card.requiresApproval ? t('common.you') : '—'}</td>
             <td>{name(departments, card.departmentId)}</td>
             <td><code>{modeLabel(card.decisionMode)}</code></td>
-            <td title={card.updatedAt ? new Date(card.updatedAt).toLocaleString() : ''}>{relativeTime(card.updatedAt, now)}</td>
+            <td title={card.updatedAt ? new Date(card.updatedAt).toLocaleString() : ''}>{formatRelative(card.updatedAt, now, locale) || '—'}</td>
           </tr>)}
         </tbody>
       </table>

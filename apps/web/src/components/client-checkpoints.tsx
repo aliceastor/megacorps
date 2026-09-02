@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { MessageCircleQuestion, Send } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
+import { formatRelative } from '@/lib/relative-time';
 
 // The client's inbox: questions the company is blocked on. A CEO or department
 // head parked a card as waiting_on_client; answering here resumes it with the
@@ -21,18 +22,8 @@ type Approval = { id: string; companyId: string; cardId?: string | null; type: s
 
 const REFRESH_MS = 60_000;
 
-function relativeTime(value: string | undefined, now: number): string {
-  if (!value) return '';
-  const diff = Math.max(0, now - new Date(value).getTime());
-  const minutes = Math.round(diff / 60_000);
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours} h ago`;
-  return `${Math.round(hours / 24)} d ago`;
-}
-
 export function ClientCheckpoints() {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const [items, setItems] = useState<Approval[]>([]);
   const [drafts, setDrafts] = useState<Record<string, { option: string; text: string }>>({});
   const [busyId, setBusyId] = useState('');
@@ -86,7 +77,7 @@ export function ClientCheckpoints() {
         return <article className="list-row" key={item.id}>
           <div className="prompt-log-head">
             <b>{payload.cardTitle ?? item.cardId ?? 'card'}</b>
-            <span>{payload.kind === 'interim' ? t('checkpoints.kindInterim') : t('checkpoints.kindDirection')} · {payload.askedByName ?? 'agent'} · {relativeTime(item.createdAt, now)}</span>
+            <span>{payload.kind === 'interim' ? t('checkpoints.kindInterim') : t('checkpoints.kindDirection')} · {payload.askedByName ?? 'agent'} · {formatRelative(item.createdAt, now, locale)}</span>
           </div>
           <p>{payload.question}</p>
           {payload.artifactRefs && payload.artifactRefs.length > 0 && <div className="meta-grid">

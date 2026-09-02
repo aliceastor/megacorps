@@ -5,27 +5,14 @@ import { CSS } from '@dnd-kit/utilities';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { isCancelledError, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Ban, ExternalLink, GripVertical, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Save, Search, ShieldCheck, StopCircle, Trash2, X } from 'lucide-react';
+import { GripVertical, Plus, RefreshCw, Search, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
+import { CardDetailPanel } from './kanban/card-detail-panel';
+import { agentDisplayName, goalScope, parseCsv, priorityNumber, priorityValue, scopedGoalOptions, statusColor } from './kanban/card-helpers';
+import { type Agent, type ApiEvent, type CachedRows, type CachedValue, type Card, type CardAction, type CardComment, type CardDelegationSummary, type CardDetailTab, type CardStatus, type CardTabCache, type CardTabKey, type Company, type Department, type Goal, type LocaleLabels, type Project, type TaskLog, type TaskRun, type WorkProduct, priorities, statusLabels, statuses, workProductTypes } from './kanban/card-types';
+import { DependencyPicker } from './kanban/dependency-picker';
 
-const statuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm', 'done', 'blocked', 'cancelled'] as const;
-type CardStatus = (typeof statuses)[number];
-const priorities = ['urgent', 'high', 'normal', 'low'] as const;
-const workProductTypes = ['report', 'file', 'preview_url', 'pull_request', 'commit', 'screenshot', 'artifact', 'external'] as const;
-type LocaleLabels = Record<string, string>;
-const statusLabels: Record<CardStatus, LocaleLabels> = {
-  todo: { 'zh-TW': '待辦', en: 'Todo', ja: '未着手' },
-  in_progress: { 'zh-TW': '執行中', en: 'In Progress', ja: '進行中' },
-  in_review: { 'zh-TW': '審核中', en: 'In Review', ja: 'レビュー中' },
-  needs_review: { 'zh-TW': '求助審核', en: 'Needs Review', ja: '支援レビュー' },
-  waiting_on_external: { 'zh-TW': '等待外部', en: 'Waiting External', ja: '外部待ち' },
-  waiting_on_client: { 'zh-TW': '等你回答', en: 'Waiting Client', ja: 'クライアント待ち' },
-  waiting_on_brainstorm: { 'zh-TW': '腦力激盪中', en: 'Brainstorming', ja: 'ブレスト中' },
-  done: { 'zh-TW': '完成', en: 'Done', ja: '完了' },
-  blocked: { 'zh-TW': '受阻', en: 'Blocked', ja: 'ブロック' },
-  cancelled: { 'zh-TW': '已取消', en: 'Cancelled', ja: 'キャンセル' },
-};
 type StatusGroupId = 'todo' | 'in_progress' | 'review' | 'done' | 'blocked_cancelled';
 type StatusGroup = { id: StatusGroupId; statuses: readonly CardStatus[]; dropStatus: CardStatus };
 const statusGroups: readonly StatusGroup[] = [
@@ -43,68 +30,8 @@ const statusGroupLabels: Record<StatusGroupId, LocaleLabels> = {
   blocked_cancelled: { 'zh-TW': '受阻 / 已取消', en: 'Blocked / Cancelled', ja: 'ブロック / キャンセル' },
 };
 
-type Card = {
-  id: string;
-  title: string;
-  body: string;
-  columnStatus: string;
-  tags: string[];
-  priority: number;
-  companyId?: string;
-  departmentId?: string | null;
-  assigneeId?: string | null;
-  reviewerId?: string | null;
-  projectId?: string | null;
-  goalId?: string | null;
-  parentCardId?: string | null;
-  dependencyCardIds?: string[];
-  decisionMode?: string | null;
-  requiresApproval?: boolean;
-  retryCount?: number;
-  maxRetries?: number;
-  scheduleAt?: string | null;
-  recurEveryMinutes?: number | null;
-  recurNextAt?: string | null;
-  scheduledFromCardId?: string | null;
-  executionLog?: string | null;
-  reviewFeedback?: string | null;
-  sessionId?: string | null;
-  costUsd?: string | null;
-  executionLockId?: string | null;
-  activeHeartbeatRunId?: string | null;
-  startedAt?: string | null;
-  completedAt?: string | null;
-  createdAt?: string;
-  updatedAt?: string;
-  workflowProcessAgentId?: string | null;
-  workflowReviewAgentId?: string | null;
-};
-type Agent = { id: string; companyId?: string; name: string; role?: string; adapterType?: string; isBusy?: boolean };
-type Company = { id: string; name: string };
-type Department = { id: string; companyId: string; name: string };
-type Project = { id: string; companyId: string; name: string };
-type Goal = { id: string; companyId: string; departmentId?: string | null; projectId?: string | null; title: string };
-type TaskLog = { id: string; type: string; status: string; message: string; output?: string; costUsd?: string; durationSeconds?: number; createdAt?: string };
-type TaskRun = { id: string; cardId: string; kind: string; status: string };
-type ApiEvent = { id: string; method: string; path: string; statusCode?: number; requestBody?: unknown; responseBody?: unknown; error?: string | null; durationMs?: number; createdAt?: string };
-type CardComment = { id: string; body: string; action: string; authorType: string; agentId?: string | null; authorId?: string | null; parentCommentId?: string | null; assigneeAgentId?: string | null; reviewerAgentId?: string | null; reviewerScope?: 'phase' | 'final' | null; delegationStatus?: string | null; createdAt?: string };
-type CardAction = { id: string; actorType: string; actorId: string; action: string; fromStatus?: string | null; toStatus?: string | null; detail?: string | null; metadata?: unknown; createdAt?: string };
-type WorkProduct = { id: string; cardId?: string | null; projectId?: string | null; agentId?: string | null; type: string; title: string; summary?: string | null; url?: string | null; repoProvider?: string | null; repoUrl?: string | null; branch?: string | null; commitSha?: string | null; pullRequestUrl?: string | null; createdAt?: string };
-type CardDelegationSummary = { phaseAssigneeId?: string | null; phaseReviewerId?: string | null; phaseStatus?: string | null; phaseUpdatedAt?: string | null; phaseSourceAction?: string | null; phaseSourceCommentId?: string | null };
 type CardUpdatePayload = Omit<Partial<Card>, 'priority'> & { priority?: (typeof priorities)[number] };
 type LiveEvent = { type: string; cardId?: string | null; entityId?: string; projectId?: string | null };
-type CachedRows<T> = { rows: T[]; cachedAt: number };
-type CachedValue<T> = { value: T; cachedAt: number };
-type CardTabCache = {
-  comments?: CachedRows<CardComment>;
-  logs?: CachedRows<TaskLog>;
-  actions?: CachedRows<CardAction>;
-  apiLogs?: CachedRows<ApiEvent>;
-  workProducts?: CachedRows<WorkProduct>;
-  delegationSummary?: CachedValue<CardDelegationSummary>;
-};
-type CardTabKey = keyof CardTabCache;
-type CardDetailTab = 'details' | 'comments' | 'delegation' | 'thread' | 'logs' | 'workProducts';
 
 const CARD_TAB_CACHE_KEY = 'megacorps.kanban.card-tabs.v2';
 const CARD_TAB_CACHE_TTL_MS = 2 * 60 * 1000;
@@ -152,38 +79,6 @@ function apiEventMentionsCard(event: ApiEvent, cardId: string): boolean {
   }
 }
 
-function isDelegationReviewComment(comment: CardComment): boolean {
-  const action = comment.action.toLowerCase();
-  return Boolean(
-    comment.delegationStatus ||
-    comment.assigneeAgentId ||
-    comment.reviewerAgentId ||
-    comment.reviewerScope ||
-    action.startsWith('delegate_') ||
-    action.includes('review'),
-  );
-}
-
-function delegationReviewTone(comment: CardComment): 'system' | 'error' | 'product' {
-  const token = `${comment.action} ${comment.delegationStatus ?? ''}`.toLowerCase();
-  if (token.includes('failed') || token.includes('error') || token.includes('rejected') || token.includes('blocked')) return 'error';
-  if (token.includes('approved') || token.includes('submitted')) return 'product';
-  return 'system';
-}
-
-function statusColor(status: string) {
-  if (status === 'done') return '#16a34a';
-  if (status === 'blocked') return '#dc2626';
-  if (status === 'cancelled') return '#64748b';
-  if (status === 'in_progress') return '#2563eb';
-  if (status === 'in_review') return '#9333ea';
-  if (status === 'needs_review') return '#ca8a04';
-  if (status === 'waiting_on_external') return '#0d9488';
-  if (status === 'waiting_on_client') return '#f59e0b';
-  if (status === 'waiting_on_brainstorm') return '#0891b2';
-  return 'var(--border)';
-}
-
 function statusGroupColor(groupId: StatusGroupId) {
   if (groupId === 'review') return statusColor('in_review');
   if (groupId === 'blocked_cancelled') return statusColor('blocked');
@@ -205,46 +100,6 @@ function cardsForStatusGroup(cards: Card[], group: StatusGroup): Card[] {
   return [...grouped].sort((left, right) => cardStatusRank(group, left.columnStatus) - cardStatusRank(group, right.columnStatus));
 }
 
-function goalScope(goal: Goal): string {
-  if (goal.projectId) return 'Project';
-  if (goal.departmentId) return 'Department';
-  return 'Company';
-}
-
-function scopedGoalOptions(goals: Goal[], input: { companyId?: string; departmentId?: string | null; projectId?: string | null }) {
-  return goals.filter((goal) => {
-    if (input.companyId && goal.companyId !== input.companyId) return false;
-    if (!goal.departmentId && !goal.projectId) return true;
-    if (goal.departmentId && input.departmentId && goal.departmentId === input.departmentId) return true;
-    if (goal.projectId && input.projectId && goal.projectId === input.projectId) return true;
-    return false;
-  });
-}
-
-function priorityValue(priority: number): (typeof priorities)[number] {
-  if (priority >= 3) return 'urgent';
-  if (priority >= 2) return 'high';
-  if (priority <= -1) return 'low';
-  return 'normal';
-}
-
-function priorityNumber(priority: string | number | undefined): number {
-  if (typeof priority === 'number') return priority;
-  if (priority === 'urgent') return 3;
-  if (priority === 'high') return 2;
-  if (priority === 'low') return -1;
-  return 0;
-}
-
-function parseCsv(value: string): string[] {
-  return value.split(',').map((item) => item.trim()).filter(Boolean);
-}
-
-function agentDisplayName(agent: Agent | undefined): string | null {
-  if (!agent) return null;
-  return [agent.name, agent.role].filter(Boolean).join(' / ');
-}
-
 function cardWorkflowTag(card: Card, agents: Agent[]): { type: 'Process' | 'Review'; name: string } | null {
   const reviewId = card.workflowReviewAgentId ?? (['in_review', 'needs_review'].includes(card.columnStatus) ? card.reviewerId : null);
   const processId = card.workflowProcessAgentId ?? (!reviewId && ['todo', 'in_progress', 'waiting_on_external'].includes(card.columnStatus) ? card.assigneeId : null);
@@ -255,63 +110,6 @@ function cardWorkflowTag(card: Card, agents: Agent[]): { type: 'Process' | 'Revi
 
 function isQueryCancellation(error: unknown): boolean {
   return isCancelledError(error) || (error instanceof Error && error.name === 'CancelledError');
-}
-
-function projectScopedDependencyCandidates(cards: Card[], input: { companyId?: string | null; projectId?: string | null; excludeCardId?: string | null; query?: string }) {
-  const needle = input.query?.trim().toLowerCase() ?? '';
-  return cards.filter((card) => {
-    if (input.excludeCardId && card.id === input.excludeCardId) return false;
-    if (input.companyId && card.companyId !== input.companyId) return false;
-    if ((input.projectId ?? null) !== (card.projectId ?? null)) return false;
-    if (!needle) return true;
-    return `${card.title} ${card.body} ${(card.tags ?? []).join(' ')}`.toLowerCase().includes(needle);
-  });
-}
-
-function DependencyPicker({
-  cards,
-  companyId,
-  projectId,
-  excludeCardId,
-  value,
-  onChange,
-}: {
-  cards: Card[];
-  companyId?: string | null;
-  projectId?: string | null;
-  excludeCardId?: string | null;
-  value: string[];
-  onChange: (next: string[]) => void;
-}) {
-  const { t } = useLocale();
-  const [query, setQuery] = useState('');
-  const candidates = useMemo(() => projectScopedDependencyCandidates(cards, { companyId, projectId, excludeCardId, query }), [cards, companyId, projectId, excludeCardId, query]);
-  const selectedSet = useMemo(() => new Set(value), [value]);
-  const selectedCount = value.length;
-
-  function toggle(cardId: string, checked: boolean) {
-    if (checked) {
-      if (!selectedSet.has(cardId)) onChange([...value, cardId]);
-      return;
-    }
-    onChange(value.filter((id) => id !== cardId));
-  }
-
-  return <div className="dependency-picker">
-    <div className="input-wrap dependency-search"><Search size={14} /><input placeholder={t('kanban.searchDeps')} value={query} onChange={(event) => setQuery(event.target.value)} /></div>
-    <div className="dependency-list">
-      {candidates.length === 0 ? <p className="field-hint">{projectId ? t('kanban.depNoProjectMatches') : t('kanban.depNoNoProjectMatches')}</p> : candidates.map((card) => (
-        <label className="dependency-option" key={card.id}>
-          <input type="checkbox" checked={selectedSet.has(card.id)} onChange={(event) => toggle(card.id, event.target.checked)} />
-          <span>
-            <b>{card.title}</b>
-            <small>{card.columnStatus} / {card.id.slice(0, 8)}</small>
-          </span>
-        </label>
-      ))}
-    </div>
-    <p className="field-hint">{selectedCount === 0 ? t('kanban.depNoneSelected') : `${selectedCount} ${t('kanban.depSelected')}`}</p>
-  </div>;
 }
 
 async function fetchKanbanBoard() {
@@ -837,46 +635,6 @@ export function KanbanBoard() {
     return b.priority - a.priority;
   }), [cards, companyNameById, filterAssignee, filterCompany, filterProject, query, sortMode]);
   const boardCards = visibleCards;
-  const ticketThreadEntries = selected ? [
-    ...logs.map((log) => ({
-      id: `log-${log.id}`,
-      createdAt: log.createdAt,
-      type: log.type === 'stage' ? 'stage_changed' : log.type,
-      actor: t('common.system'),
-      tone: log.status === 'failed' ? 'error' : 'system',
-      body: [log.message, log.output].filter(Boolean).join('\n\n'),
-      meta: [log.createdAt ? new Date(log.createdAt).toLocaleString() : '', log.costUsd ? `$${log.costUsd}` : '', log.durationSeconds !== undefined ? `${log.durationSeconds}s` : ''].filter(Boolean).join(' / '),
-    })),
-    ...actions.map((action) => ({
-      id: `action-${action.id}`,
-      createdAt: action.createdAt,
-      type: action.action,
-      actor: action.actorType === 'user' ? `${t('common.user')} ${action.actorId}` : action.actorType === 'system' ? t('common.system') : action.actorId,
-      tone: action.action.includes('block') || action.toStatus === 'blocked' ? 'error' : 'system',
-      body: action.detail ?? `${action.fromStatus ?? 'none'} -> ${action.toStatus ?? 'none'}`,
-      meta: [action.createdAt ? new Date(action.createdAt).toLocaleString() : '', `${action.actorType}:${action.actorId}`, action.fromStatus || action.toStatus ? `${action.fromStatus ?? 'none'} -> ${action.toStatus ?? 'none'}` : ''].filter(Boolean).join(' / '),
-    })),
-    ...workProducts.map((product) => ({
-      id: `product-${product.id}`,
-      createdAt: product.createdAt,
-      type: 'work_product',
-      actor: agents.find((agent) => agent.id === product.agentId)?.name ?? t('common.system'),
-      tone: 'product',
-      body: [product.title, product.summary].filter(Boolean).join('\n\n'),
-      meta: [product.type, product.createdAt ? new Date(product.createdAt).toLocaleString() : '', product.pullRequestUrl || product.url || product.commitSha || ''].filter(Boolean).join(' / '),
-    })),
-  ].sort((a, b) => Date.parse(a.createdAt ?? '') - Date.parse(b.createdAt ?? '')) : [];
-  const delegationReviewRecords = selected
-    ? comments.filter(isDelegationReviewComment).sort((a, b) => Date.parse(a.createdAt ?? '') - Date.parse(b.createdAt ?? ''))
-    : [];
-  const phaseAssigneeAgent = delegationSummary?.phaseAssigneeId ? agents.find((agent) => agent.id === delegationSummary.phaseAssigneeId) : undefined;
-  const phaseReviewerAgent = delegationSummary?.phaseReviewerId ? agents.find((agent) => agent.id === delegationSummary.phaseReviewerId) : undefined;
-  const phaseAssigneeLabel = agentDisplayName(phaseAssigneeAgent) ?? t('kanban.noneAssigned');
-  const phaseReviewerLabel = agentDisplayName(phaseReviewerAgent) ?? t('kanban.noneAssigned');
-  const phaseSummaryMeta = [
-    delegationSummary?.phaseStatus,
-    delegationSummary?.phaseUpdatedAt ? new Date(delegationSummary.phaseUpdatedAt).toLocaleString() : null,
-  ].filter(Boolean).join(' / ');
 
   async function create() {
     if (!newTitle.trim()) { setToast({ message: t('kanban.titleRequired'), type: 'error' }); return; }
@@ -1269,266 +1027,66 @@ export function KanbanBoard() {
       )}
     </AnimatePresence>
 
-    <AnimatePresence>
-      {selected && (
-        <motion.div className="overlay kanban-detail-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelected(null)}>
-        <motion.aside initial={{ scale: 0.97, y: 16 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.97, y: 16 }} transition={{ duration: 0.16 }}
-          className="card detail-panel" onClick={(event) => event.stopPropagation()}>
-          <div className="panel-title">
-            <div><h2>{selected.title}</h2><span className="status-pill" style={{ borderColor: statusColor(selected.columnStatus) }}>{selected.columnStatus}</span></div>
-            <button className="btn" onClick={() => setSelected(null)}><X size={16} /></button>
-          </div>
-          <div className="tab-row">
-            {(['details', 'comments', 'delegation', 'thread', 'logs', 'workProducts'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => selectTab(next)}>{next === 'comments' ? t('kanban.tabMessageBoard') : next === 'delegation' ? t('kanban.tabDelegationReview') : next === 'thread' ? t('kanban.tabThread') : next === 'workProducts' ? t('kanban.tabWorkProducts') : next === 'details' ? t('kanban.tabDetails') : t('kanban.tabLogs')}</button>)}
-          </div>
-          {tab === 'details' && <div style={{ display: 'grid', gap: 12 }}>
-            <label className="field-label">{t('common.title')}<input className="input" value={String(draft?.title ?? '')} onChange={(e) => setDraft({ ...(draft ?? {}), title: e.target.value })} /></label>
-            <label className="field-label">{t('kanban.stage')}
-              <select className="input" value={String(draft?.columnStatus ?? selected.columnStatus)} onChange={(e) => setDraft({ ...(draft ?? {}), columnStatus: e.target.value })}>
-                {statuses.map((status) => <option value={status} key={status}>{statusLabels[status]?.[locale] ?? status}</option>)}
-              </select>
-            </label>
-            <label className="field-label">{t('kanban.fullDetail')}<textarea className="input" rows={8} value={String(draft?.body ?? '')} onChange={(e) => setDraft({ ...(draft ?? {}), body: e.target.value })} /></label>
-            <div className="form-grid">
-              <label className="field-label">{t('kanban.assignee')}<select className="input" value={draft?.assigneeId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), assigneeId: e.target.value || null })}><option value="">{t('kanban.assignee')}</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
-              <label className="field-label">{t('kanban.reviewer')}<select className="input" value={draft?.reviewerId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), reviewerId: e.target.value || null, requiresApproval: Boolean(e.target.value) })}><option value="">{t('kanban.reviewer')}</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
-              <label className="field-label">{t('common.department')}<select className="input" value={draft?.departmentId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), departmentId: e.target.value || null, goalId: null })}><option value="">{t('common.department')}</option>{departments.filter((department) => !selected.companyId || department.companyId === selected.companyId).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
-              <label className="field-label">{t('common.project')}<select className="input" value={draft?.projectId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), projectId: e.target.value || null, goalId: null, dependencyCardIds: [] })}><option value="">{t('common.project')}</option>{projects.filter((project) => !selected.companyId || project.companyId === selected.companyId).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label>
-              <label className="field-label">{t('kanban.goal')}<select className="input" value={draft?.goalId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), goalId: e.target.value || null })}><option value="">{t('kanban.goal')}</option>{scopedGoalOptions(goals, { companyId: selected.companyId, departmentId: draft?.departmentId ?? selected.departmentId, projectId: draft?.projectId ?? selected.projectId }).map((goal) => <option value={goal.id} key={goal.id}>{goalScope(goal)} / {goal.title}</option>)}</select></label>
-              <label className="field-label">{t('kanban.priority')}<select className="input" value={priorityValue(priorityNumber(draft?.priority ?? selected.priority))} onChange={(e) => setDraft({ ...(draft ?? {}), priority: priorityNumber(e.target.value) })}>{priorities.map((priority) => <option key={priority} value={priority}>{t(`kanban.priority.${priority}`)}</option>)}</select></label>
-            </div>
-            <details className="runtime-details">
-              <summary>{t('kanban.moreFields')}</summary>
-              <label className="field-label">{t('kanban.tags')}<input className="input" value={(draft?.tags ?? []).join(', ')} onChange={(e) => setDraft({ ...(draft ?? {}), tags: parseCsv(e.target.value) })} /></label>
-            </details>
-            <label className="field-label">{t('kanban.collaboration')}
-              <select className="input" value={['auto', 'solo', 'pair', 'swarm'].includes(String(draft?.decisionMode ?? '')) ? String(draft?.decisionMode) : draft?.decisionMode === 'execute' ? 'solo' : 'auto'} onChange={(e) => setDraft({ ...(draft ?? {}), decisionMode: e.target.value })}>
-                <option value="auto">{t('kanban.modeAuto')}</option>
-                <option value="solo">{t('kanban.modeSolo')}</option>
-                <option value="pair">{t('kanban.modePair')}</option>
-                <option value="swarm">{t('kanban.modeSwarm')}</option>
-              </select>
-            </label>
-            <div className="field-label"><span>{t('kanban.dependencies')}</span><DependencyPicker cards={cards} companyId={selected.companyId} projectId={(draft?.projectId ?? selected.projectId) || null} excludeCardId={selected.id} value={draft?.dependencyCardIds ?? []} onChange={(next) => setDraft({ ...(draft ?? {}), dependencyCardIds: next })} /></div>
-            <div className="form-grid">
-              <label className="field-label">{t('kanban.maxRetries')}<input className="input" type="number" min={1} max={10} value={Number(draft?.maxRetries ?? 3)} onChange={(e) => setDraft({ ...(draft ?? {}), maxRetries: Number(e.target.value) })} /></label>
-              <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={Boolean(draft?.requiresApproval)} onChange={(e) => setDraft({ ...(draft ?? {}), requiresApproval: e.target.checked })} /> {t('kanban.requiresApproval')}</label>
-            </div>
-            <details className="runtime-details">
-            <summary>{t('kanban.runtimeDetails')}</summary>
-            <div className="meta-grid">
-              <span>UUID <b>{selected.id}</b></span>
-              <span>{t('kanban.stage')} <b>{selected.columnStatus}</b></span>
-              <span>{t('kanban.phaseAssignee')} <b>{phaseAssigneeLabel}</b>{phaseSummaryMeta && <small>{phaseSummaryMeta}</small>}</span>
-              <span>{t('kanban.phaseReviewer')} <b>{phaseReviewerLabel}</b>{phaseSummaryMeta && <small>{phaseSummaryMeta}</small>}</span>
-              <span>{t('kanban.priority')} <b>{t(`kanban.priority.${priorityValue(selected.priority)}`)}</b></span>
-              <span>{t('kanban.cost')} <b>{selected.costUsd ?? '0.0000'}</b></span>
-              <span>{t('kanban.session')} <b>{selected.sessionId ?? 'none'}</b></span>
-              <span>{t('kanban.retries')} <b>{selected.retryCount ?? 0}/{selected.maxRetries ?? 3}</b></span>
-              <span>{t('kanban.activeRun')} <b>{selected.activeHeartbeatRunId ?? 'none'}</b></span>
-              <span>{t('kanban.lock')} <b>{selected.executionLockId ?? 'none'}</b></span>
-            </div>
-            </details>
-            {selected.reviewFeedback && <pre className="log-block">{selected.reviewFeedback}</pre>}
-            <div className="action-row">
-              <button className="btn btn-primary" disabled={busy} onClick={saveSelected}><Save size={15} /> {t('common.save')}</button>
-              <button className="btn" disabled={busy} onClick={resetDraft}><RotateCcw size={15} /> {t('kanban.revert')}</button>
-              <button className="btn btn-primary" disabled={busy} onClick={() => action(`/api/cards/${selected.id}/run`, t('kanban.taskDispatched'))}><Play size={15} /> {t('common.runNow')}</button>
-              <button className="btn" disabled={busy} onClick={() => action(`/api/cards/${selected.id}/review`, t('kanban.reviewCompleted'))}><ShieldCheck size={15} /> {t('kanban.review')}</button>
-              <button className="btn" disabled={busy} onClick={() => { selectTab('comments'); setCommentAction('pause_agent'); }}><StopCircle size={15} /> {t('kanban.pauseWithComment')}</button>
-              <button className="btn" disabled={busy || selected.columnStatus === 'cancelled'} onClick={() => action(`/api/cards/${selected.id}/cancel`, t('kanban.taskCancelled'))}><Ban size={15} /> {t('kanban.cancelTask')}</button>
-              <button className="btn" disabled={busy} onClick={deleteSelected} style={{ color: 'var(--danger)' }}><Trash2 size={15} /> {t('kanban.deleteTask')}</button>
-            </div>
-          </div>}
-          {tab === 'comments' && <div style={{ display: 'grid', gap: 12 }}>
-            <div className="panel-title">
-              <div><h2>{t('kanban.tabMessageBoard')}</h2><span className="status-pill">{comments.length} {t('kanban.messagesCount')}{tabLoading.comments ? ` / ${t('kanban.refreshing')}` : ''}</span></div>
-            </div>
-            <div className="message-board-list">
-              {comments.length === 0 && !tabLoading.comments ? <p style={{ opacity: 0.6 }}>{t('kanban.noMessages')}</p> : comments.map((comment) => {
-                const authorAgent = comment.agentId ? agents.find((agent) => agent.id === comment.agentId) : undefined;
-                const assigneeAgent = comment.assigneeAgentId ? agents.find((agent) => agent.id === comment.assigneeAgentId) : undefined;
-                const reviewerAgent = comment.reviewerAgentId ? agents.find((agent) => agent.id === comment.reviewerAgentId) : undefined;
-                const author = authorAgent?.name ?? (comment.authorType === 'system' ? t('common.system') : comment.authorType === 'agent' ? t('common.agent') : t('common.you'));
-                return <article className="message-board-entry" key={comment.id}>
-                  <div className="message-board-entry-head"><b>{author}</b><span>{comment.action} / {comment.createdAt ? new Date(comment.createdAt).toLocaleString() : ''}</span></div>
-                  {(comment.delegationStatus || comment.assigneeAgentId || comment.reviewerAgentId) && <div className="message-board-meta">
-                    {comment.delegationStatus && <span className="status-pill">{comment.delegationStatus}</span>}
-                    {assigneeAgent && <span>{t('kanban.delegateAssignee')}: {assigneeAgent.name}</span>}
-                    {reviewerAgent && <span>{comment.reviewerScope === 'final' ? t('kanban.finalReviewer') : t('kanban.phaseReviewer')}: {reviewerAgent.name}</span>}
-                  </div>}
-                  <p>{comment.body}</p>
-                </article>;
-              })}
-            </div>
-            <div className="form-grid">
-              <label className="field-label">{t('kanban.author')}
-                <select className="input" value={commentAgentId} onChange={(event) => {
-                  setCommentAgentId(event.target.value);
-                  if (event.target.value) setCommentAction('agent_note');
-                }}>
-                  <option value="">{t('common.you')}</option>
-                  {agents.filter((agent) => !selected.companyId || agent.companyId === selected.companyId).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}{agent.role ? ` / ${agent.role}` : ''}</option>)}
-                </select>
-              </label>
-              <label className="field-label">{t('kanban.action')}
-                <select className="input" value={commentAgentId ? 'agent_note' : commentAction} disabled={Boolean(commentAgentId)} onChange={(event) => {
-                  const next = event.target.value as typeof commentAction;
-                  setCommentAction(next);
-                  if (next === 'delegate_to_agent') setCommentAgentId('');
-                }}>
-                  <option value="comment">{t('kanban.commentOnly')}</option>
-                  <option value="agent_note">{t('kanban.agentNote')}</option>
-                  <option value="delegate_to_agent">{t('kanban.delegateToAgent')}</option>
-                  <option value="pause_agent">{t('kanban.stopAgentBlock')}</option>
-                  <option value="escalate_to_reviewer">{t('kanban.escalateReviewer')}</option>
-                  <option value="send_to_agent">{t('kanban.sendToAgent')}</option>
-                  <option value="continue_run">{t('kanban.continueWithComment')}</option>
-                </select>
-              </label>
-            </div>
-            {commentAction === 'delegate_to_agent' && !commentAgentId && <div className="form-grid">
-              <label className="field-label">{t('kanban.delegateAssignee')}
-                <select className="input" value={commentDelegateAssigneeId} onChange={(event) => setCommentDelegateAssigneeId(event.target.value)}>
-                  <option value="">{t('kanban.delegateAssignee')}</option>
-                  {agents.filter((agent) => !selected.companyId || agent.companyId === selected.companyId).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}{agent.role ? ` / ${agent.role}` : ''}</option>)}
-                </select>
-              </label>
-              <label className="field-label">{t('kanban.reviewScope')}
-                <select className="input" value={commentDelegateScope} onChange={(event) => setCommentDelegateScope(event.target.value as typeof commentDelegateScope)}>
-                  <option value="phase">{t('kanban.phaseReviewer')}</option>
-                  <option value="final">{t('kanban.finalReviewer')}</option>
-                </select>
-              </label>
-              <label className="field-label">{commentDelegateScope === 'final' ? t('kanban.finalReviewer') : t('kanban.phaseReviewer')}
-                <select className="input" value={commentDelegateReviewerId} onChange={(event) => setCommentDelegateReviewerId(event.target.value)}>
-                  <option value="">{t('kanban.reviewer')}</option>
-                  {agents.filter((agent) => !selected.companyId || agent.companyId === selected.companyId).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}{agent.role ? ` / ${agent.role}` : ''}</option>)}
-                </select>
-              </label>
-            </div>}
-            <label className="field-label">{t('kanban.message')}
-              <textarea className="input" rows={5} value={commentBody} onChange={(event) => setCommentBody(event.target.value)} placeholder={t('kanban.messageHint')} />
-            </label>
-            <button className="btn btn-primary" disabled={busy || !commentBody.trim()} onClick={addComment}><MessageSquare size={15} /> {t('kanban.addMessage')}</button>
-          </div>}
-          {tab === 'thread' && <div style={{ display: 'grid', gap: 12 }}>
-            <div className="panel-title">
-              <div><h2>{t('kanban.tabThread')}</h2><span className="status-pill">{ticketThreadEntries.length} {t('kanban.tracedEntries')}{tabLoading.comments || tabLoading.logs || tabLoading.actions || tabLoading.workProducts ? ` / ${t('kanban.refreshing')}` : ''}</span></div>
-            </div>
-            <div className="ticket-thread">
-              {ticketThreadEntries.length === 0 ? <p style={{ opacity: 0.6 }}>{t('kanban.noThreadEntries')}</p> : ticketThreadEntries.map((entry) => <article className={`ticket-entry ${entry.tone}`} key={entry.id}>
-                <div className="ticket-entry-rail"><span /></div>
-                <div className="ticket-entry-body">
-                  <div className="ticket-entry-head"><b>{entry.actor}</b><span>{entry.type} / {entry.meta}</span></div>
-                  <p>{entry.body}</p>
-                </div>
-              </article>)}
-            </div>
-          </div>}
-          {tab === 'logs' && <div style={{ display: 'grid', gap: 10 }}>
-            {(tabLoading.logs || tabLoading.actions || tabLoading.apiLogs) && <p style={{ opacity: 0.6 }}>{t('kanban.refreshingLogs')}</p>}
-            {selected.executionLog && <article className="log-item">
-              <b>{t('kanban.latestExecution')}</b>
-              <span>{selected.completedAt ? new Date(selected.completedAt).toLocaleString() : selected.updatedAt ? new Date(selected.updatedAt).toLocaleString() : ''}</span>
-              <pre className="log-block">{selected.executionLog}</pre>
-            </article>}
-            <article className="log-item">
-              <b>{t('kanban.actionTimeline')}</b>
-              <span>{actions.length} {t('kanban.normalizedActions')}{tabLoading.actions ? ` / ${t('kanban.refreshing')}` : ''}</span>
-              {tabLoading.actions && actions.length === 0 ? <p>{t('kanban.loadingActions')}</p> : actions.length === 0 ? <p>{t('kanban.noActions')}</p> : actions.map((action) => <div className="log-item" key={action.id} style={{ marginTop: 8 }}>
-                <b>{action.action}</b>
-                <span>{action.createdAt ? new Date(action.createdAt).toLocaleString() : ''} / {action.actorType}:{action.actorId} / {action.fromStatus ?? 'none'} {'->'} {action.toStatus ?? 'none'}</span>
-                {action.detail && <p>{action.detail}</p>}
-                {action.metadata != null && <pre className="log-block">{JSON.stringify(action.metadata, null, 2)}</pre>}
-              </div>)}
-            </article>
-            {tabLoading.logs && logs.length === 0 ? <p style={{ opacity: 0.6 }}>{t('kanban.loadingLogs')}</p> : logs.length === 0 ? <p style={{ opacity: 0.6 }}>{t('kanban.noLogs')}</p> : logs.map((log) => <article className="log-item" key={log.id}>
-              <b>{log.type} / {log.status}</b>
-              <span>{log.createdAt ? new Date(log.createdAt).toLocaleString() : ''}</span>
-              <p>{log.message}</p>
-              <div className="log-meta">
-                {log.costUsd && <span>cost ${log.costUsd}</span>}
-                {log.durationSeconds !== undefined && <span>{log.durationSeconds}s</span>}
-              </div>
-              {log.output && <pre className="log-block">{log.output}</pre>}
-            </article>)}
-            {logsHasMore && <button className="btn" disabled={tabLoading.logs} onClick={() => selected && loadMoreCardLogs(selected)}><RefreshCw size={14} /> {t('kanban.loadOlderLogs')}</button>}
-            <article className="log-item">
-              <b>{t('logs.apiLifecycle')}</b>
-              <span>{apiLogs.length} {t('kanban.relatedOperations')}{tabLoading.apiLogs ? ` / ${t('kanban.refreshing')}` : ''}</span>
-              {tabLoading.apiLogs && apiLogs.length === 0 ? <p>{t('kanban.loadingApiEvents')}</p> : apiLogs.length === 0 ? <p>{t('kanban.noApiEvents')}</p> : apiLogs.map((event) => <div className="log-item" key={event.id} style={{ marginTop: 8 }}>
-                <b>{event.method} {event.path}</b>
-                <span>{event.createdAt ? new Date(event.createdAt).toLocaleString() : ''} / {event.statusCode ?? '-'} / {event.durationMs ?? 0}ms</span>
-                {event.error && <p className="form-error">{event.error}</p>}
-                <pre className="log-block">{JSON.stringify({ request: event.requestBody, response: event.responseBody }, null, 2)}</pre>
-              </div>)}
-            </article>
-          </div>}
-          {tab === 'workProducts' && <div style={{ display: 'grid', gap: 10 }}>
-            <div className="panel-title">
-              <div><h2>{t('kanban.tabWorkProducts')}</h2><span className="status-pill">{workProducts.length} {t('kanban.productsCount')}{tabLoading.workProducts ? ` / ${t('kanban.refreshing')}` : ''}</span></div>
-            </div>
-            <section className="section-card" style={{ padding: 0 }}>
-              <div className="form-grid">
-                <label className="field-label">{t('kanban.type')}<select className="input" value={workProductType} onChange={(event) => setWorkProductType(event.target.value as (typeof workProductTypes)[number])}>{workProductTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
-                <label className="field-label">{t('common.title')}<input className="input" value={workProductTitle} onChange={(event) => setWorkProductTitle(event.target.value)} /></label>
-                <label className="field-label">URL<input className="input" value={workProductUrl} onChange={(event) => setWorkProductUrl(event.target.value)} placeholder="https://..." /></label>
-                <label className="field-label">{t('kanban.pullRequestUrl')}<input className="input" value={workProductPullRequestUrl} onChange={(event) => setWorkProductPullRequestUrl(event.target.value)} placeholder="https://github.com/org/repo/pull/1" /></label>
-                <label className="field-label">{t('kanban.repoProvider')}<input className="input" value={workProductRepoProvider} onChange={(event) => setWorkProductRepoProvider(event.target.value)} placeholder="github" /></label>
-                <label className="field-label">{t('kanban.repoUrl')}<input className="input" value={workProductRepoUrl} onChange={(event) => setWorkProductRepoUrl(event.target.value)} /></label>
-                <label className="field-label">{t('kanban.branch')}<input className="input" value={workProductBranch} onChange={(event) => setWorkProductBranch(event.target.value)} /></label>
-                <label className="field-label">Commit SHA<input className="input" value={workProductCommitSha} onChange={(event) => setWorkProductCommitSha(event.target.value)} /></label>
-              </div>
-              <label className="field-label">{t('kanban.summary')}<textarea className="input" rows={3} value={workProductSummary} onChange={(event) => setWorkProductSummary(event.target.value)} /></label>
-              <button className="btn btn-primary" disabled={busy || !workProductTitle.trim()} onClick={addWorkProduct}><Plus size={15} /> {t('kanban.addWorkProduct')}</button>
-            </section>
-            {tabLoading.workProducts && workProducts.length === 0 ? <p style={{ opacity: 0.6 }}>{t('kanban.loadingWorkProducts')}</p> : workProducts.length === 0 ? <p style={{ opacity: 0.6 }}>{t('kanban.noWorkProducts')}</p> : workProducts.map((product) => {
-              const primaryUrl = product.pullRequestUrl || product.url || (product.repoUrl && product.commitSha ? `${product.repoUrl.replace(/\/$/, '')}/commit/${product.commitSha}` : '');
-              return <article className="log-item" key={product.id}>
-                <b>{product.type} / {product.title}</b>
-                <span>{product.createdAt ? new Date(product.createdAt).toLocaleString() : ''}</span>
-                {product.summary && <p>{product.summary}</p>}
-                <div className="log-meta">
-                  {product.repoProvider && <span>{product.repoProvider}</span>}
-                  {product.branch && <span>branch {product.branch}</span>}
-                  {product.commitSha && <span>commit {product.commitSha.slice(0, 12)}</span>}
-                </div>
-                {primaryUrl && <a className="btn" href={primaryUrl} target="_blank" rel="noreferrer"><ExternalLink size={14} /> {t('kanban.openProduct')}</a>}
-              </article>;
-            })}
-          </div>}
-          {tab === 'delegation' && <div style={{ display: 'grid', gap: 10 }}>
-            <div className="panel-title">
-              <div><h2>{t('kanban.tabDelegationReview')}</h2><span className="status-pill">{delegationReviewRecords.length} {t('kanban.delegationRecords')}{tabLoading.comments ? ` / ${t('kanban.refreshing')}` : ''}</span></div>
-              <button className="btn" disabled={tabLoading.comments} onClick={() => loadCardComments(selected, true)}><RefreshCw size={14} /> {t('common.refresh')}</button>
-            </div>
-            {tabLoading.comments && delegationReviewRecords.length === 0 ? <p style={{ opacity: 0.6 }}>{t('kanban.loadingDelegationRecords')}</p> : delegationReviewRecords.length === 0 ? <p style={{ opacity: 0.6 }}>{t('kanban.noDelegationRecords')}</p> : <div className="ticket-thread">
-              {delegationReviewRecords.map((comment) => {
-                const authorAgent = comment.agentId ? agents.find((agent) => agent.id === comment.agentId) : undefined;
-                const assigneeAgent = comment.assigneeAgentId ? agents.find((agent) => agent.id === comment.assigneeAgentId) : undefined;
-                const reviewerAgent = comment.reviewerAgentId ? agents.find((agent) => agent.id === comment.reviewerAgentId) : undefined;
-                const author = authorAgent?.name ?? (comment.authorType === 'system' ? t('common.system') : comment.authorType === 'agent' ? t('common.agent') : t('common.you'));
-                return <article className={`ticket-entry ${delegationReviewTone(comment)}`} key={comment.id}>
-                  <div className="ticket-entry-rail"><span /></div>
-                  <div className="ticket-entry-body">
-                    <div className="ticket-entry-head"><b>{author}</b><span>{comment.action} / {comment.createdAt ? new Date(comment.createdAt).toLocaleString() : ''}</span></div>
-                    <div className="message-board-meta">
-                      {comment.delegationStatus && <span>{comment.delegationStatus}</span>}
-                      {assigneeAgent && <span>{t('kanban.delegateAssignee')}: {assigneeAgent.name}</span>}
-                      {reviewerAgent && <span>{comment.reviewerScope === 'final' ? t('kanban.finalReviewer') : t('kanban.phaseReviewer')}: {reviewerAgent.name}</span>}
-                      {comment.parentCommentId && <span>{t('kanban.parentRecord')}: {comment.parentCommentId.slice(0, 8)}</span>}
-                    </div>
-                    <p>{comment.body}</p>
-                  </div>
-                </article>;
-              })}
-            </div>}
-          </div>}
-        </motion.aside>
-        </motion.div>
-      )}
-    </AnimatePresence>
+    <CardDetailPanel
+      selected={selected}
+      setSelected={setSelected}
+      tab={tab}
+      selectTab={selectTab}
+      cards={cards}
+      agents={agents}
+      departments={departments}
+      projects={projects}
+      goals={goals}
+      draft={draft}
+      setDraft={setDraft}
+      logs={logs}
+      actions={actions}
+      apiLogs={apiLogs}
+      comments={comments}
+      workProducts={workProducts}
+      delegationSummary={delegationSummary}
+      logsHasMore={logsHasMore}
+      tabLoading={tabLoading}
+      busy={busy}
+      commentBody={commentBody}
+      setCommentBody={setCommentBody}
+      commentAction={commentAction}
+      setCommentAction={setCommentAction}
+      commentAgentId={commentAgentId}
+      setCommentAgentId={setCommentAgentId}
+      commentDelegateAssigneeId={commentDelegateAssigneeId}
+      setCommentDelegateAssigneeId={setCommentDelegateAssigneeId}
+      commentDelegateReviewerId={commentDelegateReviewerId}
+      setCommentDelegateReviewerId={setCommentDelegateReviewerId}
+      commentDelegateScope={commentDelegateScope}
+      setCommentDelegateScope={setCommentDelegateScope}
+      workProductType={workProductType}
+      setWorkProductType={setWorkProductType}
+      workProductTitle={workProductTitle}
+      setWorkProductTitle={setWorkProductTitle}
+      workProductSummary={workProductSummary}
+      setWorkProductSummary={setWorkProductSummary}
+      workProductUrl={workProductUrl}
+      setWorkProductUrl={setWorkProductUrl}
+      workProductRepoProvider={workProductRepoProvider}
+      setWorkProductRepoProvider={setWorkProductRepoProvider}
+      workProductRepoUrl={workProductRepoUrl}
+      setWorkProductRepoUrl={setWorkProductRepoUrl}
+      workProductBranch={workProductBranch}
+      setWorkProductBranch={setWorkProductBranch}
+      workProductCommitSha={workProductCommitSha}
+      setWorkProductCommitSha={setWorkProductCommitSha}
+      workProductPullRequestUrl={workProductPullRequestUrl}
+      setWorkProductPullRequestUrl={setWorkProductPullRequestUrl}
+      saveSelected={saveSelected}
+      resetDraft={resetDraft}
+      deleteSelected={deleteSelected}
+      action={action}
+      addComment={addComment}
+      addWorkProduct={addWorkProduct}
+      loadMoreCardLogs={loadMoreCardLogs}
+      loadCardComments={loadCardComments}
+    />
 
     <AnimatePresence>{toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}</AnimatePresence>
   </>;
