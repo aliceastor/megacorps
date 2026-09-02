@@ -7,10 +7,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { isCancelledError, useQuery, useQueryClient } from '@tanstack/react-query';
 import { GripVertical, Plus, RefreshCw, Search, X } from 'lucide-react';
 import { api } from '@/lib/api';
+import { buildConversation, type ConversationEvent } from '@/lib/card-conversation';
 import { useLocale } from '@/lib/locale-context';
 import { CardDetailPanel } from './kanban/card-detail-panel';
-import { agentDisplayName, goalScope, parseCsv, priorityNumber, priorityValue, scopedGoalOptions, statusColor } from './kanban/card-helpers';
-import { type Agent, type ApiEvent, type CachedRows, type CachedValue, type Card, type CardAction, type CardComment, type CardDelegationSummary, type CardDetailTab, type CardStatus, type CardTabCache, type CardTabKey, type Company, type Department, type Goal, type LocaleLabels, type Project, type TaskLog, type TaskRun, type WorkProduct, priorities, statusLabels, statuses, workProductTypes } from './kanban/card-types';
+import { agentDisplayName, goalScope, isDraftDirty, parseCsv, priorityNumber, priorityValue, scopedGoalOptions, statusColor } from './kanban/card-helpers';
+import { type Agent, type ApiEvent, type CachedRows, type CachedValue, type Card, type CardAction, type CardApproval, type CardComment, type CardDelegationSummary, type CardDetailTab, type CardStatus, type CardTabCache, type CardTabKey, type Company, type Department, type DetailLayout, type Goal, type LocaleLabels, type Project, type SubtreeCard, type TaskLog, type TaskRun, type WorkProduct, priorities, statusLabels, statuses, workProductTypes } from './kanban/card-types';
 import { DependencyPicker } from './kanban/dependency-picker';
 
 type StatusGroupId = 'todo' | 'in_progress' | 'review' | 'done' | 'blocked_cancelled';
@@ -37,6 +38,18 @@ const CARD_TAB_CACHE_KEY = 'megacorps.kanban.card-tabs.v2';
 const CARD_TAB_CACHE_TTL_MS = 2 * 60 * 1000;
 const CARD_TAB_CACHE_LIMIT = 50;
 const CARD_LOG_PAGE_SIZE = 80;
+const DETAIL_LAYOUT_KEY = 'megacorps.kanban.detailLayout';
+
+function readDetailLayout(): DetailLayout {
+  try { return window.localStorage.getItem(DETAIL_LAYOUT_KEY) === 'legacy' ? 'legacy' : 'v2'; } catch { return 'v2'; }
+}
+
+// The tab a freshly opened card shows. Legacy keeps the details tab; the v2
+// panel opens on the message board until PR-3 lands the merged conversation
+// tab. PR-4 narrows CardDetailTab once the legacy layout goes.
+function defaultTabFor(layout: DetailLayout): CardDetailTab {
+  return layout === 'legacy' ? 'details' : 'comments';
+}
 
 function isFresh<T>(entry?: CachedRows<T> | CachedValue<T>): boolean {
   return Boolean(entry && Date.now() - entry.cachedAt < CARD_TAB_CACHE_TTL_MS);
@@ -247,7 +260,11 @@ export function KanbanBoard() {
   const [logsHasMore, setLogsHasMore] = useState(false);
   const [cardTabCache, setCardTabCache] = useState<Record<string, CardTabCache>>(() => readCardTabCache());
   const [tabLoading, setTabLoading] = useState<Record<CardTabKey, boolean>>({ comments: false, logs: false, actions: false, apiLogs: false, workProducts: false, delegationSummary: false });
-  const [tab, setTab] = useState<CardDetailTab>('details');
+  // Detail layout: the v2 overview panel by default, the PR-0 tabs one toggle away.
+  const [detailLayout, setDetailLayoutState] = useState<DetailLayout>(() => readDetailLayout());
+  const defaultDetailTab = defaultTabFor(detailLayout);
+  const [tab, setTab] = useState<CardDetailTab>(() => defaultTabFor(readDetailLayout()));
+  const [overviewEditing, setOverviewEditing] = useState(false);
   const [commentBody, setCommentBody] = useState('');
   const [commentAction, setCommentAction] = useState<'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run' | 'escalate_to_reviewer' | 'delegate_to_agent'>('comment');
   const [commentAgentId, setCommentAgentId] = useState('');
@@ -299,6 +316,21 @@ export function KanbanBoard() {
   const [loading, setLoading] = useState(true);
   const selectedIdRef = useRef<string | null>(null);
   const boardQuery = useQuery({ queryKey: ['kanbanBoard'], queryFn: fetchKanbanBoard });
+  const selectedId = selected?.id ?? null;
+  // A parent card: rollup set, a split round recorded, or a board card pointing at it.
+  const selectedIsParent = useMemo(() => Boolean(selected && (selected.rollupStatus || (selected.splitRound ?? 0) > 0 || cards.some((card) => card.parentCardId === selected.id))), [selected, cards]);
+  const approvalsQuery = useQuery({
+    queryKey: ['cardApprovals', selectedId],
+    queryFn: () => api<CardApproval[]>(`/api/approvals?cardId=${selectedId}&limit=20`),
+    enabled: Boolean(selectedId),
+  });
+  const subtreeQuery = useQuery({
+    queryKey: ['cardSubtree', selectedId],
+    queryFn: () => api<SubtreeCard[]>(`/api/cards/${selectedId}/subtree`),
+    enabled: Boolean(selectedId) && selectedIsParent,
+  });
+  const cardApprovals = selectedId && approvalsQuery.data ? approvalsQuery.data : null;
+  const cardChildren = useMemo(() => (selectedId && selectedIsParent && subtreeQuery.data ? subtreeQuery.data.filter((row) => row.depth === 1) : null), [selectedId, selectedIsParent, subtreeQuery.data]);
 
   async function refresh() {
     setLoading(true);
@@ -546,6 +578,12 @@ export function KanbanBoard() {
         return;
       }
       if (detail.type.startsWith('card.') || detail.type === 'activity.created') void refresh();
+      if (selected && (detail.type.startsWith('card.') || detail.type === 'activity.created')) {
+        // Approvals and the subtree have no live event of their own, and a child
+        // card's event carries the child's id: refresh both on any card.* event.
+        void queryClient.invalidateQueries({ queryKey: ['cardApprovals', selected.id] });
+        void queryClient.invalidateQueries({ queryKey: ['cardSubtree', selected.id] });
+      }
       const affectsSelectedCard = Boolean(selected && detail.cardId === selected.id);
       if (!selected || !affectsSelectedCard) return;
       if (detail.type === 'card.comment.created') {
@@ -561,6 +599,7 @@ export function KanbanBoard() {
   }, [selected?.id, tab]);
   useEffect(() => {
     selectedIdRef.current = selected?.id ?? null;
+    setOverviewEditing(false);
     if (!selected) {
       setDraft(null);
       setLogs([]);
@@ -598,7 +637,8 @@ export function KanbanBoard() {
     setDelegationSummary(cached.delegationSummary?.value ?? null);
     setLogsHasMore((cached.logs?.rows.length ?? 0) >= CARD_LOG_PAGE_SIZE);
     const timer = window.setTimeout(() => {
-      if (tab === 'details') void loadCardDelegationSummary(selected);
+      // The overview's situation line and runtime block need the summary on every open.
+      void loadCardDelegationSummary(selected);
       if (tab === 'comments' || tab === 'delegation') void loadCardComments(selected);
       if (tab === 'thread') {
         void loadCardLogs(selected);
@@ -740,6 +780,7 @@ export function KanbanBoard() {
         maxRetries: Number(draft.maxRetries ?? selected.maxRetries ?? 3),
       });
       setToast({ message: t('kanban.cardSaved'), type: 'success' });
+      setOverviewEditing(false);
     } catch (err) {
       setToast({ message: err instanceof Error ? err.message : t('kanban.saveFailed'), type: 'error' });
     } finally {
@@ -898,6 +939,51 @@ export function KanbanBoard() {
     }
   }
 
+  // Close guard: an edited draft or an unsent comment keeps the panel open when
+  // the backdrop is clicked; the × asks first. The card.deleted live path and
+  // deleteSelected call setSelected(null) directly and bypass this.
+  const draftDirty = Boolean(selected && draft && isDraftDirty(draft, selected));
+  const detailDirty = draftDirty || commentBody.trim().length > 0;
+  function closePanel(source: 'overlay' | 'button') {
+    if (!selected) return;
+    if (detailDirty) {
+      if (source === 'overlay') { setToast({ message: t('kanban.closeBlocked'), type: 'error' }); return; }
+      if (!window.confirm(t('kanban.closeDiscard'))) return;
+    }
+    setSelected(null);
+  }
+  function openCard(card: Card) {
+    if (selected?.id === card.id) return;
+    if (selected && detailDirty && !window.confirm(t('kanban.closeDiscard'))) return;
+    setSelected(cards.find((item) => item.id === card.id) ?? card);
+    setTab(defaultDetailTab);
+  }
+  function setDetailLayout(next: DetailLayout) {
+    setDetailLayoutState(next);
+    try { window.localStorage.setItem(DETAIL_LAYOUT_KEY, next); } catch { /* per-viewer convenience only */ }
+    setOverviewEditing(false);
+    if (next === 'v2' && tab === 'details') selectTab(defaultTabFor(next));
+  }
+  // The overview's "last activity" line: the newest non-system event over
+  // whatever rows are loaded (PR-3 renders the full conversation from this).
+  const conversationLatest = useMemo<ConversationEvent | null>(() => {
+    if (!selected) return null;
+    try {
+      return buildConversation({ comments, logs, actions, workProducts, approvals: cardApprovals, agents, you: { name: t('common.you') } }, { sort: 'newest', filter: 'all' }).latest;
+    } catch {
+      return null;
+    }
+  }, [selected?.id, comments, logs, actions, workProducts, cardApprovals, agents, locale]);
+  async function afterApprovalChange(message: string) {
+    if (!selected) return;
+    const card = selected;
+    setToast({ message, type: 'success' });
+    await queryClient.invalidateQueries({ queryKey: ['cardApprovals', card.id] });
+    void queryClient.invalidateQueries({ queryKey: ['kanbanBoard'] });
+    await refresh();
+    await Promise.all([loadCardComments(card, true), loadCardLogs(card, true), loadCardActions(card, true), loadCardDelegationSummary(card, true)]);
+  }
+
   return <>
     <div className="kanban-toolbar">
       <div className="input-wrap" style={{ flex: '1 1 260px' }}><Search size={15} /><input placeholder={t('common.search')} value={query} onChange={(e) => setQuery(e.target.value)} /></div>
@@ -937,7 +1023,7 @@ export function KanbanBoard() {
         projects={projects}
         statusLabel={(status) => statusLabels[status as CardStatus]?.[locale] ?? status}
         statusColor={statusColor}
-        onSelect={(card) => { const full = cards.find((item) => item.id === card.id); if (full) { setSelected(full); setTab('details'); } }}
+        onSelect={(card) => { const full = cards.find((item) => item.id === card.id); if (full) { setSelected(full); setTab(defaultDetailTab); } }}
       />
     ) : (
       <DndContext onDragEnd={onDragEnd}>
@@ -948,7 +1034,7 @@ export function KanbanBoard() {
             agents={agents}
             companies={companies}
             cards={cardsForStatusGroup(boardCards, group)}
-            onSelect={(card) => { setSelected(card); setTab('details'); }}
+            onSelect={(card) => { setSelected(card); setTab(defaultDetailTab); }}
           />)}
         </div>
       </DndContext>
@@ -1029,9 +1115,20 @@ export function KanbanBoard() {
 
     <CardDetailPanel
       selected={selected}
-      setSelected={setSelected}
       tab={tab}
       selectTab={selectTab}
+      detailLayout={detailLayout}
+      setDetailLayout={setDetailLayout}
+      overviewEditing={overviewEditing}
+      setOverviewEditing={setOverviewEditing}
+      draftDirty={draftDirty}
+      closePanel={closePanel}
+      openCard={openCard}
+      cardApprovals={cardApprovals}
+      cardChildren={cardChildren}
+      conversationLatest={conversationLatest}
+      onCheckpointAnswered={() => afterApprovalChange(t('kanban.taskQueuedContinue'))}
+      onApprovalDecided={() => afterApprovalChange(t('kanban.reviewCompleted'))}
       cards={cards}
       agents={agents}
       departments={departments}

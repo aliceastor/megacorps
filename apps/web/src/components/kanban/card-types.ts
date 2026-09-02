@@ -102,3 +102,9 @@ export type CardTabKey = keyof CardTabCache;
 export type CardDetailTab = 'details' | 'comments' | 'delegation' | 'thread' | 'logs' | 'workProducts';
 export type CommentActionMode = 'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run' | 'escalate_to_reviewer' | 'delegate_to_agent';
 export type ReviewerScope = 'phase' | 'final';
+/** A row from GET /api/approvals?cardId=; type is client_checkpoint / task_review / budget_override_required. */
+export type CardApproval = { id: string; companyId?: string; cardId?: string | null; type: string; status: string; payload?: Record<string, unknown> | null; decisionNote?: string | null; createdAt?: string; decidedAt?: string | null };
+/** A row from GET /api/cards/:id/subtree; depth 1 = direct child. */
+export type SubtreeCard = Card & { depth: number; childCount?: number };
+/** localStorage['megacorps.kanban.detailLayout']: the new overview panel or the PR-0 tab layout. */
+export type DetailLayout = 'legacy' | 'v2';

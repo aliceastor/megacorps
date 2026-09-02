@@ -1,6 +1,6 @@
 // Pure helpers moved verbatim out of kanban-board.tsx. No React here: the
 // conversation model and its node:test suite import from this file.
-import type { Agent, CardComment, CardPriority, Goal } from './card-types';
+import type { Agent, Card, CardComment, CardPriority, Goal } from './card-types';
 
 export function isDelegationReviewComment(comment: CardComment): boolean {
   const action = comment.action.toLowerCase();
@@ -72,4 +72,37 @@ export function parseCsv(value: string): string[] {
 export function agentDisplayName(agent: Agent | undefined): string | null {
   if (!agent) return null;
   return [agent.name, agent.role].filter(Boolean).join(' / ');
+}
+
+// The fields the edit form owns, in the same shape kanban-board.tsx seeds
+// `draft` with. The close guard compares these and nothing else.
+export function draftFromCard(card: Card): Partial<Card> {
+  return {
+    title: card.title,
+    body: card.body,
+    columnStatus: card.columnStatus,
+    assigneeId: card.assigneeId ?? null,
+    reviewerId: card.reviewerId ?? null,
+    departmentId: card.departmentId ?? null,
+    projectId: card.projectId ?? null,
+    goalId: card.goalId ?? null,
+    priority: card.priority,
+    tags: card.tags ?? [],
+    dependencyCardIds: card.dependencyCardIds ?? [],
+    decisionMode: card.decisionMode ?? null,
+    requiresApproval: card.requiresApproval ?? false,
+    maxRetries: card.maxRetries ?? 3,
+  };
+}
+
+function sameValue(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) return JSON.stringify(a ?? []) === JSON.stringify(b ?? []);
+  return (a ?? null) === (b ?? null);
+}
+
+/** True when the edit draft differs from the card it was seeded from; a null draft is never dirty. */
+export function isDraftDirty(draft: Partial<Card> | null | undefined, card: Card): boolean {
+  if (!draft) return false;
+  const base = draftFromCard(card);
+  return (Object.keys(base) as Array<keyof Card>).some((key) => key in draft && !sameValue(draft[key], base[key]));
 }

@@ -1,38 +1,29 @@
 'use client';
-import { useEffect, useState } from 'react';
-import { MessageCircleQuestion, Send } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { MessageCircleQuestion } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 import { formatRelative } from '@/lib/relative-time';
+import { CheckpointAnswerForm, readCheckpointPayload, type CheckpointApproval } from './checkpoint-answer-form';
 
 // The client's inbox: questions the company is blocked on. A CEO or department
 // head parked a card as waiting_on_client; answering here resumes it with the
-// answer injected into the owner's next turn.
-
-type CheckpointPayload = {
-  kind?: 'direction' | 'interim';
-  question?: string;
-  options?: string[];
-  recommendation?: string | null;
-  artifactRefs?: string[];
-  askedByName?: string;
-  cardTitle?: string;
-};
-type Approval = { id: string; companyId: string; cardId?: string | null; type: string; status: string; payload?: CheckpointPayload | null; createdAt?: string };
+// answer injected into the owner's next turn. The answer form itself is shared
+// with the card panel's needs-you strip (checkpoint-answer-form.tsx).
 
 const REFRESH_MS = 60_000;
+const LIVE_DEBOUNCE_MS = 400;
 
 export function ClientCheckpoints() {
   const { t, locale } = useLocale();
-  const [items, setItems] = useState<Approval[]>([]);
-  const [drafts, setDrafts] = useState<Record<string, { option: string; text: string }>>({});
-  const [busyId, setBusyId] = useState('');
+  const [items, setItems] = useState<CheckpointApproval[]>([]);
   const [error, setError] = useState('');
   const [now, setNow] = useState(() => Date.now());
+  const liveTimer = useRef<number | null>(null);
 
   async function refresh() {
     try {
-      const rows = await api<Approval[]>('/api/approvals?status=pending&type=client_checkpoint&limit=50');
+      const rows = await api<CheckpointApproval[]>('/api/approvals?status=pending&type=client_checkpoint&limit=50');
       setItems(rows);
       setNow(Date.now());
     } catch (err) {
@@ -46,20 +37,21 @@ export function ClientCheckpoints() {
     return () => clearInterval(timer);
   }, []);
 
-  async function answer(item: Approval) {
-    const draft = drafts[item.id] ?? { option: '', text: '' };
-    if (!draft.option && !draft.text.trim()) { setError(t('checkpoints.answerRequired')); return; }
-    setBusyId(item.id);
-    setError('');
-    try {
-      await api(`/api/approvals/${item.id}`, { method: 'PUT', body: JSON.stringify({ status: 'answered', selectedOption: draft.option || undefined, answer: draft.text.trim() || undefined }) });
-      setItems((current) => current.filter((row) => row.id !== item.id));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'failed to answer');
-    } finally {
-      setBusyId('');
+  // A checkpoint answered from the card panel (or withdrawn server-side) shows
+  // up as card.* live events; refresh once the burst settles.
+  useEffect(() => {
+    function onLive(event: Event) {
+      const detail = (event as CustomEvent<{ type?: string }>).detail;
+      if (!detail?.type?.startsWith('card.')) return;
+      if (liveTimer.current) window.clearTimeout(liveTimer.current);
+      liveTimer.current = window.setTimeout(() => { liveTimer.current = null; void refresh(); }, LIVE_DEBOUNCE_MS);
     }
-  }
+    window.addEventListener('megacorps-live', onLive);
+    return () => {
+      window.removeEventListener('megacorps-live', onLive);
+      if (liveTimer.current) window.clearTimeout(liveTimer.current);
+    };
+  }, []);
 
   if (items.length === 0 && !error) return null;
 
@@ -71,9 +63,7 @@ export function ClientCheckpoints() {
     {error && <p className="form-error">{error}</p>}
     <div className="table-list">
       {items.map((item) => {
-        const payload = item.payload ?? {};
-        const draft = drafts[item.id] ?? { option: '', text: '' };
-        const setDraft = (patch: Partial<{ option: string; text: string }>) => setDrafts((current) => ({ ...current, [item.id]: { ...draft, ...patch } }));
+        const payload = readCheckpointPayload(item.payload);
         return <article className="list-row" key={item.id}>
           <div className="prompt-log-head">
             <b>{payload.cardTitle ?? item.cardId ?? 'card'}</b>
@@ -83,20 +73,7 @@ export function ClientCheckpoints() {
           {payload.artifactRefs && payload.artifactRefs.length > 0 && <div className="meta-grid">
             {payload.artifactRefs.map((ref) => <span key={ref}>{/^https?:\/\//.test(ref) ? <a href={ref} target="_blank" rel="noreferrer">{ref}</a> : <code>{ref}</code>}</span>)}
           </div>}
-          {payload.options && payload.options.length > 0 && <div className="action-row" style={{ flexWrap: 'wrap' }}>
-            {payload.options.map((option) => <button
-              key={option}
-              className={`btn ${draft.option === option ? 'btn-primary' : ''}`}
-              onClick={() => setDraft({ option: draft.option === option ? '' : option })}
-              title={payload.recommendation === option ? t('checkpoints.recommended') : undefined}
-            >{option}{payload.recommendation === option ? ' ★' : ''}</button>)}
-          </div>}
-          <label className="field-label">{t('checkpoints.answer')}
-            <textarea className="input" rows={2} value={draft.text} onChange={(event) => setDraft({ text: event.target.value })} placeholder={t('checkpoints.answerPlaceholder')} />
-          </label>
-          <div className="action-row" style={{ justifyContent: 'flex-end' }}>
-            <button className="btn btn-primary" disabled={busyId === item.id} onClick={() => void answer(item)}><Send size={14} /> {busyId === item.id ? t('checkpoints.sending') : t('checkpoints.send')}</button>
-          </div>
+          <CheckpointAnswerForm approval={item} onAnswered={() => setItems((current) => current.filter((row) => row.id !== item.id))} />
         </article>;
       })}
     </div>

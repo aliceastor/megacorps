@@ -51,7 +51,12 @@ function invalidateLiveEvent(queryClient: QueryClient, event: LiveEvent): void {
       void queryClient.invalidateQueries({ queryKey: ['cardComments', event.cardId] });
       void queryClient.invalidateQueries({ queryKey: ['cardLogs', event.cardId] });
       void queryClient.invalidateQueries({ queryKey: ['cardWorkProducts', event.cardId] });
+      void queryClient.invalidateQueries({ queryKey: ['cardApprovals', event.cardId] });
     }
+    // A child card's change is what moves its parent's subtree, and the event
+    // carries the child's id; only the open panel holds a subtree query, so
+    // invalidating them all costs one refetch at most.
+    if (event.type.startsWith('card.')) void queryClient.invalidateQueries({ queryKey: ['cardSubtree'] });
     return;
   }
   if (event.type.startsWith('project.') || event.type.startsWith('goal.')) {

@@ -5998,6 +5998,9 @@ body {
 .kanban-card,
 .kanban-column-dropzone,
 .meta-grid span,
+.overview-people span,
+.overview-chip,
+.overview-child,
 .badge,
 .drag-handle,
 .status-pill {
@@ -6090,6 +6093,7 @@ body {
 .modal,
 .chat-shell,
 .detail-panel,
+.card-overview,
 .data-table,
 .table-wrap,
 .kanban-column-dropzone,
@@ -6276,7 +6280,8 @@ button.card:hover {
 }
 
 .modal,
-.detail-panel {
+.detail-panel,
+.card-overview {
   border-radius: 8px;
 }
 
@@ -6537,3 +6542,168 @@ button.card:hover {
 .runtime-details { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 .runtime-details > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .runtime-details[open] > summary { margin-bottom: 8px; }
+
+/* Card detail panel v2: the overview zone that sits outside the tabs.
+   Whole-panel scrolling; no sticky header in this iteration. Do not touch
+   .ticket-* / .message-board-* — the legacy tabs still render them. */
+.card-overview {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.card-overview > * { min-width: 0; }
+.overview-situation {
+  margin: 0;
+  padding: 8px 12px;
+  border-left: 4px solid var(--border);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.45;
+  max-width: 72ch;
+  overflow-wrap: anywhere;
+}
+.overview-situation.warning { color: #b45309; }
+.overview-situation.danger { color: var(--danger); }
+.overview-situation.success { color: var(--success); }
+:root:not([data-theme="light"]) .overview-situation.warning { color: #fbbf24; }
+.overview-last {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.overview-cta {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  background: color-mix(in srgb, #f59e0b 10%, transparent);
+}
+.overview-cta-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 750;
+  color: #b45309;
+}
+:root:not([data-theme="light"]) .overview-cta-title { color: #fbbf24; }
+.overview-cta-question {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  max-width: 72ch;
+}
+.overview-cta .field-hint { margin: 0; }
+.overview-people {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  font-size: 12px;
+}
+.overview-people span {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 9px;
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  min-width: 0;
+}
+.overview-people b {
+  color: var(--foreground);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.overview-body {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.55;
+  max-width: 72ch;
+}
+.overview-body.clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  overflow: hidden;
+}
+.overview-body-toggle,
+.detail-layout-toggle button,
+.detail-breadcrumb button {
+  border: 0;
+  background: transparent;
+  color: var(--primary-strong, var(--primary));
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.overview-body-toggle { justify-self: start; }
+.overview-children,
+.overview-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.overview-children-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.overview-child,
+.overview-chip {
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 10px;
+  background: color-mix(in srgb, var(--card-strong) 78%, transparent);
+  color: color-mix(in srgb, var(--foreground) 88%, transparent);
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.5;
+}
+.overview-child:hover,
+.overview-chip:not(:disabled):hover { border-color: var(--primary); }
+.overview-chip:disabled { cursor: default; }
+.overview-chip.danger { border-color: var(--danger); color: var(--danger); }
+.overview-chip.accent { border-color: color-mix(in srgb, var(--primary) 50%, var(--border)); }
+.overview-child.warning { border-color: #f59e0b; color: #b45309; }
+:root:not([data-theme="light"]) .overview-child.warning { color: #fbbf24; }
+.overview-child.danger { border-color: var(--danger); color: var(--danger); }
+.overview-child.muted { opacity: 0.6; }
+.overview-review > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.card-overview-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.card-overview-actions .card-overview-actions-spacer { flex: 1 1 auto; }
+.detail-breadcrumb {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.detail-layout-toggle {
+  margin: 16px 0 0;
+  text-align: right;
+  font-size: 12px;
+  color: var(--muted);
+}
+@media (max-width: 760px) {
+  .card-overview { padding: 12px; }
+  .overview-people { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .card-overview-actions .btn { flex: 1 1 160px; }
+  .card-overview-actions .card-overview-actions-spacer { display: none; }
+}
+

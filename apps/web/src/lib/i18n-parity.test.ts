@@ -29,6 +29,12 @@ test('the keys this phase introduced exist in every locale', () => {
     'kanban.situation.helpReview', 'kanban.situation.external', 'kanban.situation.blocked', 'kanban.situation.delegation', 'kanban.situation.running',
     'kanban.situation.queued', 'kanban.situation.done', 'kanban.situation.cancelled', 'kanban.waitedFor', 'kanban.childrenWaitingClient', 'kanban.childrenBlocked',
     'kanban.roundN', 'kanban.event.mention_question', 'kanban.event.mention_unresolved', 'kanban.event.agent_comment', 'kanban.event.comment',
+    // PR-2: overview zone, needs-you strip, close guard, layout toggle.
+    'kanban.overviewEdit', 'kanban.overviewDone', 'kanban.overviewLastEvent', 'kanban.overviewUpdatedAt', 'kanban.bodyExpand', 'kanban.bodyCollapse',
+    'kanban.chipRetryLimit', 'kanban.chipChildren', 'kanban.chipUnmet', 'kanban.chipForceBrainstorm', 'kanban.parentCard', 'kanban.noneAssigned',
+    'kanban.youApprover', 'kanban.reviewFeedback', 'kanban.answerCheckpoint', 'kanban.noPendingCheckpoint', 'kanban.approveTask', 'kanban.rejectTask',
+    'kanban.decisionNote', 'kanban.reviewEnqueuesAgent', 'kanban.continueWithCommentCta', 'kanban.closeDiscard', 'kanban.closeBlocked',
+    'kanban.phaseActive', 'kanban.phaseHistorical', 'kanban.layoutLegacy', 'kanban.layoutV2', 'kanban.approvalBlockedByChildren',
   ];
   for (const locale of locales) {
     for (const key of required) assert.ok(messages[locale][key], `${locale} lacks ${key}`);
