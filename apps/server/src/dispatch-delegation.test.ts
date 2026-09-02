@@ -198,9 +198,11 @@ test('submitted final reports can be reviewed after the parent card is done', ()
   ), false);
 });
 
-test('collaboration mode remains enabled on legacy parent-linked card rows', () => {
-  assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'delegate', parentCardId: null } as any), true);
-  assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'delegate', parentCardId: 'parent-1' } as any), true);
+test('forced delegation is retired: no decision mode compels a delegate block', () => {
+  // Company pipeline design: the org structure decides what gets split;
+  // legacy 'delegate' rows read as auto and never force a DELEGATE block.
+  assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'delegate', parentCardId: null } as any), false);
+  assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'delegate', parentCardId: 'parent-1' } as any), false);
   assert.equal(dispatchInternals.collaborationModeRequiresDelegation({ decisionMode: 'auto', parentCardId: null } as any), false);
 });
 

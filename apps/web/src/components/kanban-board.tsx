@@ -463,7 +463,7 @@ export function KanbanBoard() {
   const [newPriority, setNewPriority] = useState<(typeof priorities)[number]>('normal');
   const [newTags, setNewTags] = useState('');
   const [newDependencies, setNewDependencies] = useState<string[]>([]);
-  const [newDecisionMode, setNewDecisionMode] = useState<'agent_decides' | 'collaboration'>('agent_decides');
+  const [newDecisionMode, setNewDecisionMode] = useState<'auto' | 'solo' | 'pair' | 'swarm'>('auto');
   const [newScheduleAt, setNewScheduleAt] = useState('');
   const [newRecurMinutes, setNewRecurMinutes] = useState('');
   const [workProductType, setWorkProductType] = useState<(typeof workProductTypes)[number]>('external');
@@ -865,6 +865,9 @@ export function KanbanBoard() {
 
   async function create() {
     if (!newTitle.trim()) { setToast({ message: t('kanban.titleRequired'), type: 'error' }); return; }
+    // Every card has exactly one reviewer: an agent, or the human client via
+    // requiresApproval. The server enforces the same rule.
+    if (!newReviewer && !requiresApproval) { setToast({ message: t('kanban.reviewerRequired'), type: 'error' }); return; }
     setBusy(true);
     try {
       const card = await api<Card>('/api/cards', {
@@ -881,7 +884,7 @@ export function KanbanBoard() {
           assigneeId: newAssignee || null,
           reviewerId: newReviewer || null,
           dependencyCardIds: newDependencies,
-          decisionMode: newDecisionMode === 'collaboration' ? 'delegate' : null,
+          decisionMode: newDecisionMode,
           requiresApproval,
           scheduleAt: newScheduleAt ? new Date(newScheduleAt).toISOString() : null,
           recurEveryMinutes: newRecurMinutes ? Number(newRecurMinutes) : null,
@@ -898,7 +901,7 @@ export function KanbanBoard() {
       setNewPriority('normal');
       setNewTags('');
       setNewDependencies([]);
-      setNewDecisionMode('agent_decides');
+      setNewDecisionMode('auto');
       setNewScheduleAt('');
       setNewRecurMinutes('');
       setRequiresApproval(false);
@@ -1189,8 +1192,10 @@ export function KanbanBoard() {
               <label className="field-label">{t('kanban.tags')}<input className="input" value={newTags} onChange={(e) => setNewTags(e.target.value)} placeholder="bug, release, research" /></label>
               <label className="field-label">{t('kanban.collaboration')}
                 <select className="input" value={newDecisionMode} onChange={(e) => setNewDecisionMode(e.target.value as typeof newDecisionMode)}>
-                  <option value="agent_decides">{t('kanban.agentDecides')}</option>
-                  <option value="collaboration">{t('kanban.collaborationMode')}</option>
+                  <option value="auto">{t('kanban.modeAuto')}</option>
+                  <option value="solo">{t('kanban.modeSolo')}</option>
+                  <option value="pair">{t('kanban.modePair')}</option>
+                  <option value="swarm">{t('kanban.modeSwarm')}</option>
                 </select>
               </label>
               <div className="field-label"><span>{t('kanban.dependencies')}</span><DependencyPicker cards={cards} companyId={newCompany} projectId={newProject || null} value={newDependencies} onChange={setNewDependencies} /></div>

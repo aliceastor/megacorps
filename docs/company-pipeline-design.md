@@ -184,7 +184,7 @@ CV 資料來源:reviewer 在結構化報告填 `score: 0-10`(**加進 `agentRepo
 
 ## 11. 實施階段
 
-1. **A 組織與拆卡**:`head_agent_id`、`children[]` 報告欄位、guard、cascade 改整合優先、留言板事件、prompt 撤禁令 —— 後端,可測
+1. **A 組織與拆卡**:`head_agent_id`、`children[]` 報告欄位、guard、cascade 改整合優先、留言板事件、prompt 撤禁令 —— 後端,可測 — **✅ 2026-09-02 完成**。落地內容:migration v13(`departments.head_agent_id/description`、`kanban_cards.split_round`、`companies.max_children_per_card`、`agents.default_timeout_seconds`、`positions.review_domain`);`card-splitting.ts` 純規則引擎(9 個單元測試)+ dispatch 側 `processChildSplits`,掛在 dispatch 與 webhook 兩個完成點;`cascadeParentStatus` 改為子卡全關 → 父卡回負責人 `integrating` 並重新 dispatch,prompt 帶「整合回合」段落;留言板事件 `split_opened / split_child_opened / split_rejected / split_round_complete`;`decisionMode` 改 `auto|solo|pair|swarm`(舊值讀取映射),強制 delegate 退場,solo 同時擋 DELEGATE 與拆卡;每張卡必有審理員(`createCardSchema` refine:reviewerId 或 requiresApproval,且 ≠ assignee;chat 建卡預設 requiresApproval);`PUT /api/departments/:id`;UI:建卡協作模式四選項 + 審理員必填檢查、部門頁主管/職掌欄位。與文件的差異:人類在 UI 拆卡不受規則限制(文件規則 6 說要警告,UI 警告尚未做);`score` 欄位已進 schema 但 D 階段才消費。
 2. **B Client checkpoint**:狀態、approvals type、回答 API、答案注入、提醒、通知 —— 後端 + 小 UI
 3. **C Brainstorm**:broadcast、收齊/逾時、CEO 重 dispatch、`forceBrainstorm` —— 後端
 4. **D 資源視圖與評分**:`score`、CV 聚合進 digest、主管 prompt 注入 —— 後端

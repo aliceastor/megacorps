@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
 type Company = { id: string; name: string; slug: string };
-type Department = { id: string; companyId: string; name: string; slug: string };
+type Department = { id: string; companyId: string; name: string; slug: string; headAgentId?: string | null; description?: string | null };
 type Agent = { id: string; companyId: string; departmentId?: string | null; bossId?: string | null; name: string; role: string; adapterType?: string | null; isActive?: boolean; isBusy?: boolean };
 type Goal = { id: string; companyId: string; departmentId?: string | null; projectId?: string | null; title: string; body?: string | null };
 
@@ -25,6 +25,10 @@ export function DepartmentsPage() {
   const [departmentId, setDepartmentId] = useState('');
   const [deptName, setDeptName] = useState('');
   const [deptSlug, setDeptSlug] = useState('');
+  const [deptHead, setDeptHead] = useState('');
+  const [deptDescription, setDeptDescription] = useState('');
+  const [settingsHead, setSettingsHead] = useState('');
+  const [settingsDescription, setSettingsDescription] = useState('');
   const [goalTitle, setGoalTitle] = useState('');
   const [goalBody, setGoalBody] = useState('');
   const [toast, setToast] = useState('');
@@ -63,6 +67,10 @@ export function DepartmentsPage() {
   }, [loadError]);
   useEffect(() => { setDeptSlug(slugify(deptName)); }, [deptName]);
   useEffect(() => {
+    setSettingsHead(selectedDepartment?.headAgentId ?? '');
+    setSettingsDescription(selectedDepartment?.description ?? '');
+  }, [selectedDepartment?.id, selectedDepartment?.headAgentId, selectedDepartment?.description]);
+  useEffect(() => {
     if (selectedAgentId && !companyAgents.some((agent) => agent.id === selectedAgentId)) setSelectedAgentId('');
   }, [companyAgents, selectedAgentId]);
 
@@ -71,9 +79,11 @@ export function DepartmentsPage() {
     setBusy(true);
     setError('');
     try {
-      const department = await api<Department>('/api/departments', { method: 'POST', body: JSON.stringify({ companyId, name: deptName.trim(), slug: deptSlug.trim() }) });
+      const department = await api<Department>('/api/departments', { method: 'POST', body: JSON.stringify({ companyId, name: deptName.trim(), slug: deptSlug.trim(), headAgentId: deptHead || null, description: deptDescription.trim() || null }) });
       setDeptName('');
       setDeptSlug('');
+      setDeptHead('');
+      setDeptDescription('');
       setDepartmentCreateOpen(false);
       setToast(t('departments.added'));
       await refreshQueries();
@@ -117,9 +127,26 @@ export function DepartmentsPage() {
     }
   }
 
+  async function saveDepartmentSettings() {
+    if (!selectedDepartment) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api<Department>(`/api/departments/${selectedDepartment.id}`, { method: 'PUT', body: JSON.stringify({ headAgentId: settingsHead || null, description: settingsDescription.trim() || null }) });
+      setToast(t('departments.settingsSaved'));
+      await refreshQueries();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('departments.agentUpdateFailed'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function startNewDepartment() {
     setDeptName('');
     setDeptSlug('');
+    setDeptHead('');
+    setDeptDescription('');
     setError('');
     setDepartmentCreateOpen(true);
   }
@@ -146,6 +173,17 @@ export function DepartmentsPage() {
           </select></label>
           <label className="field-label">{t('departments.departmentName')}<input className="input" value={deptName} onChange={(event) => setDeptName(event.target.value)} disabled={!companyId} /></label>
           <label className="field-label">{t('common.slug')}<input className="input" value={deptSlug} onChange={(event) => setDeptSlug(slugify(event.target.value))} disabled={!companyId} /></label>
+          <label className="field-label">{t('departments.head')}
+            <span className="field-hint">{t('departments.headHint')}</span>
+            <select className="input" value={deptHead} onChange={(event) => setDeptHead(event.target.value)} disabled={!companyId}>
+              <option value="">{t('departments.noHead')}</option>
+              {companyAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+            </select>
+          </label>
+          <label className="field-label field-wide">{t('departments.description')}
+            <span className="field-hint">{t('departments.descriptionHint')}</span>
+            <textarea className="input" rows={2} value={deptDescription} onChange={(event) => setDeptDescription(event.target.value)} disabled={!companyId} />
+          </label>
         </div>
         <div className="action-row" style={{ justifyContent: 'flex-end' }}>
           <button className="btn" onClick={() => setDepartmentCreateOpen(false)}>{t('common.cancel')}</button>
@@ -214,6 +252,24 @@ export function DepartmentsPage() {
               {companyAgents.filter((candidate) => candidate.id !== selectedAgent.id).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
             </select></label>
           </div>
+        </section>}
+
+        {selectedDepartment && <section className="card section-card">
+          <div className="panel-title"><div><h2><Users size={18} /> {t('departments.settings')}</h2><span className="status-pill">{selectedDepartment.name}</span></div></div>
+          <div className="form-grid">
+            <label className="field-label">{t('departments.head')}
+              <span className="field-hint">{t('departments.headHint')}</span>
+              <select className="input" value={settingsHead} onChange={(event) => setSettingsHead(event.target.value)}>
+                <option value="">{t('departments.noHead')}</option>
+                {companyAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+              </select>
+            </label>
+            <label className="field-label field-wide">{t('departments.description')}
+              <span className="field-hint">{t('departments.descriptionHint')}</span>
+              <textarea className="input" rows={2} value={settingsDescription} onChange={(event) => setSettingsDescription(event.target.value)} />
+            </label>
+          </div>
+          <button className="btn btn-primary" disabled={busy} onClick={() => void saveDepartmentSettings()}>{t('departments.saveSettings')}</button>
         </section>}
 
         <section className="card section-card">

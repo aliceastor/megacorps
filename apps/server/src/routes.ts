@@ -3,14 +3,14 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, lte, ne, or, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createPositionSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateAgentSchema, updateCardSchema, updateCompanyMembershipSchema, validateCardTransition } from '@megacorps/shared';
+import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createPositionSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateAgentSchema, updateCardSchema, updateCompanyMembershipSchema, updateDepartmentSchema, validateCardTransition } from '@megacorps/shared';
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
 import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
-import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processPeerMentions } from './dispatch.ts';
+import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, childrenFromOutput } from './dispatch.ts';
 import { registerChatRoutes } from './chat.ts';
 import { runAgentMaintenance } from './agent-maintenance.ts';
 import { agentReportSchema } from '@megacorps/shared';
@@ -1094,6 +1094,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         slug: input.slug,
         mission: input.mission ?? null,
         nfsShareUrl: input.nfsShareUrl ?? null,
+        maxChildrenPerCard: input.maxChildrenPerCard ?? 3,
         dispatchIntervalSeconds: input.dispatchIntervalSeconds,
         autoDispatchEnabled: input.autoDispatchEnabled,
       }).returning();
@@ -1123,6 +1124,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       slug: input.slug,
       mission: input.mission,
       nfsShareUrl: input.nfsShareUrl,
+      maxChildrenPerCard: input.maxChildrenPerCard,
       dispatchIntervalSeconds: input.dispatchIntervalSeconds,
       autoDispatchEnabled: input.autoDispatchEnabled,
     }).where(eq(companies.id, id)).returning();
@@ -1275,8 +1277,33 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/departments', async (request, reply) => {
     const input = createDepartmentSchema.parse(request.body);
     const user = await requireCompanyRole(request, reply, input.companyId, 'operator'); if (!user) return reply;
-    const [department] = await db.insert(departments).values(input).returning();
+    if (input.headAgentId) {
+      const [head] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, input.headAgentId), eq(agents.companyId, input.companyId), isNull(agents.deletedAt))).limit(1);
+      if (!head) return reply.code(400).send({ error: 'department_head_mismatch', detail: 'headAgentId must be an active agent of the same company.' });
+    }
+    const [department] = await db.insert(departments).values({ companyId: input.companyId, name: input.name, slug: input.slug, headAgentId: input.headAgentId ?? null, description: input.description ?? null }).returning();
     return reply.code(201).send(department);
+  });
+  // Department head and charter: the head receives department cards from the
+  // CEO and splits them to members; the description is what the CEO reads to
+  // decide which departments a task or brainstorm concerns.
+  app.put('/api/departments/:id', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const input = updateDepartmentSchema.parse(request.body);
+    const [existing] = await db.select().from(departments).where(eq(departments.id, id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'department_not_found' });
+    const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    if (input.headAgentId) {
+      const [head] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, input.headAgentId), eq(agents.companyId, existing.companyId), isNull(agents.deletedAt))).limit(1);
+      if (!head) return reply.code(400).send({ error: 'department_head_mismatch', detail: 'headAgentId must be an active agent of the same company.' });
+    }
+    const [department] = await db.update(departments).set({
+      name: input.name,
+      headAgentId: input.headAgentId === undefined ? undefined : input.headAgentId,
+      description: input.description === undefined ? undefined : input.description,
+    }).where(eq(departments.id, id)).returning();
+    await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'department.updated', entityType: 'department', entityId: id, details: { headAgentId: input.headAgentId, hasDescription: Boolean(input.description) } });
+    return department;
   });
 
   app.get('/api/positions', async (request, reply) => {
@@ -1397,12 +1424,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = createCardSchema.parse(request.body);
     const companyId = input.companyId ?? await defaultCompanyId();
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
-    if (input.parentCardId) {
-      return reply.code(410).send({
-        error: 'child_cards_disabled',
-        message: 'Kanban no longer creates child cards. Use same-card Message Board DELEGATE / REVIEWER records instead.',
-      });
-    }
     try {
       await ensureCompanyReferences(companyId, {
         departmentId: input.departmentId,
@@ -1427,7 +1448,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       reviewerId,
       projectId: input.projectId ?? null,
       goalId: input.goalId ?? null,
-      parentCardId: null,
+      parentCardId: input.parentCardId ?? null,
       dependencyCardIds: input.dependencyCardIds,
       requiresApproval: input.requiresApproval,
       decisionMode: input.decisionMode === undefined ? null : input.decisionMode ?? null,
@@ -1450,6 +1471,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }).returning();
     if (card) {
       await setCardDependencies(card.id, input.dependencyCardIds);
+      // Human splits are not bounded by the agent split rules, but the parent
+      // still has to wait on its children like any other split.
+      if (card.parentCardId) await ensureParentWaitingOnChildren(card.parentCardId, { childCount: 1, actor: 'user', agentId: null, message: `Child card "${card.title}" created by ${actorLabel(user)}; parent waits on its children.` });
       await recordStageAction({
         cardId: card.id,
         actor: { type: 'user', id: user.id, userId: user.id },
@@ -2679,6 +2703,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const webhookPeerMentions = actorAgent ? peerMentionsFromOutput(executionLog, body.report ?? null) : [];
     if (actorAgent && webhookPeerMentions.length) {
       try { await processPeerMentions(card, actorAgent, webhookPeerMentions); } catch (error) { app.log.warn({ error, cardId: card.id }, 'peer mention processing failed'); }
+    }
+    const webhookChildren = actorAgent ? childrenFromOutput(executionLog, body.report ?? null) : [];
+    if (actorAgent && webhookChildren.length) {
+      try { await processChildSplits(card, actorAgent, webhookChildren); } catch (error) { app.log.warn({ error, cardId: card.id }, 'child split processing failed'); }
     }
     let delegationError: string | null = null;
     let delegatedRows: Awaited<ReturnType<typeof createMessageDelegations>> = [];

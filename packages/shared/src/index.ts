@@ -87,7 +87,23 @@ export function normalizeCardStatus(value: string | null | undefined): CardStatu
 export const prioritySchema = z.enum(['urgent', 'high', 'normal', 'low']);
 export const cardStatusSchema = z.enum(cardStatusInputs).transform((status) => normalizeCardStatus(status) ?? 'todo');
 
-export const createCardSchema = z.object({
+// Collaboration mode is a hint/constraint on the card, not a workflow switch:
+// auto (owner decides within the split rules), solo (no split, no delegation),
+// pair (ask the reviewer at every checkpoint), swarm (split homogeneous slices
+// in parallel). Legacy values are accepted on input and mapped; forced
+// delegation ('delegate') is retired and reads as auto.
+export const decisionModes = ['auto', 'solo', 'pair', 'swarm'] as const;
+export type DecisionMode = (typeof decisionModes)[number];
+const legacyDecisionModes = { execute: 'solo', delegate: 'auto', hybrid: 'auto', review: 'auto', integrate: 'auto' } as const;
+export const decisionModeSchema = z.enum([...decisionModes, 'execute', 'delegate', 'hybrid', 'review', 'integrate'])
+  .transform((value): DecisionMode => (value in legacyDecisionModes ? legacyDecisionModes[value as keyof typeof legacyDecisionModes] : value as DecisionMode));
+export function normalizeDecisionMode(value: string | null | undefined): DecisionMode {
+  if (!value) return 'auto';
+  if ((decisionModes as readonly string[]).includes(value)) return value as DecisionMode;
+  return legacyDecisionModes[value as keyof typeof legacyDecisionModes] ?? 'auto';
+}
+
+const createCardBaseSchema = z.object({
   title: z.string().trim().min(1).max(160),
   body: z.string().trim().min(1, 'body must not be empty'),
   priority: prioritySchema.default('normal'),
@@ -102,7 +118,7 @@ export const createCardSchema = z.object({
   dependencyCardIds: z.array(z.string().uuid()).default([]),
   requiresApproval: z.boolean().default(false),
   maxRetries: z.number().int().min(1).max(10).default(3),
-  decisionMode: z.enum(['execute', 'delegate', 'hybrid', 'review', 'integrate']).nullable().optional(),
+  decisionMode: decisionModeSchema.nullable().optional(),
   rollupStatus: z.enum(['planning', 'delegated', 'waiting_on_children', 'waiting_on_dependencies', 'waiting_on_external', 'integrating', 'ready_for_review', 'done', 'blocked']).nullable().optional(),
   requiredChildPolicy: z.enum(['all_required_accepted', 'all_non_cancelled_accepted', 'threshold', 'manual']).default('all_required_accepted'),
   childRequirementLevel: z.enum(['required', 'optional', 'follow_up']).default('required'),
@@ -116,6 +132,14 @@ export const createCardSchema = z.object({
   scheduleAt: z.coerce.date().nullable().optional(),
   recurEveryMinutes: z.number().int().min(5).max(43_200).nullable().optional(),
 });
+
+// Every card has exactly one reviewer and it is never the assignee. The
+// reviewer is either an agent (reviewerId) or the human client
+// (requiresApproval = true). No card is exempt: the review is the cheapest
+// insurance in the pipeline and the only source of CV scores.
+export const createCardSchema = createCardBaseSchema
+  .refine((card) => Boolean(card.reviewerId) || card.requiresApproval === true, { message: 'A reviewer is required: set reviewerId (an agent) or requiresApproval (the human client reviews).', path: ['reviewerId'] })
+  .refine((card) => !card.reviewerId || !card.assigneeId || card.reviewerId !== card.assigneeId, { message: 'The reviewer must not be the assignee.', path: ['reviewerId'] });
 
 export const createMachineRunnerSchema = z.object({
   companyId: z.string().uuid().optional(),
@@ -187,6 +211,8 @@ export const createCompanySchema = z.object({
   slug: z.string().trim().regex(/^[a-z0-9-]+$/).max(80),
   mission: z.string().trim().max(2000).optional(),
   nfsShareUrl: z.string().trim().max(1000).nullable().optional(),
+  // Live child cards allowed per card when an agent splits (hard cap 5).
+  maxChildrenPerCard: z.number().int().min(1).max(5).optional(),
   dispatchIntervalSeconds: z.number().int().min(5).max(3600).default(10),
   autoDispatchEnabled: z.boolean().default(true),
 });
@@ -195,6 +221,13 @@ export const createDepartmentSchema = z.object({
   companyId: z.string().uuid(),
   name: z.string().trim().min(1).max(120),
   slug: z.string().trim().regex(/^[a-z0-9-]+$/).max(80),
+  headAgentId: z.string().uuid().nullable().optional(),
+  description: z.string().trim().max(2000).nullable().optional(),
+});
+export const updateDepartmentSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  headAgentId: z.string().uuid().nullable().optional(),
+  description: z.string().trim().max(2000).nullable().optional(),
 });
 
 export const createPositionSchema = z.object({
@@ -211,7 +244,9 @@ export const createPositionSchema = z.object({
   isActive: z.boolean().default(true),
 });
 
-export const updateCardSchema = createCardSchema.partial().extend({
+// Derived from the unrefined base: a partial update legitimately omits the
+// reviewer fields, so the create-time reviewer rule must not apply here.
+export const updateCardSchema = createCardBaseSchema.partial().extend({
   columnStatus: cardStatusSchema.optional(),
   updatedAt: z.string().datetime().optional(),
 });
@@ -260,6 +295,19 @@ export const agentReportDelegationSchema = z.object({
 // Peer question: ask another agent (by slug) something without delegating work
 // to them. MegaCorps posts it to the card message board and schedules a small
 // answer turn for the target agent; the answer lands in the same thread.
+// Child card request: split an independent deliverable off to a direct
+// report, with its own reviewer. Bounded server-side by the org-shaped split
+// rules (direct reports only, live-children cap, rounds).
+export const agentReportChildSchema = z.object({
+  title: z.string().trim().min(1).max(160),
+  body: z.string().trim().min(40, 'child card body must state the deliverable and acceptance criteria').max(20_000),
+  assigneeSlug: z.string().trim().min(1).max(120),
+  reviewerSlug: z.string().trim().min(1).max(120).optional(),
+  priority: prioritySchema.optional(),
+  // Indexes (0-based) of other children in the same request this one waits for.
+  dependsOn: z.array(z.number().int().min(0).max(4)).max(4).optional(),
+});
+export type AgentReportChild = z.infer<typeof agentReportChildSchema>;
 export const agentReportMentionSchema = z.object({
   to: z.string().trim().min(1).max(120),
   question: z.string().trim().min(1).max(2000),
@@ -272,6 +320,9 @@ export const agentReportSchema = z.object({
   questions: z.array(z.string().trim().min(1).max(1000)).max(10).optional(),
   delegations: z.array(agentReportDelegationSchema).max(8).optional(),
   mentions: z.array(agentReportMentionSchema).max(3).optional(),
+  children: z.array(agentReportChildSchema).max(5).optional(),
+  // Reviewer score for the work under review (0-10 rubric); feeds the agent CV.
+  score: z.number().int().min(0).max(10).optional(),
   artifactRefs: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
 });
 export type AgentReportMention = z.infer<typeof agentReportMentionSchema>;
@@ -587,6 +638,7 @@ export type CreateInviteInput = z.infer<typeof createInviteSchema>;
 export type AcceptInviteInput = z.infer<typeof acceptInviteSchema>;
 export type CreateCompanyInput = z.infer<typeof createCompanySchema>;
 export type CreateDepartmentInput = z.infer<typeof createDepartmentSchema>;
+export type UpdateDepartmentInput = z.infer<typeof updateDepartmentSchema>;
 export type CreatePositionInput = z.infer<typeof createPositionSchema>;
 export type CreateCardCommentInput = z.infer<typeof createCardCommentSchema>;
 export type CreateChatSessionInput = z.infer<typeof createChatSessionSchema>;

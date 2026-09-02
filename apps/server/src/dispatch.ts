@@ -9,6 +9,9 @@ import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
 import { buildAgentDigest } from './agent-digest.ts';
 import { giteaAuthenticatedCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv } from './gitea.ts';
+import { effectiveFanoutCap, evaluateSplitPlan, formatChildOpening, formatSplitAnnouncement, type SplitAgentRef } from './card-splitting.ts';
+import { normalizeDecisionMode, type AgentReportChild } from '@megacorps/shared';
+import { setCardDependencies } from './card-dependencies.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 import { recordStageAction } from './card-actions.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
@@ -787,6 +790,118 @@ function handoffMessageBody(fromAgent: AgentRow, target: AgentRow, item: AgentRe
   ].filter(Boolean).join('\n');
 }
 
+// === Card splitting (org-shaped child cards) ==================================
+// Child cards were once banned because a lead agent fragmented work without
+// limit. They are back with the tree bounded by the org chart: an owner can
+// only split to direct reports, only a few live children at a time, one round
+// until those are integrated, every child with its own reviewer. The pure rule
+// set lives in card-splitting.ts; this is the database side.
+
+const SPLIT_CHILDREN_PER_REPORT = 5;
+
+export function childrenFromOutput(output: string | null | undefined, report?: { children?: AgentReportChild[] } | null): AgentReportChild[] {
+  if (report?.children?.length) return report.children.slice(0, SPLIT_CHILDREN_PER_REPORT);
+  const extraction = extractAgentReport(output);
+  if (extraction && 'report' in extraction && extraction.report.children?.length) return extraction.report.children.slice(0, SPLIT_CHILDREN_PER_REPORT);
+  return [];
+}
+
+function splitPriorityToNumber(priority: string | undefined, fallback: number | null): number {
+  if (!priority) return fallback ?? 0;
+  return priority === 'urgent' ? 3 : priority === 'high' ? 2 : priority === 'low' ? -1 : 0;
+}
+
+export async function processChildSplits(card: CardRow, splitter: AgentRow, children: AgentReportChild[]): Promise<{ created: string[]; errors: string[] }> {
+  if (children.length === 0) return { created: [], errors: [] };
+  const [company] = await db.select().from(companies).where(eq(companies.id, card.companyId)).limit(1);
+  const [position] = splitter.positionId
+    ? await db.select({ isCompanyBoss: positions.isCompanyBoss }).from(positions).where(eq(positions.id, splitter.positionId)).limit(1)
+    : [];
+  const reports = await activeDirectReportsForAgent(card.companyId, splitter.id);
+  const companyAgents = await db.select({ id: agents.id, slug: agents.slug, name: agents.name, departmentId: agents.departmentId })
+    .from(agents).where(and(eq(agents.companyId, card.companyId), eq(agents.isActive, true), isNull(agents.deletedAt)));
+  const live = await db.select({ id: kanbanCards.id }).from(kanbanCards).where(and(
+    eq(kanbanCards.parentCardId, card.id),
+    isNull(kanbanCards.deletedAt),
+    drizzleSql`${kanbanCards.columnStatus} NOT IN ('done', 'cancelled')`,
+  ));
+  const agentBySlug = new Map(companyAgents.map((agent) => [agent.slug, agent as SplitAgentRef]));
+  const evaluation = evaluateSplitPlan({
+    parent: { id: card.id, splitRound: card.splitRound ?? 0, decisionMode: card.decisionMode },
+    splitter: { id: splitter.id, slug: splitter.slug, name: splitter.name, departmentId: splitter.departmentId },
+    splitterIsCompanyBoss: Boolean(position?.isCompanyBoss),
+    directReports: reports.filter((report): report is typeof report & { id: string } => Boolean(report.id)).map((report) => ({ id: report.id, slug: report.slug, name: report.name, departmentId: report.departmentId ?? null })),
+    resolveAgent: (slug) => agentBySlug.get(slug) ?? null,
+    liveChildren: live.length,
+    maxChildrenPerCard: company?.maxChildrenPerCard ?? 3,
+  }, children);
+
+  if (!evaluation.ok) {
+    await addCardMessage({ cardId: card.id, authorType: 'system', action: 'split_rejected', body: `Split request from ${splitter.name} was rejected:\n${evaluation.errors.join('\n')}`, metadata: { errors: evaluation.errors } });
+    await addTaskLog({ cardId: card.id, agentId: splitter.id, type: 'children', status: 'warning', message: 'Child card split rejected by the split rules.', output: evaluation.errors.join('\n') });
+    return { created: [], errors: evaluation.errors };
+  }
+
+  const round = evaluation.round;
+  const createdIds: string[] = [];
+  const announced: Array<{ title: string; assignee: SplitAgentRef; reviewer: SplitAgentRef; cardId: string }> = [];
+  for (const candidate of evaluation.candidates) {
+    const [child] = await db.insert(kanbanCards).values({
+      companyId: card.companyId,
+      projectId: card.projectId,
+      goalId: card.goalId,
+      departmentId: candidate.assignee.departmentId ?? card.departmentId,
+      parentCardId: card.id,
+      title: candidate.child.title,
+      body: candidate.child.body,
+      priority: splitPriorityToNumber(candidate.child.priority, card.priority),
+      assigneeId: candidate.assignee.id,
+      reviewerId: candidate.reviewer.id,
+      columnStatus: 'todo',
+      decisionMode: 'auto',
+      requiredChildPolicy: 'all_required_accepted',
+      childRequirementLevel: 'required',
+      maxRetries: card.maxRetries,
+      timeoutSeconds: card.timeoutSeconds,
+      createdBy: card.createdBy,
+    }).returning();
+    if (!child) continue;
+    createdIds[candidate.index] = child.id;
+    announced.push({ title: child.title, assignee: candidate.assignee, reviewer: candidate.reviewer, cardId: child.id });
+    await addStageLog(child.id, splitter.id, null, 'todo', 'decomposition');
+    await addCardMessage({ cardId: child.id, agentId: splitter.id, action: 'split_child_opened', body: formatChildOpening(card.title, round, candidate.reviewer), metadata: { parentCardId: card.id, round } });
+    publishLiveEvent({ type: 'card.created', companyId: card.companyId, entityType: 'card', entityId: child.id, cardId: child.id, projectId: card.projectId });
+  }
+  for (const candidate of evaluation.candidates) {
+    const childId = createdIds[candidate.index];
+    const deps = candidate.dependsOn.map((index) => createdIds[index]).filter((id): id is string => Boolean(id));
+    if (childId && deps.length) await setCardDependencies(childId, deps);
+  }
+  const created = createdIds.filter((id): id is string => Boolean(id));
+
+  await db.update(kanbanCards).set({
+    splitRound: round,
+    requiredChildPolicy: card.requiredChildPolicy && card.requiredChildPolicy !== 'manual' ? card.requiredChildPolicy : 'all_required_accepted',
+    updatedAt: new Date(),
+  }).where(eq(kanbanCards.id, card.id));
+  await ensureParentWaitingOnChildren(card.id, { childCount: created.length, actor: 'decomposition', agentId: splitter.id, message: `Round ${round}: waiting on ${created.length} child card(s).` });
+  await addCardMessage({ cardId: card.id, agentId: splitter.id, action: 'split_opened', body: formatSplitAnnouncement(round, announced), metadata: { round, childIds: created } });
+  await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: splitter.id, agentId: splitter.id, action: 'card.split', entityType: 'card', entityId: card.id, details: { round, childIds: created } });
+  publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'card.split' });
+  return { created, errors: [] };
+}
+
+// Injected when a parent comes back from waiting_on_children: the owner's job
+// on this turn is integration, not fresh work.
+async function integrationSection(card: CardRow): Promise<string> {
+  if (card.rollupStatus !== 'integrating') return '';
+  const children = await db.select().from(kanbanCards).where(and(eq(kanbanCards.parentCardId, card.id), isNull(kanbanCards.deletedAt)));
+  return [
+    'INTEGRATION TURN: all child cards of this card are closed. Integrate their output into this card\'s own deliverable, verify the whole against the card body, then report completion as usual. Do not open another split round unless something is genuinely missing.',
+    ...children.map((child) => `- ${child.title} [${child.columnStatus ?? 'todo'}]: ${clipText(child.executionLog ?? child.body, 600)}`),
+  ].join('\n');
+}
+
 // === Peer questions (@mention) ===============================================
 // Agents previously had no lateral channel at all: needing another agent's
 // answer meant blocking the card and waiting for a human to carry the message.
@@ -1009,6 +1124,7 @@ export async function createMessageDelegations(parent: CardRow, leader: AgentRow
   sourceOutput?: string | null;
 } = {}): Promise<CardCommentRow[]> {
   if (titles.length === 0) return [];
+  if (normalizeDecisionMode(parent.decisionMode) === 'solo') throw new Error('delegation_forbidden_solo: this card is in solo mode; do the work yourself or ask to change its collaboration mode.');
   const depth = await delegationDepthOf(input.parentCommentId);
   const scopeFilter = input.parentCommentId ? eq(cardComments.parentCommentId, input.parentCommentId) : isNull(cardComments.parentCommentId);
   const [existingScope] = await db.select({ count: drizzleSql<number>`count(*)::int` }).from(cardComments)
@@ -1655,6 +1771,12 @@ async function claimAgentCapacity(agent: AgentRow): Promise<boolean> {
 async function cardTaskTimeoutSeconds(card: CardRow): Promise<number> {
   const configured = card.timeoutSeconds ?? null;
   if (configured && Number.isFinite(configured) && configured >= 30) return normalizeKanbanTaskTimeoutSeconds(configured);
+  // Card override > the assignee's own default > the global admin setting.
+  if (card.assigneeId) {
+    const [assignee] = await db.select({ defaultTimeoutSeconds: agents.defaultTimeoutSeconds }).from(agents).where(eq(agents.id, card.assigneeId)).limit(1);
+    const agentDefault = assignee?.defaultTimeoutSeconds ?? null;
+    if (agentDefault && Number.isFinite(agentDefault) && agentDefault >= 30) return normalizeKanbanTaskTimeoutSeconds(agentDefault);
+  }
   return readKanbanTaskTimeoutSeconds();
 }
 
@@ -1808,44 +1930,61 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
   const policy = parent.requiredChildPolicy ?? 'all_required_accepted';
   const ready = childCompletionPolicySatisfied(parent, children);
   if (!ready) return;
-  const integrationReviewerId = parent.reviewerId && parent.reviewerId !== parent.assigneeId
-    ? parent.reviewerId
-    : parent.assigneeId ?? parent.reviewerId;
-  const nextStatus = integrationReviewerId ? 'in_review' : 'done';
+  // Integration first (company pipeline design §7): the children's output goes
+  // back to the parent's owner, who integrates it into the parent's own
+  // deliverable; only that deliverable goes to the reviewer. Without an owner
+  // there is nobody to integrate, so the card goes straight to review/done.
+  const integratorId = parent.assigneeId ?? null;
+  if (!integratorId) {
+    const fallbackReviewerId = parent.reviewerId ?? null;
+    const nextStatus = fallbackReviewerId ? 'in_review' : 'done';
+    const [updated] = await db.update(kanbanCards).set({
+      columnStatus: nextStatus,
+      rollupStatus: nextStatus === 'in_review' ? 'ready_for_review' : 'done',
+      completedAt: nextStatus === 'done' ? new Date() : null,
+      updatedAt: new Date(),
+    }).where(eq(kanbanCards.id, parentCardId)).returning();
+    if (parent.columnStatus !== nextStatus) await addStageLog(parentCardId, fallbackReviewerId, parent.columnStatus ?? null, nextStatus, 'cascade');
+    await addTaskLog({ cardId: parentCardId, agentId: fallbackReviewerId, type: 'cascade', status: 'success', message: `Child completion policy ${policy} satisfied; parent has no owner to integrate, so it moved to ${nextStatus}.` });
+    if (!updated) throw new Error('parent_update_failed');
+    if (fallbackReviewerId) {
+      await createPendingApproval(updated, null, 'Child work is complete and ready for review.');
+      await enqueueTaskRun(parentCardId, 'review', 'queue');
+    } else {
+      await cascadeParentStatus(updated.parentCardId);
+    }
+    return;
+  }
+  const [integrator] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, integratorId)).limit(1);
   const [updated] = await db.update(kanbanCards).set({
-    columnStatus: nextStatus,
-    reviewerId: integrationReviewerId ?? parent.reviewerId,
-    rollupStatus: nextStatus === 'in_review' ? 'ready_for_review' : 'done',
-    completedAt: nextStatus === 'done' ? new Date() : null,
+    columnStatus: 'in_progress',
+    rollupStatus: 'integrating',
+    nextRunAt: null,
+    completedAt: null,
     updatedAt: new Date(),
   }).where(eq(kanbanCards.id, parentCardId)).returning();
-  if (parent.columnStatus !== nextStatus) await addStageLog(parentCardId, integrationReviewerId, parent.columnStatus ?? null, nextStatus, 'cascade');
-  await addTaskLog({
+  if (parent.columnStatus !== 'in_progress') await addStageLog(parentCardId, integratorId, parent.columnStatus ?? null, 'in_progress', 'cascade');
+  await addTaskLog({ cardId: parentCardId, agentId: integratorId, type: 'cascade', status: 'success', message: `Child completion policy ${policy} satisfied; parent returned to ${integrator?.name ?? 'its owner'} for integration before review.` });
+  await addCardMessage({
     cardId: parentCardId,
-    agentId: integrationReviewerId,
-    type: 'cascade',
-    status: 'success',
-    message: integrationReviewerId
-      ? `Child completion policy ${policy} satisfied; parent queued for integration review.`
-      : `Child completion policy ${policy} satisfied; parent card marked done because no integrator is available.`,
+    authorType: 'system',
+    action: 'split_round_complete',
+    body: `All ${children.length} child card(s) of round ${parent.splitRound} are closed. Returning to ${integrator?.name ?? 'the owner'} to integrate their output into this card's deliverable before review.`,
+    metadata: { round: parent.splitRound, childIds: children.map((child) => child.id) },
   });
   await addActivity({
     companyId: parent.companyId,
     actorType: 'system',
     actorId: 'cascade',
-    agentId: integrationReviewerId,
-    action: integrationReviewerId ? 'parent.ready_for_integration_review' : 'parent.completed_without_integrator',
+    agentId: integratorId,
+    action: 'parent.ready_for_integration',
     entityType: 'card',
     entityId: parentCardId,
-    details: { policy, childCount: children.length, reviewerId: integrationReviewerId },
+    details: { policy, childCount: children.length, round: parent.splitRound },
   });
   if (!updated) throw new Error('parent_update_failed');
-  if (integrationReviewerId) {
-    await createPendingApproval(updated, parent.assigneeId, 'Child work is ready for parent integration review.');
-    await enqueueTaskRun(parentCardId, 'review', 'queue');
-  } else {
-    await cascadeParentStatus(updated.parentCardId);
-  }
+  publishLiveEvent({ type: 'card.updated', companyId: parent.companyId, entityType: 'card', entityId: parentCardId, cardId: parentCardId, projectId: parent.projectId, action: 'parent.ready_for_integration' });
+  await enqueueTaskRun(parentCardId, 'dispatch', 'queue');
 }
 
 async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unknown, runId?: string | null, taskRunId?: string | null): Promise<CardRow> {
@@ -2560,6 +2699,8 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const structuredPlan = structuredDelegationPlan(result.output);
     const dispatchPeerMentions = peerMentionsFromOutput(result.output);
     if (dispatchPeerMentions.length) { try { await processPeerMentions(card, agent, dispatchPeerMentions); } catch { /* question delivery must never fail the run */ } }
+    const dispatchChildren = childrenFromOutput(result.output);
+    if (dispatchChildren.length) { try { await processChildSplits(card, agent, dispatchChildren); } catch { /* split failures are reported on the card itself */ } }
     if (structuredPlan?.mixed) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: HANDOFF_MIXED_MESSAGE, runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
@@ -3461,7 +3602,11 @@ function ancestorChain(card: CardRow, companyCards: CardRow[]): CardRow[] {
 }
 
 export function collaborationModeRequiresDelegation(card: CardRow): boolean {
-  return card.decisionMode === 'delegate';
+  // Forced delegation is retired (company pipeline design): the org structure
+  // decides what gets split, nobody is compelled to delegate. Legacy 'delegate'
+  // rows read as auto.
+  void card;
+  return false;
 }
 
 function hasProjectScope(options: KanbanContextOptions): boolean {
@@ -3590,8 +3735,8 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
       `Priority: ${focusCard.priority ?? 0}`,
       `Decision mode: ${focusCard.decisionMode ?? 'not set'}`,
       `Rollup status: ${focusCard.rollupStatus ?? 'not set'}`,
-      'Current workflow: use same-card Message Board DELEGATE / REVIEWER records. Child Kanban cards are legacy read-only context and must not be created for new delegation.',
-      parent || children.length > 0 ? `Legacy child-card policy: ${focusCard.requiredChildPolicy ?? 'all_required_accepted'} / ${focusCard.childRequirementLevel ?? 'required'}` : '',
+      'Current workflow: split independent deliverables into child cards through report.children (bounded by the org chart: direct reports only, a few live children, one round at a time) and delegate help inside a card through DELEGATE; the completion protocol carries the exact rules.',
+      parent || children.length > 0 ? `Child-card policy: ${focusCard.requiredChildPolicy ?? 'all_required_accepted'} / ${focusCard.childRequirementLevel ?? 'required'}` : '',
       `Estimated weight: ${focusCard.estimatedWeight ?? 'not set'}`,
       `Estimated duration minutes: ${focusCard.estimatedDurationMinutes ?? 'not set'}`,
       `Task budget limit: ${focusCard.taskBudgetLimit ?? 'not set'}`,
@@ -3676,22 +3821,34 @@ function afterPromptSince(value: Date | string | null | undefined, since?: Date 
   return new Date(value).getTime() > since.getTime();
 }
 
-function completionProtocol(card: CardRow, reports: DelegationReport[] = [], options: { delegationAlreadySatisfied?: boolean } = {}): string {
+function completionProtocol(card: CardRow, reports: DelegationReport[] = [], options: { delegationAlreadySatisfied?: boolean; fanoutCap?: number } = {}): string {
+  const mode = normalizeDecisionMode(card.decisionMode);
+  const fanoutCap = options.fanoutCap ?? 3;
+  void options.delegationAlreadySatisfied;
   return [
-    card.decisionMode === 'delegate'
-      ? options.delegationAlreadySatisfied
-        ? collaborationDelegationSatisfiedInstructions(reports)
-        : collaborationDelegationInstructions(reports)
+    mode === 'solo'
+      ? 'Collaboration mode: SOLO. Do this card yourself: no DELEGATE blocks and no child cards. If it is genuinely too large for one agent, say so with status="needs_review" instead of splitting.'
       : optionalDelegationInstructions(reports),
+    mode === 'pair'
+      ? 'Collaboration mode: PAIR. Before each significant decision or at each checkpoint, ask your reviewer through a report mention ("mentions": [{ "to": "<reviewer slug>", "question": "..." }]) and wait for the answer on the message board before proceeding.'
+      : '',
+    mode === 'swarm'
+      ? 'Collaboration mode: SWARM. The work is homogeneous; split it into equal slices across your direct reports as child cards (see the split rules below), one slice per report, in parallel.'
+      : '',
     `Do not ask the user whether to proceed, whether they want a draft first, or whether you should submit/POST. Kanban tasks are assigned work; complete them autonomously unless you truly cannot proceed, then use status="needs_review".`,
     `Do not call POST /api/cards yourself for delegation. MegaCorps creates Message Board delegation requests from the DELEGATE block inside this same Kanban card. If your runtime reports through the webhook, send status="in_progress" and include the same DELEGATE block in summary/output instead of marking the current card done.`,
-    `Kanban stage belongs to the current card. Message Board delegation has its own phase/final reviewer chain; do not create child Kanban cards or split this work through /api/cards. Use DELEGATE blocks and Message Board reports instead.`,
+    mode === 'solo' ? '' : [
+      'Splitting vs delegating: an independent deliverable that needs its own reviewer and should be visible on the board becomes a CHILD CARD; help inside your own deliverable, judged by your own reviewer, is a DELEGATE (Message Board, same card). Never call POST /api/cards yourself.',
+      'To split, add to your structured report:',
+      '"children": [{ "title": "...", "body": "<the deliverable and its acceptance criteria, at least 40 characters>", "assigneeSlug": "<one of your direct reports>", "reviewerSlug": "<optional; defaults to you>", "dependsOn": [<indexes of other children this one waits for>] }]',
+      `Rules MegaCorps enforces: only your active direct reports; at most ${fanoutCap} live child cards at once (the company boss instead splits exactly one card per department); one round at a time — all children must close and you must integrate their output before opening another round, and a card gets at most 3 rounds; every child has a reviewer who is not its assignee. Slice by deliverable (each child end-to-end verifiable), never by technical layer; keep each child within its assignee's timeout window. When you split, report status "in_progress": this card then waits on its children and comes back to you for integration.`,
+    ].join('\n'),
     `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, project shared file path/URL, report URL, screenshot URL, artifact URL, or file metadata instead of local-only scratch paths.`,
     `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
     `If you are waiting on CI/CD, deploy, external approval, or another external system, use status="waiting_on_external" and include pollIntervalSeconds based on how often that system should be checked.`,
     `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
     `If no reviewer/manager exists above you, provide the best final answer instead of escalating; MegaCorps will accept top-level guidance requests as done.`,
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 async function buildKanbanDeltaContext(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
@@ -3721,11 +3878,11 @@ async function buildKanbanDeltaContext(card: CardRow, options: PromptBuildOption
     `Current task: ${compactCardLine(card, agentById)}`,
     `Updated at: ${card.updatedAt ? formatDate(card.updatedAt) : 'unknown'}`,
     `Decision mode: ${card.decisionMode ?? 'not set'}`,
-    'Current workflow: same-card Message Board DELEGATE / REVIEWER records. Child Kanban cards are legacy read-only context and must not be created for new delegation.',
+    'Current workflow: split independent deliverables into child cards through report.children (bounded by the org chart: direct reports only, a few live children, one round at a time) and delegate help inside a card through DELEGATE; the completion protocol carries the exact rules.',
     `Last error: ${promptDiagnostic(card.lastError)}`,
     card.reviewFeedback ? `Current review feedback:\n${clipText(card.reviewFeedback, 2500)}` : 'Current review feedback: none',
-    ancestors.length > 0 ? `Legacy parent chain (read-only):\n${ancestors.map((item) => compactCardLine(item, agentById)).join('\n')}` : 'Legacy parent chain: none',
-    children.length > 0 ? `Legacy child cards now (read-only; do not create more):\n${children.map((item) => compactCardLine(item, agentById)).join('\n')}` : 'Legacy child cards now: none',
+    ancestors.length > 0 ? `Parent chain:\n${ancestors.map((item) => compactCardLine(item, agentById)).join('\n')}` : 'Parent chain: none',
+    children.length > 0 ? `Child cards now:\n${children.map((item) => compactCardLine(item, agentById)).join('\n')}` : 'Child cards now: none',
     `Dependencies now:\n${deps.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
     `New message board entries:\n${recentMessages.map((message) => {
       const author = message.agentId ? agentById.get(message.agentId)?.name ?? 'unavailable' : message.authorType;
@@ -3889,9 +4046,10 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
       'Do not rely on stale stage, child, dependency, or review state from memory. Treat the fresh DB delta below as the source of truth for anything that changed since your last turn.',
       'Fresh Kanban delta:',
       deltaContext,
+      await integrationSection(card),
       'Completion protocol:',
       completionProtocol(card, reports, { delegationAlreadySatisfied }),
-    ].join('\n\n');
+    ].filter(Boolean).join('\n\n');
   }
   const [company] = await db.select().from(companies).where(eq(companies.id, card.companyId)).limit(1);
   const [project] = card.projectId ? await db.select().from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1) : [];
@@ -3919,11 +4077,12 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
       'Use the Kanban context snapshot below as the source of truth for assignee, department, project, goals, company structure, parent chain, dependencies, message board, lifecycle logs, and prior output.',
     ].join('\n'),
     digest,
+    await integrationSection(card),
     kanbanContext ? `Kanban context snapshot:\n${kanbanContext}` : '',
     matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
     `Repository protocol:\n${projectGitProtocol(company, project, card, assignee, runtime)}`,
     'Completion protocol:',
-    completionProtocol(card, reports, { delegationAlreadySatisfied }),
+    completionProtocol(card, reports, { delegationAlreadySatisfied, fanoutCap: effectiveFanoutCap(company?.maxChildrenPerCard) }),
   ].filter(Boolean).join('\n\n');
 }
 

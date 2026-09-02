@@ -30,6 +30,8 @@ export const companies = pgTable('companies', {
   // Informational: where the company's shared NFS export lives (for humans and
   // the UI). Runtimes mount it themselves and record their local mount root.
   nfsShareUrl: text('nfs_share_url'),
+  // Split fan-out per card (live children at once). Default 3, hard cap 5.
+  maxChildrenPerCard: integer('max_children_per_card').notNull().default(3),
   dispatchIntervalSeconds: integer('dispatch_interval_seconds').default(10),
   autoDispatchEnabled: boolean('auto_dispatch_enabled').default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
@@ -61,7 +63,18 @@ export const userInvites = pgTable('user_invites', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 
-export const departments = pgTable('departments', { id: uuid('id').primaryKey().defaultRandom(), companyId: uuid('company_id').notNull().references(() => companies.id), name: text('name').notNull(), slug: text('slug').notNull(), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
+export const departments = pgTable('departments', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  name: text('name').notNull(),
+  slug: text('slug').notNull(),
+  // Company pipeline: the head receives department cards from the CEO and
+  // splits them to members; the description is what the CEO reads to decide
+  // which departments a brainstorm or a task concerns.
+  headAgentId: uuid('head_agent_id'),
+  description: text('description'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
 export const positions = pgTable('positions', {
   id: uuid('id').primaryKey().defaultRandom(),
   companyId: uuid('company_id').notNull().references(() => companies.id),
@@ -74,6 +87,8 @@ export const positions = pgTable('positions', {
   canDelegateAcrossDepartments: boolean('can_delegate_across_departments').default(false),
   defaultDepartmentId: uuid('default_department_id').references(() => departments.id),
   managerPositionId: uuid('manager_position_id'),
+  // Review domain (code / content / ...): the key CV scores are bucketed by.
+  reviewDomain: text('review_domain'),
   isActive: boolean('is_active').default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
@@ -140,6 +155,8 @@ export const agents = pgTable('agents', {
   // and the token is injected into task prompts as git credentials.
   giteaUsername: text('gitea_username'),
   giteaToken: text('gitea_token'),
+  // Per-agent timeout default: card override > this > global admin setting.
+  defaultTimeoutSeconds: integer('default_timeout_seconds'),
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 }, (table) => ({ companySlugUnique: unique().on(table.companyId, table.slug) }));
@@ -211,6 +228,8 @@ export const kanbanCards = pgTable('kanban_cards', {
   retryCount: integer('retry_count').default(0),
   maxRetries: integer('max_retries').default(3),
   timeoutSeconds: integer('timeout_seconds'),
+  // Number of split rounds this card has opened (round-based child creation).
+  splitRound: integer('split_round').notNull().default(0),
   scheduleAt: timestamp('schedule_at', { withTimezone: true }),
   recurEveryMinutes: integer('recur_every_minutes'),
   recurNextAt: timestamp('recur_next_at', { withTimezone: true }),

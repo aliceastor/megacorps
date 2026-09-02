@@ -22,7 +22,17 @@ const migrations: Migration[] = [
   { version: 10, name: 'agent-notes-and-digest', run: runAgentNotesAndDigest },
   { version: 11, name: 'gitea-integration', run: runGiteaIntegration },
   { version: 12, name: 'nfs-workspace-convention', run: runNfsWorkspaceConvention },
+  { version: 13, name: 'company-pipeline-org', run: runCompanyPipelineOrg },
 ];
+
+async function runCompanyPipelineOrg(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE departments ADD COLUMN IF NOT EXISTS head_agent_id UUID REFERENCES agents(id);
+ALTER TABLE departments ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS split_round INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS max_children_per_card INTEGER NOT NULL DEFAULT 3;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS default_timeout_seconds INTEGER;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS review_domain TEXT;`);
+}
 
 async function runNfsWorkspaceConvention(): Promise<void> {
   await sql.unsafe(`ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS nfs_mount_root TEXT;

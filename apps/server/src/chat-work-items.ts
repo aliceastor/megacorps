@@ -97,6 +97,10 @@ async function applyOne(input: ApplyInput, action: ChatWorkItemAction): Promise<
       priority: priorityToNumber(action.priority),
       assigneeId,
       columnStatus: 'todo',
+      // Every card has a reviewer. A chat-created card has none named, so the
+      // chatting user is its reviewer via the human-approval path.
+      requiresApproval: true,
+      decisionMode: 'auto',
       createdBy: input.user.id,
     }).returning();
     if (!card) return { action: 'create_card', cardId: null, title: action.title, ok: false, detail: 'card insert failed' };

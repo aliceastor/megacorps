@@ -139,6 +139,7 @@ const registeredRoutes = [
   ['GET', '/api/search'],
   ['GET', '/api/dashboard/timeseries'],
   ['GET', '/api/cards/:id/assignment-history'],
+  ['PUT', '/api/departments/:id'],
 ] as const;
 
 test('api help includes response examples and rate-limit notes for every endpoint', () => {
