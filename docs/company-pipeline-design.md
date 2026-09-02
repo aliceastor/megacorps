@@ -51,6 +51,12 @@
 5. **每張子卡是一個可獨立驗收的交付物**,body 必須含驗收條件(系統軟檢查:body 過短拒收)。
 6. 人類在 UI 拆卡不受 1–3 限制,但超過時顯示警告。
 
+**拆法 SOP(寫進 CEO / 部門主管的職位 prompt;來自 2026-09-01 提案 §四)**:
+- 按**交付物切片**拆(每張子卡端到端可驗收),不按技術層拆(「前端一張、後端一張」= 兩張都不可驗收)。
+- 每張子卡的工作量 **≤ 負責人的 timeout 窗**;預估超過就要再切——這直接消滅長任務 timeout。窗口大小看該 agent 的設定,不寫死分鐘數(文件/圖檔類任務的節奏跟程式不同)。
+- 依賴顯式:B 等 A 就設卡依賴,不靠留言「我先等你」。
+- 同構任務(N 個檔案各自處理)用 swarm 形態:一輪內平行分給多個成員,每人一份切片。
+
 **與 DELEGATE 鏈的分工(prompt 講死)**:
 > 獨立交付物、需要自己的審理員、要在看板上被看見 → **拆子卡**;只是我這份交付物裡的一段幫忙、審理員還是我的審理員 → **DELEGATE**(卡內委派鏈,現有,深度 3 / fan-out 16 護欄不變)。
 
@@ -118,6 +124,13 @@ CV 資料來源:reviewer 在結構化報告填 `score: 0-10`(**加進 `agentRepo
 
 主管可自己執行小項(player-coach),但 prompt 要求優先分配。
 
+**評分與 CV 的細則(來自提案 §十一,採納)**:
+- Rubric 寫死在 reviewer prompt:9–10 全綠且超預期 / 7–8 綠但有小瑕疵 / 5–6 勉強過 / 3–4 與 0–2 為 REJECT 的兩個等級。`score` 管績效,`verdict` 管流程(merge / 退回),兩者並存。
+- 動態績效 = **最新 20 次的平均**(滑動窗口抓趨勢);冷啟動有幾次算幾次並標樣本數,樣本 < 5 時注入要標「資料不足」。
+- 分數**按審計域分開**(代碼 / 內容 / …),永不跨域比較;MVP 每域一位審計員,分數天然同源。同域出現第二位審計員時才做 calibration(審同一批樣本卡對齊錨點),現在不建。
+- 冷啟動兩層並存:能力聲明(靜態,人寫)打底,CV(動態,審計累積)漸進覆蓋;CV 只反映「被審計驗證過的能力」,未驗證的能力不被優先派——保守但正確。
+- 審計域的來源:審計員的職位帶 `reviewDomain`(見 §10);卡的域 = 其審理員的域。
+
 ## 9. 與現有機制對照
 
 | 需要 | 現有 | 缺口 |
@@ -140,6 +153,8 @@ CV 資料來源:reviewer 在結構化報告填 `score: 0-10`(**加進 `agentRepo
 - `kanban_cards.force_brainstorm BOOLEAN DEFAULT false`
 - `kanban_cards.brainstorm_department_ids UUID[]`(Client 預選的參與部門,CEO 的下限)
 - `departments.description TEXT`(部門職掌,CEO 選參與部門的依據)
+- `agents.default_timeout_seconds INTEGER`(每個 agent 的 timeout 預設;卡未覆寫時用它,再沒有才用全域值——提案 §五說的「timeout 分級」目前只能逐卡手填,系統沒有這一層)
+- `positions.review_domain TEXT`(審計域:code / content / …,CV 分域統計的鍵)
 - `kanban_cards.split_round INTEGER DEFAULT 0`(父卡已開的輪數)
 - `companies.max_children_per_card INTEGER DEFAULT 3`
 - `columnStatus` 新增 `waiting_on_client`、`waiting_on_brainstorm`(shared `cardStatuses` + transitions)
@@ -161,8 +176,8 @@ CV 資料來源:reviewer 在結構化報告填 `score: 0-10`(**加進 `agentRepo
 - 整合 prompt(§7)
 
 **UI**
-- 列表視圖(7+1 欄,子列展開,`waiting_on_client` 醒目)
-- 卡片詳情三區制
+- 列表視圖(提案 §一的規格全數採納):欄位 專案 / 標題 / 階段 / 負責人 / 審理員 / 部門 / 協作模式 / **最近活動**(相對時間);階段用顏色 badge(新增 `waiting_on_client` 與 `waiting_on_brainstorm` 兩色,要跟 `waiting_on_external` 分得開);預設按最近活動降序(在動的浮上來,卡死的沉底);過濾器 專案 / 階段 / 負責人 / 「只看我的審計」/ 「等我回答」;子卡縮排成子列;成本欄可加總;卡片牆保留為切換視圖;hover 顯示最近活動摘要
+- 卡片詳情三區制(提案 §二):① 概要區常駐(標題、body、負責人、審理員、階段、依賴、優先級/協作模式/需審批/最大重試);② 過程區分頁籤(「對話」= 留言板與工單串合併、「產出」= workProducts、「歷史」= execution log 與 task logs);③ 運行時區預設折疊(UUID / session / 重試 / 鎖 / 成本)。**注意**:UI 把「階段負責人 / 階段審核者」收進對話籤的委派事件裡顯示,但後端的委派級 `reviewerScope`(phase / final)必須保留,它是委派鏈與 peer question 的依據;「目標」「標籤」先隱藏。DELEGATE 在 UI 上是對話籤裡的事件,不是欄位。
 - checkpoint 回答面板 + 通知
 - 部門設定:主管欄位 + 職掌描述(必填);建卡:強制 brainstorm 勾選 + 參與部門預選
 
@@ -192,3 +207,29 @@ A 是地基;B 是願景的靈魂;E 是「上手好用」的來源。
 - CEO 判斷失誤(小任務走大流程 / 大任務沒 brainstorm):前者成本可接受,後者會在方向確認 checkpoint 被 Client 接住——這正是 checkpoint 阻塞式的價值。
 - 部門主管是 player-coach:允許,prompt 要求優先分配;主管自己接成員卡時審理員不能是自己(規則 4 自動擋)。
 - 一個 agent 同時是多個部門主管:允許但不建議,`head_agent_id` 不設唯一約束。
+- **(待拍板)協作模式的語意**:提案要四模式 solo / delegate / pair / swarm 且預設值前後矛盾(§三說預設 solo,§十一說預設 agent 自行決定)。在本設計裡,拆不拆已由組織結構與資源視圖決定,「強制 delegate」失去必要性;協作模式應退為卡上的**提示/約束**而非流程開關。候選:`auto`(預設,負責人在規則內自決)/ `solo`(禁止拆與委派)/ `pair`(每個 checkpoint 先問審理員,建在 peer @mention 上)/ `swarm`(提示按同構切片平行拆)。
+- **(待拍板)免審與「審理員必填」的張力**:提案要小卡可 label 免審;本設計規則 4 要求每張子卡必有審理員。候選折衷:agent 拆出的子卡一律必填(便宜的保險),只有**人**建的卡可以不設審理員。
+- **(待拍板)swarm 的 fan-out 與每節點 3 張上限**:提案的 swarm 例子是 10 檔 → 3 人(合規),100 檔 → 5 人會撞上限。候選:swarm 走公司層級可調的上限(硬上限 5),再多就分輪。
+
+## 14. 可靠性(提案 §五「三件套」的系統化)
+
+1. **Timeout 分級**:改為 `agents.default_timeout_seconds`(§10),卡覆寫 > agent 預設 > 全域;不再逐卡手填。
+2. **Watchdog 正式版**:定期掃 `in_progress` 且 heartbeat 過期的 run;A2A adapter 用 `tasks/get` 問 Hermes 該 task 是否還活著(**`a2a-client.ts` 目前沒有 `tasks/get`,要補**);判定死亡 → 釋放鎖、記 task_log、依卡的 retry 政策重派或 blocked + 通知。父卡留言板同步記事件。
+3. **重試 + BLOCKED 協議**:現有(`maxRetries`、`needs_review` 求助、blocked 通知),不動。
+
+## 附錄 A:現有組織與本設計的角色對照
+
+| 提案用語 | 本設計角色 | 系統對應 |
+|---|---|---|
+| alice(派工、拆解、驗收,不寫碼不審碼) | CEO | `isCompanyBoss` 職位 |
+| CTO(IT 部門、代碼審計、merge) | IT 部門主管 + 代碼域審計員 | `departments.head_agent_id` + `positions.review_domain = code` |
+| 內容審計(待建) | 內容域審計員 | `positions.review_domain = content` |
+| ribel / digby | 成員 | `agents.departmentId` + boss 鏈 |
+| 哥哥 | Client | 目標卡建立者與最終審理員 |
+
+## 附錄 B:組織配置待辦(非系統功能,來自提案 §十)
+
+- 建內容審計 agent(命名、選模型)並設 `review_domain = content`
+- 決定 digby 的 boss 是否改為 ribel(改 boss 鏈 = 改拆卡與委派的授權路徑,會影響規則 1)
+- 既有 9 個 PR 的卡設 reviewer = CTO,跑通一層審
+- CEO / 各部門主管 / 各審計員的職位 prompt 依 §F 模板重寫;每個部門補職掌描述
