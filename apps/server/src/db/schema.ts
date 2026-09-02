@@ -568,6 +568,21 @@ export const chatSessions = pgTable('chat_sessions', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 
+// Reviewer scores per reviewed card: the raw material of an agent's CV. The
+// domain comes from the reviewer's position (code, content, ...), so scores are
+// only ever compared within a domain.
+export const agentReviewScores = pgTable('agent_review_scores', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
+  agentId: uuid('agent_id').notNull().references(() => agents.id),
+  reviewerId: uuid('reviewer_id').references(() => agents.id),
+  domain: text('domain').notNull().default('general'),
+  score: integer('score').notNull(),
+  verdict: text('verdict').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
 // Self-notes an agent leaves from Direct Chat ("agreed with the boss to use
 // v2 format"). They feed the cross-surface digest so a conclusion reached in
 // chat is visible on the agent's next Kanban run and vice versa.

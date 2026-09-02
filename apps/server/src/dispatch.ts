@@ -1,8 +1,8 @@
-import { and, desc, eq, inArray, isNull, lt, sql as drizzleSql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lt, sql as drizzleSql, isNotNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { inferCardTransitionAction, normalizeCardStatus, type CardStatus } from '@megacorps/shared';
 import { db, sql as rawSql } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, cardRequiredTools, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, toolRegistry, workProducts } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, cardRequiredTools, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, toolRegistry, workProducts, agentReviewScores } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
@@ -11,6 +11,7 @@ import { buildAgentDigest } from './agent-digest.ts';
 import { giteaAuthenticatedCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv } from './gitea.ts';
 import { effectiveFanoutCap, evaluateSplitPlan, formatChildOpening, formatSplitAnnouncement, type SplitAgentRef } from './card-splitting.ts';
 import { normalizeDecisionMode, type AgentReportChild } from '@megacorps/shared';
+import { REVIEW_SCORE_RUBRIC, formatTeamResourceView, parseReviewScore, summarizeCv, type TeamMemberView } from './agent-cv.ts';
 import { brainstormFromOutput, brainstormRoundComplete, formatBrainstormClosed, formatBrainstormOpened, planBrainstormTargets, type BrainstormRequest } from './brainstorm.ts';
 import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointEligibilityError, checkpointFromOutput, checkpointFromQuestion, checkpointReminderDue, combineCheckpointAnswer, formatCheckpointAnswer, formatCheckpointMessage, type ClientCheckpointRequest } from './client-checkpoints.ts';
 import { setCardDependencies } from './card-dependencies.ts';
@@ -790,6 +791,65 @@ function handoffMessageBody(fromAgent: AgentRow, target: AgentRow, item: AgentRe
     item.outputFormat ? `Expected output: ${item.outputFormat}` : '',
     item.boundaries ? `Boundaries: ${item.boundaries}` : '',
   ].filter(Boolean).join('\n');
+}
+
+// === Review scores and the team resource view ==================================
+// Reviewers score each reviewed card 0-10; the CV is arithmetic over those rows,
+// bucketed by the reviewer's domain. Department heads and the CEO get a resource
+// view of their direct reports (load, declared capabilities, verified track
+// record) when they plan or split.
+
+export async function recordReviewScore(card: CardRow, reviewer: AgentRow, verdict: string, output: string | null | undefined, reportScore?: number | null): Promise<number | null> {
+  if (!card.assigneeId) return null;
+  const extraction = extractAgentReport(output);
+  const report = reportScore !== undefined && reportScore !== null ? { score: reportScore } : extraction && 'report' in extraction ? extraction.report : null;
+  const score = parseReviewScore(report, output);
+  if (score === null) return null;
+  const [position] = reviewer.positionId
+    ? await db.select({ reviewDomain: positions.reviewDomain }).from(positions).where(eq(positions.id, reviewer.positionId)).limit(1)
+    : [];
+  await db.insert(agentReviewScores).values({
+    companyId: card.companyId,
+    cardId: card.id,
+    agentId: card.assigneeId,
+    reviewerId: reviewer.id,
+    domain: position?.reviewDomain?.trim() || 'general',
+    score,
+    verdict,
+  });
+  return score;
+}
+
+export async function teamResourceView(companyId: string, bossId: string): Promise<string> {
+  const reports = await activeDirectReportsForAgent(companyId, bossId);
+  const ids = reports.map((report) => report.id);
+  if (ids.length === 0) return '';
+  const [agentRows, liveRows, scoreRows, rejectRows] = await Promise.all([
+    db.select({ id: agents.id, capabilities: agents.capabilities, isBusy: agents.isBusy }).from(agents).where(inArray(agents.id, ids)),
+    db.select({ assigneeId: kanbanCards.assigneeId, count: drizzleSql<number>`count(*)::int` }).from(kanbanCards)
+      .where(and(inArray(kanbanCards.assigneeId, ids), isNull(kanbanCards.deletedAt), inArray(kanbanCards.columnStatus, ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm'])))
+      .groupBy(kanbanCards.assigneeId),
+    db.select({ agentId: agentReviewScores.agentId, domain: agentReviewScores.domain, score: agentReviewScores.score, verdict: agentReviewScores.verdict, createdAt: agentReviewScores.createdAt })
+      .from(agentReviewScores).where(inArray(agentReviewScores.agentId, ids)).orderBy(desc(agentReviewScores.createdAt)).limit(ids.length * 40),
+    db.select({ assigneeId: kanbanCards.assigneeId, feedback: kanbanCards.reviewFeedback, updatedAt: kanbanCards.updatedAt }).from(kanbanCards)
+      .where(and(inArray(kanbanCards.assigneeId, ids), isNull(kanbanCards.deletedAt), isNotNull(kanbanCards.reviewFeedback))).orderBy(desc(kanbanCards.updatedAt)).limit(ids.length * 3),
+  ]);
+  const agentById = new Map(agentRows.map((row) => [row.id, row]));
+  const liveById = new Map(liveRows.map((row) => [row.assigneeId, Number(row.count)]));
+  const lastReject = new Map<string, string>();
+  for (const row of rejectRows) if (row.assigneeId && row.feedback && !lastReject.has(row.assigneeId)) lastReject.set(row.assigneeId, row.feedback.replace(/\s+/g, ' ').slice(0, 160));
+  const members: TeamMemberView[] = reports.map((report) => ({
+    name: report.name,
+    slug: report.slug,
+    positionName: report.positionName ?? null,
+    departmentName: report.departmentName ?? null,
+    capabilities: agentById.get(report.id)?.capabilities ?? [],
+    liveCards: liveById.get(report.id) ?? 0,
+    isBusy: Boolean(agentById.get(report.id)?.isBusy),
+    cv: summarizeCv(scoreRows.filter((row) => row.agentId === report.id)),
+    lastRejectReason: lastReject.get(report.id) ?? null,
+  }));
+  return formatTeamResourceView(members);
 }
 
 // === Brainstorm rounds =========================================================
@@ -3398,6 +3458,9 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       });
     }
     const acceptedReviewOutput = result.success || Boolean(explicitDecision);
+    if (acceptedReviewOutput && decision) {
+      try { await recordReviewScore(card, reviewer, decision, result.output); } catch { /* scoring must never fail a review */ }
+    }
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
 
     if (decision === 'escalate') {
@@ -4352,6 +4415,7 @@ async function buildMessageReviewPrompt(card: CardRow, report: CardCommentRow, r
     'Return REVISION_REQUESTED with concrete guidance if the assignee must revise.',
     'Return ESCALATE only if your manager must decide.',
     'Reviews with no explicit verdict are returned for retry - never omit the decision.',
+    REVIEW_SCORE_RUBRIC,
     'This review only affects the Message Board delegation chain. Do not move the Kanban card stage.',
   ].join('\n');
 }
@@ -4404,6 +4468,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
     await integrationSection(card),
     await clientCheckpointSection(card),
     await brainstormSection(card, assignee),
+    assignee ? await teamResourceView(card.companyId, assignee.id) : '',
     kanbanContext ? `Kanban context snapshot:\n${kanbanContext}` : '',
     matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
     `Repository protocol:\n${projectGitProtocol(company, project, card, assignee, runtime)}`,
@@ -4427,6 +4492,7 @@ async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}
         ? 'Decision options: APPROVE/DONE if you can finish it directly, REVISION_REQUESTED with concrete guidance if the assignee should retry, or ESCALATE if your manager must decide.'
         : 'Decision options: PASS/APPROVED if acceptable, REJECT/REVISION_REQUESTED with concrete feedback if it needs more work, or ESCALATE only if your manager must decide.',
       'Reviews with no explicit verdict are returned for retry - never omit the decision.',
+    REVIEW_SCORE_RUBRIC,
     ].join('\n\n');
   }
   const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.reviewerId });

@@ -24,7 +24,23 @@ const migrations: Migration[] = [
   { version: 12, name: 'nfs-workspace-convention', run: runNfsWorkspaceConvention },
   { version: 13, name: 'company-pipeline-org', run: runCompanyPipelineOrg },
   { version: 14, name: 'brainstorm-rounds', run: runBrainstormRounds },
+  { version: 15, name: 'agent-review-scores', run: runAgentReviewScores },
 ];
+
+async function runAgentReviewScores(): Promise<void> {
+  await sql.unsafe(`CREATE TABLE IF NOT EXISTS agent_review_scores (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id UUID NOT NULL REFERENCES companies(id),
+  card_id UUID NOT NULL REFERENCES kanban_cards(id),
+  agent_id UUID NOT NULL REFERENCES agents(id),
+  reviewer_id UUID REFERENCES agents(id),
+  domain TEXT NOT NULL DEFAULT 'general',
+  score INTEGER NOT NULL,
+  verdict TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS agent_review_scores_agent_created_idx ON agent_review_scores(agent_id, created_at DESC);`);
+}
 
 async function runBrainstormRounds(): Promise<void> {
   await sql.unsafe(`ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS force_brainstorm BOOLEAN NOT NULL DEFAULT false;

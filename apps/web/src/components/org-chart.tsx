@@ -356,6 +356,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
         slug: String(agentDraft.slug ?? selected.slug),
         role: selected.role || 'worker',
         soul: selected.soul ?? null,
+        capabilities: agentDraft?.capabilities ?? selected.capabilities ?? [],
         adapterType: String(agentDraft.adapterType ?? selected.adapterType ?? 'hermes-ssh'),
         adapterConfig: agentDraft.adapterConfig ?? {},
         runtimeId: agentDraft.runtimeId || null,
@@ -363,7 +364,6 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
         bossId: agentDraft.bossId || null,
         departmentId: agentDraft.departmentId || null,
         positionId: agentDraft.positionId || null,
-        capabilities: [],
         budgetPerTask: agentDraft.budgetPerTask ? Number(agentDraft.budgetPerTask) : undefined,
         budgetMonthly: agentDraft.budgetMonthly ? Number(agentDraft.budgetMonthly) : undefined,
       };
@@ -660,6 +660,10 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
             </section>}
             <div className="form-grid">
               <label className="field-label">{t('common.name')}<input className="input" value={String(agentDraft?.name ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), name: e.target.value })} /></label>
+              <label className="field-label">{t('agents.capabilities')}
+                <span className="field-hint">{t('agents.capabilitiesHint')}</span>
+                <input className="input" value={(agentDraft?.capabilities ?? []).join(', ')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), capabilities: e.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} placeholder="typescript, postgres, technical writing" />
+              </label>
               <label className="field-label">{t('common.slug')}<input className="input" value={String(agentDraft?.slug ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), slug: e.target.value })} /></label>
               <label className="field-label">{t('agents.profile')}<input className="input" value={String(agentDraft?.hermesProfile ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), hermesProfile: e.target.value })} /></label>
               <label className="field-label">{t('settings.adapter')}<select className="input" value={String(agentDraft?.adapterType ?? 'hermes-ssh')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), adapterType: e.target.value })}>
