@@ -35,6 +35,18 @@ test('the keys this phase introduced exist in every locale', () => {
     'kanban.youApprover', 'kanban.reviewFeedback', 'kanban.answerCheckpoint', 'kanban.noPendingCheckpoint', 'kanban.approveTask', 'kanban.rejectTask',
     'kanban.decisionNote', 'kanban.reviewEnqueuesAgent', 'kanban.continueWithCommentCta', 'kanban.closeDiscard', 'kanban.closeBlocked',
     'kanban.phaseActive', 'kanban.phaseHistorical', 'kanban.layoutLegacy', 'kanban.layoutV2', 'kanban.approvalBlockedByChildren',
+    // PR-3: the merged 對話 tab, its composer and the @mention rows.
+    'kanban.tabConversation', 'kanban.tabOutputs', 'kanban.tabHistory', 'kanban.convFilter.all', 'kanban.convFilter.talk', 'kanban.convFilter.milestones',
+    'kanban.convFilter.delegationReview', 'kanban.convFilter.system', 'kanban.convSystemFold', 'kanban.convShowOlder', 'kanban.convOlderLogsMissing',
+    'kanban.convLoaded', 'kanban.convNewestFirst', 'kanban.convOldestFirst', 'kanban.convComposerHint', 'kanban.convToday', 'kanban.convYesterday',
+    'kanban.convAnswerAbove', 'kanban.convAnswered', 'kanban.convWithdrawn', 'kanban.convReminded', 'kanban.convLastActivity', 'kanban.convShowProcess',
+    'kanban.convRetries', 'kanban.convConsequence', 'kanban.convQueuedForAgent', 'kanban.convEscalatedTo', 'kanban.convNoIndependentReviewer',
+    'kanban.convOpenChild', 'kanban.convOpenParent', 'kanban.convEmpty', 'kanban.convEmptyFilter', 'kanban.convNewEvents', 'kanban.convUnreadAbove',
+    'kanban.convSendShortcut', 'kanban.convPauseHint', 'kanban.convSend.comment', 'kanban.convSend.agent_note', 'kanban.convSend.send_to_agent',
+    'kanban.convSend.continue_run', 'kanban.convSend.pause_agent', 'kanban.convSend.escalate_to_reviewer', 'kanban.convSend.delegate_to_agent',
+    'kanban.convVerdict.approve', 'kanban.convVerdict.reject', 'kanban.convVerdict.request_help', 'kanban.convVerdict.block',
+    'kanban.convBrainstormRound', 'kanban.convSplitRound', 'kanban.convRoundClosed', 'kanban.convRoundOpen', 'kanban.convStage', 'kanban.convDelegatedTo',
+    'kanban.convMentionWaiting', 'kanban.convMentionAnswered', 'kanban.convMentionFailed', 'kanban.convMentionClient', 'kanban.convMentionButton', 'kanban.convMentionHint',
   ];
   for (const locale of locales) {
     for (const key of required) assert.ok(messages[locale][key], `${locale} lacks ${key}`);

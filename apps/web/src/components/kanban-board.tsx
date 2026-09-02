@@ -7,7 +7,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { isCancelledError, useQuery, useQueryClient } from '@tanstack/react-query';
 import { GripVertical, Plus, RefreshCw, Search, X } from 'lucide-react';
 import { api } from '@/lib/api';
-import { buildConversation, type ConversationEvent } from '@/lib/card-conversation';
+import { EMPTY_CONVERSATION, buildConversation, type Conversation, type ConversationView } from '@/lib/card-conversation';
+import { readCardSeen, rememberCardSeen, writeCardSeen } from '@/lib/card-seen';
+import { createKeyedDebounce } from '@/lib/keyed-debounce';
 import { useLocale } from '@/lib/locale-context';
 import { CardDetailPanel } from './kanban/card-detail-panel';
 import { agentDisplayName, goalScope, isDraftDirty, parseCsv, priorityNumber, priorityValue, scopedGoalOptions, statusColor } from './kanban/card-helpers';
@@ -36,19 +38,44 @@ type LiveEvent = { type: string; cardId?: string | null; entityId?: string; proj
 
 const CARD_TAB_CACHE_KEY = 'megacorps.kanban.card-tabs.v2';
 const CARD_TAB_CACHE_TTL_MS = 2 * 60 * 1000;
-const CARD_TAB_CACHE_LIMIT = 50;
+// The merged 對話 tab fills all four arrays for every card opened, so the
+// sessionStorage cache keeps fewer cards and refuses writes past 2 MB
+// (the browser quota is ~5 MB and the in-memory copy still works).
+const CARD_TAB_CACHE_LIMIT = 20;
+const CARD_TAB_CACHE_MAX_CHARS = 2 * 1024 * 1024;
 const CARD_LOG_PAGE_SIZE = 80;
 const DETAIL_LAYOUT_KEY = 'megacorps.kanban.detailLayout';
+const CONVERSATION_VIEW_KEY = 'megacorps.kanban.conversation.v1';
+const DEFAULT_CONVERSATION_VIEW: ConversationView = { sort: 'newest', filter: 'all' };
+// One live burst (a human pause = comment.created + 2 × card.updated; a
+// dispatch = 3 × task_log.created + card.updated) collapses into one reload per key.
+const LIVE_DEBOUNCE_MS = 400;
+const CONVERSATION_SORTS = new Set<ConversationView['sort']>(['newest', 'oldest']);
+const CONVERSATION_FILTERS = new Set<ConversationView['filter']>(['all', 'talk', 'milestones', 'delegationReview', 'system']);
 
 function readDetailLayout(): DetailLayout {
   try { return window.localStorage.getItem(DETAIL_LAYOUT_KEY) === 'legacy' ? 'legacy' : 'v2'; } catch { return 'v2'; }
 }
 
+function readConversationView(): ConversationView {
+  try {
+    const raw = window.localStorage.getItem(CONVERSATION_VIEW_KEY);
+    if (!raw) return DEFAULT_CONVERSATION_VIEW;
+    const parsed = JSON.parse(raw) as Partial<ConversationView> | null;
+    return {
+      sort: parsed?.sort && CONVERSATION_SORTS.has(parsed.sort) ? parsed.sort : DEFAULT_CONVERSATION_VIEW.sort,
+      filter: parsed?.filter && CONVERSATION_FILTERS.has(parsed.filter) ? parsed.filter : DEFAULT_CONVERSATION_VIEW.filter,
+    };
+  } catch {
+    return DEFAULT_CONVERSATION_VIEW;
+  }
+}
+
 // The tab a freshly opened card shows. Legacy keeps the details tab; the v2
-// panel opens on the message board until PR-3 lands the merged conversation
-// tab. PR-4 narrows CardDetailTab once the legacy layout goes.
+// panel opens on the merged 對話 tab. PR-4 narrows CardDetailTab once the
+// legacy layout goes.
 function defaultTabFor(layout: DetailLayout): CardDetailTab {
-  return layout === 'legacy' ? 'details' : 'comments';
+  return layout === 'legacy' ? 'details' : 'conversation';
 }
 
 function isFresh<T>(entry?: CachedRows<T> | CachedValue<T>): boolean {
@@ -69,7 +96,9 @@ function readCardTabCache(): Record<string, CardTabCache> {
 function writeCardTabCache(cache: Record<string, CardTabCache>): void {
   if (typeof window === 'undefined') return;
   try {
-    window.sessionStorage.setItem(CARD_TAB_CACHE_KEY, JSON.stringify(cache));
+    const serialized = JSON.stringify(cache);
+    if (serialized.length > CARD_TAB_CACHE_MAX_CHARS) return;
+    window.sessionStorage.setItem(CARD_TAB_CACHE_KEY, serialized);
   } catch {
     // Keep the in-memory cache even if the browser refuses sessionStorage writes.
   }
@@ -265,6 +294,12 @@ export function KanbanBoard() {
   const defaultDetailTab = defaultTabFor(detailLayout);
   const [tab, setTab] = useState<CardDetailTab>(() => defaultTabFor(readDetailLayout()));
   const [overviewEditing, setOverviewEditing] = useState(false);
+  // 對話 tab sort + filter, persisted per viewer; the unread line's baseline is
+  // captured when a card opens and written back when it closes.
+  const [conversationView, setConversationViewState] = useState<ConversationView>(() => readConversationView());
+  const [lastSeenAt, setLastSeenAt] = useState<number | null>(null);
+  const [liveDebounce] = useState(() => createKeyedDebounce(LIVE_DEBOUNCE_MS));
+  useEffect(() => () => liveDebounce.cancel(), [liveDebounce]);
   const [commentBody, setCommentBody] = useState('');
   const [commentAction, setCommentAction] = useState<'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run' | 'escalate_to_reviewer' | 'delegate_to_agent'>('comment');
   const [commentAgentId, setCommentAgentId] = useState('');
@@ -534,6 +569,12 @@ export function KanbanBoard() {
   function selectTab(next: CardDetailTab) {
     setTab(next);
     if (!selected) return;
+    if (next === 'conversation') {
+      void loadCardComments(selected);
+      void loadCardLogs(selected);
+      void loadCardActions(selected);
+      void loadCardWorkProducts(selected);
+    }
     if (next === 'details') void loadCardDelegationSummary(selected);
     if (next === 'comments' || next === 'delegation') void loadCardComments(selected);
     if (next === 'thread') {
@@ -577,22 +618,37 @@ export function KanbanBoard() {
         void refresh();
         return;
       }
-      if (detail.type.startsWith('card.') || detail.type === 'activity.created') void refresh();
-      if (selected && (detail.type.startsWith('card.') || detail.type === 'activity.created')) {
+      // Every reload below is debounced per key (400 ms, newest closure wins),
+      // the whole-board refresh included, so one burst costs one request each.
+      const cardEvent = detail.type.startsWith('card.') || detail.type === 'activity.created';
+      if (cardEvent) liveDebounce.run('refresh', () => void refresh());
+      if (selected && cardEvent) {
         // Approvals and the subtree have no live event of their own, and a child
         // card's event carries the child's id: refresh both on any card.* event.
-        void queryClient.invalidateQueries({ queryKey: ['cardApprovals', selected.id] });
-        void queryClient.invalidateQueries({ queryKey: ['cardSubtree', selected.id] });
+        const id = selected.id;
+        liveDebounce.run(`approvals:${id}`, () => {
+          void queryClient.invalidateQueries({ queryKey: ['cardApprovals', id] });
+          void queryClient.invalidateQueries({ queryKey: ['cardSubtree', id] });
+        });
       }
       const affectsSelectedCard = Boolean(selected && detail.cardId === selected.id);
       if (!selected || !affectsSelectedCard) return;
+      const card = selected;
+      const reload = (key: CardTabKey, loader: (target: Card, force?: boolean) => Promise<unknown>) => liveDebounce.run(`${key}:${card.id}`, () => void loader(card, true));
       if (detail.type === 'card.comment.created') {
-        void loadCardComments(selected, true);
-        void loadCardDelegationSummary(selected, true);
+        reload('comments', loadCardComments);
+        reload('delegationSummary', loadCardDelegationSummary);
       }
-      if (detail.type === 'task_log.created') void loadCardLogs(selected, true);
-      if (detail.type === 'card.action.created') void loadCardActions(selected, true);
-      if (detail.type === 'work_product.created') void loadCardWorkProducts(selected, true);
+      if (detail.type === 'task_log.created') reload('logs', loadCardLogs);
+      if (detail.type === 'card.action.created') reload('actions', loadCardActions);
+      if (detail.type === 'work_product.created') reload('workProducts', loadCardWorkProducts);
+      // POST /comments, PUT /approvals and recordStageAction insert task_logs and
+      // card_actions without a live event of their own; card.updated is the
+      // signal that they landed, so the system rows do not arrive late.
+      if (detail.type === 'card.updated') {
+        reload('logs', loadCardLogs);
+        reload('actions', loadCardActions);
+      }
     }
     window.addEventListener('megacorps-live', onLive);
     return () => window.removeEventListener('megacorps-live', onLive);
@@ -600,6 +656,11 @@ export function KanbanBoard() {
   useEffect(() => {
     selectedIdRef.current = selected?.id ?? null;
     setOverviewEditing(false);
+    // Unread baseline: what this viewer had seen when the card opened. The
+    // cleanup records the close time (also when switching straight to another card).
+    const seenId = selected?.id ?? null;
+    setLastSeenAt(seenId ? readCardSeen()[seenId] ?? null : null);
+    const markSeen = () => { if (seenId) writeCardSeen(rememberCardSeen(readCardSeen(), seenId, Date.now())); };
     if (!selected) {
       setDraft(null);
       setLogs([]);
@@ -639,6 +700,12 @@ export function KanbanBoard() {
     const timer = window.setTimeout(() => {
       // The overview's situation line and runtime block need the summary on every open.
       void loadCardDelegationSummary(selected);
+      if (tab === 'conversation') {
+        void loadCardComments(selected);
+        void loadCardLogs(selected);
+        void loadCardActions(selected);
+        void loadCardWorkProducts(selected);
+      }
       if (tab === 'comments' || tab === 'delegation') void loadCardComments(selected);
       if (tab === 'thread') {
         void loadCardLogs(selected);
@@ -652,7 +719,10 @@ export function KanbanBoard() {
       }
       if (tab === 'workProducts') void loadCardWorkProducts(selected);
     }, 150);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      markSeen();
+    };
   }, [selected?.id]);
 
   const companyNameById = useMemo(() => new Map(companies.map((company) => [company.id, company.name])), [companies]);
@@ -962,18 +1032,26 @@ export function KanbanBoard() {
     setDetailLayoutState(next);
     try { window.localStorage.setItem(DETAIL_LAYOUT_KEY, next); } catch { /* per-viewer convenience only */ }
     setOverviewEditing(false);
-    if (next === 'v2' && tab === 'details') selectTab(defaultTabFor(next));
+    // A tab the target layout lacks maps onto its nearest equivalent.
+    if (next === 'v2' && (tab === 'details' || tab === 'comments' || tab === 'delegation' || tab === 'thread')) selectTab(defaultTabFor(next));
+    if (next === 'legacy' && tab === 'conversation') selectTab('comments');
   }
-  // The overview's "last activity" line: the newest non-system event over
-  // whatever rows are loaded (PR-3 renders the full conversation from this).
-  const conversationLatest = useMemo<ConversationEvent | null>(() => {
-    if (!selected) return null;
+  function setConversationView(next: ConversationView) {
+    setConversationViewState(next);
+    try { window.localStorage.setItem(CONVERSATION_VIEW_KEY, JSON.stringify(next)); } catch { /* per-viewer convenience only */ }
+  }
+  // The 對話 tab's model over whatever rows are loaded; `.latest` is the
+  // overview's "last activity" line (computed from the unfiltered rows, so the
+  // filter never changes it).
+  const conversation = useMemo<Conversation>(() => {
+    if (!selected) return EMPTY_CONVERSATION;
     try {
-      return buildConversation({ comments, logs, actions, workProducts, approvals: cardApprovals, agents, you: { name: t('common.you') } }, { sort: 'newest', filter: 'all' }).latest;
+      return buildConversation({ comments, logs, actions, workProducts, approvals: cardApprovals, agents, you: { name: t('common.you') }, logsHasMore, lastSeenAt }, conversationView);
     } catch {
-      return null;
+      return EMPTY_CONVERSATION;
     }
-  }, [selected?.id, comments, logs, actions, workProducts, cardApprovals, agents, locale]);
+  }, [selected?.id, comments, logs, actions, workProducts, cardApprovals, agents, locale, logsHasMore, lastSeenAt, conversationView]);
+  const conversationLatest = conversation.latest;
   async function afterApprovalChange(message: string) {
     if (!selected) return;
     const card = selected;
@@ -1126,6 +1204,9 @@ export function KanbanBoard() {
       openCard={openCard}
       cardApprovals={cardApprovals}
       cardChildren={cardChildren}
+      conversation={conversation}
+      conversationView={conversationView}
+      setConversationView={setConversationView}
       conversationLatest={conversationLatest}
       onCheckpointAnswered={() => afterApprovalChange(t('kanban.taskQueuedContinue'))}
       onApprovalDecided={() => afterApprovalChange(t('kanban.reviewCompleted'))}

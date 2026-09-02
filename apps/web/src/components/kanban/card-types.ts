@@ -99,7 +99,8 @@ export type CardTabCache = {
   delegationSummary?: CachedValue<CardDelegationSummary>;
 };
 export type CardTabKey = keyof CardTabCache;
-export type CardDetailTab = 'details' | 'comments' | 'delegation' | 'thread' | 'logs' | 'workProducts';
+/** 'conversation' is the v2 merged tab (PR-3); the legacy ids stay until PR-4 removes that layout. */
+export type CardDetailTab = 'details' | 'comments' | 'delegation' | 'thread' | 'logs' | 'workProducts' | 'conversation';
 export type CommentActionMode = 'comment' | 'agent_note' | 'pause_agent' | 'send_to_agent' | 'continue_run' | 'escalate_to_reviewer' | 'delegate_to_agent';
 export type ReviewerScope = 'phase' | 'final';
 /** A row from GET /api/approvals?cardId=; type is client_checkpoint / task_review / budget_override_required. */

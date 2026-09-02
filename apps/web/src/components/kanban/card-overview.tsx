@@ -112,7 +112,7 @@ export function CardOverview({
       busy={busy}
       onRunNow={() => void action(`/api/cards/${selected.id}/run`, t('kanban.taskDispatched'))}
       onReview={() => void action(`/api/cards/${selected.id}/review`, t('kanban.reviewCompleted'))}
-      onContinueWithComment={() => { selectTab('comments'); setCommentAction('continue_run'); }}
+      onContinueWithComment={() => { selectTab('conversation'); setCommentAction('continue_run'); }}
       onCheckpointAnswered={onCheckpointAnswered}
       onApprovalDecided={onApprovalDecided}
     />
@@ -159,7 +159,7 @@ export function CardOverview({
     <div className="card-overview-actions">
       <button className="btn btn-primary" disabled={busy} onClick={() => action(`/api/cards/${selected.id}/run`, t('kanban.taskDispatched'))}><Play size={15} /> {t('common.runNow')}</button>
       <button className="btn" disabled={busy} title={t('kanban.reviewEnqueuesAgent')} onClick={() => action(`/api/cards/${selected.id}/review`, t('kanban.reviewCompleted'))}><ShieldCheck size={15} /> {t('kanban.review')}</button>
-      <button className="btn" disabled={busy} onClick={() => { selectTab('comments'); setCommentAction('pause_agent'); }}><StopCircle size={15} /> {t('kanban.pauseWithComment')}</button>
+      <button className="btn" disabled={busy} onClick={() => { selectTab('conversation'); setCommentAction('pause_agent'); }}><StopCircle size={15} /> {t('kanban.pauseWithComment')}</button>
       <button className="btn" disabled={busy} onClick={() => onEdit(null)}><Pencil size={15} /> {t('kanban.overviewEdit')}</button>
       <span className="card-overview-actions-spacer" />
       <button className="btn" disabled={busy || selected.columnStatus === 'cancelled'} onClick={() => action(`/api/cards/${selected.id}/cancel`, t('kanban.taskCancelled'))}><Ban size={15} /> {t('kanban.cancelTask')}</button>

@@ -733,3 +733,53 @@ test('mentionCandidates prefix-matches slug or name, case-insensitively, at most
   const named = [{ slug: 'ceo-01', name: 'Alice Wong' }, { slug: 'alice-2', name: 'Other' }];
   assert.deepEqual(mentionCandidates('ali', named).map((agent) => agent.slug), ['ceo-01', 'alice-2']);
 });
+
+// --- render window (PR-3) -----------------------------------------------------------
+
+test('sliceConversationWindow keeps the head when newest-first and the tail when oldest-first, markers riding with their rows', async () => {
+  const { sliceConversationWindow, oldestItemTime, isConversationRow, EMPTY_CONVERSATION } = await import('./card-conversation.ts');
+  const day = (at: number): ConversationItem => ({ type: 'day', at });
+  const ev = (id: string, at: number): ConversationItem => ({ type: 'event', event: classifyComment(comment(id, { createdAt: new Date(at).toISOString() }), ctx) });
+  const horizon: ConversationItem = { type: 'horizon', at: 1 };
+  // newest-first: [day, e5, e4, day, e3, e2, day, e1, horizon]
+  const newest: ConversationItem[] = [day(50), ev('e5', 50), ev('e4', 40), day(30), ev('e3', 30), ev('e2', 20), day(10), ev('e1', 10), horizon];
+  const head = sliceConversationWindow(newest, 'newest', 3);
+  assert.deepEqual(head.visible.map((item) => (item.type === 'event' ? item.event.id : item.type)), ['day', 'c-e5', 'c-e4', 'day', 'c-e3']);
+  assert.equal(head.hiddenCount, 2);
+  assert.equal(oldestItemTime(head.visible), 30);
+  // oldest-first: [horizon, day, e1, day, e2, e3, day, e4, e5]
+  const oldest: ConversationItem[] = [horizon, day(10), ev('e1', 10), day(20), ev('e2', 20), ev('e3', 30), day(40), ev('e4', 40), ev('e5', 50)];
+  const tail = sliceConversationWindow(oldest, 'oldest', 3);
+  assert.deepEqual(tail.visible.map((item) => (item.type === 'event' ? item.event.id : item.type)), ['c-e3', 'day', 'c-e4', 'c-e5']);
+  assert.equal(tail.hiddenCount, 2);
+  const tailTwo = sliceConversationWindow(oldest, 'oldest', 2);
+  assert.deepEqual(tailTwo.visible.map((item) => (item.type === 'event' ? item.event.id : item.type)), ['day', 'c-e4', 'c-e5']);
+  // everything fits: untouched, horizon included
+  const all = sliceConversationWindow(oldest, 'oldest', 60);
+  assert.equal(all.visible, oldest);
+  assert.equal(all.hiddenCount, 0);
+  assert.equal(sliceConversationWindow(newest, 'newest', 0).visible.filter(isConversationRow).length, 1);
+  assert.equal(oldestItemTime([]), 0);
+  assert.equal(oldestItemTime([day(5)]), 0);
+  assert.deepEqual(EMPTY_CONVERSATION.items, []);
+  assert.equal(EMPTY_CONVERSATION.counts.all, 0);
+});
+
+test('sliceConversationWindow counts threads and folds as one row each and reads their oldest time', async () => {
+  const { sliceConversationWindow, oldestItemTime } = await import('./card-conversation.ts');
+  const result = build({
+    comments: [
+      comment('req', { action: 'delegate_request', authorType: 'agent', agentId: 'a-alice', assigneeAgentId: 'a-ben', delegationStatus: 'done', createdAt: at(0) }),
+      agentComment('rep', 'a-ben', 'delegate_report', { parentCommentId: 'req', createdAt: at(100) }),
+      comment('h1', { createdAt: at(200) }),
+    ],
+    logs: [log('s1', { type: 'lock', createdAt: at(300) }), log('s2', { type: 'queue', createdAt: at(301) })],
+  });
+  const rows = result.items.filter((item) => item.type !== 'day');
+  assert.deepEqual(rows.map((item) => item.type), ['fold', 'event', 'thread']);
+  const window = sliceConversationWindow(result.items, 'newest', 2);
+  assert.equal(window.hiddenCount, 1);
+  assert.deepEqual(window.visible.filter((item) => item.type !== 'day').map((item) => item.type), ['fold', 'event']);
+  assert.equal(oldestItemTime(window.visible), T0 + 200_000);
+  assert.equal(oldestItemTime(result.items), T0);
+});

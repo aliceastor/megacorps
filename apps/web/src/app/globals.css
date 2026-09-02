@@ -6707,3 +6707,329 @@ button.card:hover {
   .card-overview-actions .card-overview-actions-spacer { display: none; }
 }
 
+
+/* Card detail panel v2, PR-3: the merged 對話 tab. The rail reuses
+   .ticket-entry-rail (28px column) and avatars reuse .chat-avatar; everything
+   else is .conv-* so the legacy tabs keep their .ticket-* / .message-board-*
+   rules untouched. Colours come from the theme variables, so light / dark
+   need no overrides beyond the amber text tweaks below. */
+.conv-tab { display: grid; gap: 10px; }
+.conv-tab-count {
+  margin-left: 6px;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: var(--border);
+  color: var(--foreground);
+}
+.conv-filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.conv-filter {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 99px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.conv-filter:hover { border-color: var(--primary); color: var(--foreground); }
+.conv-filter.active { border-color: var(--primary); background: var(--primary-soft); color: var(--foreground); }
+.conv-filter .conv-tab-count { background: transparent; color: inherit; padding: 0; margin-left: 4px; opacity: 0.75; }
+.conv-filters-spacer { flex: 1 1 auto; }
+.conv-sort { width: auto; }
+.conv-new-pill-host {
+  position: sticky;
+  top: 8px;
+  z-index: 2;
+  justify-self: center;
+  pointer-events: none;
+}
+.conv-new-pill-host:empty { margin-top: -10px; }
+.conv-new-pill {
+  pointer-events: auto;
+  border: 1px solid var(--primary);
+  background: var(--primary);
+  color: #fff;
+  border-radius: 99px;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+}
+:root:not([data-theme="light"]) .conv-new-pill { color: #0b1d12; }
+.conv-empty { margin: 0; padding: 18px 12px; text-align: center; color: var(--muted); font-size: 13px; }
+.conv-empty-filter {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  color: var(--primary-strong, var(--primary));
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+}
+.conv-list {
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px 10px;
+  background: color-mix(in srgb, var(--card-strong) 28%, transparent);
+}
+.conv-list > * { min-width: 0; }
+.conv-row { display: grid; grid-template-columns: 28px minmax(0, 1fr); }
+.conv-row .conv-rail span { margin-top: 14px; }
+.conv-rail.accent span { background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent); }
+.conv-rail.success span { background: var(--success); box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 18%, transparent); }
+.conv-rail.warning span { background: #f59e0b; box-shadow: 0 0 0 4px color-mix(in srgb, #f59e0b 18%, transparent); }
+.conv-rail.danger span { background: var(--danger); box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 18%, transparent); }
+.conv-rail.product span { background: #60a5fa; box-shadow: 0 0 0 4px color-mix(in srgb, #60a5fa 18%, transparent); }
+.conv-rail.review span { background: #9333ea; box-shadow: 0 0 0 4px color-mix(in srgb, #9333ea 18%, transparent); }
+.conv-rail.system span,
+.conv-rail.neutral span {
+  width: 8px;
+  height: 8px;
+  margin-top: 15px;
+  background: var(--border);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--border) 40%, transparent);
+}
+.conv-main {
+  margin: 4px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--card) 86%, transparent);
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.conv-row.alert .conv-main { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); background: color-mix(in srgb, var(--danger) 6%, var(--card)); }
+.conv-row.milestone .conv-main { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.conv-row.review .conv-main { border-color: color-mix(in srgb, #9333ea 40%, var(--border)); }
+.conv-row.message.danger .conv-main { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+.conv-row.message.warning .conv-main { border-color: color-mix(in srgb, #f59e0b 45%, var(--border)); }
+.conv-main.conv-inline {
+  border: 0;
+  background: transparent;
+  padding: 6px 2px;
+  margin: 0 0 2px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: 8px;
+  row-gap: 4px;
+}
+.conv-main.conv-inline .conv-body,
+.conv-main.conv-inline .conv-body-toggle,
+.conv-main.conv-inline .conv-chips { grid-column: 1 / -1; }
+.conv-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.conv-avatar { width: 26px; height: 26px; font-size: 11px; border-radius: 6px; }
+.conv-avatar.you {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+.conv-avatar.system { background: transparent; color: var(--muted); }
+.conv-icon {
+  width: 26px;
+  height: 26px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--card-strong) 78%, transparent);
+  border: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.conv-icon.accent { color: var(--accent); }
+.conv-icon.danger { color: var(--danger); }
+.conv-icon.success { color: var(--success); }
+.conv-icon.warning { color: #b45309; }
+:root:not([data-theme="light"]) .conv-icon.warning { color: #fbbf24; }
+.conv-icon.product { color: #60a5fa; }
+.conv-icon.review { color: #9333ea; }
+.conv-who { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; font-size: 13px; }
+.conv-who b { font-weight: 650; overflow-wrap: anywhere; }
+.conv-label { color: var(--muted); font-size: 12px; }
+.conv-via { color: var(--muted); font-size: 11px; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+.conv-time { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.conv-body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
+.conv-body.clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 12;
+  overflow: hidden;
+}
+.conv-body.muted { color: var(--muted); font-size: 12px; }
+.conv-body-toggle { justify-self: start; }
+.conv-mention { font-weight: 700; color: var(--primary-strong, var(--primary)); }
+.conv-mention.unknown { color: var(--muted); font-weight: 600; text-decoration: underline dotted; }
+.conv-status-line { font-size: 13px; overflow-wrap: anywhere; }
+.conv-status-line b { font-weight: 600; }
+.conv-status-line .conv-label { margin-left: 6px; }
+.conv-status-line .conv-via { margin-left: 4px; }
+.conv-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.conv-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 1px 8px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card-strong) 78%, transparent);
+  color: color-mix(in srgb, var(--foreground) 88%, transparent);
+  max-width: 100%;
+}
+.conv-chip.consequence { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
+.conv-chip.queued { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); color: var(--primary-strong, var(--primary)); }
+.conv-chip.child { cursor: pointer; }
+.conv-chip.child:not(:disabled):hover { border-color: var(--primary); }
+.conv-chip.child:disabled { cursor: default; opacity: 0.7; }
+.conv-chip.child.warning { border-color: #f59e0b; color: #b45309; }
+:root:not([data-theme="light"]) .conv-chip.child.warning { color: #fbbf24; }
+.conv-chip.child.danger { border-color: var(--danger); color: var(--danger); }
+.conv-chip.child.muted { opacity: 0.6; }
+.conv-chip.verdict.approve { border-color: var(--success); color: var(--success); }
+.conv-chip.verdict.reject,
+.conv-chip.verdict.block { border-color: var(--danger); color: var(--danger); }
+.conv-chip.verdict.request_help { border-color: #f59e0b; color: #b45309; }
+:root:not([data-theme="light"]) .conv-chip.verdict.request_help { color: #fbbf24; }
+.conv-chip.mention-state.waiting { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
+.conv-chip.mention-state.answered { border-color: var(--success); color: var(--success); }
+.conv-chip.mention-state.failed { border-color: var(--danger); color: var(--danger); }
+.conv-chip.mention-state.client { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); color: var(--primary-strong, var(--primary)); }
+.conv-chip.cost { color: var(--muted); }
+.conv-status-pill { font-size: 11px; padding: 1px 8px; }
+.conv-thread {
+  display: grid;
+  gap: 0;
+  margin: 4px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px 4px;
+  background: color-mix(in srgb, var(--card) 60%, transparent);
+}
+.conv-thread.reply { border: 0; padding: 0; background: transparent; margin: 0; }
+.conv-thread.checkpoint { border-color: color-mix(in srgb, #f59e0b 45%, var(--border)); }
+.conv-thread.checkpoint > .conv-row { margin: 0; }
+.conv-thread.delegation { border-color: color-mix(in srgb, var(--primary) 30%, var(--border)); }
+.conv-thread-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 4px 2px 6px; font-size: 13px; }
+.conv-thread-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px;
+  display: inline-grid;
+  place-items: center;
+}
+.conv-thread-title { font-weight: 650; overflow-wrap: anywhere; flex: 1 1 200px; min-width: 0; }
+.conv-thread-meta { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; margin-left: auto; }
+.conv-thread-last { white-space: nowrap; }
+.conv-children { display: grid; gap: 0; }
+.conv-children > * { min-width: 0; }
+.conv-reply { margin-left: calc(var(--depth, 1) * 18px); }
+.conv-round-intro { padding: 0 2px 8px 30px; }
+.conv-fold { padding: 2px 0 6px; }
+.conv-fold-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 2px 4px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+}
+.conv-fold-toggle:hover { color: var(--foreground); }
+.conv-fold-tally { opacity: 0.8; overflow-wrap: anywhere; }
+.conv-fold-body { display: grid; padding-left: 4px; border-left: 2px dotted var(--border); margin-left: 12px; }
+.conv-day { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; padding: 10px 0 4px; }
+.conv-day::before,
+.conv-day::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--border); }
+.conv-unread { display: flex; align-items: center; gap: 10px; color: var(--primary-strong, var(--primary)); font-size: 11px; padding: 6px 0; }
+.conv-unread::before,
+.conv-unread::after { content: ""; flex: 1 1 auto; height: 1px; background: color-mix(in srgb, var(--primary) 50%, var(--border)); }
+.conv-horizon { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 12px; padding: 8px 0 4px; }
+.conv-show-older { justify-self: center; margin: 6px 0; }
+.conv-answer-above { padding: 3px 10px; font-size: 12px; min-height: 0; }
+.conv-open-product { justify-self: start; font-size: 12px; padding: 4px 10px; min-height: 0; }
+
+/* Composer: one collapsed line under the tab row; expands on focus or when a
+   non-comment action is preselected. The textarea never moves in the DOM, so
+   focus survives the expand. */
+.conv-composer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--card) 86%, transparent);
+}
+.conv-composer-strip { display: flex; gap: 6px; flex: 0 1 auto; }
+.conv-composer-strip .input { width: auto; max-width: 180px; }
+.conv-composer-editor { position: relative; flex: 1 1 260px; min-width: 0; }
+.conv-composer:not(.collapsed) .conv-composer-editor { flex-basis: 100%; }
+.conv-composer-input { width: 100%; resize: vertical; }
+.conv-composer.collapsed .conv-composer-input { resize: none; overflow: hidden; }
+.conv-composer-subform,
+.conv-composer-actions,
+.conv-composer-hint-row { flex-basis: 100%; margin: 0; }
+.conv-composer-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.conv-composer-hint { flex: 1 1 auto; margin: 0; font-size: 11px; }
+.conv-composer .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.conv-mention-popover {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  margin: 4px 0 0;
+  padding: 4px;
+  list-style: none;
+  z-index: 20;
+  min-width: 220px;
+  max-width: 100%;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 2px;
+}
+.conv-mention-popover li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.conv-mention-popover li span { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv-mention-popover li.active,
+.conv-mention-popover li:hover { background: color-mix(in srgb, var(--primary) 14%, transparent); }
+@media (max-width: 760px) {
+  .conv-filters { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; }
+  .conv-filters-spacer { display: none; }
+  .conv-sort { flex: 0 0 auto; }
+  .conv-row { grid-template-columns: 22px minmax(0, 1fr); }
+  .conv-reply { margin-left: calc(var(--depth, 1) * 10px); }
+  .conv-round-intro { padding-left: 24px; }
+  .conv-composer-strip { flex: 1 1 100%; }
+  .conv-composer-strip .input { flex: 1 1 0; max-width: none; }
+  .conv-composer.collapsed .conv-composer-editor { flex-basis: 100%; }
+  .conv-thread-meta { margin-left: 0; }
+}

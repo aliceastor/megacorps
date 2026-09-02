@@ -879,3 +879,58 @@ export function mentionCandidates<T extends MentionAgent>(query: string, agents:
   const matches = agents.filter((agent) => !needle || agent.slug.toLowerCase().startsWith(needle) || agent.name.toLowerCase().startsWith(needle));
   return matches.slice(0, Math.max(0, limit));
 }
+
+// === Render window ==========================================================
+
+export const EMPTY_CONVERSATION: Conversation = {
+  items: [],
+  counts: { all: 0, conversation: 0, talk: 0, milestones: 0, delegationReview: 0, system: 0, products: 0, alerts: 0, unread: 0 },
+  latest: null,
+};
+
+/** Top-level items the 60-item window counts; day / unread / horizon markers ride along with their rows. */
+export const CONVERSATION_PAGE_SIZE = 60;
+const ROW_ITEM_TYPES = new Set<ConversationItem['type']>(['event', 'thread', 'fold']);
+export type ConversationWindow = { visible: ConversationItem[]; hiddenCount: number };
+
+export function isConversationRow(item: ConversationItem): boolean {
+  return ROW_ITEM_TYPES.has(item.type);
+}
+
+/**
+ * The render window (design §4.7): newest-first keeps the head of the list,
+ * oldest-first the tail. Markers that introduce a visible row stay with it;
+ * the horizon only appears once every row is visible, because the hidden rows
+ * sit between it and the window.
+ */
+export function sliceConversationWindow(items: ConversationItem[], sort: ConversationSort, limit: number): ConversationWindow {
+  const cap = Math.max(1, Math.floor(Number.isFinite(limit) ? limit : CONVERSATION_PAGE_SIZE));
+  const rowIndexes: number[] = [];
+  items.forEach((item, index) => { if (isConversationRow(item)) rowIndexes.push(index); });
+  if (rowIndexes.length <= cap) return { visible: items, hiddenCount: 0 };
+  const hiddenCount = rowIndexes.length - cap;
+  if (sort === 'newest') return { visible: items.slice(0, rowIndexes[cap - 1]! + 1), hiddenCount };
+  let first = rowIndexes[rowIndexes.length - cap]!;
+  while (first > 0) {
+    const previous = items[first - 1]!;
+    if (isConversationRow(previous) || previous.type === 'horizon') break;
+    first -= 1;
+  }
+  return { visible: items.slice(first), hiddenCount };
+}
+
+/** Oldest timestamp among the rows these items show; 0 when none carries one. */
+export function oldestItemTime(items: ConversationItem[]): number {
+  let oldest = Number.POSITIVE_INFINITY;
+  for (const item of items) {
+    const times = item.type === 'event'
+      ? [item.event.at]
+      : item.type === 'thread'
+        ? [item.root.at, ...item.children.map((child) => child.at)]
+        : item.type === 'fold'
+          ? item.events.map((event) => event.at)
+          : [];
+    for (const time of times) if (time > 0 && time < oldest) oldest = time;
+  }
+  return Number.isFinite(oldest) ? oldest : 0;
+}

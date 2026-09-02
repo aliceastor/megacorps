@@ -1,10 +1,11 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { X } from 'lucide-react';
-import type { ConversationEvent } from '@/lib/card-conversation';
+import type { Conversation, ConversationEvent, ConversationView } from '@/lib/card-conversation';
 import { useLocale } from '@/lib/locale-context';
 import type { DecisionStatus } from '../approval-decision-form';
+import { CardConversation } from './card-conversation';
 import { CardDetailsForm } from './card-details-form';
 import { statusColor } from './card-helpers';
 import { CardHistoryTab } from './card-history-tab';
@@ -14,17 +15,19 @@ import type { OverviewChipField } from './card-overview-chips';
 import { CardOverviewEdit } from './card-overview-edit';
 import { type Agent, type ApiEvent, type Card, type CardAction, type CardApproval, type CardComment, type CardDelegationSummary, type CardDetailTab, type CardStatus, type CardTabKey, type CommentActionMode, type Department, type DetailLayout, type Goal, type Project, type ReviewerScope, type SubtreeCard, type TaskLog, type WorkProduct, type WorkProductType, statusLabels } from './card-types';
 import { CardWorkProductsTab } from './card-work-products-tab';
+import { ConversationComposer } from './conversation-composer';
 
 // The card detail overlay. State, loaders and handlers stay on the board and
 // arrive here as fat props. Two layouts, one toggle away from each other
 // (localStorage['megacorps.kanban.detailLayout'], default v2):
-//   v2     = header + overview zone (read-only, or the edit form) + the PR-0
-//            tabs minus 詳細 (comments / delegation / thread / logs / products)
+//   v2     = header + overview zone (read-only, or the edit form) + three tabs:
+//            對話 (composer + merged conversation) / 產出 / 歷史
 //   legacy = the PR-0 layout exactly.
 // Whole panel scrolls; no sticky header in this iteration.
 
 const LEGACY_TABS = ['details', 'comments', 'delegation', 'thread', 'logs', 'workProducts'] as const;
-const V2_TABS = ['comments', 'delegation', 'thread', 'logs', 'workProducts'] as const;
+const V2_TABS = ['conversation', 'workProducts', 'logs'] as const;
+const V2_TAB_SET: ReadonlySet<CardDetailTab> = new Set<CardDetailTab>(V2_TABS);
 
 export type CardDetailPanelProps = {
   selected: Card | null;
@@ -42,6 +45,10 @@ export type CardDetailPanelProps = {
   openCard: (card: Card) => void;
   cardApprovals: CardApproval[] | null;
   cardChildren: SubtreeCard[] | null;
+  /** buildConversation(...) over the loaded rows, memoised on the board; `.latest` feeds the overview. */
+  conversation: Conversation;
+  conversationView: ConversationView;
+  setConversationView: (view: ConversationView) => void;
   conversationLatest: ConversationEvent | null;
   onCheckpointAnswered: () => void | Promise<void>;
   onApprovalDecided: (status: DecisionStatus) => void | Promise<void>;
@@ -108,10 +115,17 @@ export function CardDetailPanel(props: CardDetailPanelProps) {
   useEffect(() => { setFocusField(null); }, [selected?.id]);
 
   const isV2 = detailLayout === 'v2';
-  // A tab state of 'details' can linger after a layout switch; v2 has no such tab.
-  const activeTab: CardDetailTab = isV2 && tab === 'details' ? 'comments' : tab;
+  // A legacy tab id can linger after a layout switch (and vice versa); map it
+  // onto the closest tab the current layout has.
+  const activeTab: CardDetailTab = isV2 ? (V2_TAB_SET.has(tab) ? tab : 'conversation') : tab === 'conversation' ? 'comments' : tab;
   const tabs: readonly CardDetailTab[] = isV2 ? V2_TABS : LEGACY_TABS;
-  const tabLabel = (next: CardDetailTab) => next === 'comments' ? t('kanban.tabMessageBoard') : next === 'delegation' ? t('kanban.tabDelegationReview') : next === 'thread' ? t('kanban.tabThread') : next === 'workProducts' ? t('kanban.tabWorkProducts') : next === 'details' ? t('kanban.tabDetails') : t('kanban.tabLogs');
+  const conversationCount = props.tabLoading.comments && props.comments.length === 0 ? '—' : props.conversation.counts.conversation;
+  const tabLabel = (next: CardDetailTab): ReactNode => {
+    if (next === 'conversation') return <>{t('kanban.tabConversation')}<span className="conv-tab-count">{conversationCount}</span></>;
+    if (next === 'workProducts') return isV2 ? <>{t('kanban.tabOutputs')}<span className="conv-tab-count">{props.workProducts.length}</span></> : t('kanban.tabWorkProducts');
+    if (next === 'logs') return isV2 ? t('kanban.tabHistory') : t('kanban.tabLogs');
+    return next === 'comments' ? t('kanban.tabMessageBoard') : next === 'delegation' ? t('kanban.tabDelegationReview') : next === 'thread' ? t('kanban.tabThread') : t('kanban.tabDetails');
+  };
   const parent = selected?.parentCardId ? props.cards.find((card) => card.id === selected.parentCardId) ?? null : null;
 
   function startEditing(field: OverviewChipField | null) {
@@ -208,6 +222,39 @@ export function CardDetailPanel(props: CardDetailPanelProps) {
           selectTab={selectTab}
           setCommentAction={props.setCommentAction}
         />}
+        {activeTab === 'conversation' && isV2 && <>
+          <ConversationComposer
+            selected={selected}
+            agents={props.agents}
+            busy={props.busy}
+            commentBody={props.commentBody}
+            setCommentBody={props.setCommentBody}
+            commentAction={props.commentAction}
+            setCommentAction={props.setCommentAction}
+            commentAgentId={props.commentAgentId}
+            setCommentAgentId={props.setCommentAgentId}
+            commentDelegateAssigneeId={props.commentDelegateAssigneeId}
+            setCommentDelegateAssigneeId={props.setCommentDelegateAssigneeId}
+            commentDelegateReviewerId={props.commentDelegateReviewerId}
+            setCommentDelegateReviewerId={props.setCommentDelegateReviewerId}
+            commentDelegateScope={props.commentDelegateScope}
+            setCommentDelegateScope={props.setCommentDelegateScope}
+            addComment={props.addComment}
+          />
+          <CardConversation
+            selected={selected}
+            cards={props.cards}
+            agents={props.agents}
+            conversation={props.conversation}
+            view={props.conversationView}
+            setView={props.setConversationView}
+            logs={props.logs}
+            logsHasMore={props.logsHasMore}
+            tabLoading={props.tabLoading}
+            loadMoreCardLogs={props.loadMoreCardLogs}
+            openCard={openCard}
+          />
+        </>}
         {activeTab === 'comments' && <MessageBoardTab
           selected={selected}
           agents={props.agents}

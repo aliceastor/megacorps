@@ -218,6 +218,25 @@ A 是地基;B 是願景的靈魂;E 是「上手好用」的來源。
 2. **Watchdog 正式版**:定期掃 `in_progress` 且 heartbeat 過期的 run;A2A adapter 用 `tasks/get` 問 Hermes 該 task 是否還活著(**`a2a-client.ts` 目前沒有 `tasks/get`,要補**);判定死亡 → 釋放鎖、記 task_log、依卡的 retry 政策重派或 blocked + 通知。父卡留言板同步記事件。
 3. **重試 + BLOCKED 協議**:現有(`maxRetries`、`needs_review` 求助、blocked 通知),不動。
 
+## 15. 卡片對話:留言、@mention、交接(2026-09-02 落地,後端)
+
+用戶定的三個硬需求:**易讀**、**接手的 agent 知道上一手做了什麼**、**agent 能留言而且 @mention 就能叫人**。前端「易讀」見 §11 第 5 項與 §16;後端三件事如下,全部是既有機制的延伸,沒有新表。
+
+1. **Agent 留言(兩條路,任何 adapter 都有一條)**
+   - 結構化報告新增 `notes: string[]`(最多 3 則、各 2000 字):run 結束時由 MegaCorps 以該 agent 名義貼成 `comment`(`metadata.via = 'report'`),掛在 dispatch 完成、留言板委派完成、webhook 兩條路徑共四個既有的報告消費點旁。
+   - `POST /api/cards/:id/comments` 接受 per-agent bearer token:只准 `action = comment`(控制動作 pause / continue / escalate / delegate 仍是人類專屬),身分取自 token 而不是 body,`metadata.via = 'agent_token'`;CSRF 對無 cookie 的 bearer 請求本來就放行。hermes 的「Common API Endpoints」在 agent 有 token 時多列這一條。
+2. **@mention 叫人(`card-mentions.ts`)**
+   - 人類與 agent 的留言、以及 report notes,一律解析 `@slug`(也接受 `@名字`,大小寫不分;email 不會誤判)。每個點到的 agent 得到一則 `peer_question`,`parentCommentId` 指回原留言、`metadata.mention = true`、帶 `authorName / authorKind`;回答走既有 peer 管線,`peer_answer` 掛回同一串,而且回答者的 prompt 現在帶最近的對話串,不只看到一句問題。
+   - 上限:一則留言最多叫醒 3 人;agent 作者沿用每卡 5 題的既有上限,人類不設限。找不到的名字與超額的名字合成一列系統 `peer_question_failed` 回報,不會靜默消失;自我提及靜默略過。
+   - `@client`(別名 `owner / you / 客戶 / 老闆`)不建留言,只發一則 `mention` 通知到鈴鐺——agent 想讓 Client 看一眼但不需要決定時用這個,需要有約束力的答案仍走 checkpoint。
+   - 迴圈守衛不變:`peer_answer` 的內容永遠不掃 mention。
+3. **交接段(`card-handover.ts`)**
+   - 每次 bootstrap 任務 prompt 在 digest 之後注入「Handover: what happened on this card before this run」:最近 3 次 run(誰、dispatch/message、成敗、時長、產出前 1200 字;本人的 run 標 `you`)、ownership 交接留言、最新審核意見(卡上的 `reviewFeedback` 與最新 `review_*` 留言)、上一輪之後人類的新指示、等這位負責人回答的 peer question、目前為止的 work products,總長 3500 字內。結尾明說「不要重做已完成的工作,報告時說明相對上一輪改了什麼」。
+   - 延續 session 的 prompt 不加(delta context 已含新留言)。
+4. **每卡評分可見**:`GET /api/cards/:id/review-scores` 回最近 20 筆 0–10 分(域、審核者、被審者),補上 §8 說到卻在卡上看不到的分數。
+
+`completionProtocol` 與 api-help 同步教學:notes 怎麼寫、@slug 與 @client 的差別、agent 可直接 POST 留言。測試:`card-mentions.test.ts`(10)、`card-handover.test.ts`(5)。
+
 ## 附錄 A:現有組織與本設計的角色對照
 
 | 提案用語 | 本設計角色 | 系統對應 |
