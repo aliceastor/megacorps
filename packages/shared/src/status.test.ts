@@ -3,8 +3,18 @@ import test from 'node:test';
 import { canTransitionCard, cardStatusSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createCardSchema, createMachineRunnerSchema, createProjectSchema, inferCardTransitionAction, runnerHeartbeatSchema, signupSchema, updateAgentSchema, validateCardTransition } from './index.ts';
 
 test('allows the canonical card status path and blocks invalid skips', () => {
-  assert.deepEqual([...cardStatuses], ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'done', 'blocked', 'cancelled']);
+  assert.deepEqual([...cardStatuses], ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm', 'done', 'blocked', 'cancelled']);
   assert.equal(canTransitionCard('todo', 'in_progress'), true);
+  // Client checkpoints and brainstorm rounds park the card and hand it back to the owner.
+  assert.equal(canTransitionCard('in_progress', 'waiting_on_client'), true);
+  assert.equal(canTransitionCard('waiting_on_client', 'in_progress'), true);
+  assert.equal(canTransitionCard('in_progress', 'waiting_on_brainstorm'), true);
+  assert.equal(canTransitionCard('waiting_on_brainstorm', 'in_progress'), true);
+  assert.equal(canTransitionCard('waiting_on_client', 'done'), false);
+  assert.equal(inferCardTransitionAction('in_progress', 'waiting_on_client'), 'ask_client');
+  assert.equal(inferCardTransitionAction('waiting_on_client', 'in_progress'), 'client_answered');
+  assert.equal(inferCardTransitionAction('in_progress', 'waiting_on_brainstorm'), 'open_brainstorm');
+  assert.equal(inferCardTransitionAction('waiting_on_brainstorm', 'in_progress'), 'brainstorm_closed');
   assert.equal(canTransitionCard('in_progress', 'done'), true);
   assert.equal(canTransitionCard('in_progress', 'needs_review'), true);
   assert.equal(canTransitionCard('in_progress', 'waiting_on_external'), true);
