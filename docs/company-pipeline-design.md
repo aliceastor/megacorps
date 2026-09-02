@@ -65,7 +65,7 @@
   ```json
   "checkpoint": { "kind": "direction" | "interim", "question": "...", "options": ["A", "B"], "recommendation": "A", "artifactRefs": ["..."] }
   ```
-- 系統動作:卡進 `waiting_on_client`(新 columnStatus,或沿用 `waiting_on_external` + provider=`client`——實作時二選一,傾向新狀態以便列表一眼區分);建 `approvals` 列(type=`client_checkpoint`,payload=問題/選項/附件);通知 Client(現有 notify);父卡留言板記事件;釋放 execution lock。
+- 系統動作:卡進 `waiting_on_client`(**新 columnStatus,定案**;不沿用 `waiting_on_external`——那是等機器事件、回應是 success/failure,checkpoint 等的是人的判斷、回應要注入下一輪 prompt,語意不同,列表也要一眼分得出「等 CI」與「等 Client」);建 `approvals` 列(type=`client_checkpoint`,payload=問題/選項/附件);通知 Client(現有 notify);父卡留言板記事件;釋放 execution lock。
 - Client 回答:UI(通知鈴 / 卡片頁 / 列表列內)選選項或自由文字;寫入 `approvals.decisionNote`;卡回 `in_progress`,**答案注入該卡下一輪 prompt 的最前面**(「Client 對你的 checkpoint 回覆:…」)。
 - 提醒:超過 `CLIENT_CHECKPOINT_REMIND_HOURS`(預設 4)未回,再通知一次;每日最多一次。
 - 「中期成果」型 checkpoint 必附 workProducts(repo 路徑 / URL),Client 看得到成品。
@@ -77,7 +77,13 @@
 
 - CEO 判斷規則(寫進 CEO 職位 prompt):涉及多部門、需求模糊、或預估超過一個部門一輪能完成 → brainstorm;單部門且清楚 → 直接拆或直接派。
 - Client 建卡可勾 `forceBrainstorm`(卡欄位),覆蓋 CEO 判斷。
-- 機制:擴充 peer @mention——新增 `broadcast: { to: "department_heads" | "direct_reports", question }`,系統對每位主管各建一則 `peer_question`(繞過單次 3 人上限,但**只有 CEO/主管可用 broadcast**);CEO 的卡進 `waiting_on_brainstorm`(或沿用 `waiting_on_external`);全部 `peer_answer` 到齊或 `BRAINSTORM_TIMEOUT_MINUTES`(預設 30)逾時 → 重新 dispatch CEO,提案彙整注入 prompt → CEO 產出拆解方案 → 進 §4 的方向確認 checkpoint。
+- **參與部門必須指定,不是全公司廣播**(定案):公司可能有很多不相干的部門(例如 Civil Engineering 對一個網站需求完全無關),把它們拉進來只是燒 token 和拖時間。
+  - CEO 在 broadcast 裡**點名部門**:`broadcast: { departments: ["it", "content"], question }`,至少一個;系統只對被點名部門的主管各建一則 `peer_question`。沒點名 → 拒收並回傳部門清單要它選。
+  - CEO 據以選部門的資料:每個部門的**職掌描述**(新增 `departments.description`,人填,一句話寫這個部門負責什麼)+ 該部門主管的能力聲明,注入 CEO 的評估 prompt。沒寫職掌的部門 CEO 看不懂就不會點,所以職掌是部門設定的必填項。
+  - Client 建卡時可預選 `brainstormDepartmentIds`,作為 CEO 的**下限**(CEO 可以多加、不能少於 Client 點的)。
+  - 被點名的主管若判斷自己部門不相干,可直接回「不參與,理由…」——一個便宜的 opt-out,CEO 綜合時記入「已徵詢、不參與」,避免 CEO 多點名的成本失控。
+  - 方向確認 checkpoint(§4)要列出「徵詢了哪些部門、誰參與、誰不參與」,讓 Client 能一眼抓到漏掉的部門。
+- 機制:擴充 peer @mention——`broadcast` 繞過單次 3 人上限,但**只有 CEO/主管可用**;CEO 的卡進 `waiting_on_brainstorm`;全部 `peer_answer` 到齊或 `BRAINSTORM_TIMEOUT_MINUTES`(預設 30)逾時 → 重新 dispatch CEO,提案彙整注入 prompt → CEO 產出拆解方案 → 進 §4 的方向確認 checkpoint。
 - 提案與 CEO 的綜合都留在目標卡留言板。
 
 ## 6. 留言板 = 敘事與審計帳本
@@ -132,13 +138,15 @@ CV 資料來源:reviewer 在結構化報告填 `score: 0-10`(**加進 `agentRepo
 **Schema(一次 migration)**
 - `departments.head_agent_id UUID`
 - `kanban_cards.force_brainstorm BOOLEAN DEFAULT false`
+- `kanban_cards.brainstorm_department_ids UUID[]`(Client 預選的參與部門,CEO 的下限)
+- `departments.description TEXT`(部門職掌,CEO 選參與部門的依據)
 - `kanban_cards.split_round INTEGER DEFAULT 0`(父卡已開的輪數)
 - `companies.max_children_per_card INTEGER DEFAULT 3`
 - `columnStatus` 新增 `waiting_on_client`、`waiting_on_brainstorm`(shared `cardStatuses` + transitions)
 - `approvals.type` 新值 `client_checkpoint`
 
 **Shared schema**
-- `agentReportSchema` 加 `children[]`、`checkpoint`、`broadcast`、`score`
+- `agentReportSchema` 加 `children[]`、`checkpoint`、`broadcast { departments[], question }`、`score`
 
 **API**
 - `POST /api/approvals/:id/decide` 支援 checkpoint 回答(選項 + 文字)
@@ -156,7 +164,7 @@ CV 資料來源:reviewer 在結構化報告填 `score: 0-10`(**加進 `agentRepo
 - 列表視圖(7+1 欄,子列展開,`waiting_on_client` 醒目)
 - 卡片詳情三區制
 - checkpoint 回答面板 + 通知
-- 部門設定:主管欄位;建卡:強制 brainstorm 勾選
+- 部門設定:主管欄位 + 職掌描述(必填);建卡:強制 brainstorm 勾選 + 參與部門預選
 
 ## 11. 實施階段
 
@@ -171,8 +179,16 @@ A 是地基;B 是願景的靈魂;E 是「上手好用」的來源。
 
 ## 12. 未決與風險
 
-- `waiting_on_client` 用新狀態還是沿用 `waiting_on_external`:傾向新狀態(列表一眼分辨、統計乾淨),實作時定。
-- Brainstorm 逾時後只有部分提案:CEO 照綜合,缺席部門在留言板標記。
+- ~~`waiting_on_client` 用新狀態還是沿用 `waiting_on_external`~~:**定案用新狀態**(見 §4)。
+- Brainstorm 逾時後只有部分提案:CEO 照綜合,缺席部門在留言板標記為「已徵詢、逾時未回」。
+- CEO 點錯部門(漏了相關的 / 拉了不相干的):漏的由方向確認 checkpoint 的「徵詢部門清單」讓 Client 接住;多拉的由主管 opt-out 消化。兩者都不需要系統硬擋。
+
+## 13. 順手要補的既有缺口(建議,非本文定案)
+
+查 `waiting_on_external` 現況時發現三個既有缺口,與流水線正交但會影響體驗,建議排進 A 或 B 階段一起做:
+1. `external_waits.pollIntervalSeconds` 沒有消費者:沒有 sweep 依間隔把卡重新 dispatch 去檢查外部系統,「輪詢」目前是空的。
+2. `external_waits.timeoutAt` 沒有消費者:逾時不會自動 blocked、不會通知。
+3. Gitea push webhook(`/api/gitea/events`)尚未對接 `external-events`:PR 合進 main 應自動觸發 success 喚醒等待中的卡,這才是「merge 進 main → done」的真閉環。
 - CEO 判斷失誤(小任務走大流程 / 大任務沒 brainstorm):前者成本可接受,後者會在方向確認 checkpoint 被 Client 接住——這正是 checkpoint 阻塞式的價值。
 - 部門主管是 player-coach:允許,prompt 要求優先分配;主管自己接成員卡時審理員不能是自己(規則 4 自動擋)。
 - 一個 agent 同時是多個部門主管:允許但不建議,`head_agent_id` 不設唯一約束。
