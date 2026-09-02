@@ -131,10 +131,15 @@ This session is only for consolidating your own memory and skills. Do not call t
   const escalationBodyExample = task.taskRunId
     ? `{ "cardId": "${task.id}", "taskRunId": "${task.taskRunId}", "status": "needs_review", "summary": "needs reviewer guidance: ...", "output": "Attempted methods:\\n- ...\\n\\nBlocker/root cause:\\n...\\n\\nReviewer questions:\\n- ...\\n\\nPartial output/logs:\\n..." }`
     : `{ "cardId": "${task.id}", "status": "needs_review", "summary": "needs reviewer guidance: ...", "output": "Attempted methods:\\n- ...\\n\\nBlocker/root cause:\\n...\\n\\nReviewer questions:\\n- ...\\n\\nPartial output/logs:\\n..." }`;
+  // The conversation endpoint authenticates with the per-agent token only, so
+  // it is advertised only when the agent actually has one.
+  const commentsEndpointLine = agent.apiToken
+    ? `\n- POST ${apiUrl}/api/cards/${task.id}/comments -- Leave a message on the card conversation ({ "body": "..." }); @<slug> wakes that agent`
+    : '';
   return `You are now working under PLATFORM MegaCorps at ${apiUrl}.
 
 === Common API Endpoints ===
-- POST ${apiUrl}/api/webhook/task-complete -- Report task progress, delegation, or completion
+- POST ${apiUrl}/api/webhook/task-complete -- Report task progress, delegation, or completion${commentsEndpointLine}
 - GET  ${apiUrl}/api/help -- Read API documentation if network access is available
 
 Task runtimes usually do not have a browser session cookie. Do not call session-auth endpoints such as POST /api/cards for delegation. If the MegaCorps task prompt asks you to delegate, include the exact DELEGATE block in your output or webhook payload; the MegaCorps server will create Message Board delegation requests inside the same card and assign direct reports.
@@ -161,6 +166,10 @@ The legacy DELEGATE block still works but is deprecated.
 To ask another agent a question WITHOUT delegating work, add mentions to the report:
 "mentions": [{ "to": "<agent-slug>", "question": "..." }]
 MegaCorps posts each question to this card's message board and the target agent answers in the same thread shortly after; check the message board on your next turn for the answer. Use a mention when you need information or a decision from a peer; use a delegation only when transferring actual work. Maximum 3 mentions per report.
+
+To leave a message on the card conversation for the humans and colleagues following it, add notes to the report:
+"notes": ["..."]
+Each note is posted as your comment on the card (maximum 3 per report). Writing @<agent-slug> inside a note wakes that agent with the message; @client pings the human client without blocking the card.
 
 If you are delegating to direct reports, POST status "in_progress" and include a DELEGATE block in summary/output. Do not mark the parent card done and do not try to create Kanban cards yourself; MegaCorps will create same-card Message Board delegation requests.
 If the work is complete but needs QA, POST status "in_review" with the completed output.

@@ -7,10 +7,10 @@ import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, a
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
-import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
+import { activityLog, adapterSessions, agentReviewScores, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
-import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest, finishRunWaitingOnBrainstorm, resolveBrainstormRequest, recordReviewScore } from './dispatch.ts';
+import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, processMentionQuestions, processReportNotes, reportNotesFromOutput, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest, finishRunWaitingOnBrainstorm, resolveBrainstormRequest, recordReviewScore } from './dispatch.ts';
 import { brainstormFromOutput } from './brainstorm.ts';
 import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointFromOutput } from './client-checkpoints.ts';
 import { registerChatRoutes } from './chat.ts';
@@ -1815,6 +1815,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }).from(taskRuns).where(and(eq(taskRuns.cardId, card.id), eq(taskRuns.kind, 'review'))).orderBy(desc(taskRuns.completedAt)).limit(50);
     return hydrateReviewCommentAuthors(card, comments, reviewRuns);
   });
+  app.get('/api/cards/:id/review-scores', async (request, reply) => {
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    return db.select({
+      id: agentReviewScores.id,
+      score: agentReviewScores.score,
+      verdict: agentReviewScores.verdict,
+      domain: agentReviewScores.domain,
+      reviewerAgentId: agentReviewScores.reviewerId,
+      revieweeAgentId: agentReviewScores.agentId,
+      createdAt: agentReviewScores.createdAt,
+    }).from(agentReviewScores).where(eq(agentReviewScores.cardId, card.id)).orderBy(desc(agentReviewScores.createdAt)).limit(20);
+  });
   app.get('/api/cards/:id/work-products', async (request, reply) => {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
     if (!card) return reply;
@@ -1859,6 +1872,34 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const input = createCardCommentSchema.parse(request.body);
     const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, id), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
+    // Agent bearer path: a runtime with no session cookie leaving a plain
+    // message on the conversation (the CSRF origin check already exempts
+    // cookie-less requests). Control actions stay with humans; the caller
+    // identity comes from the token, never from input.agentId.
+    const agentBearer = bearerFromRequest(request);
+    if (looksLikeAgentToken(agentBearer)) {
+      const callerAgent = await authenticateAgentToken(agentBearer);
+      if (!callerAgent) return reply.code(401).send({ error: 'agent_token_invalid' });
+      if (callerAgent.companyId !== card.companyId) return reply.code(403).send({ error: 'agent_company_mismatch' });
+      if (input.action !== 'comment') return reply.code(403).send({ error: 'agent_comments_cannot_control_task' });
+      const [agentComment] = await db.insert(cardComments).values({
+        cardId: id,
+        authorType: 'agent',
+        authorId: null,
+        agentId: callerAgent.id,
+        body: input.body,
+        action: 'comment',
+        metadata: { via: 'agent_token' },
+      }).returning();
+      if (agentComment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: agentComment.id, cardId: card.id, projectId: card.projectId, action: 'comment' });
+      await db.insert(taskLogs).values({ cardId: id, agentId: callerAgent.id, type: 'comment', status: 'success', message: `${callerAgent.name} added a comment.`, output: input.body });
+      await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'agent', actorId: callerAgent.id, agentId: callerAgent.id, action: 'comment.comment', entityType: 'card', entityId: card.id, details: { commentId: agentComment?.id, authorAgentId: callerAgent.id, viaAgentToken: true } });
+      if (agentComment) {
+        try { await processMentionQuestions(card, { agentId: callerAgent.id, userId: null, name: callerAgent.name }, input.body, agentComment.id); }
+        catch (error) { app.log.warn({ error, cardId: card.id, commentId: agentComment.id }, 'mention processing failed'); }
+      }
+      return reply.code(201).send(agentComment);
+    }
     const user = await requireCompanyRole(request, reply, card.companyId, 'operator'); if (!user) return reply;
     if (input.agentId && !['comment', 'agent_note'].includes(input.action)) return reply.code(400).send({ error: 'agent_comments_cannot_control_task' });
     const [authorAgent] = input.agentId ? await db.select().from(agents).where(and(eq(agents.id, input.agentId), isNull(agents.deletedAt))).limit(1) : [];
@@ -1893,6 +1934,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (comment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: comment.id, cardId: card.id, projectId: card.projectId, action: effectiveAction });
     await db.insert(taskLogs).values({ cardId: id, agentId: effectiveAgentId, type: 'comment', status: 'success', message: `${authorName} added a ${effectiveAction} message.`, output: input.body });
     await db.insert(activityLog).values({ companyId: card.companyId, actorType: authorType, actorId: authorAgent?.id ?? user.id, userId: user.id, agentId: effectiveAgentId, action: `comment.${effectiveAction}`, entityType: 'card', entityId: card.id, details: { commentId: comment?.id, authorAgentId: authorAgent?.id } });
+    // @mentions in the message wake the named agents (peer questions threaded
+    // under this comment) and @client pings the human client. Delegation
+    // requests are routed by the delegation pipeline instead. Delivery
+    // problems are logged, never surfaced as a failed comment.
+    if (comment && input.action !== 'delegate_to_agent') {
+      try { await processMentionQuestions(card, { agentId: authorAgent?.id ?? null, userId: authorAgent ? null : user.id, name: authorName }, input.body, comment.id); }
+      catch (error) { app.log.warn({ error, cardId: card.id, commentId: comment.id }, 'mention processing failed'); }
+    }
     if (input.action === 'delegate_to_agent') {
       if (comment) await enqueueMessageTaskRun(comment, 'message');
     } else if (input.action === 'pause_agent') {
@@ -2727,6 +2776,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (existingWebhook) return { ok: true, duplicate: true, cardId: body.cardId, taskRunId, newStatus: card.columnStatus };
     }
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
+    const webhookNotes = actorAgent ? reportNotesFromOutput(executionLog, body.report ?? null) : [];
+    if (actorAgent && webhookNotes.length) {
+      try { await processReportNotes(card, actorAgent, webhookNotes); } catch (error) { app.log.warn({ error, cardId: card.id }, 'report note processing failed'); }
+    }
     const webhookPeerMentions = actorAgent ? peerMentionsFromOutput(executionLog, body.report ?? null) : [];
     if (actorAgent && webhookPeerMentions.length) {
       try { await processPeerMentions(card, actorAgent, webhookPeerMentions); } catch (error) { app.log.warn({ error, cardId: card.id }, 'peer mention processing failed'); }

@@ -63,6 +63,7 @@ const registeredRoutes = [
   ['POST', '/api/cards/:id/context-requests'],
   ['PUT', '/api/context-requests/:id'],
   ['GET', '/api/cards/:id/comments'],
+  ['GET', '/api/cards/:id/review-scores'],
   ['GET', '/api/cards/:id/work-products'],
   ['POST', '/api/cards/:id/work-products'],
   ['GET', '/api/cards/:id/external-waits'],

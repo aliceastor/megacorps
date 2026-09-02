@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, isNull, lt, sql as drizzleSql, isNotNull } from
 import type { FastifyInstance } from 'fastify';
 import { inferCardTransitionAction, normalizeCardStatus, type CardStatus } from '@megacorps/shared';
 import { db, sql as rawSql } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, cardRequiredTools, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, toolRegistry, workProducts, agentReviewScores } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, cardRequiredTools, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, toolRegistry, users, workProducts, agentReviewScores } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
@@ -28,6 +28,8 @@ import type { TaskResult } from './adapters/hermes.ts';
 import { notify } from './notifications.ts';
 import { readChatTaskTimeoutSeconds, readKanbanTaskTimeoutSeconds, normalizeKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
 import { workspaceProtocolLines } from './workspace-paths.ts';
+import { MENTIONS_PER_MESSAGE, extractMentionTokens, mentionQuestionMetadata, resolveMentions } from './card-mentions.ts';
+import { HANDOVER_LIMITS, formatHandoverSection, type HandoverInput } from './card-handover.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -636,7 +638,8 @@ async function addTaskLog(input: {
 async function addCardMessage(input: {
   cardId: string;
   agentId?: string | null;
-  authorType?: 'agent' | 'system';
+  authorType?: 'agent' | 'system' | 'user';
+  authorId?: string | null;
   action: string;
   body: string;
   parentCommentId?: string | null;
@@ -655,7 +658,7 @@ async function addCardMessage(input: {
     reviewerScope: input.reviewerScope ?? null,
     delegationStatus: input.delegationStatus ?? null,
     authorType: input.authorType ?? 'agent',
-    authorId: null,
+    authorId: input.authorId ?? null,
     action: input.action,
     body: clipText(input.body, MESSAGE_BOARD_COMMENT_LIMIT),
     metadata: input.metadata ?? {},
@@ -1328,6 +1331,96 @@ export async function processPeerMentions(card: CardRow, author: AgentRow, menti
   return created;
 }
 
+// === Free-text @mentions ======================================================
+// The same peer-question pipeline, fed from the conversation itself: a human
+// typing "@ben ..." on the message board, or an agent leaving a note (report
+// notes, or POST /api/cards/:id/comments with its bearer token). Each resolved
+// @slug becomes a peer_question threaded under the source comment; @client
+// pings the human client through the notification feed without parking the
+// card. Only comments that arrive through those paths are scanned — peer
+// answers never are, so two agents cannot wake each other forever.
+
+export type PeerAuthor = { agentId: string | null; userId: string | null; name: string };
+
+export async function processMentionQuestions(card: CardRow, author: PeerAuthor, body: string, sourceCommentId: string | null): Promise<{ asked: number; client: boolean }> {
+  const tokens = extractMentionTokens(body);
+  if (tokens.length === 0) return { asked: 0, client: false };
+  const companyAgents = await db.select({ id: agents.id, slug: agents.slug, name: agents.name, isActive: agents.isActive })
+    .from(agents)
+    .where(and(eq(agents.companyId, card.companyId), isNull(agents.deletedAt)));
+  const resolved = resolveMentions(tokens, companyAgents, { excludeAgentId: author.agentId });
+  const authorKind: 'user' | 'agent' = author.agentId ? 'agent' : 'user';
+  let asked = 0;
+  for (const target of resolved.agents) {
+    // The per-card budget only applies to agents; a human operator is the
+    // person the loop guard exists to protect, not someone it should throttle.
+    if (author.agentId) {
+      const already = await db.select({ id: cardComments.id }).from(cardComments)
+        .where(and(eq(cardComments.cardId, card.id), eq(cardComments.action, 'peer_question'), eq(cardComments.agentId, author.agentId)));
+      if (already.length >= PEER_QUESTIONS_PER_AUTHOR_PER_CARD) {
+        await addCardMessage({ cardId: card.id, parentCommentId: sourceCommentId, authorType: 'system', action: 'peer_question_failed', body: `${author.name} has reached the limit of ${PEER_QUESTIONS_PER_AUTHOR_PER_CARD} peer questions on this card; the mention of @${target.slug} did not wake them.` });
+        continue;
+      }
+    }
+    const comment = await addCardMessage({
+      cardId: card.id,
+      agentId: author.agentId,
+      authorType: authorKind,
+      authorId: author.userId,
+      assigneeAgentId: target.id,
+      action: 'peer_question',
+      body,
+      parentCommentId: sourceCommentId,
+      delegationStatus: 'queued',
+      metadata: mentionQuestionMetadata({ targetSlug: target.slug, sourceCommentId, authorName: author.name, authorKind }),
+    });
+    if (!comment) continue;
+    asked += 1;
+    await addActivity({ companyId: card.companyId, actorType: authorKind, actorId: author.agentId ?? author.userId ?? undefined, agentId: author.agentId, action: 'peer_question.asked', entityType: 'card_comment', entityId: comment.id, details: { cardId: card.id, to: target.slug, mention: true, sourceCommentId } });
+    publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'peer_question.asked' });
+  }
+  if (resolved.unresolved.length > 0 || resolved.overflow.length > 0) {
+    const parts = [
+      resolved.unresolved.length > 0 ? `${resolved.unresolved.map((token) => `@${token}`).join(', ')} could not be matched to an active agent in this company, so no one was woken for ${resolved.unresolved.length === 1 ? 'it' : 'them'}.` : '',
+      resolved.overflow.length > 0 ? `Only ${MENTIONS_PER_MESSAGE} agents can be mentioned per message; ${resolved.overflow.map((token) => `@${token}`).join(', ')} ${resolved.overflow.length === 1 ? 'was' : 'were'} not woken.` : '',
+    ].filter(Boolean);
+    await addCardMessage({ cardId: card.id, parentCommentId: sourceCommentId, authorType: 'system', action: 'peer_question_failed', body: parts.join('\n') });
+  }
+  if (resolved.client) {
+    await notify({ companyId: card.companyId, type: 'mention', title: `${author.name} mentioned you: ${card.title}`, body: clipText(body, 500), entityType: 'card_comment', entityId: sourceCommentId ?? card.id, cardId: card.id, agentId: author.agentId });
+  }
+  return { asked, client: resolved.client };
+}
+
+// === Report notes =============================================================
+// Any adapter can leave a message on the card conversation by adding
+// "notes": ["..."] to its structured report; no HTTP access to MegaCorps is
+// required. Each note is posted as a plain agent comment and then scanned for
+// @mentions exactly like a comment posted through the route.
+
+const REPORT_NOTES_PER_REPORT = 3;
+
+export function reportNotesFromOutput(output: string | null | undefined, report?: { notes?: string[] } | null): string[] {
+  if (report?.notes?.length) return report.notes.slice(0, REPORT_NOTES_PER_REPORT);
+  const extraction = extractAgentReport(output);
+  if (extraction && 'report' in extraction && extraction.report.notes?.length) return extraction.report.notes.slice(0, REPORT_NOTES_PER_REPORT);
+  return [];
+}
+
+export async function processReportNotes(card: CardRow, agent: AgentRow, notes: string[]): Promise<number> {
+  let posted = 0;
+  for (const note of notes.slice(0, REPORT_NOTES_PER_REPORT)) {
+    const body = note.trim();
+    if (!body) continue;
+    // addCardMessage already publishes card.comment.created for the new row.
+    const comment = await addCardMessage({ cardId: card.id, agentId: agent.id, authorType: 'agent', action: 'comment', body, metadata: { via: 'report' } });
+    if (!comment) continue;
+    posted += 1;
+    await processMentionQuestions(card, { agentId: agent.id, userId: null, name: agent.name }, body, comment.id);
+  }
+  return posted;
+}
+
 async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: CardCommentRow, target: AgentRow, authorName: string): Promise<boolean> {
   if (!(await budgetOk(target))) return false;
   if (!(await claimAgentCapacity(target))) return false;
@@ -1343,13 +1436,17 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
     // target's cross-surface digest supplies its working memory.
     const executionAgent = await buildExecutionAgent(target, null);
     const digest = (await buildAgentDigest(target.id, card.companyId)).text;
+    const questionMetadata = commentMetadata(comment.metadata);
     const prompt = [
-      (comment.metadata as Record<string, unknown> | null)?.brainstorm
+      questionMetadata.brainstorm
         ? `BRAINSTORM: the owner of this card is consulting department heads before planning. As head of your department, propose concretely how your department would contribute (scope, deliverables, risks, rough effort), or answer "not participating" with a one-line reason if this genuinely does not concern your department.`
-        : `A colleague agent asked you a question on the MegaCorps card message board. Answer it from your own knowledge and recent work.`,
+        : questionMetadata.authorKind === 'user'
+          ? `The human client/operator mentioned you on the card conversation below and is waiting for your answer. Answer from your own knowledge and recent work.`
+          : `A colleague agent asked you a question on the MegaCorps card message board. Answer it from your own knowledge and recent work.`,
       `Card: ${card.title} (stage ${card.columnStatus ?? 'todo'})`,
       `Card brief:\n${clipText(card.body, 2000)}`,
       digest,
+      `Recent conversation on this card:\n${clipText(await messageBoardThreadContext(card, comment), 3000)}`,
       `Question from ${authorName}:`,
       comment.body,
       'Reply with the answer text only. Your reply is posted back to the same message board thread automatically — do not call any webhook, do not create or update cards, and do not delegate. If you genuinely do not know, say so and name who or what might.',
@@ -1412,8 +1509,11 @@ export async function sweepPeerQuestions(app: FastifyInstance): Promise<number> 
       continue;
     }
     if (target.isBusy) continue;
-    const [author] = comment.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, comment.agentId)).limit(1) : [];
-    if (await answerPeerQuestion(app, card, comment, target, author?.name ?? 'a colleague agent')) answered += 1;
+    // Mention questions carry the asker's name in metadata (a human has no
+    // agent row); report mentions still resolve it from the asking agent.
+    const metadataAuthorName = commentMetadataString(comment.metadata, 'authorName');
+    const [author] = !metadataAuthorName && comment.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, comment.agentId)).limit(1) : [];
+    if (await answerPeerQuestion(app, card, comment, target, metadataAuthorName ?? author?.name ?? 'a colleague')) answered += 1;
   }
   return answered;
 }
@@ -2681,6 +2781,8 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       return card;
     }
     const messagePlan = structuredDelegationPlan(result.output);
+    const messageNotes = reportNotesFromOutput(result.output);
+    if (messageNotes.length) { try { await processReportNotes(card, agent, messageNotes); } catch { /* note delivery must never fail the run */ } }
     const messagePeerMentions = peerMentionsFromOutput(result.output);
     if (messagePeerMentions.length) { try { await processPeerMentions(card, agent, messagePeerMentions); } catch { /* question delivery must never fail the run */ } }
     if (messagePlan?.handoff || messagePlan?.mixed) {
@@ -2880,6 +2982,10 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
       return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'failed', delegated: false, reviewerId: comment.reviewerAgentId };
     }
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), isNull(agents.deletedAt))).limit(1) : [];
+    const webhookMessageNotes = actorAgent ? reportNotesFromOutput(output) : [];
+    if (actorAgent && webhookMessageNotes.length) {
+      try { await processReportNotes(card, actorAgent, webhookMessageNotes); } catch { /* note delivery must never fail the run */ }
+    }
     const webhookMessageMentions = actorAgent ? peerMentionsFromOutput(output) : [];
     if (actorAgent && webhookMessageMentions.length) {
       try { await processPeerMentions(card, actorAgent, webhookMessageMentions); } catch { /* question delivery must never fail the run */ }
@@ -3066,6 +3172,8 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     }
     await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
     const structuredPlan = structuredDelegationPlan(result.output);
+    const dispatchNotes = reportNotesFromOutput(result.output);
+    if (dispatchNotes.length) { try { await processReportNotes(card, agent, dispatchNotes); } catch { /* note delivery must never fail the run */ } }
     const dispatchPeerMentions = peerMentionsFromOutput(result.output);
     if (dispatchPeerMentions.length) { try { await processPeerMentions(card, agent, dispatchPeerMentions); } catch { /* question delivery must never fail the run */ } }
     const dispatchChildren = childrenFromOutput(result.output);
@@ -4233,6 +4341,7 @@ function completionProtocol(card: CardRow, reports: DelegationReport[] = [], opt
     `If you are waiting on CI/CD, deploy, external approval, or another external system, use status="waiting_on_external" and include pollIntervalSeconds based on how often that system should be checked.`,
     `Brainstorm: if you are the CEO or a department head and this card spans several departments or its requirements are vague, broadcast one question to the heads of the departments it concerns before planning: add "broadcast": { "departments": ["<slug>", "<slug>"], "question": "..." } to your report and stop. Name only relevant departments (the directory above lists slugs, heads and charters); MegaCorps parks the card as waiting_on_brainstorm, collects each head's proposal, and resumes you with them. One round at a time.`,
     `Client checkpoint: if you are the CEO or a department head and this card genuinely needs the client's decision on direction, or the client's look at interim output, add "checkpoint": { "kind": "direction" | "interim", "question": "...", "options": ["A", "B"], "recommendation": "A", "artifactRefs": ["repo path or URL"] } to your report and stop working; MegaCorps parks the card as waiting_on_client and resumes you with the answer injected. One checkpoint at a time. Members cannot ask the client: use status="needs_review" for your reviewer or report.mentions for a peer.`,
+    `Conversation: to leave a message on this card for the humans and colleagues following it, add "notes": ["..."] (max 3) to your structured report. Write @<agent slug> inside a note to wake that agent with your message; they answer on the same thread and you see the answer next run. @client pings the human client without blocking the card (use a checkpoint when you need a binding decision). If your runtime can reach MegaCorps over HTTP you may also post at any time: POST /api/cards/${card.id}/comments with your Bearer token and { "body": "..." }.`,
     `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
     `If no reviewer/manager exists above you, provide the best final answer instead of escalating; MegaCorps will accept top-level guidance requests as done.`,
   ].filter(Boolean).join('\n');
@@ -4316,6 +4425,86 @@ function commentMetadata(metadata: unknown): Record<string, unknown> {
 function commentMetadataString(metadata: unknown, key: string): string | null {
   const value = commentMetadata(metadata)[key];
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+// === Handover =================================================================
+// Bootstrap-only digest of what the previous hand did on this card, so a new
+// assignee (or the same agent after a session reset) builds on finished work
+// instead of starting over. The continuation branch is left alone: its delta
+// context already carries everything new since the last adapter turn.
+
+const HANDOVER_HUMAN_ACTIONS = ['comment', 'send_to_agent', 'continue_run', 'pause_agent', 'escalate_to_reviewer'];
+const HANDOVER_COMMENT_SCAN_LIMIT = Math.max(80, KANBAN_CONTEXT_RECORD_LIMIT);
+
+function isReviewCommentAction(action: string): boolean {
+  return action.startsWith('review_') || action.startsWith('delegate_review_');
+}
+
+export async function handoverSection(card: CardRow, assignee: AgentRow | null): Promise<string> {
+  const [runs, comments, products, openQuestions, lastOwnRun] = await Promise.all([
+    db.select().from(taskRuns)
+      .where(and(eq(taskRuns.cardId, card.id), inArray(taskRuns.kind, ['dispatch', 'message']), inArray(taskRuns.status, ['success', 'failed'])))
+      .orderBy(desc(taskRuns.completedAt))
+      .limit(HANDOVER_LIMITS.runs),
+    db.select().from(cardComments).where(eq(cardComments.cardId, card.id)).orderBy(desc(cardComments.createdAt)).limit(HANDOVER_COMMENT_SCAN_LIMIT),
+    db.select().from(workProducts).where(eq(workProducts.cardId, card.id)).orderBy(desc(workProducts.createdAt)).limit(HANDOVER_LIMITS.products),
+    assignee
+      ? db.select().from(cardComments)
+        .where(and(eq(cardComments.cardId, card.id), eq(cardComments.action, 'peer_question'), eq(cardComments.assigneeAgentId, assignee.id), eq(cardComments.delegationStatus, 'queued')))
+        .orderBy(desc(cardComments.createdAt))
+        .limit(HANDOVER_LIMITS.questions)
+      : Promise.resolve([] as CardCommentRow[]),
+    assignee
+      ? db.select({ completedAt: taskRuns.completedAt }).from(taskRuns)
+        .where(and(eq(taskRuns.cardId, card.id), eq(taskRuns.agentId, assignee.id), inArray(taskRuns.kind, ['dispatch', 'message']), inArray(taskRuns.status, ['success', 'failed'])))
+        .orderBy(desc(taskRuns.completedAt))
+        .limit(1)
+      : Promise.resolve([] as Array<{ completedAt: Date | null }>),
+  ]);
+  const handoffs = comments.filter((comment) => comment.action === 'handoff').slice(0, HANDOVER_LIMITS.handoffs);
+  const latestReview = comments.find((comment) => isReviewCommentAction(comment.action)) ?? null;
+  const sinceOwnRun = lastOwnRun[0]?.completedAt ?? null;
+  const humanInstructions = comments
+    .filter((comment) => comment.authorType === 'user' && HANDOVER_HUMAN_ACTIONS.includes(comment.action))
+    .filter((comment) => !sinceOwnRun || (comment.createdAt ? new Date(comment.createdAt).getTime() > new Date(sinceOwnRun).getTime() : false))
+    .slice(0, HANDOVER_LIMITS.instructions);
+  if (runs.length === 0 && handoffs.length === 0 && !latestReview && !card.reviewFeedback && humanInstructions.length === 0 && openQuestions.length === 0 && products.length === 0) return '';
+
+  const agentIds = new Set<string>();
+  for (const run of runs) if (run.agentId) agentIds.add(run.agentId);
+  for (const comment of [...handoffs, ...openQuestions]) if (comment.agentId) agentIds.add(comment.agentId);
+  if (latestReview?.agentId) agentIds.add(latestReview.agentId);
+  const userIds = new Set<string>();
+  for (const comment of humanInstructions) if (comment.authorId) userIds.add(comment.authorId);
+  const [agentRows, userRows] = await Promise.all([
+    agentIds.size > 0 ? db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, [...agentIds])) : Promise.resolve([] as Array<{ id: string; name: string }>),
+    userIds.size > 0 ? db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, [...userIds])) : Promise.resolve([] as Array<{ id: string; name: string; email: string }>),
+  ]);
+  const agentNameById = new Map(agentRows.map((row) => [row.id, row.name]));
+  const userNameById = new Map(userRows.map((row) => [row.id, row.name || row.email]));
+  const agentName = (id: string | null | undefined, fallback: string) => (id ? agentNameById.get(id) ?? fallback : fallback);
+
+  const input: HandoverInput = {
+    assigneeId: assignee?.id ?? null,
+    runs: runs.map((run) => ({
+      agentId: run.agentId,
+      agentName: agentName(run.agentId, 'unknown agent'),
+      kind: run.kind,
+      status: run.status,
+      completedAt: run.completedAt,
+      durationSeconds: run.durationSeconds,
+      output: run.output ?? run.error,
+    })),
+    handoffs: handoffs.map((comment) => ({ at: comment.createdAt, fromName: agentName(comment.agentId, 'previous owner'), body: comment.body })),
+    reviewFeedback: card.reviewFeedback ?? null,
+    latestReview: latestReview
+      ? { at: latestReview.createdAt, reviewerName: latestReview.agentId ? agentName(latestReview.agentId, 'reviewer') : 'MegaCorps', action: latestReview.action, body: latestReview.body }
+      : null,
+    humanInstructions: humanInstructions.map((comment) => ({ at: comment.createdAt, authorName: comment.authorId ? userNameById.get(comment.authorId) ?? 'client' : 'client', action: comment.action, body: comment.body })),
+    openQuestions: openQuestions.map((comment) => ({ at: comment.createdAt, fromName: commentMetadataString(comment.metadata, 'authorName') ?? agentName(comment.agentId, 'a colleague'), body: comment.body })),
+    products: products.map((product) => ({ type: product.type, title: product.title, url: product.url ?? product.pullRequestUrl ?? null })),
+  };
+  return formatHandoverSection(input);
 }
 
 function delegationSourceContextForPrompt(comment: Pick<CardCommentRow, 'metadata'>, options: PromptBuildOptions = {}): string {
@@ -4468,6 +4657,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
       'Use the Kanban context snapshot below as the source of truth for assignee, department, project, goals, company structure, parent chain, dependencies, message board, lifecycle logs, and prior output.',
     ].join('\n'),
     digest,
+    await handoverSection(card, assignee ?? null),
     await integrationSection(card),
     await clientCheckpointSection(card),
     await brainstormSection(card, assignee),

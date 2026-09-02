@@ -351,6 +351,9 @@ export const agentReportSchema = z.object({
   questions: z.array(z.string().trim().min(1).max(1000)).max(10).optional(),
   delegations: z.array(agentReportDelegationSchema).max(8).optional(),
   mentions: z.array(agentReportMentionSchema).max(3).optional(),
+  // Conversation notes: posted to the card message board as agent comments;
+  // @<slug> inside a note wakes that agent, @client pings the human client.
+  notes: z.array(z.string().trim().min(1).max(2000)).max(3).optional(),
   children: z.array(agentReportChildSchema).max(5).optional(),
   checkpoint: agentReportCheckpointSchema.optional(),
   broadcast: agentReportBroadcastSchema.optional(),
