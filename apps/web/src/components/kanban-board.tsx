@@ -8,7 +8,7 @@ import { Ban, ExternalLink, GripVertical, MessageSquare, Play, Plus, RefreshCw, 
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
-const statuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'done', 'blocked', 'cancelled'] as const;
+const statuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm', 'done', 'blocked', 'cancelled'] as const;
 type CardStatus = (typeof statuses)[number];
 const priorities = ['urgent', 'high', 'normal', 'low'] as const;
 const workProductTypes = ['report', 'file', 'preview_url', 'pull_request', 'commit', 'screenshot', 'artifact', 'external'] as const;
@@ -20,6 +20,7 @@ const statusLabels: Record<CardStatus, LocaleLabels> = {
   needs_review: { 'zh-TW': '求助審核', en: 'Needs Review', ja: '支援レビュー' },
   waiting_on_external: { 'zh-TW': '等待外部', en: 'Waiting External', ja: '外部待ち' },
   waiting_on_client: { 'zh-TW': '等你回答', en: 'Waiting Client', ja: 'クライアント待ち' },
+  waiting_on_brainstorm: { 'zh-TW': '腦力激盪中', en: 'Brainstorming', ja: 'ブレスト中' },
   done: { 'zh-TW': '完成', en: 'Done', ja: '完了' },
   blocked: { 'zh-TW': '受阻', en: 'Blocked', ja: 'ブロック' },
   cancelled: { 'zh-TW': '已取消', en: 'Cancelled', ja: 'キャンセル' },
@@ -28,7 +29,7 @@ type StatusGroupId = 'todo' | 'in_progress' | 'review' | 'done' | 'blocked_cance
 type StatusGroup = { id: StatusGroupId; statuses: readonly CardStatus[]; dropStatus: CardStatus };
 const statusGroups: readonly StatusGroup[] = [
   { id: 'todo', statuses: ['todo'], dropStatus: 'todo' },
-  { id: 'in_progress', statuses: ['in_progress'], dropStatus: 'in_progress' },
+  { id: 'in_progress', statuses: ['in_progress', 'waiting_on_brainstorm'], dropStatus: 'in_progress' },
   { id: 'review', statuses: ['in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client'], dropStatus: 'in_review' },
   { id: 'done', statuses: ['done'], dropStatus: 'done' },
   { id: 'blocked_cancelled', statuses: ['blocked', 'cancelled'], dropStatus: 'blocked' },
@@ -178,6 +179,7 @@ function statusColor(status: string) {
   if (status === 'needs_review') return '#ca8a04';
   if (status === 'waiting_on_external') return '#0d9488';
   if (status === 'waiting_on_client') return '#f59e0b';
+  if (status === 'waiting_on_brainstorm') return '#0891b2';
   return 'var(--border)';
 }
 
@@ -478,6 +480,8 @@ export function KanbanBoard() {
   const [workProductCommitSha, setWorkProductCommitSha] = useState('');
   const [workProductPullRequestUrl, setWorkProductPullRequestUrl] = useState('');
   const [requiresApproval, setRequiresApproval] = useState(false);
+  const [forceBrainstorm, setForceBrainstorm] = useState(false);
+  const [brainstormDepartmentIds, setBrainstormDepartmentIds] = useState<string[]>([]);
   const [filterCompany, setFilterCompany] = useState('');
   const [filterAssignee, setFilterAssignee] = useState('');
   const [filterProject, setFilterProject] = useState('');
@@ -888,6 +892,8 @@ export function KanbanBoard() {
           dependencyCardIds: newDependencies,
           decisionMode: newDecisionMode,
           requiresApproval,
+          forceBrainstorm,
+          brainstormDepartmentIds: forceBrainstorm ? brainstormDepartmentIds : [],
           scheduleAt: newScheduleAt ? new Date(newScheduleAt).toISOString() : null,
           recurEveryMinutes: newRecurMinutes ? Number(newRecurMinutes) : null,
         }),
@@ -907,6 +913,8 @@ export function KanbanBoard() {
       setNewScheduleAt('');
       setNewRecurMinutes('');
       setRequiresApproval(false);
+      setForceBrainstorm(false);
+      setBrainstormDepartmentIds([]);
       setModalOpen(false);
       void queryClient.invalidateQueries({ queryKey: ['kanbanBoard'] });
       setToast({ message: `${t('kanban.cardCreated')}: ${card.title}`, type: 'success' });
@@ -1219,6 +1227,16 @@ export function KanbanBoard() {
                 </label>
               </div>
               <label className="check-row"><input type="checkbox" checked={requiresApproval} onChange={(e) => setRequiresApproval(e.target.checked)} /> {t('kanban.requiresApproval')}</label>
+              <label className="check-row" title={t('kanban.forceBrainstormHint')}><input type="checkbox" checked={forceBrainstorm} onChange={(e) => setForceBrainstorm(e.target.checked)} /> {t('kanban.forceBrainstorm')}</label>
+              {forceBrainstorm && <div className="field-label"><span>{t('kanban.brainstormDepartments')}</span>
+                <div className="action-row" style={{ flexWrap: 'wrap' }}>
+                  {departments.filter((department) => !newCompany || department.companyId === newCompany).map((department) => {
+                    const on = brainstormDepartmentIds.includes(department.id);
+                    return <button type="button" key={department.id} className={`btn ${on ? 'btn-primary' : ''}`} onClick={() => setBrainstormDepartmentIds((current) => on ? current.filter((id) => id !== department.id) : [...current, department.id])}>{department.name}</button>;
+                  })}
+                </div>
+                <span className="field-hint">{t('kanban.brainstormDepartmentsHint')}</span>
+              </div>}
             </div>
             <div className="kanban-create-modal-footer">
               <button className="btn btn-primary" disabled={busy} onClick={create}><Plus size={15} /> {t('common.create')}</button>

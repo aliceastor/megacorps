@@ -11,6 +11,7 @@ import { buildAgentDigest } from './agent-digest.ts';
 import { giteaAuthenticatedCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv } from './gitea.ts';
 import { effectiveFanoutCap, evaluateSplitPlan, formatChildOpening, formatSplitAnnouncement, type SplitAgentRef } from './card-splitting.ts';
 import { normalizeDecisionMode, type AgentReportChild } from '@megacorps/shared';
+import { brainstormFromOutput, brainstormRoundComplete, formatBrainstormClosed, formatBrainstormOpened, planBrainstormTargets, type BrainstormRequest } from './brainstorm.ts';
 import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointEligibilityError, checkpointFromOutput, checkpointFromQuestion, checkpointReminderDue, combineCheckpointAnswer, formatCheckpointAnswer, formatCheckpointMessage, type ClientCheckpointRequest } from './client-checkpoints.ts';
 import { setCardDependencies } from './card-dependencies.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
@@ -791,6 +792,169 @@ function handoffMessageBody(fromAgent: AgentRow, target: AgentRow, item: AgentRe
   ].filter(Boolean).join('\n');
 }
 
+// === Brainstorm rounds =========================================================
+// The CEO (or a department head) broadcasts one question to the heads of the
+// departments it names; each head answers through the peer-question pipeline;
+// when all have answered or the round times out, the card returns to its owner
+// with the proposals injected. Pure parts live in brainstorm.ts.
+
+const BRAINSTORM_TIMEOUT_MINUTES = Math.max(5, Number(process.env.BRAINSTORM_TIMEOUT_MINUTES ?? 30));
+
+async function companyDepartmentsForBrainstorm(companyId: string) {
+  const rows = await db.select({ id: departments.id, slug: departments.slug, name: departments.name, headAgentId: departments.headAgentId, description: departments.description })
+    .from(departments).where(eq(departments.companyId, companyId));
+  return rows;
+}
+
+export type BrainstormLaunch = { request: BrainstormRequest; targets: Array<{ departmentId: string; departmentName: string; headAgentId: string }> };
+
+export async function resolveBrainstormRequest(card: CardRow, agent: AgentRow, request: BrainstormRequest | null): Promise<BrainstormLaunch | null> {
+  if (!request) return null;
+  const [pendingRound] = await db.select({ id: cardComments.id }).from(cardComments).where(and(
+    eq(cardComments.cardId, card.id),
+    eq(cardComments.action, 'peer_question'),
+    drizzleSql`${cardComments.metadata}->>'brainstorm' = 'true'`,
+    inArray(cardComments.delegationStatus, ['queued', 'running']),
+  )).limit(1);
+  const may = await agentMayAskClient(card.companyId, agent);
+  const plan = planBrainstormTargets({
+    request,
+    departments: await companyDepartmentsForBrainstorm(card.companyId),
+    askerId: agent.id,
+    askerIsCompanyBoss: may.isCompanyBoss,
+    askerIsDepartmentHead: may.isDepartmentHead,
+    isOwner: card.assigneeId === agent.id,
+    alreadyPending: Boolean(pendingRound),
+    clientMinimumIds: card.brainstormDepartmentIds ?? [],
+  });
+  if (!plan.ok) {
+    await addCardMessage({ cardId: card.id, authorType: 'system', action: 'brainstorm_rejected', body: `Brainstorm broadcast from ${agent.name} was not sent:\n${plan.errors.join('\n')}`, metadata: { errors: plan.errors } });
+    return null;
+  }
+  return { request, targets: plan.targets.map((target) => ({ departmentId: target.department.id, departmentName: target.department.name, headAgentId: target.headAgentId })) };
+}
+
+export async function openBrainstormRound(card: CardRow, agent: AgentRow, launch: BrainstormLaunch): Promise<number> {
+  const round = (card.brainstormRound ?? 0) + 1;
+  const heads = await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, launch.targets.map((target) => target.headAgentId)));
+  const headName = new Map(heads.map((head) => [head.id, head.name]));
+  for (const target of launch.targets) {
+    await addCardMessage({
+      cardId: card.id,
+      agentId: agent.id,
+      assigneeAgentId: target.headAgentId,
+      action: 'peer_question',
+      body: `[Brainstorm round ${round} — ${target.departmentName}] ${launch.request.question}`,
+      delegationStatus: 'queued',
+      metadata: { peerQuestion: true, brainstorm: true, round, departmentId: target.departmentId, departmentName: target.departmentName },
+    });
+  }
+  await db.update(kanbanCards).set({
+    columnStatus: 'waiting_on_brainstorm',
+    brainstormRound: round,
+    nextRunAt: null,
+    updatedAt: new Date(),
+  }).where(eq(kanbanCards.id, card.id));
+  if (card.columnStatus !== 'waiting_on_brainstorm') await addStageLog(card.id, agent.id, card.columnStatus ?? null, 'waiting_on_brainstorm', 'dispatch');
+  await addCardMessage({ cardId: card.id, agentId: agent.id, action: 'brainstorm_opened', body: formatBrainstormOpened(round, launch.request.question, launch.targets.map((target) => ({ departmentName: target.departmentName, headName: headName.get(target.headAgentId) ?? 'head' }))), metadata: { round, departmentIds: launch.targets.map((target) => target.departmentId) } });
+  if (card.parentCardId) await addCardMessage({ cardId: card.parentCardId, authorType: 'system', action: 'brainstorm_opened', body: `Child card "${card.title}" opened brainstorm round ${round} with ${launch.targets.length} department(s).` });
+  await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'decomposition', status: 'queued', message: `Brainstorm round ${round} opened with ${launch.targets.length} department head(s).`, output: launch.request.question });
+  await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: 'brainstorm.opened', entityType: 'card', entityId: card.id, details: { round, departments: launch.targets.map((target) => target.departmentName) } });
+  publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'brainstorm.opened' });
+  return round;
+}
+
+// Webhook path: the run is over, the round opens, the card waits.
+export async function finishRunWaitingOnBrainstorm(card: CardRow, agent: AgentRow, launch: BrainstormLaunch, input: { taskRunId: string | null; heartbeatRunId: string | null; output: string | null; costUsd?: number }): Promise<number> {
+  await db.update(kanbanCards).set({
+    executionLog: input.output ?? card.executionLog,
+    executionLockId: null,
+    executionLockedByAgentId: null,
+    executionLockedAt: null,
+    executionLockExpiresAt: null,
+    activeHeartbeatRunId: null,
+    updatedAt: new Date(),
+  }).where(eq(kanbanCards.id, card.id));
+  await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
+  if (input.heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), error: null, costUsd: input.costUsd?.toString() }).where(eq(heartbeatRuns.id, input.heartbeatRunId));
+  await completeTaskRun(input.taskRunId, { status: 'success', output: input.output ?? null, costUsd: input.costUsd });
+  return openBrainstormRound(card, agent, launch);
+}
+
+// Dispatch cron: close rounds whose heads have all answered or that timed out,
+// and hand the card back to its owner.
+export async function sweepBrainstormRounds(app: FastifyInstance): Promise<number> {
+  const waiting = await db.select().from(kanbanCards).where(and(eq(kanbanCards.columnStatus, 'waiting_on_brainstorm'), isNull(kanbanCards.deletedAt)));
+  let closed = 0;
+  const now = new Date();
+  for (const card of waiting) {
+    const round = card.brainstormRound ?? 0;
+    const questions = await db.select().from(cardComments).where(and(
+      eq(cardComments.cardId, card.id),
+      eq(cardComments.action, 'peer_question'),
+      drizzleSql`${cardComments.metadata}->>'brainstorm' = 'true'`,
+      drizzleSql`(${cardComments.metadata}->>'round')::int = ${round}`,
+    ));
+    const openedAt = questions.reduce<Date | null>((earliest, row) => (!earliest || (row.createdAt && row.createdAt < earliest) ? row.createdAt ?? earliest : earliest), null) ?? card.updatedAt ?? now;
+    const verdict = brainstormRoundComplete({ statuses: questions.map((row) => row.delegationStatus), openedAt, now, timeoutMinutes: BRAINSTORM_TIMEOUT_MINUTES });
+    if (!verdict.complete || !verdict.reason) continue;
+    const answered = questions.filter((row) => row.delegationStatus === 'done').map((row) => String((row.metadata as Record<string, unknown> | null)?.departmentName ?? 'department'));
+    const silent = questions.filter((row) => row.delegationStatus !== 'done').map((row) => String((row.metadata as Record<string, unknown> | null)?.departmentName ?? 'department'));
+    if (verdict.reason === 'timeout') {
+      await db.update(cardComments).set({ delegationStatus: 'cancelled' }).where(and(
+        eq(cardComments.cardId, card.id), eq(cardComments.action, 'peer_question'),
+        drizzleSql`${cardComments.metadata}->>'brainstorm' = 'true'`,
+        drizzleSql`(${cardComments.metadata}->>'round')::int = ${round}`,
+        inArray(cardComments.delegationStatus, ['queued', 'running']),
+      ));
+    }
+    await db.update(kanbanCards).set({ columnStatus: 'in_progress', nextRunAt: null, updatedAt: now }).where(eq(kanbanCards.id, card.id));
+    await addStageLog(card.id, card.assigneeId, 'waiting_on_brainstorm', 'in_progress', 'system');
+    await addCardMessage({ cardId: card.id, authorType: 'system', action: 'brainstorm_closed', body: formatBrainstormClosed(round, verdict.reason, answered, silent), metadata: { round, reason: verdict.reason } });
+    await addTaskLog({ cardId: card.id, agentId: card.assigneeId, type: 'decomposition', status: verdict.reason === 'timeout' ? 'warning' : 'success', message: `Brainstorm round ${round} closed (${verdict.reason}); owner resumes to synthesize.` });
+    publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'brainstorm.closed' });
+    try { await enqueueTaskRun(card.id, 'dispatch', 'queue'); } catch (error) { app.log.warn({ error, cardId: card.id }, 'brainstorm resume dispatch skipped'); }
+    closed += 1;
+  }
+  return closed;
+}
+
+// Prompt section for the owner: the department directory (so a broadcast can
+// name departments), the client's floor, and the proposals from the latest
+// round if one has closed.
+async function brainstormSection(card: CardRow, agent: AgentRow | null | undefined): Promise<string> {
+  const lines: string[] = [];
+  const may = agent ? await agentMayAskClient(card.companyId, agent) : { isCompanyBoss: false, isDepartmentHead: false };
+  if (may.isCompanyBoss || may.isDepartmentHead) {
+    const directory = await companyDepartmentsForBrainstorm(card.companyId);
+    const heads = directory.length ? await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, directory.map((d) => d.headAgentId).filter((id): id is string => Boolean(id)))) : [];
+    const headName = new Map(heads.map((head) => [head.id, head.name]));
+    lines.push('Departments you can consult (slug — head — charter):', ...directory.map((d) => `- ${d.slug} — ${d.headAgentId ? headName.get(d.headAgentId) ?? 'head' : 'NO HEAD (cannot be consulted)'} — ${d.description ?? 'no charter written'}`));
+    if (card.brainstormDepartmentIds?.length) {
+      const floor = directory.filter((d) => card.brainstormDepartmentIds?.includes(d.id)).map((d) => d.slug);
+      lines.push(`The client asked that at least these departments take part in the brainstorm: ${floor.join(', ')}.`);
+    }
+    if (card.forceBrainstorm && (card.brainstormRound ?? 0) === 0) lines.push('The client REQUIRES a brainstorm round on this card before any split or plan: open one with report.broadcast now.');
+  }
+  const round = card.brainstormRound ?? 0;
+  if (round > 0) {
+    const rows = await db.select().from(cardComments).where(and(
+      eq(cardComments.cardId, card.id),
+      drizzleSql`${cardComments.metadata}->>'brainstorm' = 'true'`,
+      drizzleSql`(${cardComments.metadata}->>'round')::int = ${round}`,
+    )).orderBy(cardComments.createdAt);
+    const questions = rows.filter((row) => row.action === 'peer_question');
+    const answers = rows.filter((row) => row.action === 'peer_answer');
+    const answerByQuestion = new Map(answers.map((row) => [row.parentCommentId, row.body]));
+    lines.push(`Brainstorm round ${round} proposals:`, ...questions.map((q) => {
+      const dept = String((q.metadata as Record<string, unknown> | null)?.departmentName ?? 'department');
+      const answer = answerByQuestion.get(q.id);
+      return answer ? `- ${dept}: ${clipText(answer, 1500)}` : `- ${dept}: (no answer — ${q.delegationStatus ?? 'unknown'})`;
+    }), 'Synthesize these into one plan. If the direction needs the client, raise a direction checkpoint; otherwise split the work into child cards per department.');
+  }
+  return lines.join('\n');
+}
+
 // === Client checkpoints ========================================================
 // The CEO or a department head stops and asks the client (direction decision or
 // interim-output review). Blocking: the card parks as waiting_on_client and
@@ -950,6 +1114,11 @@ function splitPriorityToNumber(priority: string | undefined, fallback: number | 
 
 export async function processChildSplits(card: CardRow, splitter: AgentRow, children: AgentReportChild[]): Promise<{ created: string[]; errors: string[] }> {
   if (children.length === 0) return { created: [], errors: [] };
+  if (card.forceBrainstorm && (card.brainstormRound ?? 0) === 0) {
+    const error = 'split_brainstorm_required: the client requires a brainstorm round on this card before it is split. Broadcast to the relevant department heads first (report.broadcast).';
+    await addCardMessage({ cardId: card.id, authorType: 'system', action: 'split_rejected', body: `Split request from ${splitter.name} was rejected:\n${error}` });
+    return { created: [], errors: [error] };
+  }
   const [company] = await db.select().from(companies).where(eq(companies.id, card.companyId)).limit(1);
   const [position] = splitter.positionId
     ? await db.select({ isCompanyBoss: positions.isCompanyBoss }).from(positions).where(eq(positions.id, splitter.positionId)).limit(1)
@@ -1114,7 +1283,9 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
     const executionAgent = await buildExecutionAgent(target, null);
     const digest = (await buildAgentDigest(target.id, card.companyId)).text;
     const prompt = [
-      `A colleague agent asked you a question on the MegaCorps card message board. Answer it from your own knowledge and recent work.`,
+      (comment.metadata as Record<string, unknown> | null)?.brainstorm
+        ? `BRAINSTORM: the owner of this card is consulting department heads before planning. As head of your department, propose concretely how your department would contribute (scope, deliverables, risks, rough effort), or answer "not participating" with a one-line reason if this genuinely does not concern your department.`
+        : `A colleague agent asked you a question on the MegaCorps card message board. Answer it from your own knowledge and recent work.`,
       `Card: ${card.title} (stage ${card.columnStatus ?? 'todo'})`,
       `Card brief:\n${clipText(card.body, 2000)}`,
       digest,
@@ -2978,10 +3149,12 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     // A client checkpoint overrides the normal completion: the card parks and
     // nothing downstream (review, done, cascade) happens until the client answers.
     const checkpointRequest = await resolveClientCheckpointRequest(card, agent, checkpointFromOutput(result.output), needsInputQuestion);
-    const needsHelpReview = checkpointRequest ? false : completionDecision.needsHelpReview;
-    const topLevelGuidanceAccepted = checkpointRequest ? false : completionDecision.topLevelGuidanceAccepted;
-    const nextStatus: CardStatus = checkpointRequest ? 'waiting_on_client' : completionDecision.nextStatus;
-    const childBlock = checkpointRequest ? null : await completionBlockedByChildren(card, nextStatus);
+    const brainstormLaunch = checkpointRequest ? null : await resolveBrainstormRequest(card, agent, brainstormFromOutput(result.output));
+    const parked = Boolean(checkpointRequest || brainstormLaunch);
+    const needsHelpReview = parked ? false : completionDecision.needsHelpReview;
+    const topLevelGuidanceAccepted = parked ? false : completionDecision.topLevelGuidanceAccepted;
+    const nextStatus: CardStatus = checkpointRequest ? 'waiting_on_client' : brainstormLaunch ? 'waiting_on_brainstorm' : completionDecision.nextStatus;
+    const childBlock = parked ? null : await completionBlockedByChildren(card, nextStatus);
     const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : nextStatus;
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     // Agent release + card stage move + heartbeat completion commit atomically, so a
@@ -3021,6 +3194,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await addCardMessage({ cardId: card.id, agentId: agent.id, action: 'agent_question', body: needsInputQuestion });
     }
     if (checkpointRequest) await recordClientCheckpoint(updated ?? card, agent, checkpointRequest);
+    if (brainstormLaunch) await openBrainstormRound(updated ?? card, agent, brainstormLaunch);
     await recordA2aArtifacts(card, agent.id, options.taskRunId, result.artifacts);
     if (effectiveNextStatus === 'needs_review') {
       await notify({ companyId: card.companyId, type: 'needs_review', title: `Help review requested: ${card.title}`, body: `${agent.name} requested reviewer guidance.`, entityType: 'card', entityId: card.id, cardId: card.id, agentId: agent.id });
@@ -3594,6 +3768,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
       await spawnDueScheduledCards(app, activeCompanyIds);
       try { await sweepPeerQuestions(app); } catch (error) { app.log.warn({ error }, 'peer question sweep failed'); }
       try { await sweepClientCheckpointReminders(app); } catch (error) { app.log.warn({ error }, 'client checkpoint reminder sweep failed'); }
+      try { await sweepBrainstormRounds(app); } catch (error) { app.log.warn({ error }, 'brainstorm round sweep failed'); }
       // Only statuses the loop can act on; done/blocked/cancelled/in_progress cards
       // used to be loaded and skipped one by one, which scales badly with board size.
       const cards = await db.select().from(kanbanCards).where(and(
@@ -3991,6 +4166,7 @@ function completionProtocol(card: CardRow, reports: DelegationReport[] = [], opt
     `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, project shared file path/URL, report URL, screenshot URL, artifact URL, or file metadata instead of local-only scratch paths.`,
     `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
     `If you are waiting on CI/CD, deploy, external approval, or another external system, use status="waiting_on_external" and include pollIntervalSeconds based on how often that system should be checked.`,
+    `Brainstorm: if you are the CEO or a department head and this card spans several departments or its requirements are vague, broadcast one question to the heads of the departments it concerns before planning: add "broadcast": { "departments": ["<slug>", "<slug>"], "question": "..." } to your report and stop. Name only relevant departments (the directory above lists slugs, heads and charters); MegaCorps parks the card as waiting_on_brainstorm, collects each head's proposal, and resumes you with them. One round at a time.`,
     `Client checkpoint: if you are the CEO or a department head and this card genuinely needs the client's decision on direction, or the client's look at interim output, add "checkpoint": { "kind": "direction" | "interim", "question": "...", "options": ["A", "B"], "recommendation": "A", "artifactRefs": ["repo path or URL"] } to your report and stop working; MegaCorps parks the card as waiting_on_client and resumes you with the answer injected. One checkpoint at a time. Members cannot ask the client: use status="needs_review" for your reviewer or report.mentions for a peer.`,
     `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
     `If no reviewer/manager exists above you, provide the best final answer instead of escalating; MegaCorps will accept top-level guidance requests as done.`,
@@ -4194,6 +4370,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
       deltaContext,
       await integrationSection(card),
       await clientCheckpointSection(card),
+      await brainstormSection(card, card.assigneeId ? (await db.select().from(agents).where(eq(agents.id, card.assigneeId)).limit(1))[0] : null),
       'Completion protocol:',
       completionProtocol(card, reports, { delegationAlreadySatisfied }),
     ].filter(Boolean).join('\n\n');
@@ -4226,6 +4403,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
     digest,
     await integrationSection(card),
     await clientCheckpointSection(card),
+    await brainstormSection(card, assignee),
     kanbanContext ? `Kanban context snapshot:\n${kanbanContext}` : '',
     matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
     `Repository protocol:\n${projectGitProtocol(company, project, card, assignee, runtime)}`,

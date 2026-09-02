@@ -10,7 +10,8 @@ import { db } from './db/client.ts';
 import { activityLog, adapterSessions, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
-import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest } from './dispatch.ts';
+import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest, finishRunWaitingOnBrainstorm, resolveBrainstormRequest } from './dispatch.ts';
+import { brainstormFromOutput } from './brainstorm.ts';
 import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointFromOutput } from './client-checkpoints.ts';
 import { registerChatRoutes } from './chat.ts';
 import { runAgentMaintenance } from './agent-maintenance.ts';
@@ -1470,6 +1471,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       parentCardId: input.parentCardId ?? null,
       dependencyCardIds: input.dependencyCardIds,
       requiresApproval: input.requiresApproval,
+      forceBrainstorm: input.forceBrainstorm,
+      brainstormDepartmentIds: input.brainstormDepartmentIds,
       decisionMode: input.decisionMode === undefined ? null : input.decisionMode ?? null,
       rollupStatus: input.rollupStatus ?? null,
       requiredChildPolicy: input.requiredChildPolicy ?? 'manual',
@@ -2734,6 +2737,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: actorAgentId, action: 'webhook.client_checkpoint', entityType: 'card', entityId: card.id, details: { taskRunId, requestedStatus, approvalId: parked.approvalId } });
       publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'webhook.client_checkpoint' });
       return { ok: true, cardId: card.id, taskRunId: taskRunId ?? null, requestedStatus, newStatus: 'waiting_on_client', checkpointId: parked.approvalId };
+    }
+    // Brainstorm broadcast: open the round and park the card.
+    const webhookBrainstorm = actorAgent ? await resolveBrainstormRequest(card, actorAgent, brainstormFromOutput(executionLog, body.report ?? null)) : null;
+    if (webhookBrainstorm && actorAgent) {
+      const round = await finishRunWaitingOnBrainstorm(card, actorAgent, webhookBrainstorm, { taskRunId: taskRunId ?? null, heartbeatRunId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId ?? null, output: executionLog, costUsd: body.costUsd });
+      await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: actorAgentId, action: 'webhook.brainstorm', entityType: 'card', entityId: card.id, details: { taskRunId, requestedStatus, round } });
+      return { ok: true, cardId: card.id, taskRunId: taskRunId ?? null, requestedStatus, newStatus: 'waiting_on_brainstorm', brainstormRound: round };
+    }
+    if (requestedStatus === 'waiting_on_brainstorm') {
+      return reply.code(400).send({ error: 'broadcast_required', message: 'broadcast_required: status="waiting_on_brainstorm" needs a report.broadcast { departments: [slugs], question }, and only the CEO or a department head who owns the card may open a round.' });
     }
     if (requestedStatus === 'waiting_on_client') {
       return reply.code(400).send({ error: 'checkpoint_required', message: 'checkpoint_required: status="waiting_on_client" needs a report.checkpoint { kind, question, options?, recommendation?, artifactRefs? }, and only the CEO or a department head who owns the card may ask the client.' });

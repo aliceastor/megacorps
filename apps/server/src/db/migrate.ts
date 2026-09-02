@@ -23,7 +23,14 @@ const migrations: Migration[] = [
   { version: 11, name: 'gitea-integration', run: runGiteaIntegration },
   { version: 12, name: 'nfs-workspace-convention', run: runNfsWorkspaceConvention },
   { version: 13, name: 'company-pipeline-org', run: runCompanyPipelineOrg },
+  { version: 14, name: 'brainstorm-rounds', run: runBrainstormRounds },
 ];
+
+async function runBrainstormRounds(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS force_brainstorm BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS brainstorm_department_ids UUID[] DEFAULT '{}';
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS brainstorm_round INTEGER NOT NULL DEFAULT 0;`);
+}
 
 async function runCompanyPipelineOrg(): Promise<void> {
   await sql.unsafe(`ALTER TABLE departments ADD COLUMN IF NOT EXISTS head_agent_id UUID REFERENCES agents(id);

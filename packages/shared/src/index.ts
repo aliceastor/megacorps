@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const cardStatuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'done', 'blocked', 'cancelled'] as const;
+export const cardStatuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm', 'done', 'blocked', 'cancelled'] as const;
 export type CardStatus = (typeof cardStatuses)[number];
 export const legacyCardStatusAliases = { backlog: 'todo' } as const;
 const cardStatusInputs = ['backlog', ...cardStatuses] as const;
@@ -8,7 +8,7 @@ export const agentAdapterTypes = ['hermes-ssh', 'hermes-gateway', 'codex-app', '
 export type AgentAdapterType = (typeof agentAdapterTypes)[number];
 export const cardActorTypes = ['user', 'machine', 'system', 'agent:worker', 'agent:reviewer', 'agent:leader'] as const;
 export type CardActorType = (typeof cardActorTypes)[number];
-export const cardTransitionActions = ['claim', 'submit_review', 'request_help', 'wait_external', 'external_success', 'external_failure', 'ask_client', 'client_answered', 'approve', 'reject', 'complete', 'block', 'cancel', 'release', 'resume', 'reopen', 'manual_move'] as const;
+export const cardTransitionActions = ['claim', 'submit_review', 'request_help', 'wait_external', 'external_success', 'external_failure', 'ask_client', 'client_answered', 'open_brainstorm', 'brainstorm_closed', 'approve', 'reject', 'complete', 'block', 'cancel', 'release', 'resume', 'reopen', 'manual_move'] as const;
 export type CardTransitionAction = (typeof cardTransitionActions)[number];
 
 type CardTransitionDef = {
@@ -28,24 +28,29 @@ const cardTransitionDefs: Record<CardTransitionAction, CardTransitionDef> = {
   // human client answers a direction or interim-output question.
   ask_client: { from: ['in_progress', 'in_review'], to: 'waiting_on_client', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
   client_answered: { from: ['waiting_on_client'], to: 'in_progress', allow: ['user', 'system'] },
+  // Brainstorm round: the CEO or a department head broadcasts one question to
+  // named department heads and waits for their proposals before planning.
+  open_brainstorm: { from: ['in_progress'], to: 'waiting_on_brainstorm', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
+  brainstorm_closed: { from: ['waiting_on_brainstorm'], to: 'in_progress', allow: ['system', 'user'] },
   approve: { from: ['in_review', 'needs_review'], to: 'done', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
   reject: { from: ['in_review', 'needs_review'], to: 'todo', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
   complete: { from: ['in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'cancelled'], to: 'done', allow: ['machine', 'system', 'agent:reviewer', 'agent:leader', 'user'] },
-  block: { from: ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client'], to: 'blocked', allow: ['machine', 'system', 'agent:worker', 'agent:reviewer', 'agent:leader', 'user'] },
-  cancel: { from: ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'blocked'], to: 'cancelled', allow: ['machine', 'system', 'agent:leader', 'user'] },
+  block: { from: ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm'], to: 'blocked', allow: ['machine', 'system', 'agent:worker', 'agent:reviewer', 'agent:leader', 'user'] },
+  cancel: { from: ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm', 'blocked'], to: 'cancelled', allow: ['machine', 'system', 'agent:leader', 'user'] },
   release: { from: ['in_progress'], to: 'todo', allow: ['machine', 'system', 'agent:worker', 'agent:leader', 'user'] },
-  resume: { from: ['blocked', 'cancelled', 'waiting_on_external', 'waiting_on_client'], to: 'todo', allow: ['machine', 'system', 'agent:leader', 'user'] },
+  resume: { from: ['blocked', 'cancelled', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm'], to: 'todo', allow: ['machine', 'system', 'agent:leader', 'user'] },
   reopen: { from: ['done'], to: 'todo', allow: ['agent:leader', 'user'] },
   manual_move: { from: cardStatuses, to: 'todo', allow: ['user', 'system'] },
 };
 
 const allowedTransitions: Record<CardStatus, CardStatus[]> = {
   todo: ['in_progress', 'blocked', 'cancelled'],
-  in_progress: ['in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'done', 'blocked', 'cancelled'],
+  in_progress: ['in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm', 'done', 'blocked', 'cancelled'],
   in_review: ['waiting_on_external', 'waiting_on_client', 'done', 'todo', 'in_progress', 'blocked', 'cancelled'],
   needs_review: ['todo', 'in_progress', 'done', 'blocked', 'cancelled'],
   waiting_on_external: ['in_review', 'in_progress', 'done', 'todo', 'blocked', 'cancelled'],
   waiting_on_client: ['in_progress', 'todo', 'blocked', 'cancelled'],
+  waiting_on_brainstorm: ['in_progress', 'todo', 'blocked', 'cancelled'],
   done: ['todo'],
   blocked: ['todo', 'cancelled'],
   cancelled: ['todo', 'done'],
@@ -122,9 +127,13 @@ const createCardBaseSchema = z.object({
   parentCardId: z.string().uuid().nullable().optional(),
   dependencyCardIds: z.array(z.string().uuid()).default([]),
   requiresApproval: z.boolean().default(false),
+  // Brainstorm controls (company pipeline §5): force a round before any split,
+  // and the departments the client wants consulted at minimum.
+  forceBrainstorm: z.boolean().default(false),
+  brainstormDepartmentIds: z.array(z.string().uuid()).max(20).default([]),
   maxRetries: z.number().int().min(1).max(10).default(3),
   decisionMode: decisionModeSchema.nullable().optional(),
-  rollupStatus: z.enum(['planning', 'delegated', 'waiting_on_children', 'waiting_on_dependencies', 'waiting_on_external', 'waiting_on_client', 'integrating', 'ready_for_review', 'done', 'blocked']).nullable().optional(),
+  rollupStatus: z.enum(['planning', 'delegated', 'waiting_on_children', 'waiting_on_dependencies', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm', 'integrating', 'ready_for_review', 'done', 'blocked']).nullable().optional(),
   requiredChildPolicy: z.enum(['all_required_accepted', 'all_non_cancelled_accepted', 'threshold', 'manual']).default('all_required_accepted'),
   childRequirementLevel: z.enum(['required', 'optional', 'follow_up']).default('required'),
   estimatedWeight: z.number().nonnegative().nullable().optional(),
@@ -324,6 +333,12 @@ export const agentReportCheckpointSchema = z.object({
   artifactRefs: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
 });
 export type AgentReportCheckpoint = z.infer<typeof agentReportCheckpointSchema>;
+// Brainstorm broadcast: one question to the heads of the named departments.
+export const agentReportBroadcastSchema = z.object({
+  departments: z.array(z.string().trim().min(1).max(80)).min(1).max(10),
+  question: z.string().trim().min(1).max(2000),
+});
+export type AgentReportBroadcast = z.infer<typeof agentReportBroadcastSchema>;
 export const agentReportMentionSchema = z.object({
   to: z.string().trim().min(1).max(120),
   question: z.string().trim().min(1).max(2000),
@@ -338,6 +353,7 @@ export const agentReportSchema = z.object({
   mentions: z.array(agentReportMentionSchema).max(3).optional(),
   children: z.array(agentReportChildSchema).max(5).optional(),
   checkpoint: agentReportCheckpointSchema.optional(),
+  broadcast: agentReportBroadcastSchema.optional(),
   // Reviewer score for the work under review (0-10 rubric); feeds the agent CV.
   score: z.number().int().min(0).max(10).optional(),
   artifactRefs: z.array(z.string().trim().min(1).max(200)).max(50).optional(),

@@ -85,6 +85,7 @@ function statusPercent(status: string | null | undefined): number {
     case 'needs_review': return 70;
     case 'waiting_on_external': return 60;
     case 'waiting_on_client': return 60;
+    case 'waiting_on_brainstorm': return 40;
     case 'in_progress': return 50;
     case 'todo': return 10;
     default: return 0;

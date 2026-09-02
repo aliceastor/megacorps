@@ -230,6 +230,10 @@ export const kanbanCards = pgTable('kanban_cards', {
   timeoutSeconds: integer('timeout_seconds'),
   // Number of split rounds this card has opened (round-based child creation).
   splitRound: integer('split_round').notNull().default(0),
+  // Brainstorm controls: client can force a round and name a floor of departments.
+  forceBrainstorm: boolean('force_brainstorm').notNull().default(false),
+  brainstormDepartmentIds: uuid('brainstorm_department_ids').array().default([]),
+  brainstormRound: integer('brainstorm_round').notNull().default(0),
   scheduleAt: timestamp('schedule_at', { withTimezone: true }),
   recurEveryMinutes: integer('recur_every_minutes'),
   recurNextAt: timestamp('recur_next_at', { withTimezone: true }),
