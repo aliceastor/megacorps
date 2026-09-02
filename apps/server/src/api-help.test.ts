@@ -41,6 +41,7 @@ const registeredRoutes = [
   ['DELETE', '/api/company-memberships/:id'],
   ['GET', '/api/departments'],
   ['POST', '/api/departments'],
+  ['GET', '/api/positions/templates'],
   ['GET', '/api/positions'],
   ['POST', '/api/positions'],
   ['PUT', '/api/positions/:id'],

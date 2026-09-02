@@ -12,6 +12,7 @@ import { giteaAuthenticatedCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv }
 import { effectiveFanoutCap, evaluateSplitPlan, formatChildOpening, formatSplitAnnouncement, type SplitAgentRef } from './card-splitting.ts';
 import { normalizeDecisionMode, type AgentReportChild } from '@megacorps/shared';
 import { REVIEW_SCORE_RUBRIC, formatTeamResourceView, parseReviewScore, summarizeCv, type TeamMemberView } from './agent-cv.ts';
+import { REVIEWER_PLAYBOOK, playbookFor, structuralRole } from './role-playbooks.ts';
 import { brainstormFromOutput, brainstormRoundComplete, formatBrainstormClosed, formatBrainstormOpened, planBrainstormTargets, type BrainstormRequest } from './brainstorm.ts';
 import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointEligibilityError, checkpointFromOutput, checkpointFromQuestion, checkpointReminderDue, combineCheckpointAnswer, formatCheckpointAnswer, formatCheckpointMessage, type ClientCheckpointRequest } from './client-checkpoints.ts';
 import { setCardDependencies } from './card-dependencies.ts';
@@ -4091,12 +4092,13 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
       `Agent: ${focusAgent.name}`,
       `Position: ${position?.name ?? 'none'}`,
       includeInvocationPositionPrompt && positionPrompt ? `Position prompt:\n${positionPrompt}` : '',
+      `Role playbook:\n${playbookFor(structuralRole({ isCompanyBoss: Boolean(position?.isCompanyBoss), isDepartmentHead: companyDepartments.some((department) => department.headAgentId === focusAgent.id) }))}`,
       `Runtime: ${runtime?.name ?? focusAgent.runtimeId ?? 'none'}`,
       ...runtimeLocalLines(runtime),
       `Reports to: ${manager?.name ?? 'top-level'}`,
       `Assigned open work:\n${assigned.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
       `Review queue:\n${reviews.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
-    ].join('\n'), 6000);
+    ].join('\n'), 9000);
   }
 
   if (focusCard) {
@@ -4415,6 +4417,7 @@ async function buildMessageReviewPrompt(card: CardRow, report: CardCommentRow, r
     'Return REVISION_REQUESTED with concrete guidance if the assignee must revise.',
     'Return ESCALATE only if your manager must decide.',
     'Reviews with no explicit verdict are returned for retry - never omit the decision.',
+    REVIEWER_PLAYBOOK,
     REVIEW_SCORE_RUBRIC,
     'This review only affects the Message Board delegation chain. Do not move the Kanban card stage.',
   ].join('\n');
@@ -4492,7 +4495,8 @@ async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}
         ? 'Decision options: APPROVE/DONE if you can finish it directly, REVISION_REQUESTED with concrete guidance if the assignee should retry, or ESCALATE if your manager must decide.'
         : 'Decision options: PASS/APPROVED if acceptable, REJECT/REVISION_REQUESTED with concrete feedback if it needs more work, or ESCALATE only if your manager must decide.',
       'Reviews with no explicit verdict are returned for retry - never omit the decision.',
-    REVIEW_SCORE_RUBRIC,
+      REVIEWER_PLAYBOOK,
+      REVIEW_SCORE_RUBRIC,
     ].join('\n\n');
   }
   const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.reviewerId });
@@ -4530,6 +4534,9 @@ async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}
         ? 'Read every existing legacy child result and work product as read-only context, synthesize the final answer, and return PASS/APPROVED only when the combined result is ready. Return REJECT/REVISION_REQUESTED with concrete feedback if required evidence is missing. Do not create new child Kanban cards; use Message Board delegation records for any future split work.'
         : 'Return PASS/APPROVED if it is acceptable, or REJECT/REVISION_REQUESTED with feedback if it needs more work. Use ESCALATE only if your manager must decide.',
     'Use the Kanban context, message board, lifecycle logs, dependencies, and company state when deciding.',
+    'Reviews with no explicit verdict are returned for retry - never omit the decision.',
+    REVIEWER_PLAYBOOK,
+    REVIEW_SCORE_RUBRIC,
     'Kanban context snapshot:',
     kanbanContext,
     childRows.length > 0 ? 'Legacy child-card results and work products:' : '',

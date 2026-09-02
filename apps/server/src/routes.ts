@@ -25,6 +25,7 @@ import { registerTrashRoutes } from './trash-routes.ts';
 import { authenticateAgentToken, decideGiteaProvisionAuth, looksLikeAgentToken, previewAgentToken, revokeAgentToken, rotateAgentToken } from './agent-auth.ts';
 import { addGiteaCollaborator, ensureGiteaAgentAccount, ensureGiteaOrg, ensureGiteaRepo, ensureGiteaRepoWebhook, ensureGiteaWebhookToken, giteaConfigFromEnv, giteaWebhookCallbackUrl } from './gitea.ts';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
+import { CEO_POSITION_PROMPT, POSITION_TEMPLATES } from './role-playbooks.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
 import { resetAdapterSessionsForAgent } from './adapter-sessions.ts';
@@ -1124,7 +1125,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         companyId: created.id,
         name: 'CEO',
         slug: 'ceo',
-        prompt: 'Own final company-level task confirmation, decomposition, escalation, and integration.',
+        prompt: CEO_POSITION_PROMPT,
         description: 'Default company boss position.',
         rank: 0,
         isCompanyBoss: true,
@@ -1326,6 +1327,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return department;
   });
 
+  app.get('/api/positions/templates', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    return POSITION_TEMPLATES;
+  });
   app.get('/api/positions', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string };

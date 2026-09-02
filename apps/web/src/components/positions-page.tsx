@@ -22,6 +22,7 @@ type Position = {
   updatedAt?: string;
 };
 type Agent = { id: string; companyId: string; positionId?: string | null; name: string; role: string };
+type PositionTemplate = { key: string; name: string; slug: string; isCompanyBoss: boolean; reviewDomain: string | null; description: string; prompt: string };
 
 function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -44,6 +45,7 @@ export function PositionsPage() {
   const [defaultDepartmentId, setDefaultDepartmentId] = useState('');
   const [managerPositionId, setManagerPositionId] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [templates, setTemplates] = useState<PositionTemplate[]>([]);
   const [toast, setToast] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -54,6 +56,23 @@ export function PositionsPage() {
   const selectedPosition = positions.find((position) => position.id === selectedId) ?? null;
   const selectedCompany = companies.find((company) => company.id === companyId) ?? null;
   const assignedAgents = useMemo(() => agents.filter((agent) => agent.positionId === selectedId), [agents, selectedId]);
+  const companyHasBoss = companyPositions.some((position) => position.isCompanyBoss && position.isActive !== false);
+
+  useEffect(() => {
+    api<PositionTemplate[]>('/api/positions/templates').then(setTemplates).catch(() => setTemplates([]));
+  }, []);
+
+  // A template fills the prompt; when drafting a new position it also proposes
+  // name, slug and the boss flag (never a second boss for a company that has one).
+  function applyTemplate(key: string) {
+    const template = templates.find((item) => item.key === key);
+    if (!template) return;
+    setPrompt(template.prompt);
+    if (selectedPosition) return;
+    if (!name.trim()) { setName(template.name); setSlug(template.slug); }
+    if (!description.trim()) setDescription(template.description);
+    if (template.isCompanyBoss && !companyHasBoss) setIsCompanyBoss(true);
+  }
 
   async function refresh(nextCompanyId = companyId, nextSelectedId = selectedId) {
     setError('');
@@ -218,6 +237,13 @@ export function PositionsPage() {
             <label className="check-row"><input type="checkbox" checked={isActive} onChange={(event) => setIsActive(event.target.checked)} /> Active position</label>
           </div>
           <label className="field-label">Description<textarea className="input" rows={3} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Operational authority, scope, and how this position fits into the company hierarchy." /></label>
+          <label className="field-label">Start from a template
+            <span className="field-hint">Fills the prompt with a ready-made role. The operating procedure for a boss, department head, member or reviewer is injected automatically from the org chart, so the prompt only needs personality, expertise and house rules.</span>
+            <select className="input" value="" onChange={(event) => applyTemplate(event.target.value)} disabled={templates.length === 0}>
+              <option value="">{templates.length === 0 ? 'Templates unavailable' : 'Choose a template to apply'}</option>
+              {templates.map((template) => <option key={template.key} value={template.key}>{template.name}: {template.description}</option>)}
+            </select>
+          </label>
           <label className="field-label">Position prompt
             <span className="field-hint">Injected after: You are {name || 'xxxxx'} in agent department of firm {selectedCompany?.name ?? 'yyyy'}.</span>
             <textarea className="input" rows={9} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Define authority, responsibilities, decision style, escalation rules, and limits for this position." />
