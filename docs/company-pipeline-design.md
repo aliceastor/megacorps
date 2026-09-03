@@ -205,6 +205,7 @@ A 是地基;B 是願景的靈魂;E 是「上手好用」的來源。
 1. `external_waits.pollIntervalSeconds` 沒有消費者:沒有 sweep 依間隔把卡重新 dispatch 去檢查外部系統,「輪詢」目前是空的。
 2. `external_waits.timeoutAt` 沒有消費者:逾時不會自動 blocked、不會通知。
 3. Gitea push webhook(`/api/gitea/events`)尚未對接 `external-events`:PR 合進 main 應自動觸發 success 喚醒等待中的卡,這才是「merge 進 main → done」的真閉環。
+4. ~~api-help 只靠手寫清單守覆蓋率~~(2026-09-03 已補):`api-help-coverage.test.ts` 直接從原始碼抽出所有 `app.<method>('/api/...')` 註冊,與目錄雙向比對(缺漏與過期都會紅);做法抄自 mosonlab/anneal 的 `operator-api-docs.test.mjs`。
 - CEO 判斷失誤(小任務走大流程 / 大任務沒 brainstorm):前者成本可接受,後者會在方向確認 checkpoint 被 Client 接住——這正是 checkpoint 阻塞式的價值。
 - 部門主管是 player-coach:允許,prompt 要求優先分配;主管自己接成員卡時審理員不能是自己(規則 4 自動擋)。
 - 一個 agent 同時是多個部門主管:允許但不建議,`head_agent_id` 不設唯一約束。
@@ -214,7 +215,7 @@ A 是地基;B 是願景的靈魂;E 是「上手好用」的來源。
 
 ## 14. 可靠性(提案 §五「三件套」的系統化)
 
-1. **Timeout 分級**:改為 `agents.default_timeout_seconds`(§10),卡覆寫 > agent 預設 > 全域;不再逐卡手填。
+1. **Timeout 分級**:改為 `agents.default_timeout_seconds`(§10),卡覆寫 > agent 預設 > 全域;不再逐卡手填。(2026-09-03 補齊:這個欄位原本只有 dispatch 會讀,API 與 UI 都設不了;現在 `POST/PUT /api/agents` 接受 `defaultTimeoutSeconds`,組織圖的 agent 編輯器有欄位。同批也補上 `positions.reviewDomain` 的 API/UI,職位頁套模板會一併帶入審計域。)
 2. **Watchdog 正式版**:定期掃 `in_progress` 且 heartbeat 過期的 run;A2A adapter 用 `tasks/get` 問 Hermes 該 task 是否還活著(**`a2a-client.ts` 目前沒有 `tasks/get`,要補**);判定死亡 → 釋放鎖、記 task_log、依卡的 retry 政策重派或 blocked + 通知。父卡留言板同步記事件。
 3. **重試 + BLOCKED 協議**:現有(`maxRetries`、`needs_review` 求助、blocked 通知),不動。
 
