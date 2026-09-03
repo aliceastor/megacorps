@@ -244,18 +244,68 @@ export async function addGiteaCollaborator(config: GiteaConfig, orgSlug: string,
   });
 }
 
+// Merge closure (§19) needs pull_request events, not just push. An existing
+// hook created before that (events: ['push']) is patched in place rather than
+// duplicated, so the boot reconcile upgrades every repo on the next start.
+export const GITEA_WEBHOOK_EVENTS = ['push', 'pull_request'] as const;
+
 export async function ensureGiteaRepoWebhook(config: GiteaConfig, orgSlug: string, repoSlug: string, targetUrl: string, fetchImpl?: typeof fetch): Promise<void> {
   const hooks = await giteaFetch(config, `/repos/${orgSlug}/${repoSlug}/hooks`, { fetchImpl });
-  const list = Array.isArray(hooks.json) ? hooks.json as Array<{ config?: { url?: string } }> : [];
-  if (list.some((hook) => hook.config?.url === targetUrl)) return;
+  const list = Array.isArray(hooks.json) ? hooks.json as Array<{ id?: number; events?: string[]; config?: { url?: string } }> : [];
+  const existing = list.find((hook) => hook.config?.url === targetUrl);
+  if (existing) {
+    const events = Array.isArray(existing.events) ? existing.events : [];
+    const missing = GITEA_WEBHOOK_EVENTS.filter((event) => !events.includes(event));
+    if (missing.length === 0 || existing.id === undefined) return;
+    await giteaFetch(config, `/repos/${orgSlug}/${repoSlug}/hooks/${existing.id}`, {
+      method: 'PATCH',
+      body: { active: true, events: [...new Set([...events, ...GITEA_WEBHOOK_EVENTS])] },
+      fetchImpl,
+    });
+    return;
+  }
   await giteaFetch(config, `/repos/${orgSlug}/${repoSlug}/hooks`, {
     method: 'POST',
     body: {
       type: 'gitea',
       active: true,
-      events: ['push'],
+      events: [...GITEA_WEBHOOK_EVENTS],
       config: { url: targetUrl, content_type: 'json' },
     },
     fetchImpl,
+  });
+}
+
+export type GiteaPullRequest = {
+  number?: number;
+  state?: string;
+  merged?: boolean;
+  merged_at?: string | null;
+  merge_commit_sha?: string | null;
+  html_url?: string;
+  head?: { sha?: string; ref?: string } | null;
+  base?: { sha?: string; ref?: string } | null;
+};
+
+// Reads one pull request. A missing PR (deleted repo, wrong number) is a null,
+// not a throw: the merge gate degrades to "no head" instead of failing review.
+export async function giteaPullRequest(config: GiteaConfig, orgSlug: string, repoSlug: string, index: number, fetchImpl?: typeof fetch): Promise<GiteaPullRequest | null> {
+  const response = await giteaFetch(config, `/repos/${orgSlug}/${repoSlug}/pulls/${index}`, { allow: [404], fetchImpl });
+  if (response.status === 404) return null;
+  return (response.json as GiteaPullRequest | null) ?? null;
+}
+
+// Containment check for push payloads that do not list the authorized head
+// (Gitea truncates long pushes). Compares against the newest commits on the
+// branch, which is where a just-merged head always is.
+export async function giteaBranchContainsCommit(config: GiteaConfig, orgSlug: string, repoSlug: string, branch: string, sha: string, options?: { limit?: number; fetchImpl?: typeof fetch }): Promise<boolean> {
+  const limit = Math.min(Math.max(options?.limit ?? 100, 1), 100);
+  const response = await giteaFetch(config, `/repos/${orgSlug}/${repoSlug}/commits?sha=${encodeURIComponent(branch)}&limit=${limit}`, { allow: [404, 409], fetchImpl: options?.fetchImpl });
+  if (response.status !== 200 || !Array.isArray(response.json)) return false;
+  const wanted = sha.trim().toLowerCase();
+  if (!wanted) return false;
+  return (response.json as Array<{ sha?: string }>).some((commit) => {
+    const id = (commit.sha ?? '').toLowerCase();
+    return id.length > 0 && (id === wanted || id.startsWith(wanted) || wanted.startsWith(id));
   });
 }

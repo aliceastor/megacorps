@@ -109,6 +109,9 @@ export const projects = pgTable('projects', {
   pullBeforeRun: boolean('pull_before_run').default(true),
   pushAfterRun: boolean('push_after_run').default(true),
   completionPolicy: text('completion_policy').default('push_or_pr'),
+  // Merge closure (company pipeline §19): an approved card only counts as done
+  // once its authorized head SHA is merged into the default branch.
+  completionRequiresMerge: boolean('completion_requires_merge').notNull().default(false),
   setupCommand: text('setup_command'),
   testCommand: text('test_command'),
   runtimeServices: jsonb('runtime_services').default({}),

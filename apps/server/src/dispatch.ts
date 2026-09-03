@@ -33,6 +33,8 @@ import { HANDOVER_LIMITS, formatHandoverSection, type HandoverInput } from './ca
 import { acceptanceOf, formatBriefCoverage, parseCardBrief } from './card-brief.ts';
 import { dispositionErrors, formatDispositionRules } from './review-panel.ts';
 import { afterAuthorFix, cardIdsAwaitingPanelOrHuman, ensureHumanGate, fixSection, hasOpenReviewRound, openFixRound, openPanelRound, panelRequiredForCard, reviewPanelSlot, sweepReviewRounds } from './review-rounds.ts';
+import { noteMergeGateSkipped, parkForMerge, planMergeGate } from './merge-gate.ts';
+import { sweepExternalWaitTimeouts } from './external-events.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -611,6 +613,9 @@ function projectGitProtocol(company: typeof companies.$inferSelect | null | unde
     '9. Durable non-code deliverables, reports, exports, and handoff docs belong in the project repo too (e.g. a deliverables/ or docs/ folder): commit and push them, then reference them as workProducts. Use the company shared directory only for company-wide reference material, never as the primary home of task output.',
     '10. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, file, or external metadata as applicable. Never use runtime-local file paths as the final artifact reference unless the user explicitly asked for local-only work.',
     '11. If you report status=waiting_on_external, include pollIntervalSeconds when polling is appropriate. Choose the interval yourself based on the external system, minimum 30 seconds.',
+    ...(project.completionRequiresMerge
+      ? [`12. Completion gate: this project counts a card as done only when its pull request is merged into ${project.defaultBranch ?? 'main'}; report the PR URL and head commit SHA as workProducts, and do not push further commits to the PR after review approval unless asked (a new head reopens review).`]
+      : []),
   ].join('\n');
 }
 
@@ -3571,6 +3576,21 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       if (!updated) throw new Error('card_update_failed');
       return updated;
     }
+    // Merge closure (§19): an auto-approval is still an approval, so a
+    // merge-gated project parks the card here too instead of finishing it.
+    const autoMergePlan = await planMergeGate(card);
+    if (autoMergePlan.park) {
+      await parkForMerge(card, autoMergePlan, { fromStatus: card.columnStatus });
+      await addTaskLog({ cardId: card.id, type: 'review', status: 'success', message: `${reason} The card waits for head ${autoMergePlan.headSha} to be merged into ${autoMergePlan.defaultBranch}.` });
+      await addCardMessage({ cardId: card.id, authorType: 'system', action: 'review_auto_approved', body: reason });
+      await resolvePendingApproval(card, 'approved', reason);
+      await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'review', action: 'review.auto_approved_no_reviewer', entityType: 'card', entityId: card.id, details: { reason, mode: reviewMode, mergeGate: true, authorizedHeadSha: autoMergePlan.headSha } });
+      await completeTaskRun(options.taskRunId, { status: 'success', output: reason });
+      const [parked] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
+      if (!parked) throw new Error('card_update_failed');
+      return parked;
+    }
+    await noteMergeGateSkipped(card, autoMergePlan);
     const [updated] = await db.update(kanbanCards).set({
       columnStatus: 'done',
       rollupStatus: 'done',
@@ -3735,8 +3755,13 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     // The human client is the last gate: an agent approval on a requiresApproval
     // card parks it in review for the client instead of finishing it.
     const humanGate = !rejected && Boolean(card.requiresApproval);
-    const targetStatus: CardStatus = rejected ? 'todo' : humanGate ? 'in_review' : 'done';
-    const childBlock = rejected ? null : await completionBlockedByChildren(card, targetStatus);
+    const completionTarget: CardStatus = rejected ? 'todo' : humanGate ? 'in_review' : 'done';
+    const childBlock = rejected ? null : await completionBlockedByChildren(card, completionTarget);
+    // Merge closure (§19): once no gate is left, a project that requires a
+    // merge parks the card on the exact authorized head instead of finishing.
+    const mergePlan = !rejected && !humanGate && !childBlock ? await planMergeGate(card) : null;
+    const mergeParked = mergePlan?.park === true;
+    const targetStatus: CardStatus = rejected ? 'todo' : humanGate ? 'in_review' : mergeParked ? 'waiting_on_external' : 'done';
     const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : targetStatus;
     const [updated] = await db.update(kanbanCards).set({
       columnStatus: effectiveNextStatus,
@@ -3745,7 +3770,9 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       completedAt: effectiveNextStatus === 'done' ? new Date() : null,
       updatedAt: new Date(),
     }).where(eq(kanbanCards.id, card.id)).returning();
-    await addStageLog(card.id, reviewer.id, card.columnStatus, effectiveNextStatus, 'review');
+    // parkForMerge writes its own stage record, so the merge park does not log
+    // the transition twice.
+    if (!mergeParked) await addStageLog(card.id, reviewer.id, card.columnStatus, effectiveNextStatus, 'review');
     await addTaskLog({
       cardId: card.id,
       agentId: reviewer.id,
@@ -3753,7 +3780,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       status: childBlock ? 'queued' : acceptedReviewOutput ? 'success' : 'failed',
       message: childBlock ? childBlock.message : rejected
         ? reviewMode === 'help' ? 'Reviewer provided guidance; card returned to todo for rework.' : 'Review rejected; card returned to todo.'
-        : humanGate ? 'Review passed; waiting for the client to approve.' : reviewMode === 'help' ? 'Reviewer resolved the escalated task; card marked done.' : 'Review passed; card marked done.',
+        : humanGate ? 'Review passed; waiting for the client to approve.' : mergeParked ? 'Review passed; the card waits for its authorized head to be merged.' : reviewMode === 'help' ? 'Reviewer resolved the escalated task; card marked done.' : 'Review passed; card marked done.',
       output: result.output,
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
@@ -3765,7 +3792,9 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: childBlock ? 'review.waiting_on_children' : rejected ? (reviewMode === 'help' ? 'review.revision_requested' : 'review.rejected') : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, mode: reviewMode, childBlock } });
     await completeTaskRun(options.taskRunId, { status: rejected ? 'failed' : 'success', error: rejected ? result.output : null, output: childBlock ? childBlock.message : result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
-    if (!rejected && !childBlock && !humanGate) await cascadeParentStatus(updated.parentCardId);
+    if (mergePlan?.park) await parkForMerge(updated, mergePlan, { approvedBy: reviewer.id, fromStatus: card.columnStatus });
+    else if (mergePlan) await noteMergeGateSkipped(updated, mergePlan);
+    if (!rejected && !childBlock && !humanGate && !mergeParked) await cascadeParentStatus(updated.parentCardId);
     return updated;
   } catch (error) {
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
@@ -4058,6 +4087,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
       try { await sweepClientCheckpointReminders(app); } catch (error) { app.log.warn({ error }, 'client checkpoint reminder sweep failed'); }
       try { await sweepBrainstormRounds(app); } catch (error) { app.log.warn({ error }, 'brainstorm round sweep failed'); }
       try { await sweepReviewRounds(app); } catch (error) { app.log.warn({ error }, 'review round sweep failed'); }
+      try { await sweepExternalWaitTimeouts(app); } catch (error) { app.log.warn({ error }, 'external wait timeout sweep failed'); }
       // Only statuses the loop can act on; done/blocked/cancelled/in_progress cards
       // used to be loaded and skipped one by one, which scales badly with board size.
       const cards = await db.select().from(kanbanCards).where(and(

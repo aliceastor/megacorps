@@ -33,7 +33,8 @@ import {
   toolRegistry,
   workProducts,
 } from './db/schema.ts';
-import { buildCompanyKanbanContext, cascadeParentStatus, completionBlockedByChildren, enqueueTaskRun } from './dispatch.ts';
+import { buildCompanyKanbanContext } from './dispatch.ts';
+import { applyExternalEvent, rootCardId } from './external-events.ts';
 import { publishLiveEvent } from './live.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
@@ -64,18 +65,6 @@ async function operatorCard(request: Parameters<typeof requireCompanyRole>[0], r
   }
   const user = await requireCompanyRole(request, reply, card.companyId, 'operator');
   return user ? { card, user } : null;
-}
-
-async function rootCardId(card: CardRow): Promise<string> {
-  let current = card;
-  const seen = new Set<string>();
-  while (current.parentCardId && !seen.has(current.parentCardId)) {
-    seen.add(current.id);
-    const [parent] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, current.parentCardId), isNull(kanbanCards.deletedAt))).limit(1);
-    if (!parent) break;
-    current = parent;
-  }
-  return current.id;
 }
 
 function statusPercent(status: string | null | undefined): number {
@@ -367,56 +356,14 @@ export async function registerLifecycleRoutes(app: FastifyInstance): Promise<voi
     const companyId = input.companyId ?? card.companyId;
     if (companyId !== card.companyId) return reply.code(400).send({ error: 'external_event_company_mismatch' });
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
-    const now = new Date();
-    const [event] = await db.insert(externalEvents).values({
-      companyId,
-      projectId: input.projectId ?? card.projectId,
-      rootCardId: input.rootCardId ?? await rootCardId(card),
-      cardId: card.id,
-      provider: input.provider,
-      eventType: input.eventType,
-      externalId: input.externalId ?? null,
-      externalUrl: input.externalUrl ?? null,
-      status: input.status,
-      payloadHash: hashValue(input.payload),
-      payloadSummary: input.payloadSummary ?? null,
-      payload: input.payload,
-      processedAt: now,
-    }).returning();
-    await db.update(externalWaits).set({ status: input.status, resolvedAt: input.status === 'waiting' || input.status === 'info' ? undefined : now }).where(and(eq(externalWaits.cardId, card.id), eq(externalWaits.status, 'waiting')));
-    let nextStatus = card.columnStatus;
-    if (input.status === 'success') nextStatus = card.reviewerId ? 'in_review' : 'done';
-    if (input.status === 'failure' || input.status === 'cancelled') nextStatus = card.assigneeId ? 'in_progress' : 'blocked';
-    if (input.status === 'timeout') nextStatus = 'blocked';
-    if (nextStatus !== card.columnStatus && nextStatus) {
-      const fromStatus = normalizeCardStatus(card.columnStatus) ?? 'todo';
-      const requestedToStatus = normalizeCardStatus(nextStatus) ?? fromStatus;
-      const childBlock = await completionBlockedByChildren(card, requestedToStatus);
-      const toStatus = childBlock ? 'in_progress' : requestedToStatus;
-      nextStatus = toStatus;
-      await db.update(kanbanCards).set({
-        columnStatus: toStatus,
-        rollupStatus: childBlock ? 'waiting_on_children' : toStatus === 'done' ? 'done' : undefined,
-        lastError: toStatus === 'blocked' ? input.payloadSummary ?? `${input.provider} ${input.eventType} ${input.status}` : null,
-        completedAt: toStatus === 'done' ? now : null,
-        updatedAt: now,
-      }).where(eq(kanbanCards.id, card.id));
-      const action = input.status === 'success'
-        ? 'external_success'
-        : toStatus === 'in_progress'
-          ? 'external_failure'
-          : toStatus === 'blocked'
-            ? 'block'
-            : 'manual_move';
-      await recordStageAction({ cardId: card.id, agentId: card.assigneeId, actor: { type: 'user', id: user.id, userId: user.id }, fromStatus, toStatus, action, detail: childBlock ? `External ${input.provider}/${input.eventType} reported ${input.status}; ${childBlock.message}` : `External ${input.provider}/${input.eventType} reported ${input.status}.`, metadata: { externalEventId: event?.id, requestedToStatus, childBlock } });
-      if (childBlock) await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'children', status: 'queued', message: childBlock.message });
-      if (toStatus === 'in_review') await enqueueTaskRun(card.id, 'review', 'queue');
-      if (toStatus === 'done') await cascadeParentStatus(card.parentCardId);
-    }
-    await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'webhook', status: input.status === 'failure' || input.status === 'timeout' ? 'failed' : 'success', message: `External event ${input.provider}/${input.eventType}: ${input.status}`, output: input.payloadSummary ?? undefined });
-    await db.insert(activityLog).values({ companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: card.assigneeId, action: 'external_event.received', entityType: 'card', entityId: card.id, details: { externalEventId: event?.id, provider: input.provider, eventType: input.eventType, status: input.status } });
-    publishLiveEvent({ type: 'card.updated', companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'external_event.received' });
-    return reply.code(201).send({ event, newStatus: nextStatus });
+    // The transition itself lives in external-events.ts so the Gitea receiver
+    // and the timeout sweep wake cards exactly the same way.
+    const { event, newStatus } = await applyExternalEvent({
+      card,
+      actor: { type: 'user', id: user.id, userId: user.id },
+      input: { ...input, companyId },
+    });
+    return reply.code(201).send({ event, newStatus });
   });
 
   app.get('/api/tools', async (request, reply) => {

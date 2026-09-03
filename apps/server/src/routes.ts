@@ -13,6 +13,7 @@ import { adapterRequiresRuntime } from './adapters/config.ts';
 import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, processMentionQuestions, processReportNotes, reportNotesFromOutput, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest, finishRunWaitingOnBrainstorm, resolveBrainstormRequest, recordReviewScore } from './dispatch.ts';
 import { afterAuthorFix, completePanelReviewFromWebhook, ensureHumanGate, hasOpenReviewRound, listReviewRounds, openFixRound, openPanelRound, panelRequiredForCard } from './review-rounds.ts';
 import { dispositionErrors, formatDispositionRules } from './review-panel.ts';
+import { handleGiteaWebhookEvent, noteMergeGateSkipped, parkForMerge, planMergeGate } from './merge-gate.ts';
 import { brainstormFromOutput } from './brainstorm.ts';
 import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointFromOutput } from './client-checkpoints.ts';
 import { registerChatRoutes } from './chat.ts';
@@ -851,10 +852,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (approval.cardId) {
       const card = approvalCard;
       if (card && input.status !== 'cancelled') {
-        const nextStatus = input.status === 'approved' ? 'done' : 'todo';
+        // Merge closure (§19): human approval is the last review gate, and the
+        // merge gate sits after it. An approved card on a merge-gated project
+        // parks on its authorized head instead of going straight to done.
+        const mergePlan = input.status === 'approved' ? await planMergeGate(card) : null;
+        const nextStatus = input.status === 'approved' ? (mergePlan?.park ? 'waiting_on_external' : 'done') : 'todo';
         await db.update(kanbanCards).set({ columnStatus: nextStatus, completedAt: nextStatus === 'done' ? new Date() : null, reviewFeedback: input.decisionNote ?? card.reviewFeedback, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
         await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'approval', status: input.status === 'approved' ? 'success' : 'failed', message: `Approval ${input.status} by ${actorLabel(user)}.`, output: input.decisionNote });
-        await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by approval.` });
+        if (mergePlan?.park) {
+          await parkForMerge(card, mergePlan, { approvedBy: user.id, actor: { type: 'user', id: user.id, userId: user.id }, fromStatus: card.columnStatus });
+        } else {
+          if (mergePlan) await noteMergeGateSkipped(card, mergePlan);
+          await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by approval.` });
+        }
       }
     }
     await db.insert(activityLog).values({ companyId: approval.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: `approval.${input.status}`, entityType: 'approval', entityId: approval.id, details: { cardId: approval.cardId, note: input.decisionNote } });
@@ -2419,6 +2429,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       pullBeforeRun: input.pullBeforeRun,
       pushAfterRun: input.pushAfterRun,
       completionPolicy: input.completionPolicy,
+      // Merge closure (§19): the bundled Gitea is the version control MegaCorps
+      // administers, so a new gitea-local project defaults to the merge gate;
+      // every other provider keeps today's behaviour unless asked.
+      completionRequiresMerge: input.completionRequiresMerge ?? input.repoProvider === 'gitea-local',
       setupCommand: input.setupCommand ?? null,
       testCommand: input.testCommand ?? null,
       runtimeServices: input.runtimeServices,
@@ -2448,6 +2462,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       pullBeforeRun: input.pullBeforeRun,
       pushAfterRun: input.pushAfterRun,
       completionPolicy: input.completionPolicy,
+      completionRequiresMerge: input.completionRequiresMerge,
       setupCommand: input.setupCommand,
       testCommand: input.testCommand,
       runtimeServices: input.runtimeServices,
@@ -2623,14 +2638,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { ok: true, matched: true, accelerated };
   });
 
-  // Push events from the bundled Gitea. Auth is a URL token (set when the
-  // webhook is registered) rather than HMAC, because Fastify has already
-  // consumed the raw body here; the token is random and intranet-only.
+  // Push and pull_request events from the bundled Gitea. Auth is a URL token
+  // (set when the webhook is registered) rather than HMAC, because Fastify has
+  // already consumed the raw body here; the token is random and intranet-only.
+  // Merge closure (§19): after the activity record, the payload is routed to
+  // the merge gate, which only recognises the exact head review authorized.
   app.post('/api/gitea/events', async (request, reply) => {
     const token = (request.query as { token?: string }).token;
     const expected = await ensureGiteaWebhookToken();
     if (!token || !safeSecretEqual(token, expected)) return reply.code(401).send({ error: 'gitea_webhook_auth_required' });
-    const body = request.body as { ref?: string; repository?: { full_name?: string }; commits?: Array<{ id?: string; message?: string }>; pusher?: { username?: string } } | null;
+    const header = request.headers['x-gitea-event'];
+    const eventName = (Array.isArray(header) ? header[0] : header)?.trim().toLowerCase() || 'push';
+    const body = request.body as { ref?: string; repository?: { full_name?: string }; commits?: Array<{ id?: string; message?: string }>; pusher?: { username?: string }; action?: string; number?: number; pull_request?: { number?: number; merged?: boolean; html_url?: string; head?: { sha?: string; ref?: string } | null; base?: { sha?: string; ref?: string } | null } | null } | null;
     const repoFullName = body?.repository?.full_name ?? 'unknown/unknown';
     const orgSlug = repoFullName.split('/')[0] ?? '';
     const [company] = await db.select().from(companies).where(eq(companies.slug, orgSlug)).limit(1);
@@ -2639,19 +2658,34 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       companyId,
       actorType: 'system',
       actorId: 'gitea',
-      action: 'gitea.push',
+      action: eventName === 'pull_request' ? 'gitea.pull_request' : 'gitea.push',
       entityType: 'repository',
       entityId: companyId,
-      details: {
-        repository: repoFullName,
-        ref: body?.ref ?? null,
-        commits: body?.commits?.length ?? 0,
-        pusher: body?.pusher?.username ?? null,
-        lastCommit: body?.commits?.[body.commits.length - 1]?.message?.slice(0, 200) ?? null,
-      },
+      details: eventName === 'pull_request'
+        ? {
+          repository: repoFullName,
+          prAction: body?.action ?? null,
+          pullRequest: body?.pull_request?.number ?? body?.number ?? null,
+          merged: body?.pull_request?.merged ?? false,
+          head: body?.pull_request?.head?.sha ?? null,
+          base: body?.pull_request?.base?.ref ?? null,
+        }
+        : {
+          repository: repoFullName,
+          ref: body?.ref ?? null,
+          commits: body?.commits?.length ?? 0,
+          pusher: body?.pusher?.username ?? null,
+          lastCommit: body?.commits?.[body.commits.length - 1]?.message?.slice(0, 200) ?? null,
+        },
     });
-    publishLiveEvent({ type: 'gitea.push', companyId, entityType: 'repository', entityId: companyId });
-    return { ok: true };
+    publishLiveEvent({ type: eventName === 'pull_request' ? 'gitea.pull_request' : 'gitea.push', companyId, entityType: 'repository', entityId: companyId });
+    let merge: Awaited<ReturnType<typeof handleGiteaWebhookEvent>> = { event: eventName, matched: 0, outcomes: [] };
+    try {
+      merge = await handleGiteaWebhookEvent({ eventName, payload: body ?? {}, app });
+    } catch (error) {
+      app.log.warn({ error, repository: repoFullName, eventName }, 'gitea merge closure could not process the event');
+    }
+    return { ok: true, event: merge.event, matchedWaits: merge.matched, outcomes: merge.outcomes };
   });
 
   // Provision (or re-provision) the Gitea identity for one agent and grant it

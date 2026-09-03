@@ -28,7 +28,17 @@ const migrations: Migration[] = [
   { version: 15, name: 'agent-review-scores', run: runAgentReviewScores },
   { version: 16, name: 'ceo-position-prompt', run: runCeoPositionPrompt },
   { version: 17, name: 'review-panel', run: runReviewPanel },
+  { version: 18, name: 'merge-closure', run: runMergeClosure },
 ];
+
+// Merge closure (company pipeline §19). external_waits.authorized_head_sha
+// already landed with v17, so this only adds the project switch and the index
+// the Gitea receiver uses to find open waits by provider.
+async function runMergeClosure(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS completion_requires_merge BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS external_waits_provider_status_idx ON external_waits(provider, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS external_waits_status_timeout_idx ON external_waits(status, timeout_at);`);
+}
 
 // Blind review panel + adjudicated fixes (company pipeline §17), the card
 // brief (§18) and the merge-closure head SHA reserved for §19.

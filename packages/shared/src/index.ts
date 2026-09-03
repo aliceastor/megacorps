@@ -560,6 +560,11 @@ export const createProjectSchema = z.object({
   pullBeforeRun: z.boolean().default(true),
   pushAfterRun: z.boolean().default(true),
   completionPolicy: z.enum(['push_branch', 'pull_request', 'push_or_pr', 'manual']).default('push_or_pr'),
+  // Merge closure (company pipeline §19): when true an approved card parks on
+  // waiting_on_external until the exact authorized head lands on the default
+  // branch. No default here so a partial PUT cannot silently flip it; POST
+  // /api/projects turns it on for new gitea-local projects.
+  completionRequiresMerge: z.boolean().optional(),
   setupCommand: z.string().trim().max(2000).nullable().optional(),
   testCommand: z.string().trim().max(2000).nullable().optional(),
   runtimeServices: z.record(z.string(), z.unknown()).default({}),

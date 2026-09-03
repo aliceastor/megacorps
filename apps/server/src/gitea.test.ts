@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createGiteaAccessToken, giteaAgentUsername, giteaAuthenticatedCloneUrl, giteaCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv, giteaRequestUrl, giteaSlug, giteaWebhookCallbackUrl, isGiteaProvisioningRetryable } from './gitea.ts';
+import { createGiteaAccessToken, ensureGiteaRepoWebhook, giteaAgentUsername, giteaAuthenticatedCloneUrl, giteaBranchContainsCommit, giteaCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv, giteaPullRequest, giteaRequestUrl, giteaSlug, giteaWebhookCallbackUrl, isGiteaProvisioningRetryable } from './gitea.ts';
 import { redactPromptForLog } from './prompt-logs.ts';
 
 test('giteaSlug normalizes names to Gitea-safe slugs', () => {
@@ -137,4 +137,72 @@ test('giteaCloneUrlForAgent rewrites onto a pinned bridge IP internal origin', (
     giteaCloneUrlForAgent('http://192.168.1.180:3300/auroria/testing-new-system.git', config),
     'http://172.16.22.6:3000/auroria/testing-new-system.git',
   );
+});
+
+test('ensureGiteaRepoWebhook creates a hook subscribed to push and pull_request', async () => {
+  const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    calls.push({ url: String(url), method, body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined });
+    if (method === 'GET') return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ id: 7 }), { status: 201, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const config = giteaConfigFromEnv({ GITEA_URL: 'http://gitea:3000', GITEA_ADMIN_TOKEN: 'tok' } as NodeJS.ProcessEnv)!;
+  await ensureGiteaRepoWebhook(config, 'mega-corps', 'website', 'http://server:4000/api/gitea/events?token=t', fetchImpl);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]?.method, 'POST');
+  assert.equal(calls[1]?.url, 'http://gitea:3000/api/v1/repos/mega-corps/website/hooks');
+  assert.deepEqual((calls[1]?.body as { events?: string[] })?.events, ['push', 'pull_request']);
+});
+
+test('ensureGiteaRepoWebhook patches a push-only hook instead of duplicating it', async () => {
+  const target = 'http://server:4000/api/gitea/events?token=t';
+  const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    calls.push({ url: String(url), method, body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined });
+    if (method === 'GET') {
+      return new Response(JSON.stringify([{ id: 42, events: ['push'], config: { url: target } }]), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ id: 42 }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const config = giteaConfigFromEnv({ GITEA_URL: 'http://gitea:3000', GITEA_ADMIN_TOKEN: 'tok' } as NodeJS.ProcessEnv)!;
+  await ensureGiteaRepoWebhook(config, 'mega-corps', 'website', target, fetchImpl);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]?.method, 'PATCH');
+  assert.equal(calls[1]?.url, 'http://gitea:3000/api/v1/repos/mega-corps/website/hooks/42');
+  assert.deepEqual((calls[1]?.body as { events?: string[] })?.events, ['push', 'pull_request']);
+});
+
+test('ensureGiteaRepoWebhook leaves an already complete hook alone', async () => {
+  const target = 'http://server:4000/api/gitea/events?token=t';
+  const calls: string[] = [];
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push(`${init?.method ?? 'GET'} ${String(url)}`);
+    return new Response(JSON.stringify([{ id: 42, events: ['push', 'pull_request'], config: { url: target } }]), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const config = giteaConfigFromEnv({ GITEA_URL: 'http://gitea:3000', GITEA_ADMIN_TOKEN: 'tok' } as NodeJS.ProcessEnv)!;
+  await ensureGiteaRepoWebhook(config, 'mega-corps', 'website', target, fetchImpl);
+  assert.deepEqual(calls, ['GET http://gitea:3000/api/v1/repos/mega-corps/website/hooks']);
+});
+
+test('giteaPullRequest returns the head SHA and null for a missing pull request', async () => {
+  const config = giteaConfigFromEnv({ GITEA_URL: 'http://gitea:3000', GITEA_ADMIN_TOKEN: 'tok' } as NodeJS.ProcessEnv)!;
+  const found = (async () => new Response(JSON.stringify({ number: 12, merged: false, head: { sha: 'abc123def456', ref: 'megacorps/card-1' }, base: { ref: 'main' } }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+  assert.equal((await giteaPullRequest(config, 'mega-corps', 'website', 12, found))?.head?.sha, 'abc123def456');
+  const missing = (async () => new Response('not found', { status: 404 })) as typeof fetch;
+  assert.equal(await giteaPullRequest(config, 'mega-corps', 'website', 99, missing), null);
+});
+
+test('giteaBranchContainsCommit matches full and short SHAs from the branch history', async () => {
+  const config = giteaConfigFromEnv({ GITEA_URL: 'http://gitea:3000', GITEA_ADMIN_TOKEN: 'tok' } as NodeJS.ProcessEnv)!;
+  let requested = '';
+  const fetchImpl = (async (url: string | URL | Request) => {
+    requested = String(url);
+    return new Response(JSON.stringify([{ sha: 'aaaabbbbccccdddd' }, { sha: 'eeeeffff00001111' }]), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  assert.equal(await giteaBranchContainsCommit(config, 'mega-corps', 'website', 'main', 'aaaabbbbccccdddd', { fetchImpl }), true);
+  assert.match(requested, /\/repos\/mega-corps\/website\/commits\?sha=main&limit=100$/);
+  assert.equal(await giteaBranchContainsCommit(config, 'mega-corps', 'website', 'main', 'aaaabbb', { fetchImpl }), true);
+  assert.equal(await giteaBranchContainsCommit(config, 'mega-corps', 'website', 'main', '1234567890abcdef', { fetchImpl }), false);
 });

@@ -25,6 +25,7 @@ import { REVIEWER_PLAYBOOK } from './role-playbooks.ts';
 import { acceptanceOf } from './card-brief.ts';
 import { composeReviewPanel, dispositionWarnings, findingIsOpen, formatDispositionRules, formatFindingsForPrompt, formatRoundClosedMessage, formatVerifyInstructions, mergeFindings, nextFixOwner, normalizeFindingKey, normalizeSeverity, panelRequired, roundDecision, takeoverTrigger, verificationDecision, type FindingRow, type MergedFinding, type ReviewVerdict, type TakeoverTrigger, type VerificationInput } from './review-panel.ts';
 import { addActivity, addCardMessage, addStageLog, addTaskLog, budgetOk, buildExecutionAgent, buildReviewPrompt, cardTaskTimeoutSeconds, cascadeParentStatus, claimAgentCapacity, clipText, completeTaskRun, completionBlockedByChildren, createPendingApproval, dispatchInternals, enqueuePanelReviewRun, enqueueTaskRun, openHeartbeatRun, recordCostAndEnforceBudget, recordReviewScore, rememberTaskAdapterSession, resolvePendingApproval, scopedAdapterSession } from './dispatch.ts';
+import { noteMergeGateSkipped, parkForMerge, planMergeGate } from './merge-gate.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -727,6 +728,17 @@ async function approveAfterRound(card: CardRow, round: ReviewRoundRow): Promise<
     await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'review-panel', agentId: round.authorAgentId, action: 'review.awaiting_client', entityType: 'card', entityId: card.id, details: { roundId: round.id, round: round.round } });
     return;
   }
+  // Merge closure (§19): the panel's approval authorizes one exact head; the
+  // card parks on that merge instead of finishing.
+  const mergePlan = await planMergeGate(card);
+  if (mergePlan.park) {
+    await parkForMerge(card, mergePlan, { approvedBy: round.authorAgentId, fromStatus: card.columnStatus });
+    await addTaskLog({ cardId: card.id, agentId: round.authorAgentId, type: 'review', status: 'success', message: `Blind ${round.kind} review round ${round.round} approved; waiting for head ${mergePlan.headSha} to be merged into ${mergePlan.defaultBranch}.` });
+    await resolvePendingApproval(card, 'approved', `Blind review round ${round.round} approved the card.`);
+    await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'review-panel', agentId: round.authorAgentId, action: 'review.approved', entityType: 'card', entityId: card.id, details: { roundId: round.id, round: round.round, kind: round.kind, panel: true, mergeGate: true, authorizedHeadSha: mergePlan.headSha } });
+    return;
+  }
+  await noteMergeGateSkipped(card, mergePlan);
   const [updated] = await db.update(kanbanCards).set({
     columnStatus: 'done',
     rollupStatus: 'done',
