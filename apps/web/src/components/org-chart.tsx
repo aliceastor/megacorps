@@ -22,6 +22,7 @@ type Agent = {
   runtimeId?: string | null;
   bossId?: string | null;
   capabilities?: string[] | null;
+  defaultTimeoutSeconds?: number | null;
   isBusy?: boolean;
   isActive?: boolean;
   budgetPerTask?: string;
@@ -199,6 +200,8 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       departmentId: selected.departmentId ?? '',
       positionId: selected.positionId ?? '',
       budgetMonthly: selected.budgetMonthly ?? '',
+      capabilities: selected.capabilities ?? [],
+      defaultTimeoutSeconds: selected.defaultTimeoutSeconds ?? null,
     });
   }, [selected?.id]);
   useEffect(() => {
@@ -357,6 +360,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
         role: selected.role || 'worker',
         soul: selected.soul ?? null,
         capabilities: agentDraft?.capabilities ?? selected.capabilities ?? [],
+        defaultTimeoutSeconds: agentDraft?.defaultTimeoutSeconds === undefined ? selected.defaultTimeoutSeconds ?? null : agentDraft.defaultTimeoutSeconds,
         adapterType: String(agentDraft.adapterType ?? selected.adapterType ?? 'hermes-ssh'),
         adapterConfig: agentDraft.adapterConfig ?? {},
         runtimeId: agentDraft.runtimeId || null,
@@ -663,6 +667,10 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
               <label className="field-label">{t('agents.capabilities')}
                 <span className="field-hint">{t('agents.capabilitiesHint')}</span>
                 <input className="input" value={(agentDraft?.capabilities ?? []).join(', ')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), capabilities: e.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} placeholder="typescript, postgres, technical writing" />
+              </label>
+              <label className="field-label">{t('agents.defaultTimeout')}
+                <span className="field-hint">{t('agents.defaultTimeoutHint')}</span>
+                <input className="input" type="number" min={30} max={14400} value={agentDraft?.defaultTimeoutSeconds ?? ''} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), defaultTimeoutSeconds: e.target.value ? Number(e.target.value) : null })} placeholder="900" />
               </label>
               <label className="field-label">{t('common.slug')}<input className="input" value={String(agentDraft?.slug ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), slug: e.target.value })} /></label>
               <label className="field-label">{t('agents.profile')}<input className="input" value={String(agentDraft?.hermesProfile ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), hermesProfile: e.target.value })} /></label>

@@ -169,7 +169,12 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.match(JSON.stringify(actionEndpoint?.responseSchema), /detail/);
   const webhookEndpoint = catalog.endpoints.find((endpoint) => endpoint.path === '/api/webhook/task-complete');
   assert.match(webhookEndpoint?.summary ?? '', /queues quality review/i);
-  assert.match(webhookEndpoint?.summary ?? '', /one-time per agent/i);
+  // Forced delegation was retired with the org-shaped split rules; the summary
+  // must describe the report fields agents actually have today.
+  assert.doesNotMatch(webhookEndpoint?.summary ?? '', /one-time per agent/i);
+  assert.match(webhookEndpoint?.summary ?? '', /report\.children/);
+  assert.match(webhookEndpoint?.summary ?? '', /report\.notes/);
+  assert.match(webhookEndpoint?.summary ?? '', /@client/);
   assert.match(webhookEndpoint?.summary ?? '', /committed and pushed to the project repo/);
   const runnerCompleteEndpoint = catalog.endpoints.find((endpoint) => endpoint.path === '/api/runner/task-runs/:id/complete');
   assert.match(runnerCompleteEndpoint?.summary ?? '', /quality review/i);

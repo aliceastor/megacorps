@@ -250,6 +250,8 @@ export const createPositionSchema = z.object({
   slug: z.string().trim().regex(/^[a-z0-9-]+$/).max(80),
   prompt: z.string().trim().max(8000).nullable().optional(),
   description: z.string().trim().max(2000).nullable().optional(),
+  // Review domain (code, content, ...) under which this position scores reviews; feeds the agent CV.
+  reviewDomain: z.string().trim().max(40).nullable().optional(),
   rank: z.number().int().min(0).max(10000).default(100),
   isCompanyBoss: z.boolean().default(false),
   canDelegateAcrossDepartments: z.boolean().default(false),
@@ -283,6 +285,8 @@ export const createAgentSchema = z.object({
   budgetPerTask: z.number().nonnegative().optional(),
   budgetMonthly: z.number().nonnegative().optional(),
   maxConcurrent: z.number().int().min(1).max(16).optional(),
+  // Per-agent task timeout: card override > this > global Kanban timeout.
+  defaultTimeoutSeconds: z.number().int().min(30).max(14_400).nullable().optional(),
   memoryConfig: z.object({
     enabled: z.boolean().optional(),
     idleMinutes: z.number().int().min(1).max(1440).optional(),
