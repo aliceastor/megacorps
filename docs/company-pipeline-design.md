@@ -248,6 +248,32 @@ A 是地基;B 是願景的靈魂;E 是「上手好用」的來源。
 
 **未做 / 待實際使用後決定**:PR-4 拆舊分頁與切換;sticky header;文字搜尋;Markdown 渲染;審核分數 chip(端點已有,UI 未接);人工 smoke(未起本機服務,機器記憶體有限)——PR-2 / PR-3 的檢查清單在各 commit 的 agent 報告裡,重點是七種撰寫動作各送一次、@mention 一次、切回舊版比對「委派與審核」計數。
 
+## 17. 多 agent 盲審 + 自裁決修復 + 沿 boss 鏈接手(2026-09-03 定案,抄自 anneal 並改成組織版)
+
+**原則**:審查者只出結構化 findings、絕不動手;修的人是作者;「換人修」是分配決策,沿 boss 鏈往上接手,部門頂層也修不好才找人;難度分流在派工時做(`critical` 旗標 + 資源視圖),審查後換人是補救不是常態。
+
+**卡片欄位**:`review_mode` = `single | panel`(預設 single;公司層 `panel_review_default` = `critical_only | always | never`,預設 critical_only);`critical`(碰持久資料或不可逆外部動作,anneal 的定義;agent 在 `report.children[].critical` 可設,人在表單勾);`reviewer_ids`(小組,最多 2 人);`review_round`;`revision_count` 改義為「本層修復輪數」,接手時歸零;`max_revisions` = 每層上限(預設 3,可調)。
+
+**小組組成**(`review-panel.ts` 純函數 `composeReviewPanel`):合格 = 活躍、不是作者、且(職位 `review_domain` 相符,或是作者部門的主管);順序:卡上指定的 → 部門主管 → 同部門同域 → 跨部門同域 → 作者的 boss 鏈。目標 2 人;只有 1 人合格就單盲並在事件上標 `panel_degraded`;0 人合格:critical 卡必須有人類審批(`requiresApproval`),非 critical 沿用自動通過但事件標 `review_unavailable`、CV 不記分。CEO 不當程式碼審查者,只做目標驗收(他本來就是父卡負責人)。
+
+**輪次**(表 `review_rounds`:round、kind = `panel | verify`、reviewer_ids、status、timeout、decision、author、level):
+1. 卡進 in_review 且模式為 panel → 開 panel 輪:每位審查者一個 `panel_review` task run(以各自的 sealed slot 留言為 `message_comment_id`,繞過「每卡每 kind 一個 run」的唯一索引),輸入完全相同:brief 與 Acceptance、diff / 產出、執行輸出、留言板(不含本輪任何審查內容)。審查者在輪關閉前看不到彼此;findings 存表 `review_findings`(round、reviewer、finding_key、severity P0/P1/P2、file、line、title、evidence、required_fix、disposition、reason、code/test evidence、verification),不進留言板。
+2. 全部交件或逾時(`PANEL_REVIEW_TIMEOUT_MINUTES`,預設 60)→ 關輪:合併去重(file+line+標題相似,取較高 severity)、貼一則 `review_round_closed` 里程碑、每位審查者的 0–10 分照常進 CV。裁決:沒有未關閉的 P0/P1 且審查者都 approve → 通過;否則退回作者。
+3. 作者修復輪:prompt 帶每條 finding 與規則——逐條裁決 `adopted | rejected | merged`,P0/P1 只能以「不可達」或「已被另一條覆蓋」拒絕且必附理由,修完附 code 與 test 證據,push,報告 `dispositions[]`。漏掉任一條或 P0/P1 無理由拒絕 → 報告被退回重報(既有 `sendAgentFeedbackAndRequeue` 模式)。作者可回 `escalation: { reason }` 表示超出能力或授權。
+4. 複核輪(kind = verify):同一組審查者只看已關閉的 findings 是否真的關閉、被拒的理由站不站得住,回 `verifications[]`;全部確認 → 通過,否則再退回,本層 `revision_count` +1。
+5. **接手階梯**:觸發 = 作者回 escalation、本層輪數到 `max_revisions`、或全體審查者對同一條 P0 標 `reassign`。作者的 boss(部門內)接手:走既有 handoff,findings 成為交接內容,`revision_count` 歸零、level +1,小組剔除新作者(補位或降為單盲);作者的 CV 記退件,接手者之後記補救。作者已是部門主管 → 找人:建 `task_review` 審批(payload 帶 findings 與歷程),卡停在 in_review 等你決定(接受 / 退回主管 / 取消)。CEO 不在程式碼接手鏈上。
+6. **人類審批是最後一道閘**:`requiresApproval` 的卡在 agent 審查通過後停在 in_review 等你核准,不再直接 done(修掉現況:只有 requiresApproval、沒有 agent 審查者且負責人無 boss 的卡會直接完成)。
+
+**成本**:預設單審;panel 只在 critical 或主管點選;複核輪只看已關閉項;輪數每層有上限。
+
+## 18. 卡片 brief(2026-09-03 定案,抄自 anneal 的 BRIEF-TEMPLATE)
+
+專案層已有 description 與三層 goals(卡片以 goalId 連結,prompt 注入「適用目標」);缺的是卡片自己的結構。卡片 body 維持 markdown,但用固定小節:`## Goal` / `## Background` / `## Changes`(逐條可對 diff 驗證)/ `## Out of scope`(必填)/ `## Constraints` / `## Acceptance`(機械可驗);中英標題都認(目標 / 背景 / 變更 / 範圍外 / 限制 / 驗收)。`card-brief.ts` 純函數:解析小節、抽 Acceptance(沒有標題時寬鬆偵測 `- [ ]` 清單或含「驗收 / acceptance」的段落)、模板、完整度。用法:建卡表單「插入 brief 模板」;agent 拆子卡(`report.children[].body`)必須有 Acceptance,否則 `split_child_missing_acceptance`(既有 40 字下限不變);審查 prompt 把 Acceptance 明列為判準;概要區顯示 Acceptance 清單與缺漏小節。
+
+## 19. Merge 閉環:只認 exact head(2026-09-03 定案,抄自 anneal 的 merge readiness)
+
+內建 Gitea 是所有專案的版本控制,不只 coding 專案,所以「合進預設分支」就是 done 的真閉環。專案層 `completion_requires_merge`(gitea-local 新專案預設開,既有專案預設關,UI 可調)。開啟時:審查通過(含人類審批)後卡不直接 done,而是 `waiting_on_external`,`external_waits` 記 provider gitea、PR 號或分支、以及**授權的 head SHA**(新欄位 `authorized_head_sha`)。Gitea webhook 訂閱 push 與 pull_request(既有 hook 缺事件就 PATCH 補上):`pull_request closed + merged` 且 head.sha 等於授權 head 且 base 是預設分支 → success → done;head 不同(授權後又推了 commit)或 `synchronize` 事件 → drift:記錄事件、貼 `merge_drift` 留言、卡回 in_review 重開審查,舊授權作廢;closed 未合併 → failure → in_progress;push 到預設分支且 commits 含授權 head(payload 沒有就用 Gitea API 查包含關係)→ success(push_branch 政策用)。沒有 repo 的專案行為不變。順手補 §13 第 2 項:`external_waits.timeout_at` 到期 → blocked 並通知。
+
 ## 附錄 A:現有組織與本設計的角色對照
 
 | 提案用語 | 本設計角色 | 系統對應 |
