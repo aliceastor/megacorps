@@ -1,4 +1,5 @@
 import type { AgentReportChild, DecisionMode } from '@megacorps/shared';
+import { hasAcceptance } from './card-brief.ts';
 
 // Org-shaped card splitting: the pure rule set that decides whether an agent's
 // request to split a card into child cards is allowed. No database access, so
@@ -85,6 +86,11 @@ export function evaluateSplitPlan(context: SplitContext, children: AgentReportCh
   const seenDepartments = new Map<string, number>();
 
   children.forEach((child, index) => {
+    // Card brief (§18): a child's reviewer judges against its acceptance
+    // criteria, so a child without any is not a deliverable yet.
+    if (!hasAcceptance(child.body)) {
+      errors.push(`split_child_missing_acceptance[${index}]: child card body must contain an Acceptance section or a checklist of acceptance criteria.`);
+    }
     const assignee = reportBySlug.get(child.assigneeSlug);
     if (!assignee) {
       errors.push(`split_not_direct_report[${index}]: "${child.assigneeSlug}" is not one of your active direct reports (${context.directReports.map((r) => r.slug).join(', ') || 'none'}). Cards can only be split downward along the boss chain.`);

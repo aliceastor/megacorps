@@ -64,6 +64,8 @@ const registeredRoutes = [
   ['PUT', '/api/context-requests/:id'],
   ['GET', '/api/cards/:id/comments'],
   ['GET', '/api/cards/:id/review-scores'],
+  ['GET', '/api/cards/:id/review-rounds'],
+  ['POST', '/api/cards/:id/review-rounds'],
   ['GET', '/api/cards/:id/work-products'],
   ['POST', '/api/cards/:id/work-products'],
   ['GET', '/api/cards/:id/external-waits'],
@@ -176,6 +178,19 @@ test('api help includes response examples and rate-limit notes for every endpoin
   assert.match(webhookEndpoint?.summary ?? '', /report\.notes/);
   assert.match(webhookEndpoint?.summary ?? '', /@client/);
   assert.match(webhookEndpoint?.summary ?? '', /committed and pushed to the project repo/);
+  // Blind review panel: the report fields agents need for panel slots, fix
+  // rounds and verify rounds are taught here and in the report example.
+  assert.match(webhookEndpoint?.summary ?? '', /report\.findings/);
+  assert.match(webhookEndpoint?.summary ?? '', /report\.dispositions/);
+  assert.match(webhookEndpoint?.summary ?? '', /report\.verifications/);
+  assert.match(webhookEndpoint?.summary ?? '', /report\.escalation/);
+  assert.match(JSON.stringify(webhookEndpoint?.body), /"findings"/);
+  assert.match(JSON.stringify(webhookEndpoint?.body), /"dispositions"/);
+  const createCardEndpoint = catalog.endpoints.find((endpoint) => endpoint.path === '/api/cards' && endpoint.method === 'POST');
+  assert.match(JSON.stringify(createCardEndpoint?.body), /reviewMode/);
+  assert.match(JSON.stringify(createCardEndpoint?.body), /reviewerIds/);
+  const reviewRoundsEndpoint = catalog.endpoints.find((endpoint) => endpoint.path === '/api/cards/:id/review-rounds' && endpoint.method === 'GET');
+  assert.match(JSON.stringify(reviewRoundsEndpoint?.responseSchema), /findingKey/);
   const runnerCompleteEndpoint = catalog.endpoints.find((endpoint) => endpoint.path === '/api/runner/task-runs/:id/complete');
   assert.match(runnerCompleteEndpoint?.summary ?? '', /quality review/i);
   assert.ok(catalog.cli.commands.some((command) => command.command === 'apply' && command.auth === 'session'));

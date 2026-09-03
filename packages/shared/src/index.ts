@@ -4,6 +4,21 @@ export const cardStatuses = ['todo', 'in_progress', 'in_review', 'needs_review',
 export type CardStatus = (typeof cardStatuses)[number];
 export const legacyCardStatusAliases = { backlog: 'todo' } as const;
 const cardStatusInputs = ['backlog', ...cardStatuses] as const;
+// zod 4 keeps applying a field's create-time default inside .partial(), so a
+// PUT that omits `tags` would silently reset them to []. Update schemas are
+// therefore derived with the defaults stripped: an omitted key stays undefined
+// and the route leaves the column untouched.
+type StripDefault<T> = T extends z.ZodDefault<infer Inner> ? Inner : T;
+type PartialWithoutDefaults<S extends z.ZodRawShape> = z.ZodObject<{ [K in keyof S]: z.ZodOptional<StripDefault<S[K]>> }>;
+export function partialWithoutDefaults<S extends z.ZodRawShape>(schema: z.ZodObject<S>): PartialWithoutDefaults<S> {
+  const shape: Record<string, z.ZodTypeAny> = {};
+  for (const [key, field] of Object.entries(schema.shape)) {
+    const inner = (field instanceof z.ZodDefault ? field.removeDefault() : field) as z.ZodTypeAny;
+    shape[key] = inner.optional();
+  }
+  return z.object(shape) as unknown as PartialWithoutDefaults<S>;
+}
+
 export const agentAdapterTypes = ['hermes-ssh', 'hermes-gateway', 'codex-app', 'openclaw', 'webhook', 'a2a'] as const;
 export type AgentAdapterType = (typeof agentAdapterTypes)[number];
 export const cardActorTypes = ['user', 'machine', 'system', 'agent:worker', 'agent:reviewer', 'agent:leader'] as const;
@@ -113,6 +128,14 @@ export function normalizeDecisionMode(value: string | null | undefined): Decisio
   return legacyDecisionModes[value as keyof typeof legacyDecisionModes] ?? 'auto';
 }
 
+// Blind review panel (company pipeline design §17): single = one reviewer
+// (the default path); panel = two blind reviewers whose findings are merged.
+// The company default decides when a single-mode card still gets a panel.
+export const reviewModes = ['single', 'panel'] as const;
+export type ReviewMode = (typeof reviewModes)[number];
+export const panelReviewDefaults = ['critical_only', 'always', 'never'] as const;
+export type PanelReviewDefault = (typeof panelReviewDefaults)[number];
+
 const createCardBaseSchema = z.object({
   title: z.string().trim().min(1).max(160),
   body: z.string().trim().min(1, 'body must not be empty'),
@@ -127,6 +150,14 @@ const createCardBaseSchema = z.object({
   parentCardId: z.string().uuid().nullable().optional(),
   dependencyCardIds: z.array(z.string().uuid()).default([]),
   requiresApproval: z.boolean().default(false),
+  // Blind review panel (company pipeline §17). critical marks work that touches
+  // persisted data or performs an irreversible external action; with the
+  // company default critical_only that alone puts the card on a panel.
+  // reviewerIds names the panel (max 2); empty means the server composes it at
+  // review time from the org chart.
+  reviewMode: z.enum(reviewModes).default('single'),
+  critical: z.boolean().default(false),
+  reviewerIds: z.array(z.string().uuid()).max(2).default([]),
   // Brainstorm controls (company pipeline §5): force a round before any split,
   // and the departments the client wants consulted at minimum.
   forceBrainstorm: z.boolean().default(false),
@@ -166,7 +197,7 @@ export const createMachineRunnerSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 
-export const updateMachineRunnerSchema = createMachineRunnerSchema.partial().extend({
+export const updateMachineRunnerSchema = partialWithoutDefaults(createMachineRunnerSchema).extend({
   status: z.enum(['online', 'offline', 'disabled']).optional(),
 });
 
@@ -227,6 +258,9 @@ export const createCompanySchema = z.object({
   nfsShareUrl: z.string().trim().max(1000).nullable().optional(),
   // Live child cards allowed per card when an agent splits (hard cap 5).
   maxChildrenPerCard: z.number().int().min(1).max(5).optional(),
+  // When a single-mode card still gets a blind review panel: only critical
+  // cards (default), every card, or never (explicit reviewMode=panel only).
+  panelReviewDefault: z.enum(panelReviewDefaults).optional(),
   dispatchIntervalSeconds: z.number().int().min(5).max(3600).default(10),
   autoDispatchEnabled: z.boolean().default(true),
 });
@@ -262,7 +296,7 @@ export const createPositionSchema = z.object({
 
 // Derived from the unrefined base: a partial update legitimately omits the
 // reviewer fields, so the create-time reviewer rule must not apply here.
-export const updateCardSchema = createCardBaseSchema.partial().extend({
+export const updateCardSchema = partialWithoutDefaults(createCardBaseSchema).extend({
   columnStatus: cardStatusSchema.optional(),
   updatedAt: z.string().datetime().optional(),
 });
@@ -294,7 +328,7 @@ export const createAgentSchema = z.object({
   }).optional(),
 });
 
-export const updateAgentSchema = createAgentSchema.omit({ adapterType: true, capabilities: true }).partial().extend({
+export const updateAgentSchema = partialWithoutDefaults(createAgentSchema.omit({ adapterType: true, capabilities: true })).extend({
   adapterType: z.enum(agentAdapterTypes).optional(),
   capabilities: z.array(z.string().trim().min(1).max(80)).optional(),
 });
@@ -324,8 +358,48 @@ export const agentReportChildSchema = z.object({
   priority: prioritySchema.optional(),
   // Indexes (0-based) of other children in the same request this one waits for.
   dependsOn: z.array(z.number().int().min(0).max(4)).max(4).optional(),
+  // The child touches persisted data or performs an irreversible external
+  // action: with the company default it gets a blind review panel.
+  critical: z.boolean().optional(),
 });
 export type AgentReportChild = z.infer<typeof agentReportChildSchema>;
+// Blind review panel (company pipeline design §17). A panel reviewer reports
+// findings; the author answers each with a disposition; the same reviewers
+// verify the dispositions; an author who cannot fix reports an escalation.
+export const findingSeverities = ['P0', 'P1', 'P2'] as const;
+export type FindingSeverity = (typeof findingSeverities)[number];
+export const agentReportFindingSchema = z.object({
+  id: z.string().trim().min(1).max(40).optional(),
+  severity: z.enum(findingSeverities),
+  file: z.string().trim().max(500).optional(),
+  line: z.number().int().min(0).optional(),
+  title: z.string().trim().min(1).max(200),
+  evidence: z.string().trim().min(1).max(2000),
+  requiredFix: z.string().trim().min(1).max(2000),
+  // The reviewer believes the author cannot fix it: a takeover trigger when
+  // every reviewer of the round flags the same P0.
+  reassign: z.boolean().optional(),
+});
+export type AgentReportFinding = z.infer<typeof agentReportFindingSchema>;
+export const agentReportVerificationSchema = z.object({
+  findingKey: z.string().trim().min(1).max(80),
+  status: z.enum(['verified', 'still_open']),
+  note: z.string().trim().max(2000).optional(),
+});
+export type AgentReportVerification = z.infer<typeof agentReportVerificationSchema>;
+export const agentReportDispositionSchema = z.object({
+  findingKey: z.string().trim().min(1).max(80),
+  disposition: z.enum(['adopted', 'rejected', 'merged']),
+  reason: z.string().trim().max(2000).optional(),
+  mergedInto: z.string().trim().max(80).optional(),
+  codeEvidence: z.string().trim().max(2000).optional(),
+  testEvidence: z.string().trim().max(2000).optional(),
+});
+export type AgentReportDisposition = z.infer<typeof agentReportDispositionSchema>;
+export const agentReportEscalationSchema = z.object({
+  reason: z.string().trim().min(1).max(2000),
+});
+export type AgentReportEscalation = z.infer<typeof agentReportEscalationSchema>;
 // Client checkpoint: the CEO or a department head asks the human client for a
 // direction decision or a look at interim output. The card parks as
 // waiting_on_client until the client answers; the answer is injected back.
@@ -363,6 +437,13 @@ export const agentReportSchema = z.object({
   broadcast: agentReportBroadcastSchema.optional(),
   // Reviewer score for the work under review (0-10 rubric); feeds the agent CV.
   score: z.number().int().min(0).max(10).optional(),
+  // Blind review panel: a panel reviewer files findings; the same reviewers
+  // later file verifications; the author answers findings with dispositions
+  // or escalates when the fix is beyond their ability or authority.
+  findings: z.array(agentReportFindingSchema).max(30).optional(),
+  verifications: z.array(agentReportVerificationSchema).max(60).optional(),
+  dispositions: z.array(agentReportDispositionSchema).max(60).optional(),
+  escalation: agentReportEscalationSchema.optional(),
   artifactRefs: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
 });
 export type AgentReportMention = z.infer<typeof agentReportMentionSchema>;
@@ -552,7 +633,7 @@ export const createToolSchema = z.object({
   isActive: z.boolean().default(true),
 });
 
-export const updateToolSchema = createToolSchema.partial().extend({
+export const updateToolSchema = partialWithoutDefaults(createToolSchema).extend({
   companyId: z.string().uuid().optional(),
 });
 
@@ -702,3 +783,13 @@ export type UpdateTaskContextRequestInput = z.infer<typeof updateTaskContextRequ
 export type CreateBudgetPolicyInput = z.infer<typeof createBudgetPolicySchema>;
 export type ApprovalDecisionInput = z.infer<typeof approvalDecisionSchema>;
 export type TaskLogInput = z.infer<typeof taskLogSchema>;
+
+// Update schemas for routes that used to call createXSchema.partial() inline.
+export const updateCompanySchema = partialWithoutDefaults(createCompanySchema);
+export const updateProjectSchema = partialWithoutDefaults(createProjectSchema);
+export const updatePositionSchema = partialWithoutDefaults(createPositionSchema);
+export const updateAgentRuntimeSchema = partialWithoutDefaults(createAgentRuntimeSchema);
+export const updateBudgetPolicySchema = partialWithoutDefaults(createBudgetPolicySchema);
+export const updateKnowledgeDocSchema = partialWithoutDefaults(createKnowledgeDocSchema);
+export type UpdateCompanyInput = z.infer<typeof updateCompanySchema>;
+export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;

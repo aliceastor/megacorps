@@ -69,6 +69,15 @@ test('a live round blocks a new split, and rounds are finite', () => {
   assert.ok(!exhausted.ok && /split_rounds_exhausted/.test(exhausted.errors.join()));
 });
 
+test('a child whose body states no acceptance criteria is rejected', () => {
+  const noAcceptance = evaluateSplitPlan(context(), [child('ribel', { body: 'Build the thing end to end and make it look nice, with tests and docs.' })]);
+  assert.ok(!noAcceptance.ok && /split_child_missing_acceptance\[0\]/.test(noAcceptance.errors.join()));
+  const checklist = evaluateSplitPlan(context(), [child('ribel', { body: 'Build the thing end to end.\n\n- [ ] tests green\n- [ ] page renders the list' })]);
+  assert.ok(checklist.ok);
+  const section = evaluateSplitPlan(context(), [child('ribel', { body: '## Goal\nShip it, end to end, nicely.\n\n## Acceptance\n- [ ] the export downloads' })]);
+  assert.ok(section.ok);
+});
+
 test('solo mode forbids splitting', () => {
   const result = evaluateSplitPlan(context({ parent: { id: 'card-1', splitRound: 0, decisionMode: 'solo' } }), [child('ribel')]);
   assert.ok(!result.ok && /split_forbidden_solo/.test(result.errors.join()));

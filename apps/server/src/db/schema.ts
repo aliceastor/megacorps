@@ -32,6 +32,8 @@ export const companies = pgTable('companies', {
   nfsShareUrl: text('nfs_share_url'),
   // Split fan-out per card (live children at once). Default 3, hard cap 5.
   maxChildrenPerCard: integer('max_children_per_card').notNull().default(3),
+  // Blind review panel default for single-mode cards: critical_only | always | never.
+  panelReviewDefault: text('panel_review_default').notNull().default('critical_only'),
   dispatchIntervalSeconds: integer('dispatch_interval_seconds').default(10),
   autoDispatchEnabled: boolean('auto_dispatch_enabled').default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
@@ -216,6 +218,14 @@ export const kanbanCards = pgTable('kanban_cards', {
   reviewerId: uuid('reviewer_id').references(() => agents.id),
   dependencyCardIds: uuid('dependency_card_ids').array().default([]),
   requiresApproval: boolean('requires_approval').default(false),
+  // Blind review panel (company pipeline §17): review_mode single | panel,
+  // critical work, the composed panel, the current round number and the
+  // boss-chain takeover level (0 = original author, +1 per takeover).
+  reviewMode: text('review_mode').notNull().default('single'),
+  critical: boolean('critical').notNull().default(false),
+  reviewerIds: uuid('reviewer_ids').array().notNull().default([]),
+  reviewRound: integer('review_round').notNull().default(0),
+  fixLevel: integer('fix_level').notNull().default(0),
   decisionMode: text('decision_mode'),
   rollupStatus: text('rollup_status'),
   requiredChildPolicy: text('required_child_policy').default('all_required_accepted'),
@@ -487,6 +497,9 @@ export const externalWaits = pgTable('external_waits', {
   timeoutAt: timestamp('timeout_at', { withTimezone: true }),
   pollIntervalSeconds: integer('poll_interval_seconds'),
   status: text('status').notNull().default('waiting'),
+  // Merge closure (company pipeline §19): the exact head SHA the review
+  // authorized; a merge of any other head is drift, not completion.
+  authorizedHeadSha: text('authorized_head_sha'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
 });
@@ -581,6 +594,56 @@ export const agentReviewScores = pgTable('agent_review_scores', {
   score: integer('score').notNull(),
   verdict: text('verdict').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+// Blind review rounds (company pipeline §17). A panel round gives every
+// reviewer a sealed slot; a verify round sends the author's dispositions back
+// to the same reviewers. Findings live in review_findings, never on the
+// message board, so reviewers cannot see each other until the round closes.
+export const reviewRounds = pgTable('review_rounds', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
+  round: integer('round').notNull(),
+  kind: text('kind').notNull().default('panel'),
+  level: integer('level').notNull().default(0),
+  authorAgentId: uuid('author_agent_id').references(() => agents.id),
+  reviewerIds: uuid('reviewer_ids').array().notNull().default([]),
+  status: text('status').notNull().default('open'),
+  decision: text('decision'),
+  timeoutAt: timestamp('timeout_at', { withTimezone: true }),
+  openedAt: timestamp('opened_at', { withTimezone: true }).defaultNow(),
+  closedAt: timestamp('closed_at', { withTimezone: true }),
+  summary: text('summary'),
+  metadata: jsonb('metadata').default({}),
+});
+
+export const reviewFindings = pgTable('review_findings', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
+  roundId: uuid('round_id').notNull().references(() => reviewRounds.id),
+  round: integer('round').notNull(),
+  reviewerAgentId: uuid('reviewer_agent_id').references(() => agents.id),
+  findingKey: text('finding_key').notNull(),
+  severity: text('severity').notNull(),
+  file: text('file'),
+  line: integer('line'),
+  title: text('title').notNull(),
+  evidence: text('evidence').notNull(),
+  requiredFix: text('required_fix').notNull(),
+  reassign: boolean('reassign').notNull().default(false),
+  // The author's answer (adopted | rejected | merged) and its evidence.
+  disposition: text('disposition'),
+  dispositionReason: text('disposition_reason'),
+  mergedInto: text('merged_into'),
+  codeEvidence: text('code_evidence'),
+  testEvidence: text('test_evidence'),
+  // The verify round's answer (verified | still_open).
+  verification: text('verification'),
+  verificationNote: text('verification_note'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 
 // Self-notes an agent leaves from Direct Chat ("agreed with the boss to use

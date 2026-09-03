@@ -3,7 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, lte, ne, or, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { acceptInviteSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createPositionSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateAgentSchema, updateCardSchema, updateCompanyMembershipSchema, updateDepartmentSchema, validateCardTransition } from '@megacorps/shared';
+import { acceptInviteSchema, updateBudgetPolicySchema, updateCompanySchema, updatePositionSchema, updateAgentRuntimeSchema, updateProjectSchema, updateKnowledgeDocSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createPositionSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateAgentSchema, updateCardSchema, updateCompanyMembershipSchema, updateDepartmentSchema, validateCardTransition } from '@megacorps/shared';
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
 import { db } from './db/client.ts';
@@ -11,6 +11,8 @@ import { activityLog, adapterSessions, agentReviewScores, agentRuntimes, agents,
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, processMentionQuestions, processReportNotes, reportNotesFromOutput, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest, finishRunWaitingOnBrainstorm, resolveBrainstormRequest, recordReviewScore } from './dispatch.ts';
+import { afterAuthorFix, completePanelReviewFromWebhook, ensureHumanGate, hasOpenReviewRound, listReviewRounds, openFixRound, openPanelRound, panelRequiredForCard } from './review-rounds.ts';
+import { dispositionErrors, formatDispositionRules } from './review-panel.ts';
 import { brainstormFromOutput } from './brainstorm.ts';
 import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointFromOutput } from './client-checkpoints.ts';
 import { registerChatRoutes } from './chat.ts';
@@ -887,7 +889,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.put('/api/budget-policies/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
-    const input = createBudgetPolicySchema.partial().parse(request.body);
+    const input = updateBudgetPolicySchema.parse(request.body);
     const [existing] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, id)).limit(1);
     if (!existing) return reply.code(404).send({ error: 'budget_policy_not_found' });
     if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'budget_policy_company_immutable' });
@@ -1116,6 +1118,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         mission: input.mission ?? null,
         nfsShareUrl: input.nfsShareUrl ?? null,
         maxChildrenPerCard: input.maxChildrenPerCard ?? 3,
+        panelReviewDefault: input.panelReviewDefault ?? 'critical_only',
         dispatchIntervalSeconds: input.dispatchIntervalSeconds,
         autoDispatchEnabled: input.autoDispatchEnabled,
       }).returning();
@@ -1139,13 +1142,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.put('/api/companies/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const user = await requireCompanyRole(request, reply, id, 'operator'); if (!user) return reply;
-    const input = createCompanySchema.partial().parse(request.body);
+    const input = updateCompanySchema.parse(request.body);
     const [company] = await db.update(companies).set({
       name: input.name,
       slug: input.slug,
       mission: input.mission,
       nfsShareUrl: input.nfsShareUrl,
       maxChildrenPerCard: input.maxChildrenPerCard,
+      panelReviewDefault: input.panelReviewDefault,
       dispatchIntervalSeconds: input.dispatchIntervalSeconds,
       autoDispatchEnabled: input.autoDispatchEnabled,
     }).where(eq(companies.id, id)).returning();
@@ -1371,7 +1375,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.put('/api/positions/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
-    const input = createPositionSchema.partial().parse(request.body);
+    const input = updatePositionSchema.parse(request.body);
     const [existing] = await db.select().from(positions).where(eq(positions.id, id)).limit(1);
     if (!existing) return reply.code(404).send({ error: 'position_not_found' });
     if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'position_company_immutable' });
@@ -1478,6 +1482,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       parentCardId: input.parentCardId ?? null,
       dependencyCardIds: input.dependencyCardIds,
       requiresApproval: input.requiresApproval,
+      reviewMode: input.reviewMode,
+      critical: input.critical,
+      reviewerIds: input.reviewerIds,
       forceBrainstorm: input.forceBrainstorm,
       brainstormDepartmentIds: input.brainstormDepartmentIds,
       decisionMode: input.decisionMode === undefined ? null : input.decisionMode ?? null,
@@ -1531,6 +1538,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.put('/api/cards/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const input = updateCardSchema.parse(request.body);
+    const rawBody = (request.body && typeof request.body === 'object' ? request.body : {}) as Record<string, unknown>;
     const [existing] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, id), isNull(kanbanCards.deletedAt))).limit(1);
     if (!existing) return reply.code(404).send({ error: 'card_not_found' });
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
@@ -1599,6 +1607,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       parentCardId: nextParentCardId,
       dependencyCardIds: nextDependencyCardIds,
       requiresApproval: input.requiresApproval,
+      // The partial schema still fills these with their defaults, so only a
+      // request that names them may change them: an unrelated edit must not
+      // wipe the composed panel.
+      reviewMode: 'reviewMode' in rawBody ? input.reviewMode : undefined,
+      critical: 'critical' in rawBody ? input.critical : undefined,
+      reviewerIds: 'reviewerIds' in rawBody ? input.reviewerIds : undefined,
       decisionMode: input.decisionMode === undefined ? undefined : input.decisionMode ?? null,
       rollupStatus: input.rollupStatus === undefined ? undefined : input.rollupStatus ?? null,
       requiredChildPolicy: input.requiredChildPolicy,
@@ -1829,6 +1843,24 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       revieweeAgentId: agentReviewScores.agentId,
       createdAt: agentReviewScores.createdAt,
     }).from(agentReviewScores).where(eq(agentReviewScores.cardId, card.id)).orderBy(desc(agentReviewScores.createdAt)).limit(20);
+  });
+  app.get('/api/cards/:id/review-rounds', async (request, reply) => {
+    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    if (!card) return reply;
+    return listReviewRounds(card.id, 20);
+  });
+  app.post('/api/cards/:id/review-rounds', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const input = z.object({ kind: z.enum(['panel']).default('panel') }).parse(request.body ?? {});
+    const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, id), isNull(kanbanCards.deletedAt))).limit(1);
+    if (!card) return reply.code(404).send({ error: 'card_not_found' });
+    const user = await requireCompanyRole(request, reply, card.companyId, 'operator'); if (!user) return reply;
+    if (card.columnStatus !== 'in_review') return reply.code(409).send({ error: 'card_not_in_review', message: `card_not_in_review: a blind review panel can only be opened on an in_review card; this card is ${card.columnStatus ?? 'todo'}.` });
+    if (await hasOpenReviewRound(card.id)) return reply.code(409).send({ error: 'review_round_open', message: 'review_round_open: a blind review round is already open on this card.' });
+    const opened = await openPanelRound(card, { kind: input.kind });
+    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'review_round.forced', entityType: 'card', entityId: card.id, details: { outcome: opened.outcome, roundId: opened.roundId, reviewerIds: opened.reviewerIds } });
+    const rounds = opened.roundId ? await listReviewRounds(card.id, 5) : [];
+    return reply.code(opened.roundId ? 201 : 200).send({ ok: true, cardId: card.id, outcome: opened.outcome, roundId: opened.roundId, reviewerIds: opened.reviewerIds, round: rounds.find((round) => round.id === opened.roundId) ?? null });
   });
   app.get('/api/cards/:id/work-products', async (request, reply) => {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
@@ -2281,7 +2313,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.put('/api/agent-runtimes/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
-    const input = createAgentRuntimeSchema.partial().parse(request.body);
+    const input = updateAgentRuntimeSchema.parse(request.body);
     const [existing] = await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, id)).limit(1);
     if (!existing?.companyId) return reply.code(404).send({ error: 'runtime_not_found' });
     if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'runtime_company_immutable' });
@@ -2399,7 +2431,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.put('/api/projects/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
-    const input = createProjectSchema.partial().parse(request.body);
+    const input = updateProjectSchema.parse(request.body);
     const [existing] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
     if (!existing) return reply.code(404).send({ error: 'project_not_found' });
     if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'project_company_immutable' });
@@ -2525,7 +2557,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.put('/api/knowledge-docs/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
-    const input = createKnowledgeDocSchema.partial().parse(request.body);
+    const input = updateKnowledgeDocSchema.parse(request.body);
     const [existing] = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.id, id)).limit(1);
     if (!existing) return reply.code(404).send({ error: 'knowledge_doc_not_found' });
     if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'knowledge_doc_company_immutable' });
@@ -2740,6 +2772,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({ error: error instanceof Error ? error.message : 'message_task_webhook_failed' });
       }
     }
+    // A blind review slot answered through the webhook: same slot logic as the
+    // adapter path; a malformed answer is a 400 and the slot stays open.
+    if (webhookTaskRun && webhookTaskRun.kind === 'panel_review') {
+      try {
+        return await completePanelReviewFromWebhook(webhookTaskRun.id, {
+          status: requestedStatus,
+          summary: body.summary ?? null,
+          output: body.output ?? null,
+          costUsd: body.costUsd,
+          report: body.report ?? null,
+        });
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : 'panel_review_webhook_failed' });
+      }
+    }
     const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
     const actorAgentId = webhookTaskRun?.agentId ?? card.assigneeId;
     const structuredDelegations = body.report?.delegations ?? null;
@@ -2861,16 +2908,39 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'webhook.collaboration_delegation_required' });
       return reply.code(409).send({ error: 'collaboration_mode_requires_delegation', message, cardId: body.cardId, taskRunId, newStatus: 'todo' });
     }
+    // Blind review panel (§17): an author answering panel findings must
+    // disposition every one of them (or escalate) before the run counts as a
+    // fix; the errors come back synchronously so the agent can resend.
+    const fixRound = actorAgent && !escalation && requestedDelegation.length === 0 && (requestedStatus === 'done' || requestedStatus === 'in_review') ? await openFixRound(card) : null;
+    const fixEscalation = fixRound ? body.report?.escalation ?? null : null;
+    if (fixRound && !fixEscalation) {
+      const errors = dispositionErrors(fixRound.findings, body.report?.dispositions ?? []);
+      if (errors.length > 0) {
+        return reply.code(409).send({
+          error: 'fix_dispositions_invalid',
+          message: ['fix_dispositions_invalid: answer every open review finding before reporting completion.', ...errors, formatDispositionRules()].join('\n'),
+          errors,
+          findingKeys: fixRound.findings.map((finding) => finding.key),
+          cardId: card.id,
+          taskRunId,
+        });
+      }
+    }
     const qualityReviewerId = !delegatedViaWebhook && !delegationFailed && !escalation && (requestedStatus === 'done' || requestedStatus === 'in_review')
       ? await resolveIndependentReviewerForCard(card, actorAgentId)
       : null;
+    // Human approval is the last gate (§17.6): with no agent reviewer a
+    // requiresApproval card waits for the client instead of completing itself.
+    const humanGate = !delegatedViaWebhook && !delegationFailed && !escalation && !fixRound && (requestedStatus === 'done' || requestedStatus === 'in_review') && !qualityReviewerId && card.requiresApproval === true;
     const requestedNextStatus = delegatedViaWebhook
       ? 'in_progress'
       : delegationFailed
         ? 'todo'
         : escalation
           ? escalationReviewerId ? 'needs_review' : 'done'
-          : completionStatusForQualityGate(requestedStatus, qualityReviewerId);
+          : fixRound || humanGate
+            ? 'in_review'
+            : completionStatusForQualityGate(requestedStatus, qualityReviewerId);
     const childBlock = await completionBlockedByChildren(card, requestedNextStatus);
     const nextStatus = childBlock ? 'in_progress' : requestedNextStatus;
     const completesRun = delegatedViaWebhook || delegationFailed || Boolean(childBlock) || nextStatus !== 'in_progress';
@@ -2923,7 +2993,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       });
     }
     const webhookLogType = childBlock ? 'children' : delegatedViaWebhook || delegationFailed ? 'message_delegation' : escalation ? 'escalation' : webhookTaskRun?.kind === 'review' ? 'review' : 'webhook';
-    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: actorAgentId, type: webhookLogType, status: childBlock ? 'queued' : delegationFailed || nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : nextStatus === 'needs_review' || nextStatus === 'in_review' ? 'queued' : 'success', message: childBlock ? childBlock.message : delegatedViaWebhook ? `Webhook delegation plan accepted; ${delegatedRows.length} Message Board delegation(s) queued for direct reports.` : delegationFailed ? delegationFailureReason ?? 'Webhook delegation plan could not create Message Board delegations because the actor has no available direct reports.' : escalation ? (nextStatus === 'needs_review' ? 'Webhook requested reviewer guidance; help review queued.' : 'Webhook requested guidance but no reviewer is available; output accepted as final and card marked done.') : qualityReviewerId ? 'Webhook reported completion; quality review queued.' : body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
+    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: actorAgentId, type: webhookLogType, status: childBlock ? 'queued' : delegationFailed || nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : nextStatus === 'needs_review' || nextStatus === 'in_review' ? 'queued' : 'success', message: childBlock ? childBlock.message : delegatedViaWebhook ? `Webhook delegation plan accepted; ${delegatedRows.length} Message Board delegation(s) queued for direct reports.` : delegationFailed ? delegationFailureReason ?? 'Webhook delegation plan could not create Message Board delegations because the actor has no available direct reports.' : escalation ? (nextStatus === 'needs_review' ? 'Webhook requested reviewer guidance; help review queued.' : 'Webhook requested guidance but no reviewer is available; output accepted as final and card marked done.') : fixRound ? 'Webhook reported the fix; verification round queued.' : humanGate ? 'Webhook reported completion; the card waits for client approval.' : qualityReviewerId ? 'Webhook reported completion; quality review queued.' : body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
     const webhookCommentAction = delegatedViaWebhook
       ? 'agent_delegated'
       : nextStatus === 'needs_review'
@@ -2981,10 +3051,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await db.update(taskRuns).set({ status: runStatus, completedAt: new Date(), lockedBy: null, lockedAt: null, error, output: executionLog, costUsd: body.costUsd?.toString(), updatedAt: new Date() }).where(eq(taskRuns.heartbeatRunId, heartbeatRunId));
       }
     }
-    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: actorAgentId, action: webhookAction, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId, requestedStatus, requestedNextStatus, nextStatus, escalation, reviewerId: escalationReviewerId ?? qualityReviewerId, topLevelGuidanceAccepted, externalWaitId, pollIntervalSeconds: body.pollIntervalSeconds ?? null, delegatedViaWebhook, delegationFailed, delegationFailureReason, messageDelegationCount: delegatedRows.length, childBlock, reportFormat: body.report ? 'structured' : 'legacy' } });
-    if (nextStatus === 'in_review' && qualityReviewerId) {
-      await createPendingApproval(updatedCard ?? { ...card, columnStatus: nextStatus, reviewerId: qualityReviewerId }, actorAgentId ?? card.assigneeId, 'Webhook completion requires quality review.');
-      await enqueueTaskRun(card.id, 'review', 'queue');
+    await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: actorAgentId, action: webhookAction, entityType: 'card', entityId: card.id, details: { summary: body.summary, costUsd: body.costUsd, taskRunId, requestedStatus, requestedNextStatus, nextStatus, escalation, reviewerId: escalationReviewerId ?? qualityReviewerId, topLevelGuidanceAccepted, externalWaitId, pollIntervalSeconds: body.pollIntervalSeconds ?? null, delegatedViaWebhook, delegationFailed, delegationFailureReason, messageDelegationCount: delegatedRows.length, childBlock, reportFormat: body.report ? 'structured' : 'legacy', humanGate, fixRound: Boolean(fixRound) } });
+    if (nextStatus === 'in_review' && fixRound && actorAgent) {
+      await afterAuthorFix(updatedCard ?? { ...card, columnStatus: nextStatus }, actorAgent, fixRound, { escalation: fixEscalation, dispositions: body.report?.dispositions ?? [] });
+    } else if (nextStatus === 'in_review' && humanGate) {
+      await ensureHumanGate(updatedCard ?? { ...card, columnStatus: nextStatus }, actorAgentId ?? card.assigneeId, 'Client approval required', { kind: 'client_approval' });
+    } else if (nextStatus === 'in_review' && qualityReviewerId) {
+      const gateCard = updatedCard ?? { ...card, columnStatus: nextStatus, reviewerId: qualityReviewerId };
+      await createPendingApproval(gateCard, actorAgentId ?? card.assigneeId, 'Webhook completion requires quality review.');
+      if (await panelRequiredForCard(gateCard)) await openPanelRound(gateCard, { kind: 'panel' });
+      else await enqueueTaskRun(card.id, 'review', 'queue');
     }
     if (nextStatus === 'needs_review') await enqueueTaskRun(card.id, 'review', 'queue');
     if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);

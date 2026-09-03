@@ -27,7 +27,66 @@ const migrations: Migration[] = [
   { version: 14, name: 'brainstorm-rounds', run: runBrainstormRounds },
   { version: 15, name: 'agent-review-scores', run: runAgentReviewScores },
   { version: 16, name: 'ceo-position-prompt', run: runCeoPositionPrompt },
+  { version: 17, name: 'review-panel', run: runReviewPanel },
 ];
+
+// Blind review panel + adjudicated fixes (company pipeline §17), the card
+// brief (§18) and the merge-closure head SHA reserved for §19.
+async function runReviewPanel(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS review_mode TEXT NOT NULL DEFAULT 'single';
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS critical BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS reviewer_ids UUID[] NOT NULL DEFAULT '{}';
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS review_round INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS fix_level INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS panel_review_default TEXT NOT NULL DEFAULT 'critical_only';
+ALTER TABLE external_waits ADD COLUMN IF NOT EXISTS authorized_head_sha TEXT;
+CREATE TABLE IF NOT EXISTS review_rounds (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id UUID NOT NULL REFERENCES companies(id),
+  card_id UUID NOT NULL REFERENCES kanban_cards(id),
+  round INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'panel',
+  level INTEGER NOT NULL DEFAULT 0,
+  author_agent_id UUID REFERENCES agents(id),
+  reviewer_ids UUID[] NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'open',
+  decision TEXT,
+  timeout_at TIMESTAMPTZ,
+  opened_at TIMESTAMPTZ DEFAULT now(),
+  closed_at TIMESTAMPTZ,
+  summary TEXT,
+  metadata JSONB DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS review_rounds_card_round_idx ON review_rounds(card_id, round);
+CREATE INDEX IF NOT EXISTS review_rounds_status_timeout_idx ON review_rounds(status, timeout_at);
+CREATE TABLE IF NOT EXISTS review_findings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id UUID NOT NULL REFERENCES companies(id),
+  card_id UUID NOT NULL REFERENCES kanban_cards(id),
+  round_id UUID NOT NULL REFERENCES review_rounds(id),
+  round INTEGER NOT NULL,
+  reviewer_agent_id UUID REFERENCES agents(id),
+  finding_key TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  file TEXT,
+  line INTEGER,
+  title TEXT NOT NULL,
+  evidence TEXT NOT NULL,
+  required_fix TEXT NOT NULL,
+  reassign BOOLEAN NOT NULL DEFAULT false,
+  disposition TEXT,
+  disposition_reason TEXT,
+  merged_into TEXT,
+  code_evidence TEXT,
+  test_evidence TEXT,
+  verification TEXT,
+  verification_note TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS review_findings_card_round_idx ON review_findings(card_id, round);
+CREATE INDEX IF NOT EXISTS review_findings_round_idx ON review_findings(round_id);`);
+}
 
 async function runCeoPositionPrompt(): Promise<void> {
   // Only the untouched placeholder is upgraded; a customised CEO prompt is the

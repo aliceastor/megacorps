@@ -30,6 +30,9 @@ import { readChatTaskTimeoutSeconds, readKanbanTaskTimeoutSeconds, normalizeKanb
 import { workspaceProtocolLines } from './workspace-paths.ts';
 import { MENTIONS_PER_MESSAGE, extractMentionTokens, mentionQuestionMetadata, resolveMentions } from './card-mentions.ts';
 import { HANDOVER_LIMITS, formatHandoverSection, type HandoverInput } from './card-handover.ts';
+import { acceptanceOf, formatBriefCoverage, parseCardBrief } from './card-brief.ts';
+import { dispositionErrors, formatDispositionRules } from './review-panel.ts';
+import { afterAuthorFix, cardIdsAwaitingPanelOrHuman, ensureHumanGate, fixSection, hasOpenReviewRound, openFixRound, openPanelRound, panelRequiredForCard, reviewPanelSlot, sweepReviewRounds } from './review-rounds.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -54,7 +57,9 @@ type KanbanContextOptions = {
 };
 type PromptBuildOptions = { continuation?: boolean; since?: Date | null; kind?: TaskRunKind };
 type LogStatus = 'queued' | 'running' | 'success' | 'warning' | 'failed';
-type TaskRunKind = 'dispatch' | 'review' | 'message' | 'message_review';
+// panel_review: one sealed blind-review slot of a panel or verify round; keyed
+// by its slot comment like message runs, so several can be queued per card.
+export type TaskRunKind = 'dispatch' | 'review' | 'message' | 'message_review' | 'panel_review';
 type TaskRunSource = 'manual' | 'loop' | 'startup' | 'queue';
 
 const LOOP_INTERVAL_MS = Number(process.env.DISPATCH_LOOP_INTERVAL_MS ?? 10_000);
@@ -491,6 +496,16 @@ function resolveReviewVerdict(output: string | null | undefined, mode: 'quality'
 
 const REVIEW_VERDICT_MISSING_MESSAGE = 'review_verdict_missing: Your review did not contain a decision. Return a JSON megacorps-report with "verdict", or an explicit VERDICT: APPROVED | REVISION_REQUESTED | ESCALATE line.';
 
+function agentReportFromOutput(output: string | null | undefined) {
+  const extraction = extractAgentReport(output);
+  return extraction && 'report' in extraction ? extraction.report : null;
+}
+
+// Blind review panel (§17): the author's answer to the findings was malformed.
+function fixDispositionFeedback(errors: string[]): string {
+  return ['fix_dispositions_invalid: your report did not answer the open review findings correctly.', ...errors, '', formatDispositionRules()].join('\n');
+}
+
 function cardChangedOutsideCurrentRun(latest: Pick<CardRow, 'columnStatus' | 'activeHeartbeatRunId' | 'executionLockId'> | null | undefined, lockedCard: Pick<CardRow, 'columnStatus'>, runId: string): boolean {
   if (!latest) return false;
   if (latest.activeHeartbeatRunId === runId || latest.executionLockId) return false;
@@ -611,7 +626,7 @@ function applicableGoals(goalsRows: GoalRow[], input: { departmentId?: string | 
   return rows;
 }
 
-async function addTaskLog(input: {
+export async function addTaskLog(input: {
   cardId: string;
   agentId?: string | null;
   type: string;
@@ -635,7 +650,7 @@ async function addTaskLog(input: {
   if (card && log) publishLiveEvent({ type: 'task_log.created', companyId: card.companyId, entityType: 'task_log', entityId: log.id, cardId: input.cardId, projectId: card.projectId, action: input.type });
 }
 
-async function addCardMessage(input: {
+export async function addCardMessage(input: {
   cardId: string;
   agentId?: string | null;
   authorType?: 'agent' | 'system' | 'user';
@@ -736,6 +751,46 @@ export async function enqueueMessageTaskRun(comment: CardCommentRow, kind: Extra
     entityType: 'card_comment',
     entityId: comment.id,
     details: { cardId: card.id, kind, reviewerScope: comment.reviewerScope ?? null },
+  });
+  return run;
+}
+
+// Blind review panel: one panel_review run per sealed slot comment. The
+// message_comment_id makes each slot its own unique key, so two reviewers of
+// the same card queue side by side despite the per-card-per-kind index on
+// plain runs. Retries reuse the slot with a higher attempt number.
+const PANEL_REVIEW_SLOT_MAX_ATTEMPTS = 3;
+
+export async function enqueuePanelReviewRun(card: CardRow, slot: CardCommentRow, reviewerId: string, attemptNumber = 1): Promise<TaskRunRow | null> {
+  const [existing] = await db.select().from(taskRuns).where(and(
+    eq(taskRuns.messageCommentId, slot.id),
+    eq(taskRuns.kind, 'panel_review'),
+    inArray(taskRuns.status, ['queued', 'running']),
+  )).orderBy(desc(taskRuns.createdAt)).limit(1);
+  if (existing) return existing;
+  const [run] = await db.insert(taskRuns).values({
+    companyId: card.companyId,
+    cardId: card.id,
+    messageCommentId: slot.id,
+    agentId: reviewerId,
+    kind: 'panel_review',
+    source: 'queue',
+    status: 'queued',
+    priority: card.priority ?? 0,
+    attemptNumber,
+    maxAttempts: PANEL_REVIEW_SLOT_MAX_ATTEMPTS,
+  }).onConflictDoNothing().returning();
+  if (!run) return null;
+  await addTaskRunLog(run, 'queued', `panel_review task run queued for a blind review slot (attempt ${attemptNumber}).`);
+  await addActivity({
+    companyId: card.companyId,
+    actorType: 'system',
+    actorId: 'review-panel',
+    agentId: reviewerId,
+    action: 'task_run.queued',
+    entityType: 'task_run',
+    entityId: run.id,
+    details: { cardId: card.id, kind: 'panel_review', messageCommentId: slot.id, attemptNumber },
   });
   return run;
 }
@@ -1229,6 +1284,9 @@ export async function processChildSplits(card: CardRow, splitter: AgentRow, chil
       reviewerId: candidate.reviewer.id,
       columnStatus: 'todo',
       decisionMode: 'auto',
+      // Critical children (persisted data, irreversible external actions) get a
+      // blind review panel under the company default.
+      critical: candidate.child.critical ?? false,
       requiredChildPolicy: 'all_required_accepted',
       childRequirementLevel: 'required',
       maxRetries: card.maxRetries,
@@ -1650,7 +1708,7 @@ export async function createMessageDelegations(parent: CardRow, leader: AgentRow
   return comments;
 }
 
-async function addStageLog(cardId: string, agentId: string | null, from: string | null, to: string, actor = 'system') {
+export async function addStageLog(cardId: string, agentId: string | null, from: string | null, to: string, actor = 'system') {
   const fromStatus = normalizeCardStatus(from) ?? 'todo';
   const toStatus = normalizeCardStatus(to) ?? 'todo';
   const action = inferCardTransitionAction(fromStatus, toStatus) ?? 'manual_move';
@@ -1670,7 +1728,7 @@ async function addStageLog(cardId: string, agentId: string | null, from: string 
   });
 }
 
-async function addActivity(input: {
+export async function addActivity(input: {
   companyId: string;
   actorType?: 'agent' | 'user' | 'system';
   actorId?: string;
@@ -1738,7 +1796,7 @@ async function addTaskRunLog(run: TaskRunRow, status: LogStatus, message: string
   });
 }
 
-async function completeTaskRun(runId: string | null | undefined, input: {
+export async function completeTaskRun(runId: string | null | undefined, input: {
   status: 'success' | 'failed' | 'cancelled';
   error?: string | null;
   output?: string | null;
@@ -1941,6 +1999,10 @@ async function claimNextTaskRun(): Promise<TaskRunRow | null> {
       if (!(await cardDependenciesMet(card.id))) continue;
     } else if (!queued.messageCommentId) {
       continue;
+    } else if (queued.kind === 'panel_review' && card.columnStatus !== 'in_review') {
+      // A sealed panel slot only runs while the card is in review; the round
+      // sweep cancels the slots of a card that left review.
+      continue;
     } else if (isTerminalCardStatus(card.columnStatus)) {
       const [comment] = await db.select().from(cardComments).where(and(eq(cardComments.id, queued.messageCommentId), eq(cardComments.cardId, card.id))).limit(1);
       if (!terminalMessageTaskCanRun(queued, card, comment)) {
@@ -1950,7 +2012,7 @@ async function claimNextTaskRun(): Promise<TaskRunRow | null> {
     }
     const targetAgentId = queued.kind === 'review'
       ? card.reviewerId
-      : queued.kind === 'message' || queued.kind === 'message_review'
+      : queued.kind === 'message' || queued.kind === 'message_review' || queued.kind === 'panel_review'
         ? queued.agentId
         : card.assigneeId;
     if (!targetAgentId) continue;
@@ -2031,7 +2093,9 @@ export async function processTaskRunQueue(app: FastifyInstance): Promise<{ claim
           ? () => runMessageDelegation(run.cardId, { taskRunId: run.id })
           : run.kind === 'message_review'
             ? () => reviewMessageDelegation(run.cardId, { taskRunId: run.id })
-            : () => dispatchCard(run.cardId, run.source === 'manual' ? 'manual' : 'loop', { taskRunId: run.id });
+            : run.kind === 'panel_review'
+              ? () => reviewPanelSlot(run.cardId, { taskRunId: run.id })
+              : () => dispatchCard(run.cardId, run.source === 'manual' ? 'manual' : 'loop', { taskRunId: run.id });
       void finishWorkerTaskRun(run, work)
         .catch((error) => app.log.error({ error, taskRunId: run.id }, 'task run worker failed unexpectedly'))
         .finally(() => activeTaskRunIds.delete(run.id));
@@ -2118,7 +2182,7 @@ function supportsScopedKanbanAdapterSession(adapterType?: string | null): boolea
   return adapterType === 'codex-app' || adapterType === 'hermes-ssh';
 }
 
-async function scopedAdapterSession(card: CardRow, agent: AgentRow, kind: TaskRunKind): Promise<AdapterSessionRow | null> {
+export async function scopedAdapterSession(card: CardRow, agent: AgentRow, kind: TaskRunKind): Promise<AdapterSessionRow | null> {
   if (!supportsScopedKanbanAdapterSession(agent.adapterType)) return null;
   return findAdapterSession({
     companyId: card.companyId,
@@ -2131,7 +2195,7 @@ async function scopedAdapterSession(card: CardRow, agent: AgentRow, kind: TaskRu
   });
 }
 
-async function rememberTaskAdapterSession(card: CardRow, agent: AgentRow, kind: TaskRunKind, result: { sessionId: string; turnId?: string | null }, taskRunId?: string | null): Promise<void> {
+export async function rememberTaskAdapterSession(card: CardRow, agent: AgentRow, kind: TaskRunKind, result: { sessionId: string; turnId?: string | null }, taskRunId?: string | null): Promise<void> {
   if (!supportsScopedKanbanAdapterSession(agent.adapterType)) return;
   await rememberAdapterSession({
     companyId: card.companyId,
@@ -2202,7 +2266,7 @@ async function ensureAssigned(card: CardRow, source: string): Promise<CardRow | 
   return updated ?? null;
 }
 
-async function openHeartbeatRun(card: CardRow, agent: AgentRow, source: string, taskRunId?: string | null): Promise<HeartbeatRunRow> {
+export async function openHeartbeatRun(card: CardRow, agent: AgentRow, source: string, taskRunId?: string | null): Promise<HeartbeatRunRow> {
   const [run] = await db.insert(heartbeatRuns).values({
     companyId: card.companyId,
     cardId: card.id,
@@ -2219,7 +2283,7 @@ async function openHeartbeatRun(card: CardRow, agent: AgentRow, source: string, 
 // Claims one execution slot on the agent. With maxConcurrent=1 (the default) this is
 // the original atomic isBusy flip. With maxConcurrent>1, isBusy means "at capacity"
 // and the claim counts running heartbeat runs against the configured limit.
-async function claimAgentCapacity(agent: AgentRow): Promise<boolean> {
+export async function claimAgentCapacity(agent: AgentRow): Promise<boolean> {
   const maxConcurrent = Math.max(1, agent.maxConcurrent ?? 1);
   if (maxConcurrent === 1) {
     const [row] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, agent.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
@@ -2237,7 +2301,7 @@ async function claimAgentCapacity(agent: AgentRow): Promise<boolean> {
   return rows.length > 0;
 }
 
-async function cardTaskTimeoutSeconds(card: CardRow): Promise<number> {
+export async function cardTaskTimeoutSeconds(card: CardRow): Promise<number> {
   const configured = card.timeoutSeconds ?? null;
   if (configured && Number.isFinite(configured) && configured >= 30) return normalizeKanbanTaskTimeoutSeconds(configured);
   // Card override > the assignee's own default > the global admin setting.
@@ -2327,14 +2391,14 @@ export async function createPendingApproval(card: CardRow, agentId: string | nul
   return approval;
 }
 
-async function resolvePendingApproval(card: CardRow, status: 'approved' | 'rejected' | 'revision_requested' | 'cancelled', note: string, agentId?: string | null) {
+export async function resolvePendingApproval(card: CardRow, status: 'approved' | 'rejected' | 'revision_requested' | 'cancelled', note: string, agentId?: string | null) {
   const [approval] = await db.select().from(approvals).where(and(eq(approvals.cardId, card.id), eq(approvals.status, 'pending'))).orderBy(desc(approvals.createdAt)).limit(1);
   if (!approval) return;
   await db.update(approvals).set({ status, decisionNote: note, decidedAt: new Date(), updatedAt: new Date() }).where(eq(approvals.id, approval.id));
   await addActivity({ companyId: card.companyId, actorType: agentId ? 'agent' : 'system', actorId: agentId ?? 'system', agentId, action: `approval.${status}`, entityType: 'approval', entityId: approval.id, details: { cardId: card.id, note } });
 }
 
-async function recordCostAndEnforceBudget(card: CardRow, agent: AgentRow, runId: string | null, costUsd: number, tokensUsed: number, durationSeconds?: number): Promise<boolean> {
+export async function recordCostAndEnforceBudget(card: CardRow, agent: AgentRow, runId: string | null, costUsd: number, tokensUsed: number, durationSeconds?: number): Promise<boolean> {
   await db.insert(costEvents).values({
     companyId: card.companyId,
     agentId: agent.id,
@@ -3322,8 +3386,24 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const brainstormLaunch = checkpointRequest ? null : await resolveBrainstormRequest(card, agent, brainstormFromOutput(result.output));
     const parked = Boolean(checkpointRequest || brainstormLaunch);
     const needsHelpReview = parked ? false : completionDecision.needsHelpReview;
-    const topLevelGuidanceAccepted = parked ? false : completionDecision.topLevelGuidanceAccepted;
-    const nextStatus: CardStatus = checkpointRequest ? 'waiting_on_client' : brainstormLaunch ? 'waiting_on_brainstorm' : completionDecision.nextStatus;
+    // Blind review panel (§17): an author answering panel findings must
+    // disposition every one of them (or escalate) before the run counts as a
+    // fix; a malformed answer bounces like any other malformed report.
+    const structuredReport = agentReportFromOutput(result.output);
+    const fixRound = parked || needsHelpReview ? null : await openFixRound(card);
+    const fixEscalation = fixRound ? structuredReport?.escalation ?? null : null;
+    if (fixRound && !fixEscalation) {
+      const errors = dispositionErrors(fixRound.findings, structuredReport?.dispositions ?? []);
+      if (errors.length > 0) {
+        await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+        return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: fixDispositionFeedback(errors), runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
+      }
+    }
+    // Human approval is the last gate (§17.6): with no agent reviewer a
+    // requiresApproval card waits for the client instead of completing itself.
+    const humanGate = !parked && !fixRound && completionDecision.nextStatus === 'done' && !effectiveReviewerId && card.requiresApproval === true;
+    const topLevelGuidanceAccepted = parked || humanGate ? false : completionDecision.topLevelGuidanceAccepted;
+    const nextStatus: CardStatus = checkpointRequest ? 'waiting_on_client' : brainstormLaunch ? 'waiting_on_brainstorm' : fixRound || humanGate ? 'in_review' : completionDecision.nextStatus;
     const childBlock = parked ? null : await completionBlockedByChildren(card, nextStatus);
     const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : nextStatus;
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
@@ -3374,13 +3454,15 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       agentId: agent.id,
       type: childBlock ? 'children' : needsHelpReview ? 'escalation' : 'dispatch',
       status: childBlock ? 'queued' : 'success',
-      message: childBlock ? childBlock.message : needsHelpReview
-        ? nextStatus === 'needs_review'
-          ? 'Assignee requested reviewer guidance; help review queued.'
-          : 'Assignee requested guidance but has no reviewer or manager; output accepted as final and card marked done.'
-        : nextStatus === 'in_review'
-          ? 'Dispatch completed; card moved to quality review.'
-          : 'Dispatch completed; card marked done.',
+      message: childBlock ? childBlock.message : humanGate
+        ? 'Dispatch completed; no agent reviewer is available, so the card waits for client approval.'
+        : needsHelpReview
+          ? nextStatus === 'needs_review'
+            ? 'Assignee requested reviewer guidance; help review queued.'
+            : 'Assignee requested guidance but has no reviewer or manager; output accepted as final and card marked done.'
+          : nextStatus === 'in_review'
+            ? fixRound ? 'Dispatch completed; review findings answered, verification round queued.' : 'Dispatch completed; card moved to quality review.'
+            : 'Dispatch completed; card marked done.',
       output: result.output,
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
@@ -3390,8 +3472,17 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     await completeTaskRun(options.taskRunId, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
     if (effectiveNextStatus === 'in_review') {
-      await createPendingApproval(updated, agent.id, card.reviewerId === effectiveReviewerId ? 'Reviewer approval required' : 'Reports-to review required');
-      await enqueueTaskRun(updated.id, 'review', 'queue');
+      if (fixRound) {
+        // Fix round answered: the same reviewers verify the dispositions, or
+        // the escalation hands the card up the boss chain.
+        await afterAuthorFix(updated, agent, fixRound, { escalation: fixEscalation, dispositions: structuredReport?.dispositions ?? [] });
+      } else if (humanGate) {
+        await ensureHumanGate(updated, agent.id, 'Client approval required', { kind: 'client_approval' });
+      } else {
+        await createPendingApproval(updated, agent.id, card.reviewerId === effectiveReviewerId ? 'Reviewer approval required' : 'Reports-to review required');
+        if (await panelRequiredForCard(updated)) await openPanelRound(updated, { kind: 'panel' });
+        else await enqueueTaskRun(updated.id, 'review', 'queue');
+      }
     }
     if (effectiveNextStatus === 'needs_review') {
       await createPendingApproval(updated, agent.id, 'Assignee needs reviewer guidance');
@@ -3414,6 +3505,15 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     return card;
   }
   if (card.columnStatus !== 'in_review' && card.columnStatus !== 'needs_review') throw new Error(`card_not_ready_for_review:${card.columnStatus ?? 'todo'}`);
+  // Blind review panel (§17): while a panel or verify round is open its slots
+  // review the card; a plain review run would double-review it. Cards that
+  // never had a round (review_round = 0) skip the lookup entirely.
+  if ((card.reviewRound ?? 0) > 0 && card.columnStatus === 'in_review' && await hasOpenReviewRound(card.id)) {
+    const note = 'Single review skipped; a blind review round is open on this card.';
+    await addTaskLog({ cardId: card.id, agentId: card.reviewerId, type: 'review', status: 'queued', message: note });
+    await completeTaskRun(options.taskRunId, { status: 'success', output: note });
+    return card;
+  }
   const reviewMode = card.columnStatus === 'needs_review' ? 'help' : 'quality';
   const childCards = await db.select({ id: kanbanCards.id }).from(kanbanCards).where(and(eq(kanbanCards.parentCardId, card.id), isNull(kanbanCards.deletedAt)));
   const hasChildren = childCards.length > 0;
@@ -3437,6 +3537,17 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     const reason = reviewMode === 'help'
       ? 'Escalation requested but no reviewer or manager is available; output accepted as final.'
       : 'Review requested but no independent reviewer or manager is available; output accepted as final.';
+    // Human approval is the last gate (§17.6): a requiresApproval card with no
+    // agent reviewer is parked for the client instead of auto-approving.
+    if (card.requiresApproval) {
+      const parkedReason = 'No agent reviewer is available; the card waits for client approval.';
+      await ensureHumanGate(card, null, parkedReason, { kind: 'client_approval' });
+      await addTaskLog({ cardId: card.id, type: 'review', status: 'queued', message: parkedReason });
+      await addCardMessage({ cardId: card.id, authorType: 'system', action: 'review_awaiting_client', body: parkedReason });
+      await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'review', action: 'review.awaiting_client', entityType: 'card', entityId: card.id, details: { mode: reviewMode } });
+      await completeTaskRun(options.taskRunId, { status: 'success', output: parkedReason });
+      return card;
+    }
     const childBlock = await completionBlockedByChildren(card, 'done');
     if (childBlock) {
       const [updated] = await db.update(kanbanCards).set({
@@ -3621,7 +3732,10 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     }
 
     const rejected = decision === 'revision_requested';
-    const targetStatus: CardStatus = rejected ? 'todo' : 'done';
+    // The human client is the last gate: an agent approval on a requiresApproval
+    // card parks it in review for the client instead of finishing it.
+    const humanGate = !rejected && Boolean(card.requiresApproval);
+    const targetStatus: CardStatus = rejected ? 'todo' : humanGate ? 'in_review' : 'done';
     const childBlock = rejected ? null : await completionBlockedByChildren(card, targetStatus);
     const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : targetStatus;
     const [updated] = await db.update(kanbanCards).set({
@@ -3639,18 +3753,19 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       status: childBlock ? 'queued' : acceptedReviewOutput ? 'success' : 'failed',
       message: childBlock ? childBlock.message : rejected
         ? reviewMode === 'help' ? 'Reviewer provided guidance; card returned to todo for rework.' : 'Review rejected; card returned to todo.'
-        : reviewMode === 'help' ? 'Reviewer resolved the escalated task; card marked done.' : 'Review passed; card marked done.',
+        : humanGate ? 'Review passed; waiting for the client to approve.' : reviewMode === 'help' ? 'Reviewer resolved the escalated task; card marked done.' : 'Review passed; card marked done.',
       output: result.output,
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
     });
-    await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: childBlock ? 'review_waiting_on_children' : rejected ? (reviewMode === 'help' ? 'review_guidance' : 'review_rejected') : 'review_note', body: childBlock ? `${childBlock.message}\n\n${result.output}` : result.output });
+    await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: childBlock ? 'review_waiting_on_children' : rejected ? (reviewMode === 'help' ? 'review_guidance' : 'review_rejected') : humanGate ? 'review_approved_awaiting_client' : 'review_note', body: childBlock ? `${childBlock.message}\n\n${result.output}` : result.output });
     await db.update(heartbeatRuns).set({ status: acceptedReviewOutput ? 'success' : 'failed', completedAt: new Date(), durationSeconds: result.durationSeconds, error: acceptedReviewOutput ? null : result.output }).where(eq(heartbeatRuns.id, run.id));
-    await resolvePendingApproval(card, childBlock ? 'cancelled' : rejected ? (reviewMode === 'help' ? 'revision_requested' : 'rejected') : 'approved', childBlock ? childBlock.message : rejected ? result.output : 'Reviewer approved task.', reviewer.id);
+    if (humanGate && !childBlock) await ensureHumanGate(card, reviewer.id, 'Client approval required after reviewer approval', { reviewerVerdict: 'approved' });
+    else await resolvePendingApproval(card, childBlock ? 'cancelled' : rejected ? (reviewMode === 'help' ? 'revision_requested' : 'rejected') : 'approved', childBlock ? childBlock.message : rejected ? result.output : 'Reviewer approved task.', reviewer.id);
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: childBlock ? 'review.waiting_on_children' : rejected ? (reviewMode === 'help' ? 'review.revision_requested' : 'review.rejected') : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, mode: reviewMode, childBlock } });
     await completeTaskRun(options.taskRunId, { status: rejected ? 'failed' : 'success', error: rejected ? result.output : null, output: childBlock ? childBlock.message : result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
-    if (!rejected && !childBlock) await cascadeParentStatus(updated.parentCardId);
+    if (!rejected && !childBlock && !humanGate) await cascadeParentStatus(updated.parentCardId);
     return updated;
   } catch (error) {
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
@@ -3942,6 +4057,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
       try { await sweepPeerQuestions(app); } catch (error) { app.log.warn({ error }, 'peer question sweep failed'); }
       try { await sweepClientCheckpointReminders(app); } catch (error) { app.log.warn({ error }, 'client checkpoint reminder sweep failed'); }
       try { await sweepBrainstormRounds(app); } catch (error) { app.log.warn({ error }, 'brainstorm round sweep failed'); }
+      try { await sweepReviewRounds(app); } catch (error) { app.log.warn({ error }, 'review round sweep failed'); }
       // Only statuses the loop can act on; done/blocked/cancelled/in_progress cards
       // used to be loaded and skipped one by one, which scales badly with board size.
       const cards = await db.select().from(kanbanCards).where(and(
@@ -3953,6 +4069,14 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
         inArray(kanbanCards.columnStatus, ['backlog', 'todo', 'in_review', 'needs_review']),
       ));
       result.cardsScanned = cards.length;
+      // Blind review panel / human gate: a card waiting on an open review
+      // round or on the client must not be handed to the single review path.
+      let reviewGated = new Set<string>();
+      try {
+        reviewGated = await cardIdsAwaitingPanelOrHuman(cards.filter((card) => card.columnStatus === 'in_review').map((card) => card.id));
+      } catch (error) {
+        app.log.warn({ error }, 'review gate lookup failed');
+      }
       for (const card of cards) {
         if (card.recurEveryMinutes) { result.skipped += 1; continue; }
         if (card.scheduleAt && card.scheduleAt > now) { result.skipped += 1; continue; }
@@ -3972,6 +4096,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
             app.log.warn({ error, cardId: card.id }, 'dispatch cron skipped card');
           }
         } else if (card.columnStatus === 'in_review' || card.columnStatus === 'needs_review') {
+          if (reviewGated.has(card.id)) { result.skipped += 1; continue; }
           try {
             await enqueueTaskRun(card.id, 'review', source === 'manual' ? 'manual' : 'loop');
             result.reviewed += 1;
@@ -4054,7 +4179,7 @@ export const dispatchInternals = {
   workProductRowsFromArtifacts,
 };
 
-function clipText(value: string | null | undefined, maxChars: number): string {
+export function clipText(value: string | null | undefined, maxChars: number): string {
   const text = value?.trim() ?? '';
   if (text.length <= maxChars) return text;
   return `${text.slice(0, Math.max(0, maxChars - 48)).trimEnd()}\n[truncated ${text.length - maxChars} chars]`;
@@ -4336,6 +4461,7 @@ function completionProtocol(card: CardRow, reports: DelegationReport[] = [], opt
       'To split, add to your structured report:',
       '"children": [{ "title": "...", "body": "<the deliverable and its acceptance criteria, at least 40 characters>", "assigneeSlug": "<one of your direct reports>", "reviewerSlug": "<optional; defaults to you>", "dependsOn": [<indexes of other children this one waits for>] }]',
       `Rules MegaCorps enforces: only your active direct reports; at most ${fanoutCap} live child cards at once (the company boss instead splits exactly one card per department); one round at a time — all children must close and you must integrate their output before opening another round, and a card gets at most 3 rounds; every child has a reviewer who is not its assignee. Slice by deliverable (each child end-to-end verifiable), never by technical layer; keep each child within its assignee's timeout window. When you split, report status "in_progress": this card then waits on its children and comes back to you for integration.`,
+      'Every child body must carry an Acceptance section (or a checklist of acceptance criteria); a child without one is rejected as split_child_missing_acceptance. Mark a child "critical": true when it touches persisted data or performs an irreversible external action; such cards get a blind review panel instead of a single reviewer.',
     ].join('\n'),
     `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, project shared file path/URL, report URL, screenshot URL, artifact URL, or file metadata instead of local-only scratch paths.`,
     `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
@@ -4343,6 +4469,7 @@ function completionProtocol(card: CardRow, reports: DelegationReport[] = [], opt
     `Brainstorm: if you are the CEO or a department head and this card spans several departments or its requirements are vague, broadcast one question to the heads of the departments it concerns before planning: add "broadcast": { "departments": ["<slug>", "<slug>"], "question": "..." } to your report and stop. Name only relevant departments (the directory above lists slugs, heads and charters); MegaCorps parks the card as waiting_on_brainstorm, collects each head's proposal, and resumes you with them. One round at a time.`,
     `Client checkpoint: if you are the CEO or a department head and this card genuinely needs the client's decision on direction, or the client's look at interim output, add "checkpoint": { "kind": "direction" | "interim", "question": "...", "options": ["A", "B"], "recommendation": "A", "artifactRefs": ["repo path or URL"] } to your report and stop working; MegaCorps parks the card as waiting_on_client and resumes you with the answer injected. One checkpoint at a time. Members cannot ask the client: use status="needs_review" for your reviewer or report.mentions for a peer.`,
     `Conversation: to leave a message on this card for the humans and colleagues following it, add "notes": ["..."] (max 3) to your structured report. Write @<agent slug> inside a note to wake that agent with your message; they answer on the same thread and you see the answer next run. @client pings the human client without blocking the card (use a checkpoint when you need a binding decision). If your runtime can reach MegaCorps over HTTP you may also post at any time: POST /api/cards/${card.id}/comments with your Bearer token and { "body": "..." }.`,
+    `If this prompt carries a "Review findings to fix" section, your completion report must include "dispositions" for every finding key listed there (or "escalation": { "reason": "..." } when the fix is beyond your ability or authority); a report without them is returned to you.`,
     `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
     `If no reviewer/manager exists above you, provide the best final answer instead of escalating; MegaCorps will accept top-level guidance requests as done.`,
   ].filter(Boolean).join('\n');
@@ -4625,6 +4752,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
       'Do not rely on stale stage, child, dependency, or review state from memory. Treat the fresh DB delta below as the source of truth for anything that changed since your last turn.',
       'Fresh Kanban delta:',
       deltaContext,
+      await fixSection(card),
       await integrationSection(card),
       await clientCheckpointSection(card),
       await brainstormSection(card, card.assigneeId ? (await db.select().from(agents).where(eq(agents.id, card.assigneeId)).limit(1))[0] : null),
@@ -4655,10 +4783,12 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
       `Card ID: ${card.id}`,
       `Title: ${card.title}`,
       `Stage: ${card.columnStatus ?? 'todo'}`,
+      formatBriefCoverage(parseCardBrief(card.body)),
       'Use the Kanban context snapshot below as the source of truth for assignee, department, project, goals, company structure, parent chain, dependencies, message board, lifecycle logs, and prior output.',
     ].join('\n'),
     digest,
     await handoverSection(card, assignee ?? null),
+    await fixSection(card),
     await integrationSection(card),
     await clientCheckpointSection(card),
     await brainstormSection(card, assignee),
@@ -4671,7 +4801,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
   ].filter(Boolean).join('\n\n');
 }
 
-async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
   if (options.continuation) {
     const helpReview = card.columnStatus === 'needs_review';
     return [
@@ -4682,6 +4812,7 @@ async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}
       'Use your existing adapter session memory for the original full context. Treat the fresh DB delta below as source of truth for current stage, messages, legacy child-card/dependency states, and new work products.',
       'Fresh Kanban delta:',
       await buildKanbanDeltaContext(card, options),
+      `Acceptance criteria (from the card brief):\n${acceptanceOf(card.body) ?? 'none stated - judge against the body'}`,
       helpReview
         ? 'Decision options: APPROVE/DONE if you can finish it directly, REVISION_REQUESTED with concrete guidance if the assignee should retry, or ESCALATE if your manager must decide.'
         : 'Decision options: PASS/APPROVED if acceptable, REJECT/REVISION_REQUESTED with concrete feedback if it needs more work, or ESCALATE only if your manager must decide.',
@@ -4725,6 +4856,7 @@ async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}
         ? 'Read every existing legacy child result and work product as read-only context, synthesize the final answer, and return PASS/APPROVED only when the combined result is ready. Return REJECT/REVISION_REQUESTED with concrete feedback if required evidence is missing. Do not create new child Kanban cards; use Message Board delegation records for any future split work.'
         : 'Return PASS/APPROVED if it is acceptable, or REJECT/REVISION_REQUESTED with feedback if it needs more work. Use ESCALATE only if your manager must decide.',
     'Use the Kanban context, message board, lifecycle logs, dependencies, and company state when deciding.',
+    `Acceptance criteria (from the card brief):\n${acceptanceOf(card.body) ?? 'none stated - judge against the body'}`,
     'Reviews with no explicit verdict are returned for retry - never omit the decision.',
     REVIEWER_PLAYBOOK,
     REVIEW_SCORE_RUBRIC,

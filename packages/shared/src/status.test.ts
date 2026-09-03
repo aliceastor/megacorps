@@ -1,6 +1,39 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canTransitionCard, cardStatusSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createCardSchema, createMachineRunnerSchema, createProjectSchema, inferCardTransitionAction, runnerHeartbeatSchema, signupSchema, updateAgentSchema, validateCardTransition } from './index.ts';
+import { agentReportSchema, canTransitionCard, createKnowledgeDocSchema, partialWithoutDefaults, updateCompanySchema, updateProjectSchema, cardStatusSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createCardSchema, createCompanySchema, createMachineRunnerSchema, createProjectSchema, inferCardTransitionAction, runnerHeartbeatSchema, signupSchema, updateAgentSchema, updateCardSchema, validateCardTransition } from './index.ts';
+
+test('cards, companies and reports carry the blind review panel fields', () => {
+  const reviewer = '2d7c0c7e-3f4b-4a55-9a0e-6c8f2e1b5d11';
+  const card = createCardSchema.parse({ title: 'Export', body: '## Acceptance\n- [ ] downloads', requiresApproval: true, reviewMode: 'panel', critical: true, reviewerIds: [reviewer] });
+  assert.equal(card.reviewMode, 'panel');
+  assert.equal(card.critical, true);
+  assert.deepEqual(card.reviewerIds, [reviewer]);
+  const defaults = createCardSchema.parse({ title: 'Export', body: 'x', requiresApproval: true });
+  assert.equal(defaults.reviewMode, 'single');
+  assert.equal(defaults.critical, false);
+  assert.deepEqual(defaults.reviewerIds, []);
+  assert.equal(createCardSchema.safeParse({ title: 'Export', body: 'x', requiresApproval: true, reviewerIds: [reviewer, reviewer, reviewer] }).success, false);
+  assert.equal(updateCardSchema.safeParse({ reviewMode: 'panel', reviewerIds: [reviewer] }).success, true);
+  assert.equal(updateCardSchema.safeParse({ reviewMode: 'committee' }).success, false);
+  assert.equal(createCompanySchema.parse({ name: 'Acme', slug: 'acme', panelReviewDefault: 'always' }).panelReviewDefault, 'always');
+  assert.equal(createCompanySchema.safeParse({ name: 'Acme', slug: 'acme', panelReviewDefault: 'sometimes' }).success, false);
+  const report = agentReportSchema.parse({
+    kind: 'megacorps-report',
+    status: 'completed',
+    summary: 'reviewed',
+    verdict: 'revision_requested',
+    score: 4,
+    findings: [{ id: 'F1', severity: 'P0', file: 'src/a.ts', line: 3, title: 'Null deref', evidence: 'crash', requiredFix: 'guard', reassign: true }],
+    dispositions: [{ findingKey: 'R1-AB1-1', disposition: 'rejected', reason: 'unreachable: validated upstream' }],
+    verifications: [{ findingKey: 'R1-AB1-1', status: 'still_open', note: 'still reproduces' }],
+    escalation: { reason: 'needs the platform team' },
+    children: [{ title: 'Child', body: 'Build the thing end to end.\n\n- [ ] tests green and the page renders the list', assigneeSlug: 'ribel', critical: true }],
+  });
+  assert.equal(report.findings?.[0]?.severity, 'P0');
+  assert.equal(report.children?.[0]?.critical, true);
+  assert.equal(agentReportSchema.safeParse({ kind: 'megacorps-report', status: 'completed', summary: 'x', findings: [{ severity: 'P3', title: 't', evidence: 'e', requiredFix: 'f' }] }).success, false);
+  assert.equal(agentReportSchema.safeParse({ kind: 'megacorps-report', status: 'completed', summary: 'x', dispositions: [{ findingKey: 'k', disposition: 'ignored' }] }).success, false);
+});
 
 test('allows the canonical card status path and blocks invalid skips', () => {
   assert.deepEqual([...cardStatuses], ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm', 'done', 'blocked', 'cancelled']);
@@ -101,4 +134,16 @@ test('agent updates do not inherit create-time adapter defaults', () => {
 test('signup requires a real password length', () => {
   assert.equal(signupSchema.safeParse({ email: 'a@example.com', name: 'Alice', password: 'short' }).success, false);
   assert.equal(signupSchema.safeParse({ email: 'a@example.com', name: 'Alice', password: 'long-enough' }).success, true);
+});
+
+test('partial updates leave omitted defaulted fields untouched', () => {
+  // A PUT that only renames must not reset priority/tags/requiresApproval/maxRetries.
+  assert.deepEqual(updateCardSchema.parse({ title: 'renamed' }), { title: 'renamed' });
+  assert.deepEqual(updateProjectSchema.parse({ description: 'x' }), { description: 'x' });
+  assert.deepEqual(updateCompanySchema.parse({ mission: 'm' }), { mission: 'm' });
+  // Explicit values still validate and defaults still apply on create.
+  assert.equal(updateCardSchema.parse({ priority: 'high', tags: ['a'] }).priority, 'high');
+  assert.equal(updateCardSchema.safeParse({ priority: 'extreme' }).success, false);
+  assert.equal(createCardSchema.parse({ title: 't', body: 'b', requiresApproval: true }).priority, 'normal');
+  assert.deepEqual(partialWithoutDefaults(createKnowledgeDocSchema).parse({}), {});
 });
