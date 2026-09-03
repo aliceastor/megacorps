@@ -266,6 +266,8 @@ A 是地基;B 是願景的靈魂;E 是「上手好用」的來源。
 
 **成本**:預設單審;panel 只在 critical 或主管點選;複核輪只看已關閉項;輪數每層有上限。
 
+**落地(2026-09-03,後端 cfb60ab)**:migration v17(卡 `review_mode / critical / reviewer_ids / review_round / fix_level`、公司 `panel_review_default`、表 `review_rounds` 與 `review_findings`、預留 `external_waits.authorized_head_sha`);`review-panel.ts` 純規則(17 個測試)、`review-rounds.ts` 資料庫黏合、新 run kind `panel_review`(以 sealed slot 留言當 `message_comment_id` 繞過每卡每 kind 一個 run 的索引);`GET/POST /api/cards/:id/review-rounds`;webhook 路徑同步支援 `findings / dispositions / verifications / escalation`,裁決不合格回 409 `fix_dispositions_invalid`。與文件差異:① 單審模式的 agent 通過也會停下等 client 核准(規格第 6 點原本只寫小組與無審查者兩種情況);② 0 位合格審查者且非 critical 時排一個單審 run 而不是行內呼叫;③ 修復輪的 findings 也注入延續 session 的 prompt。順手修掉一個既有 bug:zod 4 的 `.partial()` 仍套預設值,任何部分 `PUT` 都會把 tags / priority / requiresApproval / 依賴 / 修復輪數重置,現在所有 update schema 改為去預設版本。前端(§17 的 UI)另行落地。
+
 ## 18. 卡片 brief(2026-09-03 定案,抄自 anneal 的 BRIEF-TEMPLATE)
 
 專案層已有 description 與三層 goals(卡片以 goalId 連結,prompt 注入「適用目標」);缺的是卡片自己的結構。卡片 body 維持 markdown,但用固定小節:`## Goal` / `## Background` / `## Changes`(逐條可對 diff 驗證)/ `## Out of scope`(必填)/ `## Constraints` / `## Acceptance`(機械可驗);中英標題都認(目標 / 背景 / 變更 / 範圍外 / 限制 / 驗收)。`card-brief.ts` 純函數:解析小節、抽 Acceptance(沒有標題時寬鬆偵測 `- [ ]` 清單或含「驗收 / acceptance」的段落)、模板、完整度。用法:建卡表單「插入 brief 模板」;agent 拆子卡(`report.children[].body`)必須有 Acceptance,否則 `split_child_missing_acceptance`(既有 40 字下限不變);審查 prompt 把 Acceptance 明列為判準;概要區顯示 Acceptance 清單與缺漏小節。
