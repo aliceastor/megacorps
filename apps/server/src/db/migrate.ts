@@ -29,11 +29,21 @@ const migrations: Migration[] = [
   { version: 16, name: 'ceo-position-prompt', run: runCeoPositionPrompt },
   { version: 17, name: 'review-panel', run: runReviewPanel },
   { version: 18, name: 'merge-closure', run: runMergeClosure },
+  { version: 19, name: 'external-wait-polling', run: runExternalWaitPolling },
 ];
 
 // Merge closure (company pipeline §19). external_waits.authorized_head_sha
 // already landed with v17, so this only adds the project switch and the index
 // the Gitea receiver uses to find open waits by provider.
+// Design §13 item 1: external_waits.poll_interval_seconds had no consumer.
+// The sweep needs to know when a wait was last checked and how many checks it
+// has already spent, so a card cannot poll a dead system forever.
+async function runExternalWaitPolling(): Promise<void> {
+  await sql.unsafe(`ALTER TABLE external_waits ADD COLUMN IF NOT EXISTS last_polled_at TIMESTAMPTZ;
+ALTER TABLE external_waits ADD COLUMN IF NOT EXISTS poll_count INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS external_waits_status_poll_idx ON external_waits(status, poll_interval_seconds, last_polled_at);`);
+}
+
 async function runMergeClosure(): Promise<void> {
   await sql.unsafe(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS completion_requires_merge BOOLEAN NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS external_waits_provider_status_idx ON external_waits(provider, status, created_at DESC);

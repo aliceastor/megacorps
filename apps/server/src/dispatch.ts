@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, isNull, lt, sql as drizzleSql, isNotNull } from
 import type { FastifyInstance } from 'fastify';
 import { inferCardTransitionAction, normalizeCardStatus, type CardStatus } from '@megacorps/shared';
 import { db, sql as rawSql } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, cardRequiredTools, companies, costEvents, cronRuns, departments, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, toolRegistry, users, workProducts, agentReviewScores } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, cardRequiredTools, companies, costEvents, cronRuns, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, toolRegistry, users, workProducts, agentReviewScores } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
@@ -34,7 +34,8 @@ import { acceptanceOf, formatBriefCoverage, parseCardBrief } from './card-brief.
 import { dispositionErrors, formatDispositionRules } from './review-panel.ts';
 import { afterAuthorFix, cardIdsAwaitingPanelOrHuman, ensureHumanGate, fixSection, hasOpenReviewRound, openFixRound, openPanelRound, panelRequiredForCard, reviewPanelSlot, sweepReviewRounds } from './review-rounds.ts';
 import { noteMergeGateSkipped, parkForMerge, planMergeGate } from './merge-gate.ts';
-import { sweepExternalWaitTimeouts } from './external-events.ts';
+import { sweepExternalWaitPolls, sweepExternalWaitTimeouts } from './external-events.ts';
+import { EXTERNAL_POLL_MAX, formatPollPrompt } from './external-polling.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -612,7 +613,7 @@ function projectGitProtocol(company: typeof companies.$inferSelect | null | unde
     project.pushAfterRun === false ? '8. Push-after-run is disabled; report the local result and blocker clearly.' : `8. Commit and push your branch when work is complete. Prefer a pull request when policy is ${project.completionPolicy ?? 'push_or_pr'}.`,
     '9. Durable non-code deliverables, reports, exports, and handoff docs belong in the project repo too (e.g. a deliverables/ or docs/ folder): commit and push them, then reference them as workProducts. Use the company shared directory only for company-wide reference material, never as the primary home of task output.',
     '10. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, file, or external metadata as applicable. Never use runtime-local file paths as the final artifact reference unless the user explicitly asked for local-only work.',
-    '11. If you report status=waiting_on_external, include pollIntervalSeconds when polling is appropriate. Choose the interval yourself based on the external system, minimum 30 seconds.',
+    '11. If you report status=waiting_on_external, include pollIntervalSeconds when the external system will not call MegaCorps back. Choose the interval yourself, minimum 30 seconds: MegaCorps hands the card back to you at that cadence for a check-only turn, up to 24 times.',
     ...(project.completionRequiresMerge
       ? [`12. Completion gate: this project counts a card as done only when its pull request is merged into ${project.defaultBranch ?? 'main'}; report the PR URL and head commit SHA as workProducts, and do not push further commits to the PR after review approval unless asked (a new head reopens review).`]
       : []),
@@ -4088,6 +4089,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
       try { await sweepBrainstormRounds(app); } catch (error) { app.log.warn({ error }, 'brainstorm round sweep failed'); }
       try { await sweepReviewRounds(app); } catch (error) { app.log.warn({ error }, 'review round sweep failed'); }
       try { await sweepExternalWaitTimeouts(app); } catch (error) { app.log.warn({ error }, 'external wait timeout sweep failed'); }
+      try { await sweepExternalWaitPolls(app); } catch (error) { app.log.warn({ error }, 'external wait poll sweep failed'); }
       // Only statuses the loop can act on; done/blocked/cancelled/in_progress cards
       // used to be loaded and skipped one by one, which scales badly with board size.
       const cards = await db.select().from(kanbanCards).where(and(
@@ -4495,7 +4497,7 @@ function completionProtocol(card: CardRow, reports: DelegationReport[] = [], opt
     ].join('\n'),
     `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, project shared file path/URL, report URL, screenshot URL, artifact URL, or file metadata instead of local-only scratch paths.`,
     `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
-    `If you are waiting on CI/CD, deploy, external approval, or another external system, use status="waiting_on_external" and include pollIntervalSeconds based on how often that system should be checked.`,
+    `If you are waiting on CI/CD, deploy, external approval, or another external system, use status="waiting_on_external". Include pollIntervalSeconds when that system will not notify MegaCorps by itself: you will be handed the card back at that cadence for a check-only turn, and you either report the outcome or park it again with the same interval.`,
     `Brainstorm: if you are the CEO or a department head and this card spans several departments or its requirements are vague, broadcast one question to the heads of the departments it concerns before planning: add "broadcast": { "departments": ["<slug>", "<slug>"], "question": "..." } to your report and stop. Name only relevant departments (the directory above lists slugs, heads and charters); MegaCorps parks the card as waiting_on_brainstorm, collects each head's proposal, and resumes you with them. One round at a time.`,
     `Client checkpoint: if you are the CEO or a department head and this card genuinely needs the client's decision on direction, or the client's look at interim output, add "checkpoint": { "kind": "direction" | "interim", "question": "...", "options": ["A", "B"], "recommendation": "A", "artifactRefs": ["repo path or URL"] } to your report and stop working; MegaCorps parks the card as waiting_on_client and resumes you with the answer injected. One checkpoint at a time. Members cannot ask the client: use status="needs_review" for your reviewer or report.mentions for a peer.`,
     `Conversation: to leave a message on this card for the humans and colleagues following it, add "notes": ["..."] (max 3) to your structured report. Write @<agent slug> inside a note to wake that agent with your message; they answer on the same thread and you see the answer next run. @client pings the human client without blocking the card (use a checkpoint when you need a binding decision). If your runtime can reach MegaCorps over HTTP you may also post at any time: POST /api/cards/${card.id}/comments with your Bearer token and { "body": "..." }.`,
@@ -4596,6 +4598,31 @@ const HANDOVER_COMMENT_SCAN_LIMIT = Math.max(80, KANBAN_CONTEXT_RECORD_LIMIT);
 
 function isReviewCommentAction(action: string): boolean {
   return action.startsWith('review_') || action.startsWith('delegate_review_');
+}
+
+/**
+ * The polled owner's marching orders (§13 item 1). A poll dispatch looks
+ * exactly like an ordinary one by the time the adapter sees it, so the section
+ * has to say loudly that the job is to look, not to build.
+ */
+export async function externalPollSection(card: CardRow): Promise<string> {
+  // The open wait row is the source of truth: the sweep stamps pollCount
+  // before the dispatch runs, and the card is already in_progress by then.
+  const [wait] = await db.select().from(externalWaits)
+    .where(and(eq(externalWaits.cardId, card.id), eq(externalWaits.status, 'waiting')))
+    .orderBy(desc(externalWaits.createdAt))
+    .limit(1);
+  if (!wait || !wait.pollIntervalSeconds || (wait.pollCount ?? 0) === 0) return '';
+  return formatPollPrompt({
+    provider: wait.provider,
+    waitingFor: wait.waitingFor,
+    externalUrl: wait.externalUrl,
+    externalId: wait.externalId,
+    attempt: wait.pollCount ?? 1,
+    max: EXTERNAL_POLL_MAX,
+    final: (wait.pollCount ?? 0) >= EXTERNAL_POLL_MAX,
+    intervalSeconds: wait.pollIntervalSeconds,
+  });
 }
 
 export async function handoverSection(card: CardRow, assignee: AgentRow | null): Promise<string> {
@@ -4782,6 +4809,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
       'Do not rely on stale stage, child, dependency, or review state from memory. Treat the fresh DB delta below as the source of truth for anything that changed since your last turn.',
       'Fresh Kanban delta:',
       deltaContext,
+      await externalPollSection(card),
       await fixSection(card),
       await integrationSection(card),
       await clientCheckpointSection(card),
@@ -4818,6 +4846,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
     ].join('\n'),
     digest,
     await handoverSection(card, assignee ?? null),
+    await externalPollSection(card),
     await fixSection(card),
     await integrationSection(card),
     await clientCheckpointSection(card),

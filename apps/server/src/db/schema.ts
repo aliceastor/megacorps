@@ -503,6 +503,10 @@ export const externalWaits = pgTable('external_waits', {
   // Merge closure (company pipeline §19): the exact head SHA the review
   // authorized; a merge of any other head is drift, not completion.
   authorizedHeadSha: text('authorized_head_sha'),
+  // Polling (§13 item 1): when the sweep last asked the owner to check, and how
+  // many checks this wait has spent of its budget.
+  lastPolledAt: timestamp('last_polled_at', { withTimezone: true }),
+  pollCount: integer('poll_count').notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
 });

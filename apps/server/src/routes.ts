@@ -14,6 +14,7 @@ import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, 
 import { afterAuthorFix, completePanelReviewFromWebhook, ensureHumanGate, hasOpenReviewRound, listReviewRounds, openFixRound, openPanelRound, panelRequiredForCard } from './review-rounds.ts';
 import { dispositionErrors, formatDispositionRules } from './review-panel.ts';
 import { handleGiteaWebhookEvent, noteMergeGateSkipped, parkForMerge, planMergeGate } from './merge-gate.ts';
+import { openExternalWait } from './external-events.ts';
 import { brainstormFromOutput } from './brainstorm.ts';
 import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointFromOutput } from './client-checkpoints.ts';
 import { registerChatRoutes } from './chat.ts';
@@ -2999,17 +3000,24 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     let externalWaitId: string | null = null;
     if (nextStatus === 'waiting_on_external') {
       const externalProduct = body.workProducts.find((product) => product.pullRequestUrl || product.url || product.commitSha || product.branch);
-      const [wait] = await db.insert(externalWaits).values({
-        companyId: card.companyId,
-        cardId: card.id,
+      const waitValues = {
         waitingFor: body.summary ?? externalProduct?.title ?? 'external completion',
         provider: externalProduct?.repoProvider ?? (externalProduct?.pullRequestUrl ? 'git' : 'external'),
         externalId: externalProduct?.commitSha ?? externalProduct?.branch ?? null,
         externalUrl: externalProduct?.pullRequestUrl ?? externalProduct?.url ?? null,
         pollIntervalSeconds: body.pollIntervalSeconds ?? null,
-        status: 'waiting',
-      }).returning();
-      externalWaitId = wait?.id ?? null;
+      };
+      // A polled owner that reports "still running" parks the same wait again:
+      // update it instead of stacking a second row, so the poll budget keeps
+      // counting and the sweep does not check twice per interval.
+      const existingWait = await openExternalWait(card.id);
+      if (existingWait) {
+        const [wait] = await db.update(externalWaits).set(waitValues).where(eq(externalWaits.id, existingWait.id)).returning();
+        externalWaitId = wait?.id ?? existingWait.id;
+      } else {
+        const [wait] = await db.insert(externalWaits).values({ companyId: card.companyId, cardId: card.id, status: 'waiting', ...waitValues }).returning();
+        externalWaitId = wait?.id ?? null;
+      }
     }
     if (nextStatus !== card.columnStatus) {
       const fromStatus = normalizeCardStatus(card.columnStatus) ?? 'todo';

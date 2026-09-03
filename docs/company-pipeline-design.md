@@ -202,7 +202,7 @@ A 是地基;B 是願景的靈魂;E 是「上手好用」的來源。
 ## 13. 順手要補的既有缺口(建議,非本文定案)
 
 查 `waiting_on_external` 現況時發現三個既有缺口,與流水線正交但會影響體驗,建議排進 A 或 B 階段一起做:
-1. `external_waits.pollIntervalSeconds` 沒有消費者:沒有 sweep 依間隔把卡重新 dispatch 去檢查外部系統,「輪詢」目前是空的。
+1. ~~`external_waits.pollIntervalSeconds` 沒有消費者~~(2026-09-03 已補):migration v19 加 `last_polled_at` / `poll_count`;`external-polling.ts` 純規則(何時到期、預算 24 次、措辭,8 個測試)+ `sweepExternalWaitPolls` 進 cron tick。到期時把卡交回負責人跑一輪**只查不做**的 dispatch:prompt 段落 `externalPollSection` 明說「這不是新工作,去看那個外部系統,好了回報 done / in_review,壞了回報 in_progress,還在跑就再 park 一次」。第一次檢查在停卡後一個完整間隔才發生(agent 剛看過),之後從上次檢查起算,間隔低於 30 秒會被拉高。預算用盡就停止輪詢、留言 `external_poll_exhausted` 並通知,卡仍停在原地等 external event 或逾時。順手修掉一個既有問題:agent 重新 park 時原本會**再插一列 wait**,現在改為更新同一列,所以輪詢預算會延續、也不會一個間隔查兩次。有 webhook 的系統(內建 Gitea)不設 interval,永遠不會進這條路徑。
 2. `external_waits.timeoutAt` 沒有消費者:逾時不會自動 blocked、不會通知。
 3. Gitea push webhook(`/api/gitea/events`)尚未對接 `external-events`:PR 合進 main 應自動觸發 success 喚醒等待中的卡,這才是「merge 進 main → done」的真閉環。
 4. ~~api-help 只靠手寫清單守覆蓋率~~(2026-09-03 已補):`api-help-coverage.test.ts` 直接從原始碼抽出所有 `app.<method>('/api/...')` 註冊,與目錄雙向比對(缺漏與過期都會紅);做法抄自 mosonlab/anneal 的 `operator-api-docs.test.mjs`。
