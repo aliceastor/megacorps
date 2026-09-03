@@ -61,6 +61,17 @@ export type Card = {
   splitRound?: number | null;
   brainstormRound?: number | null;
   forceBrainstorm?: boolean | null;
+  // Blind review panel (company pipeline §17): single | panel, critical work,
+  // the composed panel (max 2), the current round number and the boss-chain
+  // takeover level; this level's revision counter and its cap feed the
+  // 修復中 situation line.
+  reviewMode?: string | null;
+  critical?: boolean | null;
+  reviewerIds?: string[];
+  reviewRound?: number | null;
+  fixLevel?: number | null;
+  revisionCount?: number | null;
+  maxRevisions?: number | null;
 };
 export type Agent = { id: string; companyId?: string; name: string; slug?: string; role?: string; adapterType?: string; isBusy?: boolean };
 export type Company = { id: string; name: string };
@@ -105,6 +116,58 @@ export type CommentActionMode = 'comment' | 'agent_note' | 'pause_agent' | 'send
 export type ReviewerScope = 'phase' | 'final';
 /** A row from GET /api/approvals?cardId=; type is client_checkpoint / task_review / budget_override_required. */
 export type CardApproval = { id: string; companyId?: string; cardId?: string | null; type: string; status: string; payload?: Record<string, unknown> | null; decisionNote?: string | null; createdAt?: string; decidedAt?: string | null };
+/** A review_findings row as GET /api/cards/:id/review-rounds returns it (same column names as the server). */
+export type ReviewFinding = {
+  id: string;
+  companyId?: string;
+  cardId?: string;
+  roundId: string;
+  round: number;
+  reviewerAgentId: string | null;
+  findingKey: string;
+  severity: string;
+  file: string | null;
+  line: number | null;
+  title: string;
+  evidence: string;
+  requiredFix: string;
+  reassign: boolean;
+  /** The author's answer (adopted | rejected | merged) and its evidence. */
+  disposition: string | null;
+  dispositionReason: string | null;
+  mergedInto: string | null;
+  codeEvidence: string | null;
+  testEvidence: string | null;
+  /** The verify round's answer (verified | still_open). */
+  verification: string | null;
+  verificationNote: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+/**
+ * A row from GET /api/cards/:id/review-rounds (newest first): review_rounds
+ * plus its findings. Findings are keyed by round number, so a verify round
+ * carries the same rows as the panel round it verifies. metadata holds
+ * panel_degraded, verdicts (reviewer id → verdict), absent, openKeys, escalation.
+ */
+export type ReviewRound = {
+  id: string;
+  companyId?: string;
+  cardId: string;
+  round: number;
+  kind: string;
+  level: number;
+  authorAgentId: string | null;
+  reviewerIds: string[];
+  status: string;
+  decision: string | null;
+  timeoutAt?: string | null;
+  openedAt?: string | null;
+  closedAt?: string | null;
+  summary?: string | null;
+  metadata?: Record<string, unknown> | null;
+  findings: ReviewFinding[];
+};
 /** A row from GET /api/cards/:id/subtree; depth 1 = direct child. */
 export type SubtreeCard = Card & { depth: number; childCount?: number };
 /** localStorage['megacorps.kanban.detailLayout']: the new overview panel or the PR-0 tab layout. */

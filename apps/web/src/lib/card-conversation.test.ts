@@ -802,3 +802,17 @@ test('sliceConversationWindow counts threads and folds as one row each and reads
   assert.equal(oldestItemTime(window.visible), T0 + 200_000);
   assert.equal(oldestItemTime(result.items), T0);
 });
+
+test('sealed panel seats never reach the board while round milestones do', () => {
+  const conversation = build({
+    comments: [
+      comment('c-slot', { action: 'review_slot', authorType: 'system', body: 'seat for Cara', metadata: { sealed: true, roundId: 'r-1', reviewerId: 'a-cara' } }),
+      comment('c-open', { action: 'review_round_opened', authorType: 'system', body: 'Round 1 opened with Cara and Alice.', metadata: { roundId: 'r-1', round: 1 } }),
+      comment('c-closed', { action: 'review_round_closed', authorType: 'system', body: 'Round 1 closed: revision requested.', metadata: { roundId: 'r-1', round: 1 } }),
+    ],
+  });
+  const ids = conversation.items.flatMap((item) => (item.type === 'event' ? [item.event.id] : item.type === 'thread' ? [item.root.id, ...item.children.map((child) => child.id)] : item.type === 'fold' ? item.events.map((event) => event.id) : []));
+  assert.ok(!ids.some((id) => id.includes('c-slot')), 'the sealed seat is not rendered');
+  assert.ok(ids.some((id) => id.includes('c-open')), 'the opened milestone is');
+  assert.ok(ids.some((id) => id.includes('c-closed')), 'so is the closed one');
+});

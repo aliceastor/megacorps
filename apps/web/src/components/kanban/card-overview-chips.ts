@@ -1,11 +1,13 @@
 // Pure descriptors for the overview zone: the chip row, child-card chip tones
 // and which needs-you strip (if any) a card requires. No React here so
 // node:test can pin the rules down without rendering.
+import { briefGaps } from '../../lib/card-brief';
+import { humanGateOf, type GateFinding } from '../../lib/card-review';
 import { priorityValue } from './card-helpers';
 import type { Card, CardApproval, CardComment } from './card-types';
 
-export type OverviewChipField = 'priority' | 'decisionMode' | 'requiresApproval' | 'maxRetries' | 'dependencyCardIds';
-export type OverviewChipTone = 'neutral' | 'accent' | 'danger';
+export type OverviewChipField = 'priority' | 'decisionMode' | 'requiresApproval' | 'maxRetries' | 'dependencyCardIds' | 'reviewMode' | 'critical' | 'body';
+export type OverviewChipTone = 'neutral' | 'accent' | 'warning' | 'danger';
 export type OverviewChip = { id: string; text: string; tone: OverviewChipTone; /** null = informational, not editable */ field: OverviewChipField | null };
 export type OverviewTranslate = (key: string, vars?: Record<string, string | number>) => string;
 export type OverviewChipContext = {
@@ -67,6 +69,22 @@ export function overviewChips(card: Card, ctx: OverviewChipContext): OverviewChi
   }
 
   if (card.forceBrainstorm) chips.push({ id: 'forceBrainstorm', field: null, tone: 'accent', text: ctx.tf('kanban.chipForceBrainstorm') });
+
+  // Blind review panel (§17): the mode chip when the card asks for a panel or
+  // has already had a round (a critical card under the company default), the
+  // critical flag, and the brief sections still missing from the body (§18).
+  const reviewRound = card.reviewRound ?? 0;
+  if (card.reviewMode === 'panel' || reviewRound > 0) {
+    const base = ctx.tf('kanban.chipPanel');
+    chips.push({ id: 'reviewMode', field: 'reviewMode', tone: 'accent', text: reviewRound > 0 ? `${base} · ${ctx.tf('kanban.roundN', { n: reviewRound })}` : base });
+  }
+  if (card.critical) chips.push({ id: 'critical', field: 'critical', tone: 'warning', text: ctx.tf('kanban.chipCritical') });
+  if (card.body && card.body.trim()) {
+    const gaps = briefGaps(card.body);
+    if (gaps.length > 0) {
+      chips.push({ id: 'brief', field: 'body', tone: gaps.includes('acceptance') ? 'warning' : 'neutral', text: ctx.tf('kanban.briefMissing', { sections: gaps.map((key) => ctx.tf(`kanban.brief.${key}`)).join(ctx.tf('kanban.listSeparator')) }) });
+    }
+  }
   return chips;
 }
 
@@ -84,6 +102,8 @@ export type NeedsYouVariant =
   | { kind: 'checkpoint'; approval: CardApproval }
   | { kind: 'checkpointMissing'; question: string }
   | { kind: 'approval'; approval: CardApproval }
+  /** §17.5: the blind review findings could not be fixed along the boss chain; you approve as is, send it back or cancel. */
+  | { kind: 'fixExhausted'; approval: CardApproval; findings: GateFinding[]; reason: string; trigger: string | null; level: number | null }
   | { kind: 'reviewHint' }
   | { kind: 'blocked' }
   | { kind: 'todo' }
@@ -109,9 +129,18 @@ export function needsYouVariant(card: Card, approvals: CardApproval[] | null | u
     return { kind: 'checkpointMissing', question: asked?.body ?? '' };
   }
 
+  // A human gate (§17.6) holds the card whether or not it requires approval:
+  // fix_exhausted gets its own strip, client_approval / review_unavailable the
+  // plain approve / reject form.
+  const pendingReview = pendingOf('task_review');
+  const gate = humanGateOf(pendingReview);
+  if (gate && !TERMINAL.has(status) && pendingReview) {
+    if (gate.kind === 'fix_exhausted') return { kind: 'fixExhausted', approval: pendingReview, findings: gate.findings, reason: gate.reason, trigger: gate.trigger, level: gate.level };
+    return { kind: 'approval', approval: pendingReview };
+  }
+
   if (card.requiresApproval && !TERMINAL.has(status)) {
-    const pending = pendingOf('task_review');
-    if (pending) return { kind: 'approval', approval: pending };
+    if (pendingReview) return { kind: 'approval', approval: pendingReview };
     if ((status === 'in_review' || status === 'needs_review') && loaded) return { kind: 'reviewHint' };
   }
 

@@ -92,6 +92,9 @@ export function draftFromCard(card: Card): Partial<Card> {
     decisionMode: card.decisionMode ?? null,
     requiresApproval: card.requiresApproval ?? false,
     maxRetries: card.maxRetries ?? 3,
+    reviewMode: card.reviewMode ?? 'single',
+    critical: card.critical ?? false,
+    reviewerIds: card.reviewerIds ?? [],
   };
 }
 

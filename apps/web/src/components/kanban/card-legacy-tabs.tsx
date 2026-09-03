@@ -1,5 +1,6 @@
 'use client';
 import { MessageSquare, RefreshCw } from 'lucide-react';
+import { isSealedComment } from '@/lib/card-review';
 import { useLocale } from '@/lib/locale-context';
 import { delegationReviewTone, isDelegationReviewComment } from './card-helpers';
 import type { Agent, Card, CardAction, CardComment, CardTabKey, CommentActionMode, ReviewerScope, TaskLog, WorkProduct } from './card-types';
@@ -32,7 +33,7 @@ export type MessageBoardTabProps = {
 export function MessageBoardTab({
   selected,
   agents,
-  comments,
+  comments: allComments,
   tabLoading,
   busy,
   commentBody,
@@ -50,6 +51,8 @@ export function MessageBoardTab({
   addComment,
 }: MessageBoardTabProps) {
   const { t } = useLocale();
+  // Sealed blind review seats (§17) carry nothing readable and never render.
+  const comments = allComments.filter((comment) => !isSealedComment(comment));
   return <div style={{ display: 'grid', gap: 12 }}>
     <div className="panel-title">
       <div><h2>{t('kanban.tabMessageBoard')}</h2><span className="status-pill">{comments.length} {t('kanban.messagesCount')}{tabLoading.comments ? ` / ${t('kanban.refreshing')}` : ''}</span></div>
@@ -189,7 +192,7 @@ export type DelegationTabProps = {
 
 export function DelegationTab({ selected, agents, comments, tabLoading, loadCardComments }: DelegationTabProps) {
   const { t } = useLocale();
-  const delegationReviewRecords = comments.filter(isDelegationReviewComment).sort((a, b) => Date.parse(a.createdAt ?? '') - Date.parse(b.createdAt ?? ''));
+  const delegationReviewRecords = comments.filter((comment) => isDelegationReviewComment(comment) && !isSealedComment(comment)).sort((a, b) => Date.parse(a.createdAt ?? '') - Date.parse(b.createdAt ?? ''));
   return <div style={{ display: 'grid', gap: 10 }}>
     <div className="panel-title">
       <div><h2>{t('kanban.tabDelegationReview')}</h2><span className="status-pill">{delegationReviewRecords.length} {t('kanban.delegationRecords')}{tabLoading.comments ? ` / ${t('kanban.refreshing')}` : ''}</span></div>

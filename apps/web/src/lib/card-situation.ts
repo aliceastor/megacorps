@@ -2,7 +2,8 @@
 // now. Pure: it reads the board card, the cached rows the panel already holds
 // and returns an i18n key + variables (plus the rendered text through ctx.tf),
 // so the overview zone never has to reason about statuses itself.
-import type { Agent, Card, CardComment, CardDelegationSummary, TaskLog } from '../components/kanban/card-types';
+import type { Agent, Card, CardComment, CardDelegationSummary, ReviewRound, TaskLog } from '../components/kanban/card-types';
+import { fixState, openReviewRound, pendingHumanGate, submittedCount } from './card-review';
 import { formatDuration, formatRelative } from './relative-time';
 
 export type SituationTone = 'neutral' | 'accent' | 'success' | 'warning' | 'danger';
@@ -20,6 +21,8 @@ export type SituationContext = {
   delegationSummary?: CardDelegationSummary | null;
   latestComments?: CardComment[] | null;
   latestLogs?: TaskLog[] | null;
+  /** GET /api/cards/:id/review-rounds, newest first; null/undefined = not loaded. */
+  reviewRounds?: ReviewRound[] | null;
 };
 export type Situation = { key: string; vars: Record<string, string | number>; tone: SituationTone; text: string };
 
@@ -102,8 +105,26 @@ export function describeSituation(card: Card, ctx: SituationContext): Situation 
   if (!terminal && card.rollupStatus === 'integrating') return finish('kanban.situation.integrating', { name: assigneeName }, 'accent');
 
   if (status === 'in_review' || status === 'needs_review') {
-    const name = agentName(card.reviewerId) ?? you;
+    // Blind review (§17): a human gate holds the card for you (§17.6), an open
+    // panel / verify round counts the seats that answered, otherwise the
+    // single reviewer (or the panel about to be composed) is named.
+    const gate = pendingHumanGate(approvals);
+    if (gate?.kind === 'fix_exhausted') return finish('kanban.situation.fixExhausted', {}, 'warning');
+    if (gate?.kind === 'review_unavailable') return finish('kanban.situation.reviewUnavailable', {}, 'warning');
+    if (gate || (card.requiresApproval && approvals.some((approval) => approval.type === 'task_review' && approval.status === 'pending'))) return finish('kanban.situation.awaitingClient', {}, 'warning');
+    const open = openReviewRound(ctx.reviewRounds);
+    if (open) return finish(open.kind === 'verify' ? 'kanban.situation.verifyReview' : 'kanban.situation.panelReview', { submitted: submittedCount(open), total: open.reviewerIds.length }, 'accent');
+    const panel = !card.requiresApproval && (card.reviewMode === 'panel' || (card.reviewerIds?.length ?? 0) > 0);
+    const name = agentName(card.reviewerId) ?? (panel ? ctx.tf('kanban.reviewModePanel') : you);
     return finish(status === 'needs_review' ? 'kanban.situation.helpReview' : 'kanban.situation.review', { name }, 'accent');
+  }
+
+  // A round sent the card back (§17.3-17.5): the owner is fixing findings, or
+  // a later owner took it over along the boss chain.
+  if (status === 'todo' || status === 'in_progress') {
+    const fix = fixState(card, ctx.reviewRounds);
+    if (fix?.takenOver) return finish('kanban.situation.takenOver', { name: assigneeName }, 'warning');
+    if (fix) return finish('kanban.situation.fixing', { round: fix.revision, max: fix.maxRevisions }, 'warning');
   }
 
   if (status === 'waiting_on_external') {

@@ -13,7 +13,7 @@ import { DelegationTab, MessageBoardTab, ThreadTab } from './card-legacy-tabs';
 import { CardOverview } from './card-overview';
 import type { OverviewChipField } from './card-overview-chips';
 import { CardOverviewEdit } from './card-overview-edit';
-import { type Agent, type ApiEvent, type Card, type CardAction, type CardApproval, type CardComment, type CardDelegationSummary, type CardDetailTab, type CardStatus, type CardTabKey, type CommentActionMode, type Department, type DetailLayout, type Goal, type Project, type ReviewerScope, type SubtreeCard, type TaskLog, type WorkProduct, type WorkProductType, statusLabels } from './card-types';
+import { type Agent, type ApiEvent, type Card, type CardAction, type CardApproval, type CardComment, type CardDelegationSummary, type CardDetailTab, type CardStatus, type CardTabKey, type CommentActionMode, type Department, type DetailLayout, type Goal, type Project, type ReviewRound, type ReviewerScope, type SubtreeCard, type TaskLog, type WorkProduct, type WorkProductType, statusLabels } from './card-types';
 import { CardWorkProductsTab } from './card-work-products-tab';
 import { ConversationComposer } from './conversation-composer';
 
@@ -45,6 +45,8 @@ export type CardDetailPanelProps = {
   openCard: (card: Card) => void;
   cardApprovals: CardApproval[] | null;
   cardChildren: SubtreeCard[] | null;
+  /** GET /api/cards/:id/review-rounds (§17): situation line, chips and the findings tables in the 對話 tab. */
+  cardReviewRounds: ReviewRound[] | null;
   /** buildConversation(...) over the loaded rows, memoised on the board; `.latest` feeds the overview. */
   conversation: Conversation;
   conversationView: ConversationView;
@@ -190,6 +192,7 @@ export function CardDetailPanel(props: CardDetailPanelProps) {
             logs={props.logs}
             approvals={props.cardApprovals}
             childCards={props.cardChildren}
+            reviewRounds={props.cardReviewRounds}
             delegationSummary={props.delegationSummary}
             latest={props.conversationLatest}
             busy={props.busy}
@@ -247,6 +250,7 @@ export function CardDetailPanel(props: CardDetailPanelProps) {
             cards={props.cards}
             agents={props.agents}
             conversation={props.conversation}
+            reviewRounds={props.cardReviewRounds}
             view={props.conversationView}
             setView={props.setConversationView}
             logs={props.logs}

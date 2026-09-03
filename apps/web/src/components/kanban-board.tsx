@@ -5,16 +5,18 @@ import { CSS } from '@dnd-kit/utilities';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { isCancelledError, useQuery, useQueryClient } from '@tanstack/react-query';
-import { GripVertical, Plus, RefreshCw, Search, X } from 'lucide-react';
+import { FileText, GripVertical, Plus, RefreshCw, Search, X } from 'lucide-react';
 import { api } from '@/lib/api';
+import { insertBriefTemplate } from '@/lib/card-brief';
 import { EMPTY_CONVERSATION, buildConversation, type Conversation, type ConversationView } from '@/lib/card-conversation';
 import { readCardSeen, rememberCardSeen, writeCardSeen } from '@/lib/card-seen';
 import { createKeyedDebounce } from '@/lib/keyed-debounce';
 import { useLocale } from '@/lib/locale-context';
 import { CardDetailPanel } from './kanban/card-detail-panel';
 import { agentDisplayName, draftFromCard, goalScope, isDraftDirty, parseCsv, priorityNumber, priorityValue, scopedGoalOptions, shouldReseedDraft, statusColor } from './kanban/card-helpers';
-import { type Agent, type ApiEvent, type CachedRows, type CachedValue, type Card, type CardAction, type CardApproval, type CardComment, type CardDelegationSummary, type CardDetailTab, type CardStatus, type CardTabCache, type CardTabKey, type Company, type Department, type DetailLayout, type Goal, type LocaleLabels, type Project, type SubtreeCard, type TaskLog, type TaskRun, type WorkProduct, priorities, statusLabels, statuses, workProductTypes } from './kanban/card-types';
+import { type Agent, type ApiEvent, type CachedRows, type CachedValue, type Card, type CardAction, type CardApproval, type CardComment, type CardDelegationSummary, type CardDetailTab, type CardStatus, type CardTabCache, type CardTabKey, type Company, type Department, type DetailLayout, type Goal, type LocaleLabels, type Project, type ReviewRound, type SubtreeCard, type TaskLog, type TaskRun, type WorkProduct, priorities, statusLabels, statuses, workProductTypes } from './kanban/card-types';
 import { DependencyPicker } from './kanban/dependency-picker';
+import { PanelReviewerPicker } from './kanban/panel-reviewer-picker';
 
 type StatusGroupId = 'todo' | 'in_progress' | 'review' | 'done' | 'blocked_cancelled';
 type StatusGroup = { id: StatusGroupId; statuses: readonly CardStatus[]; dropStatus: CardStatus };
@@ -319,6 +321,10 @@ export function KanbanBoard() {
   const [newTags, setNewTags] = useState('');
   const [newDependencies, setNewDependencies] = useState<string[]>([]);
   const [newDecisionMode, setNewDecisionMode] = useState<'auto' | 'solo' | 'pair' | 'swarm'>('auto');
+  // Blind review panel (§17): the review mode, the critical flag and the named seats (max 2).
+  const [newReviewMode, setNewReviewMode] = useState<'single' | 'panel'>('single');
+  const [newCritical, setNewCritical] = useState(false);
+  const [newReviewerIds, setNewReviewerIds] = useState<string[]>([]);
   const [newScheduleAt, setNewScheduleAt] = useState('');
   const [newRecurMinutes, setNewRecurMinutes] = useState('');
   const [workProductType, setWorkProductType] = useState<(typeof workProductTypes)[number]>('external');
@@ -368,7 +374,15 @@ export function KanbanBoard() {
     queryFn: () => api<SubtreeCard[]>(`/api/cards/${selectedId}/subtree`),
     enabled: Boolean(selectedId) && selectedIsParent,
   });
+  // Blind review rounds (§17): the situation line, the chips and the 對話
+  // tab's findings tables read them; invalidated on card.* live events below.
+  const reviewRoundsQuery = useQuery({
+    queryKey: ['cardReviewRounds', selectedId],
+    queryFn: () => api<ReviewRound[]>(`/api/cards/${selectedId}/review-rounds`),
+    enabled: Boolean(selectedId),
+  });
   const cardApprovals = selectedId && approvalsQuery.data ? approvalsQuery.data : null;
+  const cardReviewRounds = selectedId && reviewRoundsQuery.data ? reviewRoundsQuery.data : null;
   const cardChildren = useMemo(() => (selectedId && selectedIsParent && subtreeQuery.data ? subtreeQuery.data.filter((row) => row.depth === 1) : null), [selectedId, selectedIsParent, subtreeQuery.data]);
 
   // Every selection change goes through here so selectedIdRef is right before
@@ -653,12 +667,14 @@ export function KanbanBoard() {
       const cardEvent = detail.type.startsWith('card.') || detail.type === 'activity.created';
       if (cardEvent) liveDebounce.run('refresh', () => void refresh());
       if (selected && cardEvent) {
-        // Approvals and the subtree have no live event of their own, and a child
-        // card's event carries the child's id: refresh both on any card.* event.
+        // Approvals, the subtree and the review rounds have no live event of
+        // their own, and a child card's event carries the child's id: refresh
+        // all three on any card.* event.
         const id = selected.id;
         liveDebounce.run(`approvals:${id}`, () => {
           void queryClient.invalidateQueries({ queryKey: ['cardApprovals', id] });
           void queryClient.invalidateQueries({ queryKey: ['cardSubtree', id] });
+          void queryClient.invalidateQueries({ queryKey: ['cardReviewRounds', id] });
         });
       }
       const affectsSelectedCard = Boolean(selected && detail.cardId === selected.id);
@@ -790,6 +806,9 @@ export function KanbanBoard() {
           reviewerId: newReviewer || null,
           dependencyCardIds: newDependencies,
           decisionMode: newDecisionMode,
+          reviewMode: newReviewMode,
+          critical: newCritical,
+          reviewerIds: newReviewMode === 'panel' ? newReviewerIds : [],
           requiresApproval,
           forceBrainstorm,
           brainstormDepartmentIds: forceBrainstorm ? brainstormDepartmentIds : [],
@@ -809,6 +828,9 @@ export function KanbanBoard() {
       setNewTags('');
       setNewDependencies([]);
       setNewDecisionMode('auto');
+      setNewReviewMode('single');
+      setNewCritical(false);
+      setNewReviewerIds([]);
       setNewScheduleAt('');
       setNewRecurMinutes('');
       setRequiresApproval(false);
@@ -855,6 +877,9 @@ export function KanbanBoard() {
         decisionMode: draft.decisionMode ?? null,
         requiresApproval: Boolean(draft.requiresApproval),
         maxRetries: Number(draft.maxRetries ?? selected.maxRetries ?? 3),
+        reviewMode: draft.reviewMode ?? selected.reviewMode ?? 'single',
+        critical: Boolean(draft.critical),
+        reviewerIds: draft.reviewerIds ?? [],
       });
       setToast({ message: t('kanban.cardSaved'), type: 'success' });
       setOverviewEditing(false);
@@ -1053,6 +1078,7 @@ export function KanbanBoard() {
     const card = selected;
     setToast({ message, type: 'success' });
     await queryClient.invalidateQueries({ queryKey: ['cardApprovals', card.id] });
+    void queryClient.invalidateQueries({ queryKey: ['cardReviewRounds', card.id] });
     void queryClient.invalidateQueries({ queryKey: ['kanbanBoard'] });
     await refresh();
     await Promise.all([loadCardComments(card, true), loadCardLogs(card, true), loadCardActions(card, true), loadCardDelegationSummary(card, true)]);
@@ -1131,12 +1157,16 @@ export function KanbanBoard() {
             <div className="kanban-create-modal-body">
               <input className="input" placeholder={t('common.title')} autoFocus value={newTitle} onChange={(e) => setNewTitle(e.target.value)} />
               <textarea className="input" placeholder={t('common.description')} value={newBody} onChange={(e) => setNewBody(e.target.value)} rows={5} />
+              <div className="action-row brief-template-row">
+                <button type="button" className="btn" onClick={() => setNewBody(insertBriefTemplate(newBody))}><FileText size={14} /> {t('kanban.insertBriefTemplate')}</button>
+                <span className="field-hint">{t('kanban.briefTemplateHint')}</span>
+              </div>
               <div className="form-grid">
-                <select className="input" value={newCompany} onChange={(e) => { setNewCompany(e.target.value); setNewDepartment(''); setNewProject(''); setNewGoal(''); setNewAssignee(''); setNewReviewer(''); setNewDependencies([]); }}><option value="">{t('common.company')}</option>{companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}</select>
+                <select className="input" value={newCompany} onChange={(e) => { setNewCompany(e.target.value); setNewDepartment(''); setNewProject(''); setNewGoal(''); setNewAssignee(''); setNewReviewer(''); setNewDependencies([]); setNewReviewerIds([]); }}><option value="">{t('common.company')}</option>{companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}</select>
                 <select className="input" value={newDepartment} onChange={(e) => { setNewDepartment(e.target.value); setNewGoal(''); }}><option value="">{t('common.department')}</option>{departments.filter((department) => !newCompany || department.companyId === newCompany).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select>
                 <select className="input" value={newProject} onChange={(e) => { setNewProject(e.target.value); setNewGoal(''); setNewDependencies([]); }}><option value="">{t('common.project')}</option>{projects.filter((project) => !newCompany || project.companyId === newCompany).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>
                 <select className="input" value={newGoal} onChange={(e) => setNewGoal(e.target.value)}><option value="">{t('kanban.goal')}</option>{scopedGoalOptions(goals, { companyId: newCompany, departmentId: newDepartment, projectId: newProject }).map((goal) => <option value={goal.id} key={goal.id}>{goalScope(goal)} / {goal.title}</option>)}</select>
-                <select className="input" value={newAssignee} onChange={(e) => setNewAssignee(e.target.value)}><option value="">{t('kanban.assignee')}</option>{agents.filter((agent) => !newCompany || agent.companyId === newCompany).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
+                <select className="input" value={newAssignee} onChange={(e) => { setNewAssignee(e.target.value); setNewReviewerIds((current) => current.filter((id) => id !== e.target.value)); }}><option value="">{t('kanban.assignee')}</option>{agents.filter((agent) => !newCompany || agent.companyId === newCompany).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
                 <select className="input" value={newReviewer} onChange={(e) => setNewReviewer(e.target.value)}><option value="">{t('kanban.reviewer')}</option>{agents.filter((agent) => !newCompany || agent.companyId === newCompany).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
                 <select className="input" value={newPriority} onChange={(e) => setNewPriority(e.target.value as (typeof priorities)[number])}>{priorities.map((priority) => <option key={priority} value={priority}>{t(`kanban.priority.${priority}`)}</option>)}</select>
               </div>
@@ -1149,6 +1179,19 @@ export function KanbanBoard() {
                   <option value="swarm">{t('kanban.modeSwarm')}</option>
                 </select>
               </label>
+              <div className="form-grid">
+                <label className="field-label">{t('kanban.reviewMode')}
+                  <select className="input" value={newReviewMode} onChange={(e) => setNewReviewMode(e.target.value === 'panel' ? 'panel' : 'single')}>
+                    <option value="single">{t('kanban.reviewModeSingle')}</option>
+                    <option value="panel">{t('kanban.reviewModePanel')}</option>
+                  </select>
+                </label>
+                <label className="check-row" style={{ alignSelf: 'end' }} title={t('kanban.criticalHint')}><input type="checkbox" checked={newCritical} onChange={(e) => setNewCritical(e.target.checked)} /> {t('kanban.critical')}</label>
+              </div>
+              <span className="field-hint">{t('kanban.criticalHint')}</span>
+              {newReviewMode === 'panel' && <div className="field-label"><span>{t('kanban.panelReviewers')}</span>
+                <PanelReviewerPicker agents={agents.filter((agent) => !newCompany || agent.companyId === newCompany)} excludeId={newAssignee || null} value={newReviewerIds} onChange={setNewReviewerIds} disabled={busy} />
+              </div>}
               <div className="field-label"><span>{t('kanban.dependencies')}</span><DependencyPicker cards={cards} companyId={newCompany} projectId={newProject || null} value={newDependencies} onChange={setNewDependencies} /></div>
               <div className="form-grid">
                 <label className="field-label">{t('kanban.scheduleAt')}
@@ -1200,6 +1243,7 @@ export function KanbanBoard() {
       openCard={openCard}
       cardApprovals={cardApprovals}
       cardChildren={cardChildren}
+      cardReviewRounds={cardReviewRounds}
       conversation={conversation}
       conversationView={conversationView}
       setConversationView={setConversationView}

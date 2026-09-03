@@ -16,10 +16,11 @@ import {
   type ConversationSort,
   type ConversationView,
 } from '@/lib/card-conversation';
+import { displayFindings, findingLocation, panelDegraded, roundForComment, stripFindingsTable, submittedCount } from '@/lib/card-review';
 import { useLocale } from '@/lib/locale-context';
 import { formatRelative } from '@/lib/relative-time';
 import { childChipTone } from './card-overview-chips';
-import { type Agent, type Card, type CardStatus, type CardTabKey, type TaskLog, statusLabels } from './card-types';
+import { type Agent, type Card, type CardStatus, type CardTabKey, type ReviewRound, type TaskLog, statusLabels } from './card-types';
 
 // The 對話 tab: renders whatever buildConversation() produced. Nothing here
 // classifies or de-duplicates — the pure model owns the rules, this file owns
@@ -41,6 +42,8 @@ type RenderCtx = {
   openCard: (card: Card) => void;
   /** Scrolls the panel to the needs-you strip (the checkpoint's 在上方回答). */
   answerAbove: () => void;
+  /** GET /api/cards/:id/review-rounds (§17): the findings tables under closed rounds; [] while loading. */
+  reviewRounds: ReviewRound[];
 };
 
 const FILTERS: ConversationFilter[] = ['all', 'talk', 'milestones', 'delegationReview', 'system'];
@@ -212,7 +215,7 @@ export function ConversationReview({ event, ctx, depth = 0 }: { event: Conversat
   </article>;
 }
 
-export function ConversationMilestone({ event, ctx, icon, extra }: { event: ConversationEvent; ctx: RenderCtx; icon: LucideIcon; extra?: ReactNode }) {
+export function ConversationMilestone({ event, ctx, icon, extra, after }: { event: ConversationEvent; ctx: RenderCtx; icon: LucideIcon; extra?: ReactNode; after?: ReactNode }) {
   const childChips = event.refs.childIds?.length
     ? event.refs.childIds.filter((id) => id !== event.refs.childCardId).map((id) => <Chip key={id} chip={{ kind: 'child', text: id, cardId: id }} ctx={ctx} />)
     : null;
@@ -226,8 +229,84 @@ export function ConversationMilestone({ event, ctx, icon, extra }: { event: Conv
       </header>
       <Body text={event.body} ctx={ctx} />
       <Chips event={event} ctx={ctx} extra={childChips || extra ? <>{childChips}{extra}</> : undefined} />
+      {after}
     </div>
   </article>;
+}
+
+function translatedOr(ctx: RenderCtx, key: string, fallback: string): string {
+  const translated = ctx.t(key);
+  return translated === key ? fallback : translated;
+}
+
+/**
+ * The merged findings of a blind review round (§17), read from the rounds
+ * query rather than the message text: severity, key, file:line, title, who
+ * raised it (duplicates the server merged at round close fold into one row),
+ * the author's disposition once given and the verify round's verdict.
+ */
+export function ReviewFindingsTable({ round, ctx }: { round: ReviewRound; ctx: RenderCtx }) {
+  const rows = displayFindings(round.findings);
+  if (rows.length === 0) return <p className="conv-findings-empty">{ctx.t('kanban.findingsNone')}</p>;
+  return <div className="table-wrap conv-findings">
+    <table className="conv-findings-table">
+      <thead>
+        <tr>
+          <th>{ctx.t('kanban.findingSeverity')}</th>
+          <th>{ctx.t('kanban.findingKey')}</th>
+          <th>{ctx.t('kanban.findingLocation')}</th>
+          <th>{ctx.t('kanban.findingTitle')}</th>
+          <th>{ctx.t('kanban.findingReviewers')}</th>
+          <th>{ctx.t('kanban.findingState')}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((finding) => {
+          const location = findingLocation(finding);
+          const reviewers = finding.reviewerIds.map((id) => agentNameOf(ctx.agents, id)).filter(Boolean).join(ctx.t('kanban.listSeparator'));
+          const detail = [finding.evidence, finding.requiredFix].filter(Boolean).join('\n\n');
+          return <tr key={finding.id}>
+            <td><span className={`conv-chip severity ${finding.severity}`}>{finding.severity}</span></td>
+            <td><code>{finding.findingKey}</code></td>
+            <td>{location ? <code>{location}</code> : '—'}</td>
+            <td title={detail || undefined}>
+              {finding.title}
+              {finding.reassign && <> <span className="conv-chip">{ctx.t('kanban.findingReassign')}</span></>}
+            </td>
+            <td>{reviewers || '—'}{finding.reviewerIds.length > 1 && <> <span className="conv-chip">×{finding.reviewerIds.length}</span></>}</td>
+            <td>
+              {!finding.disposition && !finding.verification ? '—' : <div className="conv-chips">
+                {finding.disposition && <span className={`conv-chip disposition ${finding.disposition}`} title={finding.dispositionReason ?? undefined}>
+                  {finding.disposition === 'merged' ? ctx.tf('kanban.disposition.merged', { key: finding.mergedInto ?? '?' }) : translatedOr(ctx, `kanban.disposition.${finding.disposition}`, finding.disposition)}
+                </span>}
+                {finding.verification && <span className={`conv-chip verification ${finding.verification}`} title={finding.verificationNote ?? undefined}>
+                  {translatedOr(ctx, `kanban.verification.${finding.verification}`, finding.verification)}
+                </span>}
+              </div>}
+            </td>
+          </tr>;
+        })}
+      </tbody>
+    </table>
+  </div>;
+}
+
+/** review_round_opened / review_round_closed: kind + round chips, the decision, seats answered while open, and the findings table under a closed round. */
+function ConversationReviewRound({ event, ctx }: { event: ConversationEvent; ctx: RenderCtx }) {
+  const round = roundForComment(ctx.reviewRounds, event.refs);
+  const closed = event.rawLabel === 'review_round_closed';
+  const kind = event.refs.reviewRoundKind ?? round?.kind;
+  const decision = event.refs.decision ?? round?.decision ?? undefined;
+  const roundNumber = event.refs.round ?? round?.round;
+  const chips = <>
+    {kind && <span className="conv-chip">{translatedOr(ctx, `kanban.roundKind.${kind}`, kind)}{roundNumber !== undefined ? ` · ${ctx.tf('kanban.roundN', { n: roundNumber })}` : ''}</span>}
+    {closed && decision && <span className={`conv-chip decision ${decision}`}>{translatedOr(ctx, `kanban.roundDecision.${decision}`, decision)}</span>}
+    {!closed && round?.status === 'open' && <span className="conv-chip queued">{ctx.tf('kanban.convSubmitted', { submitted: submittedCount(round), total: round.reviewerIds.length })}</span>}
+    {round && panelDegraded(round) && <span className="conv-chip">{ctx.t('kanban.panelDegraded')}</span>}
+  </>;
+  // With the round loaded, the table replaces the markdown one in the message.
+  const shown = closed && round ? { ...event, body: stripFindingsTable(event.body) } : event;
+  return <ConversationMilestone event={shown} ctx={ctx} icon={ShieldCheck} extra={chips} after={closed && round ? <ReviewFindingsTable round={round} ctx={ctx} /> : undefined} />;
 }
 
 export function ConversationStatusRow({ event, ctx }: { event: ConversationEvent; ctx: RenderCtx }) {
@@ -313,7 +392,8 @@ function renderEvent(event: ConversationEvent, ctx: RenderCtx, depth = 0): React
     case 'review':
       return <ConversationReview key={event.id} event={event} ctx={ctx} depth={depth} />;
     case 'milestone':
-      return <ConversationMilestone key={event.id} event={event} ctx={ctx} icon={Milestone} />;
+      if (event.rawLabel === 'review_round_opened' || event.rawLabel === 'review_round_closed') return <ConversationReviewRound key={event.id} event={event} ctx={ctx} />;
+      return <ConversationMilestone key={event.id} event={event} ctx={ctx} icon={event.rawLabel.startsWith('review_') ? ShieldCheck : Milestone} />;
     case 'alert':
       return <ConversationMilestone key={event.id} event={event} ctx={ctx} icon={TriangleAlert} />;
     case 'status':
@@ -482,6 +562,8 @@ export type CardConversationProps = {
   cards: Card[];
   agents: Agent[];
   conversation: Conversation;
+  /** GET /api/cards/:id/review-rounds; null while loading. */
+  reviewRounds: ReviewRound[] | null;
   view: ConversationView;
   setView: (view: ConversationView) => void;
   logs: TaskLog[];
@@ -491,7 +573,7 @@ export type CardConversationProps = {
   openCard: (card: Card) => void;
 };
 
-export function CardConversation({ selected, cards, agents, conversation, view, setView, logs, logsHasMore, tabLoading, loadMoreCardLogs, openCard }: CardConversationProps) {
+export function CardConversation({ selected, cards, agents, conversation, reviewRounds, view, setView, logs, logsHasMore, tabLoading, loadMoreCardLogs, openCard }: CardConversationProps) {
   const { t, tf, locale } = useLocale();
   const now = Date.now();
   const listRef = useRef<HTMLDivElement>(null);
@@ -519,7 +601,7 @@ export function CardConversation({ selected, cards, agents, conversation, view, 
     cta.scrollIntoView({ behavior: 'smooth', block: 'center' });
     cta.querySelector<HTMLElement>('button, textarea, input')?.focus({ preventScroll: true });
   };
-  const ctx: RenderCtx = { t, tf, locale, now, agents, cards, mentionAgents, openCard, answerAbove };
+  const ctx: RenderCtx = { t, tf, locale, now, agents, cards, mentionAgents, openCard, answerAbove, reviewRounds: reviewRounds ?? [] };
 
   const windowed = useMemo(() => sliceConversationWindow(conversation.items, view.sort, limit), [conversation.items, view.sort, limit]);
   const oldestLogAt = useMemo(() => logs.reduce((oldest, log) => {

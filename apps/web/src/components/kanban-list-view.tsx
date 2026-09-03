@@ -21,6 +21,10 @@ export type ListCard = {
   parentCardId?: string | null;
   decisionMode?: string | null;
   requiresApproval?: boolean;
+  /** Blind review panel (§17): critical work and the review mode (or a round already run). */
+  critical?: boolean | null;
+  reviewMode?: string | null;
+  reviewRound?: number | null;
   costUsd?: string | null;
   updatedAt?: string;
 };
@@ -117,13 +121,14 @@ export function KanbanListView({ cards, agents, departments, projects, statusLab
             <td>{name(projects, card.projectId)}</td>
             <td style={{ paddingLeft: depth ? 8 + depth * 18 : undefined }}>
               {depth > 0 && <CornerDownRight size={12} style={{ marginRight: 4, opacity: 0.6 }} />}
+              {card.critical && <span className="badge critical" title={t('kanban.criticalHint')}>{t('kanban.chipCritical')}</span>}
               <b>{card.title}</b>
             </td>
             <td><span className="badge" style={{ borderColor: statusColor(card.columnStatus), color: statusColor(card.columnStatus) }}>{statusLabel(card.columnStatus)}</span></td>
             <td>{name(agents, card.assigneeId)}</td>
             <td>{card.reviewerId ? name(agents, card.reviewerId) : card.requiresApproval ? t('common.you') : '—'}</td>
             <td>{name(departments, card.departmentId)}</td>
-            <td><code>{modeLabel(card.decisionMode)}</code></td>
+            <td><code>{modeLabel(card.decisionMode)}</code>{(card.reviewMode === 'panel' || (card.reviewRound ?? 0) > 0) && <span className="badge panel" title={t('kanban.reviewModePanel')}>{t('kanban.chipPanel')}</span>}</td>
             <td title={card.updatedAt ? new Date(card.updatedAt).toLocaleString() : ''}>{formatRelative(card.updatedAt, now, locale) || '—'}</td>
           </tr>)}
         </tbody>

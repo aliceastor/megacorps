@@ -179,3 +179,43 @@ test('every situation key renders in all three locales without leaking tokens', 
     }
   }
 });
+
+test('a blind panel round reports how many seats have answered', () => {
+  const rounds = [{
+    id: 'r-1', cardId: 'card-1', round: 1, kind: 'panel', level: 0, authorAgentId: 'a-ben',
+    reviewerIds: ['a-cara', 'a-alice'], status: 'open', decision: null, openedAt: iso(HOUR),
+    metadata: { verdicts: { 'a-cara': 'revision_requested' } }, findings: [],
+  }];
+  const panel = describeSituation(card({ columnStatus: 'in_review', assigneeId: 'a-ben', reviewMode: 'panel' }), ctx({ reviewRounds: rounds }));
+  assert.equal(panel.key, 'kanban.situation.panelReview');
+  assert.deepEqual(panel.vars, { submitted: 1, total: 2 });
+
+  const verify = describeSituation(card({ columnStatus: 'in_review', assigneeId: 'a-ben' }), ctx({ reviewRounds: [{ ...rounds[0]!, kind: 'verify' }] }));
+  assert.equal(verify.key, 'kanban.situation.verifyReview');
+});
+
+test('the human gate outranks the round: fix exhausted, no reviewer, and plain client approval', () => {
+  const gate = (payload: Record<string, unknown>) => [{ id: 'ap-1', type: 'task_review', status: 'pending', payload }];
+  const inReview = card({ columnStatus: 'in_review', requiresApproval: true });
+  assert.equal(describeSituation(inReview, ctx({ approvals: gate({ humanGate: true, kind: 'fix_exhausted' }) })).key, 'kanban.situation.fixExhausted');
+  assert.equal(describeSituation(inReview, ctx({ approvals: gate({ humanGate: true, kind: 'review_unavailable' }) })).key, 'kanban.situation.reviewUnavailable');
+  assert.equal(describeSituation(inReview, ctx({ approvals: gate({ humanGate: true }) })).key, 'kanban.situation.awaitingClient');
+  assert.equal(describeSituation(inReview, ctx({ approvals: [{ id: 'ap-2', type: 'task_review', status: 'pending', payload: {} }] })).key, 'kanban.situation.awaitingClient');
+});
+
+test('a card sent back by a round is fixing, and shows the takeover once the boss holds it', () => {
+  const closed = [{
+    id: 'r-1', cardId: 'card-1', round: 1, kind: 'panel', level: 0, authorAgentId: 'a-ben',
+    reviewerIds: ['a-cara'], status: 'closed', decision: 'revision_requested', openedAt: iso(2 * HOUR), findings: [],
+  }];
+  const fixing = describeSituation(card({ columnStatus: 'in_progress', assigneeId: 'a-ben', reviewRound: 1, revisionCount: 2, maxRevisions: 3 }), ctx({ reviewRounds: closed }));
+  assert.equal(fixing.key, 'kanban.situation.fixing');
+  assert.deepEqual(fixing.vars, { round: 2, max: 3 });
+
+  const takenOver = describeSituation(
+    card({ columnStatus: 'in_progress', assigneeId: 'a-cara', reviewRound: 1, fixLevel: 1, revisionCount: 0 }),
+    ctx({ reviewRounds: closed }),
+  );
+  assert.equal(takenOver.key, 'kanban.situation.takenOver');
+  assert.equal(takenOver.vars.name, 'Cara');
+});

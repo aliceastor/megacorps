@@ -1,10 +1,12 @@
 'use client';
-import { Ban, Play, RotateCcw, Save, ShieldCheck, StopCircle, Trash2 } from 'lucide-react';
+import { Ban, FileText, Play, RotateCcw, Save, ShieldCheck, StopCircle, Trash2 } from 'lucide-react';
+import { insertBriefTemplate } from '@/lib/card-brief';
 import { useLocale } from '@/lib/locale-context';
 import { goalScope, parseCsv, priorityNumber, priorityValue, scopedGoalOptions } from './card-helpers';
 import { CardRuntimeDetails } from './card-runtime-details';
 import { type Agent, type Card, type CardDelegationSummary, type CardDetailTab, type CommentActionMode, type Department, type Goal, type Project, priorities, statusLabels, statuses } from './card-types';
 import { DependencyPicker } from './dependency-picker';
+import { PanelReviewerPicker } from './panel-reviewer-picker';
 
 // The details tab exactly as it rendered inside kanban-board.tsx: the edit
 // form, runtime details, review feedback and the action row. The v2 overview
@@ -63,8 +65,12 @@ export function CardDetailsForm({
       </select>
     </label>
     <label className="field-label">{t('kanban.fullDetail')}<textarea className="input" data-field="body" rows={8} value={String(draft?.body ?? '')} onChange={(e) => setDraft({ ...(draft ?? {}), body: e.target.value })} /></label>
+    <div className="action-row brief-template-row">
+      <button type="button" className="btn" disabled={busy} onClick={() => setDraft({ ...(draft ?? {}), body: insertBriefTemplate(String(draft?.body ?? '')) })}><FileText size={14} /> {t('kanban.insertBriefTemplate')}</button>
+      <span className="field-hint">{t('kanban.briefTemplateHint')}</span>
+    </div>
     <div className="form-grid">
-      <label className="field-label">{t('kanban.assignee')}<select className="input" data-field="assigneeId" value={draft?.assigneeId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), assigneeId: e.target.value || null })}><option value="">{t('kanban.assignee')}</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
+      <label className="field-label">{t('kanban.assignee')}<select className="input" data-field="assigneeId" value={draft?.assigneeId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), assigneeId: e.target.value || null, reviewerIds: (draft?.reviewerIds ?? []).filter((id) => id !== e.target.value) })}><option value="">{t('kanban.assignee')}</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
       <label className="field-label">{t('kanban.reviewer')}<select className="input" data-field="reviewerId" value={draft?.reviewerId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), reviewerId: e.target.value || null, requiresApproval: Boolean(e.target.value) })}><option value="">{t('kanban.reviewer')}</option>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
       <label className="field-label">{t('common.department')}<select className="input" data-field="departmentId" value={draft?.departmentId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), departmentId: e.target.value || null, goalId: null })}><option value="">{t('common.department')}</option>{departments.filter((department) => !selected.companyId || department.companyId === selected.companyId).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
       <label className="field-label">{t('common.project')}<select className="input" data-field="projectId" value={draft?.projectId ?? ''} onChange={(e) => setDraft({ ...(draft ?? {}), projectId: e.target.value || null, goalId: null, dependencyCardIds: [] })}><option value="">{t('common.project')}</option>{projects.filter((project) => !selected.companyId || project.companyId === selected.companyId).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label>
@@ -83,6 +89,25 @@ export function CardDetailsForm({
         <option value="swarm">{t('kanban.modeSwarm')}</option>
       </select>
     </label>
+    <div className="form-grid">
+      <label className="field-label">{t('kanban.reviewMode')}
+        <select className="input" data-field="reviewMode" value={draft?.reviewMode === 'panel' ? 'panel' : 'single'} onChange={(e) => setDraft({ ...(draft ?? {}), reviewMode: e.target.value === 'panel' ? 'panel' : 'single' })}>
+          <option value="single">{t('kanban.reviewModeSingle')}</option>
+          <option value="panel">{t('kanban.reviewModePanel')}</option>
+        </select>
+      </label>
+      <label className="check-row" style={{ alignSelf: 'end' }} title={t('kanban.criticalHint')}><input type="checkbox" data-field="critical" checked={Boolean(draft?.critical)} onChange={(e) => setDraft({ ...(draft ?? {}), critical: e.target.checked })} /> {t('kanban.critical')}</label>
+    </div>
+    <span className="field-hint">{t('kanban.criticalHint')}</span>
+    {draft?.reviewMode === 'panel' && <div className="field-label" data-field="reviewerIds"><span>{t('kanban.panelReviewers')}</span>
+      <PanelReviewerPicker
+        agents={agents.filter((agent) => !selected.companyId || agent.companyId === selected.companyId)}
+        excludeId={draft?.assigneeId ?? selected.assigneeId ?? null}
+        value={draft?.reviewerIds ?? []}
+        onChange={(next) => setDraft({ ...(draft ?? {}), reviewerIds: next })}
+        disabled={busy}
+      />
+    </div>}
     <div className="field-label" data-field="dependencyCardIds"><span>{t('kanban.dependencies')}</span><DependencyPicker cards={cards} companyId={selected.companyId} projectId={(draft?.projectId ?? selected.projectId) || null} excludeCardId={selected.id} value={draft?.dependencyCardIds ?? []} onChange={(next) => setDraft({ ...(draft ?? {}), dependencyCardIds: next })} /></div>
     <div className="form-grid">
       <label className="field-label">{t('kanban.maxRetries')}<input className="input" data-field="maxRetries" type="number" min={1} max={10} value={Number(draft?.maxRetries ?? 3)} onChange={(e) => setDraft({ ...(draft ?? {}), maxRetries: Number(e.target.value) })} /></label>

@@ -5,7 +5,14 @@ import { Building2, Plus, Save, Target, Trash2 } from 'lucide-react';
 import { ApiError, api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
-type Company = { id: string; name: string; slug: string; mission?: string | null; nfsShareUrl?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean; createdAt?: string };
+type Company = { id: string; name: string; slug: string; mission?: string | null; nfsShareUrl?: string | null; panelReviewDefault?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean; createdAt?: string };
+// When a single-mode card still gets a blind review panel (§17): critical cards only (default), every card, or never.
+type PanelReviewDefault = 'critical_only' | 'always' | 'never';
+const PANEL_REVIEW_DEFAULTS: PanelReviewDefault[] = ['critical_only', 'always', 'never'];
+
+function panelReviewDefaultOf(value: string | null | undefined): PanelReviewDefault {
+  return PANEL_REVIEW_DEFAULTS.includes(value as PanelReviewDefault) ? (value as PanelReviewDefault) : 'critical_only';
+}
 type Department = { id: string; companyId: string; name: string; slug: string };
 type Agent = { id: string; companyId: string };
 type Project = { id: string; companyId: string };
@@ -56,6 +63,7 @@ export function CompaniesPage() {
   const [nfsShareUrl, setNfsShareUrl] = useState('');
   const [dispatchInterval, setDispatchInterval] = useState(10);
   const [autoDispatch, setAutoDispatch] = useState(true);
+  const [panelReviewDefault, setPanelReviewDefault] = useState<PanelReviewDefault>('critical_only');
   const [goalTitle, setGoalTitle] = useState('');
   const [goalBody, setGoalBody] = useState('');
   const [toast, setToast] = useState('');
@@ -109,6 +117,7 @@ export function CompaniesPage() {
     setNfsShareUrl(company.nfsShareUrl ?? '');
     setDispatchInterval(company.dispatchIntervalSeconds ?? 10);
     setAutoDispatch(company.autoDispatchEnabled !== false);
+    setPanelReviewDefault(panelReviewDefaultOf(company.panelReviewDefault));
     setError('');
   }
 
@@ -119,6 +128,7 @@ export function CompaniesPage() {
     setMission('');
     setDispatchInterval(10);
     setAutoDispatch(true);
+    setPanelReviewDefault('critical_only');
     setGoalTitle('');
     setGoalBody('');
     setError('');
@@ -138,6 +148,7 @@ export function CompaniesPage() {
         slug: companySlug.trim(),
         mission,
         nfsShareUrl: nfsShareUrl.trim() || null,
+        panelReviewDefault,
         dispatchIntervalSeconds: dispatchInterval,
         autoDispatchEnabled: autoDispatch,
       };
@@ -223,6 +234,14 @@ export function CompaniesPage() {
           <label className="field-label">NFS share URL
             <span className="field-hint">Informational: where the company shared root export lives (e.g. nfs://nas/megacorps). Each runtime records its own local mount point in Settings.</span>
             <input className="input" value={nfsShareUrl} onChange={(event) => setNfsShareUrl(event.target.value)} />
+          </label>
+          <label className="field-label">{t('companies.panelReviewDefault')}
+            <span className="field-hint">{t('companies.panelReviewDefaultHint')}</span>
+            <select className="input" value={panelReviewDefault} onChange={(event) => setPanelReviewDefault(panelReviewDefaultOf(event.target.value))}>
+              <option value="critical_only">{t('companies.panelCriticalOnly')}</option>
+              <option value="always">{t('companies.panelAlways')}</option>
+              <option value="never">{t('companies.panelNever')}</option>
+            </select>
           </label>
           <div className="action-row">
             <button className="btn btn-primary" disabled={busy || !companyName.trim() || !companySlug.trim()} onClick={saveCompany}><Save size={15} /> {t('companies.saveCompany')}</button>

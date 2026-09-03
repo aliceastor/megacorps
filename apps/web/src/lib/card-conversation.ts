@@ -4,9 +4,10 @@
 // rules down; the UI only renders what comes out of buildConversation.
 import { isDelegationReviewComment } from '../components/kanban/card-helpers';
 import type { Agent, Card, CardAction, CardComment, CommentActionMode, ReviewerScope, TaskLog, WorkProduct } from '../components/kanban/card-types';
+import { isSealedComment } from './card-review';
 import { MENTION_LEAD_CHARS } from './mention-input';
 
-export { isDelegationReviewComment };
+export { isDelegationReviewComment, isSealedComment };
 
 // === Types ==================================================================
 
@@ -45,6 +46,10 @@ export type ConversationRefs = {
   action?: string;
   url?: string;
   mergedInto?: string;
+  /** Blind review rows (§17): the round they belong to, its kind (panel | verify) and, when closed, its decision. */
+  roundId?: string;
+  reviewRoundKind?: string;
+  decision?: string;
 };
 export type ConversationEvent = {
   id: string;
@@ -170,6 +175,7 @@ const MILESTONE_TONES: Record<string, ConversationTone> = {
   brainstorm_opened: 'accent', brainstorm_closed: 'accent', brainstorm_rejected: 'warning',
   client_checkpoint_asked: 'warning', client_checkpoint_answered: 'success', client_checkpoint_rejected: 'warning',
   create_card: 'accent',
+  review_round_opened: 'accent', review_round_closed: 'accent', review_round_cancelled: 'neutral', review_unavailable: 'warning', review_fix_exhausted: 'danger',
 };
 const DELEGATION_TONES: Record<string, ConversationTone> = {
   delegate_request: 'accent', delegate_to_agent: 'accent', delegate: 'accent', agent_delegated: 'neutral', delegate_report: 'accent',
@@ -180,7 +186,17 @@ const DELEGATION_TONES: Record<string, ConversationTone> = {
 const REVIEW_TONES: Record<string, ConversationTone> = {
   review_note: 'accent', review_guidance: 'accent', review_rejected: 'danger', review_escalated: 'warning', review_blocked: 'warning',
   review_auto_approved: 'success', review_waiting_on_children: 'neutral', review_result: 'accent',
+  review_fix_submitted: 'accent', review_fix_escalated: 'warning',
 };
+const REVIEW_ROUND_ACTIONS = new Set(['review_round_opened', 'review_round_closed', 'review_round_cancelled', 'review_slot']);
+
+/** review_round_closed takes its tone from the decision the server stamped on it. */
+function roundClosedTone(decision: string | undefined): ConversationTone {
+  if (decision === 'approved') return 'success';
+  if (decision === 'revision_requested' || decision === 'unavailable') return 'warning';
+  if (decision === 'cancelled') return 'neutral';
+  return 'accent';
+}
 const ALERT_COMMENT_ACTIONS = new Set(['agent_error', 'agent_blocked', 'review_error']);
 const STATUS_COMMENT_ACTIONS = new Set(['claim', 'cancel', 'block', 'wait_external']);
 const SYSTEM_COMMENT_ACTIONS = new Set(['update_card']);
@@ -229,6 +245,7 @@ export function classifyComment(comment: CardComment, ctx: ConversationContext):
       departmentIds: strList(metadata.departmentIds),
       brainstorm: metadata.brainstorm === true ? true : undefined,
       mention: metadata.mention === true ? true : undefined,
+      roundId: str(metadata.roundId),
       action,
     },
     hidden: false,
@@ -236,6 +253,12 @@ export function classifyComment(comment: CardComment, ctx: ConversationContext):
     raw: { comment },
   };
   if (event.refs.childCardId) event.chips.push({ kind: 'child', text: event.refs.childCardId, cardId: event.refs.childCardId });
+  // metadata.kind means something else on checkpoint rows, so the round kind
+  // and decision are read only off the blind review rows.
+  if (REVIEW_ROUND_ACTIONS.has(action)) {
+    event.refs.reviewRoundKind = str(metadata.kind);
+    event.refs.decision = str(metadata.decision);
+  }
 
   // Peer questions reuse the delegation columns (assignee + queued status) but
   // they are conversation, so they are recognised before the field rule.
@@ -249,6 +272,7 @@ export function classifyComment(comment: CardComment, ctx: ConversationContext):
   if (action === 'comment' && actor.type === 'agent') return { ...event, kind: 'message', tone: 'neutral', labelKey: labelKeyFor('agent_comment'), rawLabel: 'agent_comment' };
   if (DELEGATION_TONES[action] || action.startsWith('delegate_')) return { ...event, kind: 'delegation', tone: DELEGATION_TONES[action] ?? 'neutral' };
   if (hasDelegationFields) return { ...event, kind: 'delegation', tone: 'neutral' };
+  if (action === 'review_round_closed') return { ...event, kind: 'milestone', tone: roundClosedTone(event.refs.decision) };
   if (MILESTONE_TONES[action]) return { ...event, kind: 'milestone', tone: MILESTONE_TONES[action] ?? 'accent' };
   if (REVIEW_TONES[action]) return { ...event, kind: 'review', tone: REVIEW_TONES[action] ?? 'accent' };
   if (ALERT_COMMENT_ACTIONS.has(action)) return { ...event, kind: 'alert', tone: 'danger' };
@@ -312,7 +336,9 @@ export function classifyLog(log: TaskLog, _ctx: ConversationContext): Conversati
 }
 
 const SYSTEM_ACTION_PREFIXES = ['context.', 'task.'];
-const SYSTEM_ACTION_NAMES = new Set(['card.created', 'card.updated', 'card.dependencies_updated']);
+// review_round.closed is the card_action twin of the review_round_closed
+// comment (same round, same decision); the comment carries the findings.
+const SYSTEM_ACTION_NAMES = new Set(['card.created', 'card.updated', 'card.dependencies_updated', 'review_round.closed']);
 const TRANSITION_ACTIONS = new Set(['claim', 'submit_review', 'request_help', 'wait_external', 'external_success', 'external_failure', 'ask_client', 'client_answered', 'open_brainstorm', 'brainstorm_closed', 'approve', 'reject', 'complete', 'block', 'cancel', 'release', 'resume', 'reopen', 'manual_move']);
 
 function actorForAction(action: CardAction, ctx: ConversationContext): ConversationActor {
@@ -744,7 +770,9 @@ export function buildConversation(input: ConversationInput, view: ConversationVi
     seen.add(event.id);
     classified.push(event);
   };
-  input.comments.forEach((comment) => push(classifyComment(comment, ctx)));
+  // Sealed panel seats (review_slot, metadata.sealed) never reach the board:
+  // nothing to read there until the round closes, and no filter shows them.
+  input.comments.filter((comment) => !isSealedComment(comment)).forEach((comment) => push(classifyComment(comment, ctx)));
   input.logs.forEach((log) => push(classifyLog(log, ctx)));
   input.actions.forEach((action) => push(classifyAction(action, ctx)));
   input.workProducts.forEach((product) => push(classifyProduct(product, ctx)));

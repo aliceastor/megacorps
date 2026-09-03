@@ -80,5 +80,16 @@ test('the draft shape matches what the board seeds', () => {
   assert.deepEqual(draft.dependencyCardIds, []);
   assert.equal(draft.maxRetries, 3);
   assert.equal(draft.requiresApproval, false);
-  assert.deepEqual(Object.keys(draft).sort(), ['assigneeId', 'body', 'columnStatus', 'decisionMode', 'departmentId', 'dependencyCardIds', 'goalId', 'maxRetries', 'priority', 'projectId', 'requiresApproval', 'reviewerId', 'tags', 'title']);
+  assert.equal(draft.reviewMode, 'single');
+  assert.equal(draft.critical, false);
+  assert.deepEqual(draft.reviewerIds, []);
+  assert.deepEqual(Object.keys(draft).sort(), ['assigneeId', 'body', 'columnStatus', 'critical', 'decisionMode', 'departmentId', 'dependencyCardIds', 'goalId', 'maxRetries', 'priority', 'projectId', 'requiresApproval', 'reviewMode', 'reviewerId', 'reviewerIds', 'tags', 'title']);
+});
+
+test('the blind review fields count as edits like any other field', () => {
+  const base = card({ reviewMode: 'single', critical: false, reviewerIds: [] });
+  assert.equal(isDraftDirty({ ...draftFromCard(base), reviewMode: 'panel' }, base), true);
+  assert.equal(isDraftDirty({ ...draftFromCard(base), critical: true }, base), true);
+  assert.equal(isDraftDirty({ ...draftFromCard(base), reviewerIds: ['a-2'] }, base), true);
+  assert.equal(isDraftDirty(draftFromCard(card({ reviewMode: 'panel', critical: true, reviewerIds: ['a-2', 'a-3'] })), card({ reviewMode: 'panel', critical: true, reviewerIds: ['a-2', 'a-3'] })), false);
 });

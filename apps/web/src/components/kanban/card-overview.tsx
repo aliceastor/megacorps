@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { Ban, Pencil, Play, ShieldCheck, StopCircle, Trash2 } from 'lucide-react';
+import { acceptanceItems, acceptanceOf } from '@/lib/card-brief';
 import type { ConversationEvent } from '@/lib/card-conversation';
 import { describeSituation } from '@/lib/card-situation';
 import { useLocale } from '@/lib/locale-context';
@@ -10,12 +11,13 @@ import { statusColor } from './card-helpers';
 import { CardNeedsYou } from './card-needs-you';
 import { childChipTone, overviewChips, type OverviewChipField } from './card-overview-chips';
 import { CardRuntimeDetails } from './card-runtime-details';
-import { type Agent, type Card, type CardApproval, type CardComment, type CardDelegationSummary, type CardDetailTab, type CardStatus, type CommentActionMode, type Department, type Project, type SubtreeCard, type TaskLog, statusLabels } from './card-types';
+import { type Agent, type Card, type CardApproval, type CardComment, type CardDelegationSummary, type CardDetailTab, type CardStatus, type CommentActionMode, type Department, type Project, type ReviewRound, type SubtreeCard, type TaskLog, statusLabels } from './card-types';
 
 // ① The overview zone: always visible, outside the tabs, read-only. Top to
 // bottom: situation line, needs-you strip, last activity, people strip,
-// clamped body, child-card chips (parent cards), field chips (each opens the
-// editor focused on that field), review feedback, action row, runtime details.
+// clamped body, the brief's Acceptance checklist (§18), child-card chips
+// (parent cards), field chips (each opens the editor focused on that field),
+// review feedback, action row, runtime details.
 
 export type CardOverviewProps = {
   selected: Card;
@@ -29,6 +31,8 @@ export type CardOverviewProps = {
   approvals: CardApproval[] | null;
   /** Direct children from GET /api/cards/:id/subtree; null when not a parent or not loaded. */
   childCards: SubtreeCard[] | null;
+  /** GET /api/cards/:id/review-rounds (§17); null while loading. */
+  reviewRounds: ReviewRound[] | null;
   delegationSummary: CardDelegationSummary | null;
   /** buildConversation(...).latest over whatever rows are loaded; null falls back to updatedAt. */
   latest: ConversationEvent | null;
@@ -53,6 +57,7 @@ export function CardOverview({
   logs,
   approvals,
   childCards,
+  reviewRounds,
   delegationSummary,
   latest,
   busy,
@@ -68,7 +73,9 @@ export function CardOverview({
   const { t, tf, locale } = useLocale();
   const now = Date.now();
   const statusLabel = (status: string) => statusLabels[status as CardStatus]?.[locale] ?? status;
-  const situation = describeSituation(selected, { now, locale, tf, agents, children: childCards, approvals, delegationSummary, latestComments: comments, latestLogs: logs });
+  const situation = describeSituation(selected, { now, locale, tf, agents, children: childCards, approvals, delegationSummary, latestComments: comments, latestLogs: logs, reviewRounds });
+  // The brief's Acceptance criteria (§18), the list reviewers judge against.
+  const acceptance = acceptanceItems(acceptanceOf(selected.body));
 
   // B. last activity: the newest non-system conversation event, else updatedAt.
   const latestLabel = latest ? (t(latest.labelKey) === latest.labelKey ? latest.rawLabel : t(latest.labelKey)) : '';
@@ -134,6 +141,16 @@ export function CardOverview({
       <p ref={bodyRef} className={`overview-body ${expanded ? '' : 'clamped'}`}>{selected.body}</p>
       {(expanded || overflowing) && <button type="button" className="overview-body-toggle" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{expanded ? t('kanban.bodyCollapse') : t('kanban.bodyExpand')}</button>}
     </>}
+
+    {acceptance.length > 0 && <div className="overview-acceptance" aria-label={t('kanban.briefAcceptance')}>
+      <span className="overview-children-label">{t('kanban.briefAcceptance')}</span>
+      <ul>
+        {acceptance.map((item, index) => <li key={index} className={item.checked === null ? 'plain' : item.checked ? 'checked' : ''}>
+          {item.checked !== null && <span className="overview-acceptance-box" aria-hidden="true">{item.checked ? '☑' : '☐'}</span>}
+          <span>{item.text}</span>
+        </li>)}
+      </ul>
+    </div>}
 
     {childCards && childCards.length > 0 && <div className="overview-children">
       <span className="overview-children-label">{t('kanban.chipChildren')}</span>
