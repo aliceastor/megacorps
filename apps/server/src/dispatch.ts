@@ -2337,14 +2337,43 @@ export async function claimAgentCapacity(agent: AgentRow): Promise<boolean> {
   return rows.length > 0;
 }
 
-export async function cardTaskTimeoutSeconds(card: CardRow): Promise<number> {
-  const configured = card.timeoutSeconds ?? null;
+export const REVIEW_TASK_TIMEOUT_SECONDS = 1500;
+const REVIEW_TASK_KINDS = new Set(['review', 'message_review', 'panel_review']);
+
+export function resolveAdapterTimeoutSeconds(input: {
+  cardTimeoutSeconds?: number | null;
+  agentDefaultTimeoutSeconds?: number | null;
+  kind?: string | null;
+  globalKanbanTimeoutSeconds: number;
+}): number {
+  const configured = input.cardTimeoutSeconds ?? null;
   if (configured && Number.isFinite(configured) && configured >= 30) return normalizeKanbanTaskTimeoutSeconds(configured);
-  // Card override > the assignee's own default > the global admin setting.
-  if (card.assigneeId) {
+  const agentDefault = input.agentDefaultTimeoutSeconds ?? null;
+  if (agentDefault && Number.isFinite(agentDefault) && agentDefault >= 30) return normalizeKanbanTaskTimeoutSeconds(agentDefault);
+  if (input.kind && REVIEW_TASK_KINDS.has(input.kind)) return normalizeKanbanTaskTimeoutSeconds(REVIEW_TASK_TIMEOUT_SECONDS);
+  return normalizeKanbanTaskTimeoutSeconds(input.globalKanbanTimeoutSeconds);
+}
+
+type TimeoutAgent = Pick<AgentRow, 'defaultTimeoutSeconds'>;
+
+export async function cardTaskTimeoutSeconds(card: CardRow, options: { agent?: TimeoutAgent | null; kind?: string | null } = {}): Promise<number> {
+  let agentDefault = options.agent?.defaultTimeoutSeconds ?? null;
+  // Callers that pass the running agent use that agent's API/DB default immediately.
+  // Legacy callers still fall back to the card assignee.
+  if (options.agent === undefined && card.assigneeId) {
     const [assignee] = await db.select({ defaultTimeoutSeconds: agents.defaultTimeoutSeconds }).from(agents).where(eq(agents.id, card.assigneeId)).limit(1);
-    const agentDefault = assignee?.defaultTimeoutSeconds ?? null;
-    if (agentDefault && Number.isFinite(agentDefault) && agentDefault >= 30) return normalizeKanbanTaskTimeoutSeconds(agentDefault);
+    agentDefault = assignee?.defaultTimeoutSeconds ?? null;
+  }
+  const hasOverride = (card.timeoutSeconds != null && Number.isFinite(card.timeoutSeconds) && card.timeoutSeconds >= 30)
+    || (agentDefault != null && Number.isFinite(agentDefault) && agentDefault >= 30)
+    || Boolean(options.kind && REVIEW_TASK_KINDS.has(options.kind));
+  if (hasOverride) {
+    return resolveAdapterTimeoutSeconds({
+      cardTimeoutSeconds: card.timeoutSeconds,
+      agentDefaultTimeoutSeconds: agentDefault,
+      kind: options.kind,
+      globalKanbanTimeoutSeconds: 300,
+    });
   }
   return readKanbanTaskTimeoutSeconds();
 }
@@ -2840,7 +2869,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
     const adapterSessionId = adapterSession?.adapterSessionId ?? null;
     const executionAgent = await buildExecutionAgent(agent, adapterSessionId);
     const prompt = await buildMessageDelegationPrompt(card, comment, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'message' });
-    const task = { id: card.id, title: `Delegated message work: ${card.title}`, body: prompt, timeoutSeconds: await cardTaskTimeoutSeconds(card), taskRunId: taskRun.id };
+    const task = { id: card.id, title: `Delegated message work: ${card.title}`, body: prompt, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent, kind: 'message' }), taskRunId: taskRun.id };
     await recordPromptLog({
       companyId: card.companyId,
       agentId: agent.id,
@@ -2961,7 +2990,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
     const adapterSessionId = adapterSession?.adapterSessionId ?? null;
     const executionAgent = await buildExecutionAgent(reviewer, adapterSessionId);
     const prompt = await buildMessageReviewPrompt(card, report, request, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'message_review' });
-    const task = { id: card.id, title: `Review delegated report: ${card.title}`, body: prompt, timeoutSeconds: await cardTaskTimeoutSeconds(card), taskRunId: taskRun.id };
+    const task = { id: card.id, title: `Review delegated report: ${card.title}`, body: prompt, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent: reviewer, kind: 'message_review' }), taskRunId: taskRun.id };
     await recordPromptLog({
       companyId: card.companyId,
       agentId: reviewer.id,
@@ -3223,7 +3252,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const adapterSessionId = adapterSession?.adapterSessionId ?? null;
     const executionAgent = await buildExecutionAgent(agent, adapterSessionId);
     const taskPrompt = await buildTaskPrompt(card, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'dispatch' });
-    const task = { id: card.id, title: card.title, body: taskPrompt, timeoutSeconds: await cardTaskTimeoutSeconds(card), taskRunId: options.taskRunId };
+    const task = { id: card.id, title: card.title, body: taskPrompt, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent, kind: 'dispatch' }), taskRunId: options.taskRunId };
     await recordPromptLog({
       companyId: card.companyId,
       agentId: agent.id,
@@ -3675,7 +3704,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     const adapterSessionId = adapterSession?.adapterSessionId ?? null;
     const executionAgent = await buildExecutionAgent(reviewer, adapterSessionId);
     const reviewPrompt = await buildReviewPrompt(promptCard, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'review' });
-    const reviewTask = { id: card.id, title: `Review: ${card.title}`, body: reviewPrompt, timeoutSeconds: await cardTaskTimeoutSeconds(card), taskRunId: options.taskRunId };
+    const reviewTask = { id: card.id, title: `Review: ${card.title}`, body: reviewPrompt, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent: reviewer, kind: 'review' }), taskRunId: options.taskRunId };
     await recordPromptLog({
       companyId: card.companyId,
       agentId: reviewer.id,
@@ -4251,6 +4280,7 @@ export const dispatchInternals = {
   isGuidanceEscalation,
   needsInputCompletionDecision,
   optionalDelegationInstructions,
+  resolveAdapterTimeoutSeconds,
   resolveReviewVerdict,
   reviewDecision,
   terminalMessageTaskCanRun,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createA2aDispatch } from './adapters/a2a.ts';
+import { a2aSendTimeoutMs, createA2aDispatch } from './adapters/a2a.ts';
 import type { AgentLike, TaskContext } from './adapters/hermes.ts';
 
 const agent: AgentLike = {
@@ -148,6 +148,11 @@ test('a2a dispatch surfaces transport errors with a stable prefix', async () => 
   const result = await dispatch(agent, task);
   assert.equal(result.success, false);
   assert.match(result.output, /^a2a_transport_error: /);
+});
+
+test('a2a send timeout includes a 10s margin over the task budget', () => {
+  assert.equal(a2aSendTimeoutMs(1500), 1_510_000);
+  assert.equal(a2aSendTimeoutMs(null), 310_000);
 });
 
 test('a2a dispatch uses a direct base URL when configured', async () => {

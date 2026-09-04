@@ -15,6 +15,10 @@ const GENERATED_CONTEXT_PREFIX = 'a2a-ctx-';
 const DEFAULT_A2A_PORT = 9900;
 const TIMEOUT_MARGIN_MS = 10_000;
 
+export function a2aSendTimeoutMs(timeoutSeconds: number | null | undefined): number {
+  return (timeoutSeconds ?? 300) * 1000 + TIMEOUT_MARGIN_MS;
+}
+
 export type A2aDispatchDeps = {
   fetchImpl?: typeof fetch;
   tunnelFn?: (target: TunnelTarget) => Promise<number>;
@@ -71,7 +75,7 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
           ? { taskPushNotificationConfig: { url: `${megacorpsApiUrl(agent)}/api/a2a/push` } }
           : null,
         bearerToken: getAdapterOptionalStringConfig(agent, 'a2aBearerToken', 'A2A_BEARER_TOKEN') ?? null,
-        timeoutMs: (task.timeoutSeconds ?? 300) * 1000 + TIMEOUT_MARGIN_MS,
+        timeoutMs: a2aSendTimeoutMs(task.timeoutSeconds),
         fetchImpl: deps.fetchImpl,
       });
       const failedState = outcome.state === 'failed' || outcome.state === 'canceled' || outcome.state === 'rejected';

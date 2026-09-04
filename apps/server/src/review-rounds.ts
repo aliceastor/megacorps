@@ -489,7 +489,7 @@ export async function reviewPanelSlot(cardId: string, options: { taskRunId?: str
     const adapterSessionId = adapterSession?.adapterSessionId ?? null;
     const executionAgent = await buildExecutionAgent(reviewer, adapterSessionId);
     const prompt = await buildPanelReviewPrompt(card, round, reviewer, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, lastError: stringOf(slotMeta.lastError) });
-    const task = { id: card.id, title: `Blind ${round.kind} review: ${card.title}`, body: prompt, timeoutSeconds: await cardTaskTimeoutSeconds(card), taskRunId: taskRun.id };
+    const task = { id: card.id, title: `Blind ${round.kind} review: ${card.title}`, body: prompt, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent: reviewer, kind: 'panel_review' }), taskRunId: taskRun.id };
     await recordPromptLog({
       companyId: card.companyId,
       agentId: reviewer.id,
