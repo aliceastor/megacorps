@@ -115,13 +115,12 @@ export const cardStatusSchema = z.enum(cardStatusInputs).transform((status) => n
 // Collaboration mode is a hint/constraint on the card, not a workflow switch:
 // auto (owner decides within the split rules), solo (no split, no delegation),
 // pair (ask the reviewer at every checkpoint), swarm (split homogeneous slices
-// in parallel). Legacy values are accepted on input and mapped; forced
-// delegation ('delegate') is retired and reads as auto.
+// in parallel). Legacy values are accepted and persisted as sent; dispatch still
+// maps them through normalizeDecisionMode (forced 'delegate' reads as auto).
 export const decisionModes = ['auto', 'solo', 'pair', 'swarm'] as const;
 export type DecisionMode = (typeof decisionModes)[number];
 const legacyDecisionModes = { execute: 'solo', delegate: 'auto', hybrid: 'auto', review: 'auto', integrate: 'auto' } as const;
-export const decisionModeSchema = z.enum([...decisionModes, 'execute', 'delegate', 'hybrid', 'review', 'integrate'])
-  .transform((value): DecisionMode => (value in legacyDecisionModes ? legacyDecisionModes[value as keyof typeof legacyDecisionModes] : value as DecisionMode));
+export const decisionModeSchema = z.enum([...decisionModes, 'execute', 'delegate', 'hybrid', 'review', 'integrate']);
 export function normalizeDecisionMode(value: string | null | undefined): DecisionMode {
   if (!value) return 'auto';
   if ((decisionModes as readonly string[]).includes(value)) return value as DecisionMode;

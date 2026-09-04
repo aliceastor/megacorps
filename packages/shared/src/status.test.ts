@@ -136,6 +136,13 @@ test('signup requires a real password length', () => {
   assert.equal(signupSchema.safeParse({ email: 'a@example.com', name: 'Alice', password: 'long-enough' }).success, true);
 });
 
+test('card create and update persist requested decisionMode including legacy delegate', () => {
+  assert.equal(createCardSchema.parse({ title: 't', body: 'b', requiresApproval: true, decisionMode: 'delegate' }).decisionMode, 'delegate');
+  assert.equal(updateCardSchema.parse({ decisionMode: 'delegate' }).decisionMode, 'delegate');
+  assert.equal(updateCardSchema.parse({ title: 'renamed' }).decisionMode, undefined);
+  assert.deepEqual(updateCardSchema.parse({ title: 'renamed' }), { title: 'renamed' });
+});
+
 test('partial updates leave omitted defaulted fields untouched', () => {
   // A PUT that only renames must not reset priority/tags/requiresApproval/maxRetries.
   assert.deepEqual(updateCardSchema.parse({ title: 'renamed' }), { title: 'renamed' });
