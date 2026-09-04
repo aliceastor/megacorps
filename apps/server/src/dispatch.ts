@@ -33,7 +33,7 @@ import { HANDOVER_LIMITS, formatHandoverSection, type HandoverInput } from './ca
 import { acceptanceOf, formatBriefCoverage, parseCardBrief } from './card-brief.ts';
 import { dispositionErrors, formatDispositionRules } from './review-panel.ts';
 import { afterAuthorFix, cardIdsAwaitingPanelOrHuman, ensureHumanGate, fixSection, hasOpenReviewRound, openFixRound, openPanelRound, panelRequiredForCard, reviewPanelSlot, sweepReviewRounds } from './review-rounds.ts';
-import { noteMergeGateSkipped, parkForMerge, planMergeGate } from './merge-gate.ts';
+import { noteMergeGateSkipped, parkForMerge, planMergeGate, repoFullNameFromUrl } from './merge-gate.ts';
 import { sweepExternalWaitPolls, sweepExternalWaitTimeouts } from './external-events.ts';
 import { EXTERNAL_POLL_MAX, formatPollPrompt } from './external-polling.ts';
 
@@ -580,6 +580,12 @@ function agentFacingRepoUrl(project: { repoUrl?: string | null; repoProvider?: s
   return project.repoUrl;
 }
 
+export function gitRemoteMatchesProjectRepo(remoteUrl: string | null | undefined, projectRepoUrl: string | null | undefined): boolean {
+  const remote = repoFullNameFromUrl(remoteUrl);
+  const project = repoFullNameFromUrl(projectRepoUrl);
+  return Boolean(remote && project && remote === project);
+}
+
 function projectRepoLines(company: typeof companies.$inferSelect | null | undefined, project: ProjectRow | null | undefined, runtime?: RuntimeRow | null, agent?: { slug?: string | null } | null): string[] {
   if (!project) return ['Project repository: none', ...agentWorkspaceLines(company, null, agent, runtime), ...runtimeLocalLines(runtime)];
   const repoUrl = agentFacingRepoUrl(project);
@@ -629,7 +635,7 @@ function projectGitProtocol(company: typeof companies.$inferSelect | null | unde
     : [];
   return [
     'Repository workflow:',
-    `1. Use repo ${repoUrl}.`,
+    `1. Use repo ${repoUrl}. That URL (project.repo_url) is the single source of truth for clone and push. The workspace path is only the working-copy location, not the repository identity.`,
     ...giteaCredentialLines,
     ...publishLines,
     workspaceLines,
@@ -640,7 +646,7 @@ function projectGitProtocol(company: typeof companies.$inferSelect | null | unde
     `5. Work on branch ${branch}; do not push directly to protected branches (${(project.protectedBranches ?? ['main', 'master']).join(', ') || 'none'}).`,
     project.setupCommand ? `6. Run setup when needed: ${project.setupCommand}` : '6. Run project setup only when needed and report any failure.',
     project.testCommand ? `7. Validate with: ${project.testCommand}` : '7. Run the most relevant tests/checks available in the repo/work path.',
-    project.pushAfterRun === false ? '8. Push-after-run is disabled; report the local result and blocker clearly.' : `8. Commit and push your branch when work is complete. Prefer a pull request when policy is ${project.completionPolicy ?? 'push_or_pr'}.`,
+    project.pushAfterRun === false ? '8. Push-after-run is disabled; report the local result and blocker clearly.' : `8. Before any push, run \`git remote get-url origin\` (or the push remote). It must match ${repoUrl} (same org/repo; host and credentials may differ). If it does not match, do not push: hard-fail and report the mismatch. Then commit and push your branch when work is complete. Prefer a pull request when policy is ${project.completionPolicy ?? 'push_or_pr'}.`,
     '9. Durable non-code deliverables, reports, exports, and handoff docs belong in the project repo too (e.g. a deliverables/ or docs/ folder): commit and push them, then reference them as workProducts. Use the company shared directory only for company-wide reference material, never as the primary home of task output.',
     '10. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, file, or external metadata as applicable. Never use runtime-local file paths as the final artifact reference unless the user explicitly asked for local-only work.',
     '11. If you report status=waiting_on_external, include pollIntervalSeconds when the external system will not call MegaCorps back. Choose the interval yourself, minimum 30 seconds: MegaCorps hands the card back to you at that cadence for a check-only turn, up to 24 times.',
@@ -4277,9 +4283,11 @@ export const dispatchInternals = {
   delegationSourceContextForPrompt,
   dispatchCompletionDecision,
   explicitReviewDecision,
+  gitRemoteMatchesProjectRepo,
   isGuidanceEscalation,
   needsInputCompletionDecision,
   optionalDelegationInstructions,
+  projectGitProtocol,
   resolveAdapterTimeoutSeconds,
   resolveReviewVerdict,
   reviewDecision,

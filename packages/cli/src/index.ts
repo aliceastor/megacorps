@@ -345,6 +345,22 @@ function runGit(args: string[], cwd?: string): void {
   if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed`);
 }
 
+function gitRemoteMatchesProjectRepo(remoteUrl: string | null | undefined, projectRepoUrl: string | null | undefined): boolean {
+  const name = (url: string | null | undefined): string | null => {
+    if (!url?.trim()) return null;
+    const withoutScheme = url.trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+    const withoutCredentials = withoutScheme.replace(/^[^/@]*@/, '');
+    const scp = /^([^/:]+):([^/]+)(\/.*)$/.exec(withoutCredentials);
+    const path = scp && !/^\d+$/.test(scp[2] ?? '') ? `${scp[2]}${scp[3]}` : withoutCredentials.split('/').slice(1).join('/');
+    const segments = path.replace(/\.git$/i, '').split(/[?#]/)[0]?.split('/').filter(Boolean) ?? [];
+    if (segments.length < 2 || !segments[0] || !segments[1]) return null;
+    return `${segments[0].toLowerCase()}/${segments[1].toLowerCase()}`;
+  };
+  const remote = name(remoteUrl);
+  const project = name(projectRepoUrl);
+  return Boolean(remote && project && remote === project);
+}
+
 function branchFor(project: ManifestRecord, card: ManifestRecord, agent: ManifestRecord | null): string {
   const pattern = text(project.workBranchPattern) ?? 'megacorps/card-{cardId}-{agentSlug}';
   return pattern
@@ -368,6 +384,11 @@ async function prepareWorktree(flags: Flags, payload: ManifestRecord): Promise<{
   if (!existsSync(repoDir)) {
     runGit(['clone', '--no-checkout', repoUrl, repoDir]);
   } else {
+    const origin = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: repoDir, encoding: 'utf8', shell: process.platform === 'win32' });
+    const originUrl = origin.status === 0 ? origin.stdout.trim() : '';
+    if (!gitRemoteMatchesProjectRepo(originUrl, repoUrl)) {
+      throw new Error(`git_remote_mismatch: origin ${originUrl || '(missing)'} does not match project.repo_url ${repoUrl}; do not push`);
+    }
     runGit(['fetch', '--all', '--prune'], repoDir);
   }
   if (!existsSync(worktreePath)) {

@@ -10,7 +10,7 @@ import { db } from './db/client.ts';
 import { activityLog, adapterSessions, agentReviewScores, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
-import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, isGuidanceEscalation, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, processMentionQuestions, processReportNotes, reportNotesFromOutput, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest, finishRunWaitingOnBrainstorm, resolveBrainstormRequest, recordReviewScore, webhookCompletionDecision } from './dispatch.ts';
+import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, gitRemoteMatchesProjectRepo, isGuidanceEscalation, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, processMentionQuestions, processReportNotes, reportNotesFromOutput, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest, finishRunWaitingOnBrainstorm, resolveBrainstormRequest, recordReviewScore, webhookCompletionDecision } from './dispatch.ts';
 import { afterAuthorFix, completePanelReviewFromWebhook, ensureHumanGate, hasOpenReviewRound, listReviewRounds, openFixRound, openPanelRound, panelRequiredForCard } from './review-rounds.ts';
 import { dispositionErrors, formatDispositionRules } from './review-panel.ts';
 import { handleGiteaWebhookEvent, noteMergeGateSkipped, parkForMerge, planMergeGate } from './merge-gate.ts';
@@ -2785,6 +2785,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'agent', actorId: callerAgent.id, agentId: callerAgent.id, action: 'webhook.agent_report', entityType: 'card', entityId: card.id, details: { status: body.status, taskRunId: taskRunId ?? null, viaAgentToken: true } });
     }
     if (body.workProducts.some((product) => product.projectId && product.projectId !== card.projectId)) return reply.code(400).send({ error: 'work_product_project_mismatch' });
+    if (body.workProducts.some((product) => product.repoUrl) && card.projectId) {
+      const [projectForRepo] = await db.select({ repoUrl: projects.repoUrl }).from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1);
+      if (projectForRepo?.repoUrl && body.workProducts.some((product) => product.repoUrl && !gitRemoteMatchesProjectRepo(product.repoUrl, projectForRepo.repoUrl))) {
+        return reply.code(400).send({ error: 'work_product_repo_mismatch', detail: 'workProduct.repoUrl must match project.repo_url (same org/repo).' });
+      }
+    }
     const [webhookTaskRun] = taskRunId ? await db.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).limit(1) : [];
     if (taskRunId && !webhookTaskRun) return reply.code(404).send({ error: 'task_run_not_found' });
     if (webhookTaskRun && webhookTaskRun.cardId !== card.id) return reply.code(409).send({ error: 'task_run_card_mismatch' });
