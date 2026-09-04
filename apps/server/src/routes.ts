@@ -10,7 +10,7 @@ import { db } from './db/client.ts';
 import { activityLog, adapterSessions, agentReviewScores, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
-import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, processMentionQuestions, processReportNotes, reportNotesFromOutput, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest, finishRunWaitingOnBrainstorm, resolveBrainstormRequest, recordReviewScore } from './dispatch.ts';
+import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, isGuidanceEscalation, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, processMentionQuestions, processReportNotes, reportNotesFromOutput, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest, finishRunWaitingOnBrainstorm, resolveBrainstormRequest, recordReviewScore, webhookCompletionDecision } from './dispatch.ts';
 import { afterAuthorFix, completePanelReviewFromWebhook, ensureHumanGate, hasOpenReviewRound, listReviewRounds, openFixRound, openPanelRound, panelRequiredForCard } from './review-rounds.ts';
 import { dispositionErrors, formatDispositionRules } from './review-panel.ts';
 import { handleGiteaWebhookEvent, noteMergeGateSkipped, parkForMerge, planMergeGate } from './merge-gate.ts';
@@ -78,12 +78,6 @@ const PROCESS_DELEGATION_STATUSES = new Set(['queued', 'running', 'waiting']);
 function normalizedReviewerId(assigneeId: string | null | undefined, reviewerId: string | null | undefined): string | null {
   if (!reviewerId) return null;
   return reviewerId === assigneeId ? null : reviewerId;
-}
-
-function isGuidanceEscalation(status: string, text: string): boolean {
-  if (status === 'needs_review') return true;
-  if (status !== 'blocked') return false;
-  return /\b(needs[_ -]?review|needs[_ -]?guidance|needs[_ -]?reviewer|escalat(?:e|ed|ion)|cannot[_ -]?complete|unable[_ -]?to[_ -]?complete|stuck)\b/i.test(text);
 }
 
 async function resolveIndependentReviewerForCard(card: typeof kanbanCards.$inferSelect, actorAgentId?: string | null): Promise<string | null> {
@@ -2850,8 +2844,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       : delegationItems(executionLog);
     const escalation = isGuidanceEscalation(requestedStatus, executionLog);
     const escalationReviewerId = escalation ? await resolveIndependentReviewerForCard(card, actorAgentId) : null;
-    const topLevelGuidanceAccepted = escalation && !escalationReviewerId;
-    const preDelegationStatus = requestedDelegation.length > 0 ? 'in_progress' : escalation ? escalationReviewerId ? 'needs_review' : 'done' : requestedStatus;
+    const guidanceDecision = webhookCompletionDecision({
+      requestedStatus,
+      text: executionLog,
+      reviewerId: escalationReviewerId,
+      requiresApproval: card.requiresApproval === true,
+    });
+    const topLevelGuidanceAccepted = guidanceDecision.topLevelGuidanceAccepted;
+    const preDelegationStatus = requestedDelegation.length > 0 ? 'in_progress' : escalation ? guidanceDecision.nextStatus : requestedStatus;
     if (taskRunId && (requestedDelegation.length > 0 || preDelegationStatus !== 'in_progress')) {
       const [existingWebhook] = await db.select({ id: activityLog.id }).from(activityLog).where(and(
         eq(activityLog.entityId, card.id),
@@ -2964,15 +2964,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const qualityReviewerId = !delegatedViaWebhook && !delegationFailed && !escalation && (requestedStatus === 'done' || requestedStatus === 'in_review')
       ? await resolveIndependentReviewerForCard(card, actorAgentId)
       : null;
-    // Human approval is the last gate (§17.6): with no agent reviewer a
-    // requiresApproval card waits for the client instead of completing itself.
-    const humanGate = !delegatedViaWebhook && !delegationFailed && !escalation && !fixRound && (requestedStatus === 'done' || requestedStatus === 'in_review') && !qualityReviewerId && card.requiresApproval === true;
+    // Human approval is the last gate (§17.6): guidance with no reviewer, and
+    // any requiresApproval card with no reviewer, wait for the client instead of auto-closing.
+    const humanGate = !delegatedViaWebhook && !delegationFailed && !fixRound && (
+      escalation
+        ? guidanceDecision.humanGate
+        : (requestedStatus === 'done' || requestedStatus === 'in_review') && !qualityReviewerId && card.requiresApproval === true
+    );
     const requestedNextStatus = delegatedViaWebhook
       ? 'in_progress'
       : delegationFailed
         ? 'todo'
         : escalation
-          ? escalationReviewerId ? 'needs_review' : 'done'
+          ? guidanceDecision.nextStatus
           : fixRound || humanGate
             ? 'in_review'
             : completionStatusForQualityGate(requestedStatus, qualityReviewerId);
@@ -3035,7 +3039,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       });
     }
     const webhookLogType = childBlock ? 'children' : delegatedViaWebhook || delegationFailed ? 'message_delegation' : escalation ? 'escalation' : webhookTaskRun?.kind === 'review' ? 'review' : 'webhook';
-    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: actorAgentId, type: webhookLogType, status: childBlock ? 'queued' : delegationFailed || nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : nextStatus === 'needs_review' || nextStatus === 'in_review' ? 'queued' : 'success', message: childBlock ? childBlock.message : delegatedViaWebhook ? `Webhook delegation plan accepted; ${delegatedRows.length} Message Board delegation(s) queued for direct reports.` : delegationFailed ? delegationFailureReason ?? 'Webhook delegation plan could not create Message Board delegations because the actor has no available direct reports.' : escalation ? (nextStatus === 'needs_review' ? 'Webhook requested reviewer guidance; help review queued.' : 'Webhook requested guidance but no reviewer is available; output accepted as final and card marked done.') : fixRound ? 'Webhook reported the fix; verification round queued.' : humanGate ? 'Webhook reported completion; the card waits for client approval.' : qualityReviewerId ? 'Webhook reported completion; quality review queued.' : body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
+    await db.insert(taskLogs).values({ cardId: body.cardId, agentId: actorAgentId, type: webhookLogType, status: childBlock ? 'queued' : delegationFailed || nextStatus === 'blocked' ? 'failed' : nextStatus === 'cancelled' ? 'warning' : nextStatus === 'needs_review' || nextStatus === 'in_review' ? 'queued' : 'success', message: childBlock ? childBlock.message : delegatedViaWebhook ? `Webhook delegation plan accepted; ${delegatedRows.length} Message Board delegation(s) queued for direct reports.` : delegationFailed ? delegationFailureReason ?? 'Webhook delegation plan could not create Message Board delegations because the actor has no available direct reports.' : escalation ? (nextStatus === 'needs_review' ? 'Webhook requested reviewer guidance; help review queued.' : 'Webhook requested guidance but no reviewer is available; the card waits for client approval.') : fixRound ? 'Webhook reported the fix; verification round queued.' : humanGate ? 'Webhook reported completion; the card waits for client approval.' : qualityReviewerId ? 'Webhook reported completion; quality review queued.' : body.summary ?? `Webhook marked card ${nextStatus}`, output: body.output, costUsd: completesRun ? body.costUsd?.toString() : undefined });
     const webhookCommentAction = delegatedViaWebhook
       ? 'agent_delegated'
       : nextStatus === 'needs_review'

@@ -2,11 +2,68 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { dispatchInternals } from './dispatch.ts';
 
-test('top-level guidance requests are accepted as done when no reviewer exists', () => {
+test('top-level guidance requests wait for human approval when no reviewer exists', () => {
   const decision = dispatchInternals.dispatchCompletionDecision('needs_review: server callback is unreachable, final answer follows.', null);
   assert.equal(decision.needsHelpReview, true);
-  assert.equal(decision.nextStatus, 'done');
-  assert.equal(decision.topLevelGuidanceAccepted, true);
+  assert.equal(decision.nextStatus, 'in_review');
+  assert.equal(decision.topLevelGuidanceAccepted, false);
+});
+
+test('webhook guidance with no reviewer parks for human instead of auto-done', () => {
+  const { webhookCompletionDecision } = dispatchInternals;
+
+  const needsReview = webhookCompletionDecision({
+    requestedStatus: 'needs_review',
+    text: 'needs reviewer guidance on the blocker',
+    reviewerId: null,
+    requiresApproval: false,
+  });
+  assert.equal(needsReview.escalation, true);
+  assert.notEqual(needsReview.nextStatus, 'done');
+  assert.equal(needsReview.nextStatus, 'in_review');
+  assert.equal(needsReview.humanGate, true);
+  assert.equal(needsReview.topLevelGuidanceAccepted, false);
+
+  const blockedGuidance = webhookCompletionDecision({
+    requestedStatus: 'blocked',
+    text: 'cannot complete: stuck waiting on guidance',
+    reviewerId: null,
+    requiresApproval: false,
+  });
+  assert.equal(blockedGuidance.escalation, true);
+  assert.notEqual(blockedGuidance.nextStatus, 'done');
+  assert.equal(blockedGuidance.humanGate, true);
+  assert.equal(blockedGuidance.topLevelGuidanceAccepted, false);
+
+  const requiresApprovalDone = webhookCompletionDecision({
+    requestedStatus: 'done',
+    text: 'implementation finished',
+    reviewerId: null,
+    requiresApproval: true,
+  });
+  assert.equal(requiresApprovalDone.nextStatus, 'in_review');
+  assert.equal(requiresApprovalDone.humanGate, true);
+  assert.notEqual(requiresApprovalDone.nextStatus, 'done');
+
+  const escalationWithApproval = webhookCompletionDecision({
+    requestedStatus: 'needs_review',
+    text: 'REJECT: escalate for guidance',
+    reviewerId: null,
+    requiresApproval: true,
+  });
+  assert.equal(escalationWithApproval.humanGate, true);
+  assert.notEqual(escalationWithApproval.nextStatus, 'done');
+  assert.equal(escalationWithApproval.topLevelGuidanceAccepted, false);
+
+  const withReviewer = webhookCompletionDecision({
+    requestedStatus: 'needs_review',
+    text: 'needs reviewer guidance',
+    reviewerId: 'reviewer-1',
+    requiresApproval: false,
+  });
+  assert.equal(withReviewer.nextStatus, 'needs_review');
+  assert.equal(withReviewer.humanGate, false);
+  assert.equal(withReviewer.topLevelGuidanceAccepted, false);
 });
 
 test('guidance requests still queue review when a reviewer exists', () => {

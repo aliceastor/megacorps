@@ -381,9 +381,39 @@ async function recordA2aArtifacts(card: Pick<CardRow, 'id' | 'companyId' | 'proj
 function dispatchCompletionDecision(output: string | null | undefined, effectiveReviewerId: string | null): { needsHelpReview: boolean; nextStatus: CardStatus; topLevelGuidanceAccepted: boolean } {
   const needsHelpReview = assigneeNeedsReview(output);
   const nextStatus = needsHelpReview
-    ? effectiveReviewerId ? 'needs_review' : 'done'
+    ? effectiveReviewerId ? 'needs_review' : 'in_review'
     : effectiveReviewerId ? 'in_review' : 'done';
-  return { needsHelpReview, nextStatus, topLevelGuidanceAccepted: needsHelpReview && !effectiveReviewerId };
+  return { needsHelpReview, nextStatus, topLevelGuidanceAccepted: false };
+}
+
+export function isGuidanceEscalation(status: string, text: string): boolean {
+  if (status === 'needs_review') return true;
+  if (status !== 'blocked') return false;
+  return /\b(needs[_ -]?review|needs[_ -]?guidance|needs[_ -]?reviewer|escalat(?:e|ed|ion)|cannot[_ -]?complete|unable[_ -]?to[_ -]?complete|stuck)\b/i.test(text);
+}
+
+export function webhookCompletionDecision(input: {
+  requestedStatus: string;
+  text: string;
+  reviewerId: string | null;
+  requiresApproval: boolean;
+}): { escalation: boolean; nextStatus: CardStatus; humanGate: boolean; topLevelGuidanceAccepted: boolean } {
+  const escalation = isGuidanceEscalation(input.requestedStatus, input.text);
+  if (escalation) {
+    if (input.reviewerId) {
+      return { escalation: true, nextStatus: 'needs_review', humanGate: false, topLevelGuidanceAccepted: false };
+    }
+    return { escalation: true, nextStatus: 'in_review', humanGate: true, topLevelGuidanceAccepted: false };
+  }
+  if ((input.requestedStatus === 'done' || input.requestedStatus === 'in_review' || input.requestedStatus === 'success') && !input.reviewerId && input.requiresApproval) {
+    return { escalation: false, nextStatus: 'in_review', humanGate: true, topLevelGuidanceAccepted: false };
+  }
+  return {
+    escalation: false,
+    nextStatus: completionStatusForQualityGate(input.requestedStatus as CardStatus | 'success', input.reviewerId),
+    humanGate: false,
+    topLevelGuidanceAccepted: false,
+  };
 }
 
 export function completionStatusForQualityGate(requestedStatus: CardStatus | 'success', qualityReviewerId: string | null): CardStatus {
@@ -3405,9 +3435,9 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: fixDispositionFeedback(errors), runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
       }
     }
-    // Human approval is the last gate (§17.6): with no agent reviewer a
-    // requiresApproval card waits for the client instead of completing itself.
-    const humanGate = !parked && !fixRound && completionDecision.nextStatus === 'done' && !effectiveReviewerId && card.requiresApproval === true;
+    // Human approval is the last gate (§17.6): guidance with no reviewer, and
+    // any requiresApproval card with no reviewer, wait for the client instead of auto-closing.
+    const humanGate = !parked && !fixRound && !effectiveReviewerId && (completionDecision.needsHelpReview || (completionDecision.nextStatus === 'done' && card.requiresApproval === true));
     const topLevelGuidanceAccepted = parked || humanGate ? false : completionDecision.topLevelGuidanceAccepted;
     const nextStatus: CardStatus = checkpointRequest ? 'waiting_on_client' : brainstormLaunch ? 'waiting_on_brainstorm' : fixRound || humanGate ? 'in_review' : completionDecision.nextStatus;
     const childBlock = parked ? null : await completionBlockedByChildren(card, nextStatus);
@@ -3465,7 +3495,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         : needsHelpReview
           ? nextStatus === 'needs_review'
             ? 'Assignee requested reviewer guidance; help review queued.'
-            : 'Assignee requested guidance but has no reviewer or manager; output accepted as final and card marked done.'
+            : 'Assignee requested guidance but has no reviewer or manager; the card waits for client approval.'
           : nextStatus === 'in_review'
             ? fixRound ? 'Dispatch completed; review findings answered, verification round queued.' : 'Dispatch completed; card moved to quality review.'
             : 'Dispatch completed; card marked done.',
@@ -3541,18 +3571,33 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
   }
   if (!reviewerId) {
     const reason = reviewMode === 'help'
-      ? 'Escalation requested but no reviewer or manager is available; output accepted as final.'
+      ? 'Escalation requested but no reviewer or manager is available; the card waits for client approval.'
       : 'Review requested but no independent reviewer or manager is available; output accepted as final.';
-    // Human approval is the last gate (§17.6): a requiresApproval card with no
-    // agent reviewer is parked for the client instead of auto-approving.
-    if (card.requiresApproval) {
-      const parkedReason = 'No agent reviewer is available; the card waits for client approval.';
-      await ensureHumanGate(card, null, parkedReason, { kind: 'client_approval' });
+    // Human approval is the last gate (§17.6): guidance/REJECT with no reviewer,
+    // and any requiresApproval card, wait for the client instead of auto-approving.
+    if (card.requiresApproval || reviewMode === 'help') {
+      const parkedReason = reviewMode === 'help'
+        ? 'Escalation requested but no reviewer is available; the card waits for client approval.'
+        : 'No agent reviewer is available; the card waits for client approval.';
+      let parked = card;
+      if (card.columnStatus !== 'in_review') {
+        const [updated] = await db.update(kanbanCards).set({
+          columnStatus: 'in_review',
+          completedAt: null,
+          lastError: null,
+          updatedAt: new Date(),
+        }).where(eq(kanbanCards.id, card.id)).returning();
+        if (updated) {
+          await addStageLog(card.id, null, card.columnStatus, 'in_review', 'review');
+          parked = updated;
+        }
+      }
+      await ensureHumanGate(parked, null, parkedReason, { kind: 'client_approval' });
       await addTaskLog({ cardId: card.id, type: 'review', status: 'queued', message: parkedReason });
       await addCardMessage({ cardId: card.id, authorType: 'system', action: 'review_awaiting_client', body: parkedReason });
       await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'review', action: 'review.awaiting_client', entityType: 'card', entityId: card.id, details: { mode: reviewMode } });
       await completeTaskRun(options.taskRunId, { status: 'success', output: parkedReason });
-      return card;
+      return parked;
     }
     const childBlock = await completionBlockedByChildren(card, 'done');
     if (childBlock) {
@@ -4203,11 +4248,13 @@ export const dispatchInternals = {
   delegationSourceContextForPrompt,
   dispatchCompletionDecision,
   explicitReviewDecision,
+  isGuidanceEscalation,
   needsInputCompletionDecision,
   optionalDelegationInstructions,
   resolveReviewVerdict,
   reviewDecision,
   terminalMessageTaskCanRun,
+  webhookCompletionDecision,
   workProductRowsFromArtifacts,
 };
 
@@ -4503,7 +4550,7 @@ function completionProtocol(card: CardRow, reports: DelegationReport[] = [], opt
     `Conversation: to leave a message on this card for the humans and colleagues following it, add "notes": ["..."] (max 3) to your structured report. Write @<agent slug> inside a note to wake that agent with your message; they answer on the same thread and you see the answer next run. @client pings the human client without blocking the card (use a checkpoint when you need a binding decision). If your runtime can reach MegaCorps over HTTP you may also post at any time: POST /api/cards/${card.id}/comments with your Bearer token and { "body": "..." }.`,
     `If this prompt carries a "Review findings to fix" section, your completion report must include "dispositions" for every finding key listed there (or "escalation": { "reason": "..." } when the fix is beyond your ability or authority); a report without them is returned to you.`,
     `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
-    `If no reviewer/manager exists above you, provide the best final answer instead of escalating; MegaCorps will accept top-level guidance requests as done.`,
+    `If no reviewer/manager exists above you, still use status="needs_review" with the blocker details; MegaCorps parks the card for human approval instead of marking it done.`,
   ].filter(Boolean).join('\n');
 }
 
