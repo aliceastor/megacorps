@@ -546,7 +546,14 @@ const projectWorkPathSchema = z.string().trim().max(1000).refine((value) => {
   return !value.split(/[\\/]+/).includes('..');
 }, 'workPath must be a repo/workspace-relative path');
 
-export const createProjectSchema = z.object({
+function withCompanyIdAlias(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const body = value as Record<string, unknown>;
+  if (body.companyId == null && typeof body.company_id === 'string') return { ...body, companyId: body.company_id };
+  return value;
+}
+
+const createProjectObjectSchema = z.object({
   companyId: z.string().uuid().optional(),
   name: z.string().trim().min(1).max(160),
   description: z.string().trim().max(4000).optional(),
@@ -571,6 +578,7 @@ export const createProjectSchema = z.object({
   publishRepoUrl: z.string().trim().max(1000).nullable().optional(),
   publishToken: z.string().trim().max(500).nullable().optional(),
 });
+export const createProjectSchema = z.preprocess(withCompanyIdAlias, createProjectObjectSchema);
 
 export const createGoalSchema = z.object({
   companyId: z.string().uuid().optional(),
@@ -790,7 +798,7 @@ export type TaskLogInput = z.infer<typeof taskLogSchema>;
 
 // Update schemas for routes that used to call createXSchema.partial() inline.
 export const updateCompanySchema = partialWithoutDefaults(createCompanySchema);
-export const updateProjectSchema = partialWithoutDefaults(createProjectSchema);
+export const updateProjectSchema = partialWithoutDefaults(createProjectObjectSchema);
 export const updatePositionSchema = partialWithoutDefaults(createPositionSchema);
 export const updateAgentRuntimeSchema = partialWithoutDefaults(createAgentRuntimeSchema);
 export const updateBudgetPolicySchema = partialWithoutDefaults(createBudgetPolicySchema);

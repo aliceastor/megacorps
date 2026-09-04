@@ -106,6 +106,14 @@ test('project workPath must stay relative to the project workspace', () => {
   assert.equal(createProjectSchema.safeParse({ name: 'Traversal', workPath: '../outside' }).success, false);
 });
 
+test('createProjectSchema keeps optional companyId so POST can persist a non-default company', () => {
+  const companyId = '6c2f0a11-4b8e-4d3a-9f71-2a0c8d5e1b90';
+  assert.equal(createProjectSchema.parse({ name: 'App', companyId }).companyId, companyId);
+  assert.equal(createProjectSchema.parse({ name: 'App', company_id: companyId }).companyId, companyId);
+  assert.equal(createProjectSchema.parse({ name: 'App' }).companyId, undefined);
+  assert.equal(createProjectSchema.safeParse({ name: 'App', companyId: 'not-a-uuid' }).success, false);
+});
+
 test('agent runtime local roots are runtime-owned paths', () => {
   assert.equal(createAgentRuntimeSchema.safeParse({ name: 'SSH', adapterType: 'hermes-ssh', localWorkspaceRoot: '/home/alice/workspaces', localScratchRoot: '/tmp/megacorps' }).success, true);
   assert.equal(createAgentRuntimeSchema.safeParse({ name: 'Windows', adapterType: 'codex-app', localWorkspaceRoot: 'C:\\Agents\\Alice\\workspaces', localScratchRoot: null }).success, true);
