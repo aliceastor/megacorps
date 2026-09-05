@@ -30,8 +30,9 @@
 | 1 | A normalized, preserved report envelope and truthful result/review interpretation | 2, 5, 14 | shared/index.ts; agent-report.ts; dispatch.ts; routes.ts; new agent-results.ts |
 | 2 | Required evidence gates, existing-merge reconciliation and bounded protocol repair | 2, 14 | merge-gate.ts; external-polling.ts; run-retry.ts; dispatch.ts |
 | 2b | Execute authorized exact-head merges and prevent premature merges in managed repositories | 14 | gitea.ts; merge-gate.ts; project policy/schema/editor |
-| 3 | Structural Boss/head behavior and common role/knowledge context | 1, 10, 14 | role-playbooks.ts; agent-position-prompt.ts; dispatch.ts; chat.ts; shared/schema and company/department editors |
+| 3 | Structural Boss/head behavior, common role/knowledge context and public credential redaction | 1, 5, 10, 14 | role-playbooks.ts; agent-position-prompt.ts; dispatch.ts; chat.ts; shared/schema and company/department editors |
 | 4 | Companyless bootstrap, setup wizard, removal of implicit default, legacy SSH hidden from creation | 7, 11 | db/migrate.ts; routes.ts; runner-routes.ts; companies-page.tsx; settings-page.tsx; org editors |
+| 4b | Explicit retirement of the seeded company with preserved unbound project/runtime records and audit history | 7 | company deletion inventory; retirement route/helper; api-help.ts |
 | 5 | Lazy paginated logs and log-payload suppression | 3, 5 | log-query module; routes.ts; request-log.ts; logs-page.tsx; api-help.ts |
 | 6 | Responsive Projects/Goals/Departments, safe draft reset, simple card and work-product entry | 2, 4, 8, 9, 13 | project-authority-panel.tsx; departments-page.tsx; kanban forms; globals.css |
 | 7 | Conversation-first Direct Chat layout | 4, 12 | chat-page.tsx; globals.css |
@@ -42,6 +43,10 @@
 Each subsystem receives a concrete task brief before implementation, with file ownership, existing interfaces, test assertions, acceptance and reporting commands. This table remains the coverage ledger; a finished subset does not finish the request.
 
 Implementation inspection identified an additional required step: the existing merge gate only posts authorization and waits; it never performs the authorized merge. Task 2b follows Task 2 and precedes Task 3, adding an explicit managed-project auto-merge policy and default-branch protection without changing Hermes or unrelated repositories. The live Gitea public API reports version 1.22.6; its merge schema uses `Do` and `head_commit_id`, so the implementation must use the installed contract rather than assume latest documentation fields.
+
+Fresh read-only inventory also found two runtime definitions alongside `playground` in Default Company. Current project/runtime update routes cannot transfer their company IDs. Task 4b therefore adds an explicit admin operation after Task 4: preview all related rows, preserve unbound project/runtime IDs and configuration in a chosen existing company, retain audit provenance, and retire the source transactionally. Any other business references or target conflicts block the operation. It must not change provider repositories, runtime connections or target membership permissions.
+
+The API audit confirmed that ordinary Agent responses expose `giteaToken` even though other credentials are redacted. Task 3 closes public response exposure while preserving authorized runtime transport, and defines a project publish-token placeholder contract that Task 6 must preserve correctly on existing-project updates and clear on new drafts.
 
 ## Task 1: Normalized report and truthful result interpretation
 
@@ -78,3 +83,5 @@ assert.notEqual(dispatchInternals.dispatchCompletionDecision('Clone pending appr
 Per-task reviews use the exact task brief, report and base..head diff. Resolve Important/Critical findings before the next task. Later briefs define concrete tests against the current interfaces rather than guessing how earlier tasks implemented them. Update `.superpowers/sdd/progress.md` after each accepted review.
 
 After all tasks: full unit/integration suite, shared/server/web typecheck, workspace production build, Chromium responsive/form/workflow tests, broad branch review, CI and Docker success. Then verify the deployed revision and authenticated UI. Run the two autonomous acceptance projects using natural-language goals and keep the operator intervention count at zero for a passing lifecycle.
+
+Task 9 supplies an isolated PostgreSQL 16 CI service using an explicit test database URL. Task 10 must exercise deterministic real-database concurrency for merge wait/event closure, approval versus merge initiation, seeded-company retirement versus late references, and budget settlement. Memory database tests alone do not establish PostgreSQL lock or uniqueness behavior.
