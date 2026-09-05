@@ -25,6 +25,20 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: megacorps_test
+          POSTGRES_PASSWORD: synthetic_ci_test_password
+          POSTGRES_DB: megacorps_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U megacorps_test -d megacorps_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     permissions:
       contents: read
     steps:
@@ -44,6 +58,8 @@ jobs:
         run: npm run typecheck
 
       - name: Test
+        env:
+          TEST_DATABASE_URL: postgresql://megacorps_test:synthetic_ci_test_password@localhost:5432/megacorps_test
         run: npm run test
 
       - name: Build
