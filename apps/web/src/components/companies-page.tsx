@@ -5,7 +5,7 @@ import { Building2, Plus, Save, Target, Trash2 } from 'lucide-react';
 import { ApiError, api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
-type Company = { id: string; name: string; slug: string; mission?: string | null; nfsShareUrl?: string | null; panelReviewDefault?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean; createdAt?: string };
+type Company = { id: string; name: string; slug: string; mission?: string | null; bossRolePrompt?: string | null; nfsShareUrl?: string | null; panelReviewDefault?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean; createdAt?: string };
 // When a single-mode card still gets a blind review panel (§17): critical cards only (default), every card, or never.
 type PanelReviewDefault = 'critical_only' | 'always' | 'never';
 const PANEL_REVIEW_DEFAULTS: PanelReviewDefault[] = ['critical_only', 'always', 'never'];
@@ -57,9 +57,11 @@ export function CompaniesPage() {
   const goalsQuery = useQuery({ queryKey: ['goals'], queryFn: () => api<Goal[]>('/api/goals') });
   const meQuery = useQuery({ queryKey: ['me'], queryFn: () => api<Me>('/api/me') });
   const [companyId, setCompanyId] = useState('');
+  const readinessQuery = useQuery({ queryKey: ['company-execution-readiness', companyId], enabled: Boolean(companyId), queryFn: () => api<{ ready: boolean; issues: string[]; setupIssues: string[]; runtimeIssues: string[] }>(`/api/companies/${companyId}/execution-readiness`) });
   const [companyName, setCompanyName] = useState('');
   const [companySlug, setCompanySlug] = useState('');
   const [mission, setMission] = useState('');
+  const [bossRolePrompt, setBossRolePrompt] = useState('');
   const [nfsShareUrl, setNfsShareUrl] = useState('');
   const [dispatchInterval, setDispatchInterval] = useState(10);
   const [autoDispatch, setAutoDispatch] = useState(true);
@@ -114,6 +116,7 @@ export function CompaniesPage() {
     setCompanyName(company.name);
     setCompanySlug(company.slug);
     setMission(company.mission ?? '');
+    setBossRolePrompt(company.bossRolePrompt ?? '');
     setNfsShareUrl(company.nfsShareUrl ?? '');
     setDispatchInterval(company.dispatchIntervalSeconds ?? 10);
     setAutoDispatch(company.autoDispatchEnabled !== false);
@@ -126,6 +129,7 @@ export function CompaniesPage() {
     setCompanyName('');
     setCompanySlug('');
     setMission('');
+    setBossRolePrompt('');
     setDispatchInterval(10);
     setAutoDispatch(true);
     setPanelReviewDefault('critical_only');
@@ -147,6 +151,7 @@ export function CompaniesPage() {
         name: companyName.trim(),
         slug: companySlug.trim(),
         mission,
+        bossRolePrompt: bossRolePrompt.trim() || null,
         nfsShareUrl: nfsShareUrl.trim() || null,
         panelReviewDefault,
         dispatchIntervalSeconds: dispatchInterval,
@@ -230,6 +235,8 @@ export function CompaniesPage() {
             <label className="field-label">{t('companies.dispatchIntervalSeconds')}<input className="input" type="number" min={5} max={3600} value={dispatchInterval} onChange={(event) => setDispatchInterval(Number(event.target.value))} /></label>
             <label className="check-row" style={{ alignSelf: 'end' }}><input type="checkbox" checked={autoDispatch} onChange={(event) => setAutoDispatch(event.target.checked)} /> {t('companies.autoDispatchTodo')}</label>
           </div>
+          <label className="field-label">Boss role instructions (optional)<textarea className="input" rows={4} maxLength={8000} value={bossRolePrompt} onChange={event => setBossRolePrompt(event.target.value)} /><span className="field-hint">Adds company-specific responsibilities to the strategy-only Boss role. Platform delegation and approval gates remain required.</span></label>
+          {readinessQuery.data && <div className="notice" role="status"><strong>{readinessQuery.data.ready ? 'Company structure and runtimes are ready' : 'Company execution needs setup'}</strong>{[...new Set([...readinessQuery.data.issues, ...readinessQuery.data.runtimeIssues, ...readinessQuery.data.setupIssues])].map(issue => <p key={issue}>{issue}</p>)}<p>Repository write capability is checked separately for the selected worker and project.</p></div>}
           <label className="field-label">{t('companies.mission')}<textarea className="input" rows={4} value={mission} onChange={(event) => setMission(event.target.value)} /></label>
           <label className="field-label">NFS share URL
             <span className="field-hint">Informational: where the company shared root export lives (e.g. nfs://nas/megacorps). Each runtime records its own local mount point in Settings.</span>

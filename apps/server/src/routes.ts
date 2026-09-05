@@ -1,3 +1,6 @@
+import { structuralCompletionIssue, companyExecutionReadiness, structuralReviewer } from './company-workflow.ts';
+import { workerRepositoryReadiness } from './worker-readiness.ts';
+import { sealDeliveryAcceptance } from './delivery-acceptance.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import bcrypt from 'bcryptjs';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -22,6 +25,7 @@ import { registerChatRoutes } from './chat.ts';
 import { runAgentMaintenance } from './agent-maintenance.ts';
 import { delegationLineFromReportItem } from './agent-report.ts';
 import { agentResultExecutionLog, normalizeAgentResult, persistAgentWorkProducts } from './agent-results.ts';
+import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
 import { finishProtocolHelp, protocolHelpOrigin, resetProtocolRepair } from './protocol-repair.ts';
 import { completionCondition, guardedCompletionUpdate } from './completion-guard.ts';
@@ -279,18 +283,23 @@ function preserveRedactedSecrets(input: unknown, existing: unknown): unknown {
 }
 
 function redactAgent<T extends { adapterConfig?: unknown }>(agent: T): T {
-  const record = agent as T & { apiToken?: string | null };
+  const record = agent as T & { apiToken?: string | null; giteaToken?: string | null };
   // The raw per-agent token exists only for prompt injection; API responses
   // carry a preview, never the token itself.
   return {
     ...agent,
     adapterConfig: redactSecrets(agent.adapterConfig),
     ...('apiToken' in record ? { apiToken: previewAgentToken(record.apiToken) } : {}),
+    ...('giteaToken' in record ? { giteaToken: record.giteaToken ? '[redacted]' : null } : {}),
   } as T;
 }
 
 function redactRuntime<T extends { config?: unknown }>(runtime: T): T {
   return { ...runtime, config: redactSecrets(runtime.config) } as T;
+}
+
+function redactProject<T extends { publishToken?: string | null }>(project: T): T {
+  return { ...project, publishToken: project.publishToken ? '[redacted]' : null };
 }
 
 async function cardCompanyId(cardId: string): Promise<string | null> {
@@ -860,6 +869,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         const nextStatus = input.status === 'approved' && mergePlan ? mergeCompletionStatus(mergePlan) : 'todo';
         const completed = await guardedCompletionUpdate(card, { columnStatus: nextStatus, completedAt: nextStatus === 'done' ? new Date() : null, reviewFeedback: input.decisionNote ?? card.reviewFeedback, updatedAt: new Date() });
         if (!completed) return reply.code(409).send({ error: 'approval_completion_superseded' });
+        if (nextStatus === 'done') { await sealDeliveryAcceptance(card.id); await cascadeParentStatus(card.parentCardId); }
         await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'approval', status: input.status === 'approved' ? 'success' : 'failed', message: `Approval ${input.status} by ${actorLabel(user)}.`, output: input.decisionNote });
         if (mergePlan) {
           await applyMergeGatePlan(completed, mergePlan, { approvedBy: user.id, actor: { type: 'user', id: user.id, userId: user.id }, fromStatus: card.columnStatus });
@@ -1127,6 +1137,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         name: input.name,
         slug: input.slug,
         mission: input.mission ?? null,
+        bossRolePrompt: input.bossRolePrompt ?? null,
         nfsShareUrl: input.nfsShareUrl ?? null,
         maxChildrenPerCard: input.maxChildrenPerCard ?? 3,
         panelReviewDefault: input.panelReviewDefault ?? 'critical_only',
@@ -1150,6 +1161,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     });
     return reply.code(201).send(company);
   });
+  app.get('/api/companies/:id/execution-readiness', async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    if (!access.companyIds.includes(id)) return reply.code(403).send({ error: 'company_access_denied' });
+    const query = z.object({ agentId: z.string().uuid().optional(), departmentId: z.string().uuid().optional(), projectId: z.string().uuid().optional() }).parse(request.query);
+    const structure = await companyExecutionReadiness(id, query.agentId, query.departmentId);
+    const repository = await workerRepositoryReadiness(id, query.agentId, query.projectId);
+    return { ...structure, ready: structure.ready && repository.status !== 'blocked', repositoryWriteAccess: repository.status, repositoryIssues: repository.issues };
+  });
   app.put('/api/companies/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const user = await requireCompanyRole(request, reply, id, 'operator'); if (!user) return reply;
@@ -1158,6 +1178,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       name: input.name,
       slug: input.slug,
       mission: input.mission,
+      bossRolePrompt: input.bossRolePrompt,
       nfsShareUrl: input.nfsShareUrl,
       maxChildrenPerCard: input.maxChildrenPerCard,
       panelReviewDefault: input.panelReviewDefault,
@@ -1317,7 +1338,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const [head] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, input.headAgentId), eq(agents.companyId, input.companyId), isNull(agents.deletedAt))).limit(1);
       if (!head) return reply.code(400).send({ error: 'department_head_mismatch', detail: 'headAgentId must be an active agent of the same company.' });
     }
-    const [department] = await db.insert(departments).values({ companyId: input.companyId, name: input.name, slug: input.slug, headAgentId: input.headAgentId ?? null, description: input.description ?? null }).returning();
+    const [department] = await db.insert(departments).values({ companyId: input.companyId, name: input.name, slug: input.slug, headAgentId: input.headAgentId ?? null, description: input.description ?? null, headRolePrompt: input.headRolePrompt ?? null }).returning();
     return reply.code(201).send(department);
   });
   // Department head and charter: the head receives department cards from the
@@ -1337,6 +1358,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       name: input.name,
       headAgentId: input.headAgentId === undefined ? undefined : input.headAgentId,
       description: input.description === undefined ? undefined : input.description,
+      headRolePrompt: input.headRolePrompt,
     }).where(eq(departments.id, id)).returning();
     await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'department.updated', entityType: 'department', entityId: id, details: { headAgentId: input.headAgentId, hasDescription: Boolean(input.description) } });
     return department;
@@ -1493,6 +1515,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       parentCardId: input.parentCardId ?? null,
       dependencyCardIds: input.dependencyCardIds,
       requiresApproval: input.requiresApproval,
+      coordinationOnly: input.coordinationOnly,
       reviewMode: input.reviewMode,
       critical: input.critical,
       reviewerIds: input.reviewerIds,
@@ -1621,6 +1644,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       parentCardId: nextParentCardId,
       dependencyCardIds: nextDependencyCardIds,
       requiresApproval: input.requiresApproval,
+      coordinationOnly: input.coordinationOnly,
       // The partial schema still fills these with their defaults, so only a
       // request that names them may change them: an unrelated edit must not
       // wipe the composed panel.
@@ -2385,7 +2409,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string };
     if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
-    return db.select().from(projects).where(and(query.companyId ? eq(projects.companyId, query.companyId) : inArray(projects.companyId, access.companyIds), isNull(projects.deletedAt))).orderBy(desc(projects.createdAt));
+    const rows = await db.select().from(projects).where(and(query.companyId ? eq(projects.companyId, query.companyId) : inArray(projects.companyId, access.companyIds), isNull(projects.deletedAt))).orderBy(desc(projects.createdAt));
+    return rows.map(redactProject);
   });
   app.post('/api/projects', async (request, reply) => {
     const input = createProjectSchema.parse(request.body);
@@ -2455,7 +2480,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       publishToken: input.publishToken ?? null,
     }).returning();
     if (row) publishLiveEvent({ type: 'project.created', companyId: row.companyId, entityType: 'project', entityId: row.id });
-    return reply.code(201).send(row);
+    return reply.code(201).send(row ? redactProject(row) : row);
   });
   app.get('/api/projects/:id/merge-readiness', async (request, reply) => {
     const [project] = await db.select().from(projects).where(and(eq(projects.id, (request.params as { id: string }).id), isNull(projects.deletedAt))).limit(1);
@@ -2500,12 +2525,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       runtimeServices: input.runtimeServices,
       workspacePathHint: input.workspacePathHint,
       publishRepoUrl: input.publishRepoUrl,
-      publishToken: input.publishToken,
+      publishToken: input.publishToken === '[redacted]' ? existing.publishToken : input.publishToken,
       updatedAt: new Date(),
     }).where(eq(projects.id, id)).returning());
     if (!row) return reply.code(404).send({ error: 'project_not_found' });
     publishLiveEvent({ type: 'project.updated', companyId: row.companyId, entityType: 'project', entityId: row.id });
-    return row;
+    return redactProject(row);
   });
   // Deleting a project used to be a hard delete gated on the project being
   // completely empty, so any project that had ever run a task was permanently
@@ -2802,6 +2827,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       message: 'invalid_body: expected JSON body with cardId, status, and optional taskRunId, summary, output, costUsd, pollIntervalSeconds, workProducts. Example: { "cardId": "<uuid>", "taskRunId": "<task-run uuid>", "status": "done", "summary": "...", "output": "..." }',
       issues: parsedBody.error.issues,
     });
+    const [outputCard] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, parsedBody.data.cardId)).limit(1);
+    if (!outputCard) return reply.code(404).send({ error: 'card_not_found' });
+    if (callerAgent && callerAgent.companyId !== outputCard.companyId) return reply.code(403).send({ error: 'company_access_denied' });
+    parsedBody.data = await sanitizeCompanyOutput(outputCard.companyId, parsedBody.data);
     const normalizedResult = normalizeAgentResult({ output: [parsedBody.data.summary, parsedBody.data.output].filter(Boolean).join('\n\n'), report: parsedBody.data.report, workProducts: parsedBody.data.workProducts });
     const body = { ...parsedBody.data, report: normalizedResult.report ?? undefined, workProducts: normalizedResult.workProducts };
     const taskRunId = body.taskRunId ?? body.idempotencyKey;
@@ -2949,8 +2978,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (actorAgent && webhookChildren.length) {
       try {
         const split = await processChildSplits(card, actorAgent, webhookChildren);
-        if (split.errors.length) return reply.code(409).send({ error: 'child_split_rejected', message: split.errors.join('\n') });
-      } catch (error) { return reply.code(409).send({ error: 'child_split_rejected', message: String(error) }); }
+        if (split.errors.length) { await sendAgentFeedbackAndRequeue({ card, agent: actorAgent, kind: 'dispatch', message: split.errors.join('\n'), taskRunId, runId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId, output: executionLog }); return reply.code(409).send({ error: 'child_split_rejected', message: split.errors.join('\n') }); }
+      } catch (error) { await sendAgentFeedbackAndRequeue({ card, agent: actorAgent, kind: 'dispatch', message: String(error), taskRunId, runId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId, output: executionLog }); return reply.code(409).send({ error: 'child_split_rejected', message: String(error) }); }
     }
     // Client checkpoint: park the card and ask the client instead of completing.
     const webhookCheckpoint = actorAgent && !blockedResult ? await resolveClientCheckpointRequest(card, actorAgent, checkpointFromOutput(executionLog, body.report ?? null), normalizedResult.question) : null;
@@ -2992,34 +3021,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const delegationFailureReason = delegationFailed ? delegationError ?? 'delegation_requested_but_no_available_direct_reports' : null;
     const delegationFailureGuidance = delegationFailed ? (collaborationModeRequiresDelegation(card) ? collaborationDelegationInstructions(activeDirectReports) : optionalDelegationInstructions(activeDirectReports)) : null;
     const delegationFailureMessage = delegationFailed ? `${delegationFailureReason}\n\n${delegationFailureGuidance}` : null;
-    const collaborationModeRejected = requiredDelegation.required
-      && requestedDelegation.length === 0
-      && (requestedStatus === 'done' || requestedStatus === 'in_review')
-      && actorAgent;
-    if (collaborationModeRejected) {
-      const message = `collaboration_mode_requires_delegation\n\n${collaborationDelegationInstructions(requiredDelegation.reports)}`;
-      await db.update(kanbanCards).set({
-        columnStatus: 'todo',
-        executionLog,
-        nextRunAt: null,
-        lastError: message,
-        executionLockId: null,
-        executionLockedByAgentId: null,
-        executionLockedAt: null,
-        executionLockExpiresAt: null,
-        activeHeartbeatRunId: null,
-        updatedAt: new Date(),
-      }).where(eq(kanbanCards.id, body.cardId));
-      await db.insert(taskLogs).values({ cardId: body.cardId, agentId: actorAgentId, type: 'dispatch', status: 'warning', message: 'Agent reply rejected; correction feedback was returned to the agent and the card was requeued without increasing card retry count.', output: message, costUsd: body.costUsd?.toString() });
-      await db.insert(cardComments).values({ cardId: body.cardId, agentId: actorAgentId, authorType: actorAgentId ? 'agent' : 'system', action: 'agent_error', body: message });
-      if (actorAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actorAgentId));
-      const heartbeatRunId = webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId;
-      if (heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message, costUsd: body.costUsd?.toString() }).where(eq(heartbeatRuns.id, heartbeatRunId));
-      await completeTaskRun(taskRunId, { status: 'failed', retryableFailure: true, releaseLock: true, error: message, output: executionLog, costUsd: body.costUsd });
-      await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: actorAgentId, action: 'webhook.collaboration_delegation_required', entityType: 'card', entityId: card.id, details: { taskRunId, requestedStatus, directReportIds: activeDirectReports.map((report) => report.id).filter(Boolean), feedbackRequeued: true } });
-      await enqueueTaskRun(body.cardId, 'dispatch', 'queue');
-      publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'webhook.collaboration_delegation_required' });
-      return reply.code(409).send({ error: 'collaboration_mode_requires_delegation', message, cardId: body.cardId, taskRunId, newStatus: 'todo' });
+    const structuralIssue = actorAgent && webhookTaskRun?.kind !== 'review' ? await structuralCompletionIssue(card, actorAgent.id, normalizedResult) : null;
+    if (actorAgent && webhookTaskRun?.kind !== 'review' && normalizedResult.outcome === 'completed' && (requiredDelegation.required || structuralIssue || delegationFailed)) {
+      const message = structuralIssue ?? delegationFailureMessage ?? 'structural_delegation_required: Route execution to eligible department heads/employees with scope and acceptance criteria.';
+      const corrected = await sendAgentFeedbackAndRequeue({ card, agent: actorAgent, kind: 'dispatch', message, taskRunId, runId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId, output: executionLog, result: { sessionId: actorAgent.currentSessionId ?? '' } });
+      return reply.code(409).send({ error: 'structural_delivery_required', message, cardId: card.id, newStatus: corrected.columnStatus });
     }
     // Blind review panel (§17): an author answering panel findings must
     // disposition every one of them (or escalate) before the run counts as a
@@ -3040,7 +3046,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
     }
     const qualityReviewerId = !delegatedViaWebhook && !delegationFailed && !escalation && (requestedStatus === 'done' || requestedStatus === 'in_review')
-      ? await resolveIndependentReviewerForCard(card, actorAgentId)
+      ? webhookTaskRun?.kind === 'review' ? null : actorAgentId ? await structuralReviewer(card.companyId, actorAgentId, card.reviewerId) : await resolveIndependentReviewerForCard(card, actorAgentId)
       : null;
     // Human approval is the last gate (§17.6): guidance with no reviewer, and
     // any requiresApproval card with no reviewer, wait for the client instead of auto-closing.
@@ -3183,7 +3189,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     if (nextStatus === 'needs_review') await enqueueTaskRun(card.id, 'review', 'queue');
     if (nextStatus === 'todo' && reviewRevisionRequested) await enqueueTaskRun(card.id, 'dispatch', 'queue');
-    if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
+    if (nextStatus === 'done') { await sealDeliveryAcceptance(card.id); await cascadeParentStatus(card.parentCardId); }
     if (delegationFailed) {
       await enqueueTaskRun(body.cardId, 'dispatch', 'queue');
       return reply.code(409).send({

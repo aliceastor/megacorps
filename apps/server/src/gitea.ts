@@ -322,6 +322,21 @@ export async function giteaMergePullRequest(config: GiteaConfig, org: string, re
 }
 
 export type ManagedMergeReadiness = { ready: boolean; issues: string[]; serviceIdentity?: string; checkedAt: string };
+/** Read with the worker's credential: protection readiness is not push capability. */
+export async function giteaWorkerWriteReadiness(config: GiteaConfig, org: string, repo: string, worker: { username?: string | null; token?: string | null }, fetchImpl?: typeof fetch) {
+  const result = { ready: false, issues: [] as string[], checkedAt: new Date().toISOString() };
+  if (!worker.username || !worker.token) { result.issues.push('Provision this worker’s repository identity and credential before execution.'); return result; }
+  try {
+    const workerConfig = { ...config, adminToken: worker.token, adminUsername: undefined, adminPassword: undefined };
+    const identity = (await giteaFetch(workerConfig, '/user', { fetchImpl })).json as any;
+    const repository = (await giteaFetch(workerConfig, `/repos/${encodeURIComponent(org)}/${encodeURIComponent(repo)}`, { fetchImpl })).json as any;
+    if (identity?.login !== worker.username || identity?.is_admin !== false) result.issues.push('Worker credentials must resolve to its own non-admin identity.');
+    if (repository?.permissions?.push !== true) result.issues.push('Grant this worker repository write access to push a work branch; merge protection readiness alone does not grant it.');
+    if (repository?.permissions?.admin !== false || repository?.owner?.login === worker.username) result.issues.push('Use a non-owner worker identity without repository administration access.');
+    result.ready = result.issues.length === 0;
+  } catch { result.issues.push('Worker repository access could not be verified. Restore its credential/provider access and retry.'); }
+  return result;
+}
 /** Only explicit provisioning/opt-in may establish a rule. Inspection never writes.
  * Existing rules are accepted as-is or rejected, never replaced or weakened.
  */

@@ -1,6 +1,9 @@
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { db } from './db/client.ts';
 import { approvals, kanbanCards, taskRuns } from './db/schema.ts';
+import { acceptedDescendantEvidence } from './delivery-acceptance.ts';
+import { retryMergeGateWrite } from './db/merge-gate-write.ts';
+import { delegatedEvidenceStatus } from './delegated-acceptance.ts';
 
 type Card = typeof kanbanCards.$inferSelect;
 /** Compare the authority that produced a result, including the original run. */
@@ -23,10 +26,15 @@ export async function completionStillCurrent(card: Card, taskRunId?: string | nu
 
 export async function guardedCompletionUpdate(card: Card, values: Partial<typeof kanbanCards.$inferInsert>, taskRunId?: string | null): Promise<Card | undefined> {
   if (['done', 'cancelled', 'waiting_on_client'].includes(card.columnStatus ?? '')) return undefined;
-  return db.transaction(async (tx) => {
+  return retryMergeGateWrite(() => db.transaction(async (tx) => {
     await tx.select({ id: kanbanCards.id }).from(kanbanCards).where(eq(kanbanCards.id, card.id)).for('update').limit(1);
     if (taskRunId) await tx.select({ id: taskRuns.id }).from(taskRuns).where(eq(taskRuns.id, taskRunId)).for('update').limit(1);
+    if (values.columnStatus === 'done') {
+      if (!(await delegatedEvidenceStatus(card, tx)).ready) return undefined;
+      const descendants = await acceptedDescendantEvidence(card, tx, true);
+      if (descendants.issues.length || (descendants.requiredCount && !descendants.ready)) return undefined;
+    }
     const [updated] = await tx.update(kanbanCards).set(values).where(completionCondition(card, taskRunId)).returning();
     return updated;
-  });
+  }));
 }

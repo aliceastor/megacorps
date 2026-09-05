@@ -1,9 +1,16 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { buildCommonCompanyContext } from './company-context.ts';
+import { routeDelegatedQuestion, resumeDelegatedQuestion, blockDelegatedAssignment } from './delegated-help.ts';
+import { acceptedDescendantEvidence, sealDeliveryAcceptance } from './delivery-acceptance.ts';
+import { assertCompanyExecutionReady, structuralAssignment, isBossAssessment, structuralCompletionIssue, structuralReviewer } from './company-workflow.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
+import { workerRepositoryReadiness } from './worker-readiness.ts';
+import { acceptDelegatedDelivery, delegatedEvidenceStatus } from './delegated-acceptance.ts';
 import { and, desc, eq, inArray, isNull, lt, sql as drizzleSql, isNotNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { inferCardTransitionAction, normalizeCardStatus, type AgentReport, type CardStatus } from '@megacorps/shared';
 import { db, sql as rawSql } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, cardRequiredTools, companies, costEvents, cronRuns, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, toolRegistry, users, workProducts, agentReviewScores } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, cardDependencies, cardRequiredTools, companies, costEvents, cronRuns, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, toolRegistry, users, workProducts, agentReviewScores } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
@@ -25,6 +32,7 @@ import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { extractAgentReport, structuredDelegationPlan } from './agent-report.ts';
 import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
+import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { finishProtocolHelp, protocolHelpOrigin, protocolRepairSession, recordProtocolFailure, resetProtocolRepair } from './protocol-repair.ts';
 import { completionCondition, completionStillCurrent, guardedCompletionUpdate } from './completion-guard.ts';
 import type { AgentReportDelegation } from '@megacorps/shared';
@@ -118,10 +126,8 @@ function reviewCanRun(status: string | null | undefined): boolean {
   return status === 'in_review' || status === 'needs_review';
 }
 
-function resolveEffectiveReviewerId(card: CardRow, agent: AgentRow): string | null {
-  if (card.reviewerId && card.reviewerId !== agent.id) return card.reviewerId;
-  if (agent.bossId && agent.bossId !== agent.id) return agent.bossId;
-  return null;
+async function resolveEffectiveReviewerId(card: CardRow, agent: AgentRow): Promise<string | null> {
+  return structuralReviewer(card.companyId, agent.id, card.reviewerId);
 }
 
 function assigneeNeedsReview(output: string | null | undefined): boolean {
@@ -257,43 +263,12 @@ export function optionalDelegationInstructions(reports: DelegationReport[] = [])
 }
 
 export async function activeDirectReportsForAgent(companyId: string, bossId: string): Promise<AvailableDelegationReport[]> {
-  const rows = await db.select({
-    id: agents.id,
-    name: agents.name,
-    slug: agents.slug,
-    departmentId: agents.departmentId,
-    adapterType: agents.adapterType,
-    runtimeId: agents.runtimeId,
-    positionName: positions.name,
-    departmentName: departments.name,
-  }).from(agents)
-    .leftJoin(positions, eq(agents.positionId, positions.id))
-    .leftJoin(departments, eq(agents.departmentId, departments.id))
-    .where(and(
-    eq(agents.companyId, companyId),
-    eq(agents.bossId, bossId),
-    eq(agents.isActive, true),
-    isNull(agents.deletedAt),
-  ));
-  const availabilityCache = createRuntimeAvailabilityCache();
-  const available = await Promise.all(rows.map(async (report) => (
-    await agentRuntimeAvailable({ companyId, runtimeId: report.runtimeId, adapterType: report.adapterType ?? 'hermes-ssh' }, availabilityCache)
-      ? report
-      : null
-  )));
-  return available.filter((report): report is NonNullable<typeof report> => Boolean(report)).map((report) => ({
-    id: report.id,
-    name: report.name,
-    slug: report.slug,
-    departmentId: report.departmentId,
-    positionName: report.positionName,
-    departmentName: report.departmentName,
-  }));
+  const assignment = await structuralAssignment(companyId, bossId);
+  return assignment.available.map(agent => ({ id: agent.id, name: agent.name, slug: agent.slug, departmentId: agent.departmentId, positionName: assignment.roles.find(p => p.id === agent.positionId)?.name, departmentName: assignment.divisions.find(d => d.id === agent.departmentId)?.name }));
 }
 
-async function activeDirectReportsForCard(card: CardRow): Promise<DelegationReport[]> {
-  if (!card.assigneeId) return [];
-  return activeDirectReportsForAgent(card.companyId, card.assigneeId);
+async function activeDirectReportsForCard(card: CardRow): Promise<AvailableDelegationReport[]> {
+  return card.assigneeId ? activeDirectReportsForAgent(card.companyId, card.assigneeId) : [];
 }
 
 export async function actorHasDelegatedInScope(cardId: string, agentId: string, parentCommentId: string | null = null): Promise<boolean> {
@@ -303,21 +278,19 @@ export async function actorHasDelegatedInScope(cardId: string, agentId: string, 
     eq(cardComments.action, 'delegate_request'),
     parentCommentId ? eq(cardComments.parentCommentId, parentCommentId) : isNull(cardComments.parentCommentId),
   ];
-  const rows = await db.select({ id: cardComments.id }).from(cardComments).where(and(...filters)).limit(1);
-  return rows.length > 0;
+  const rows = await db.select().from(cardComments).where(and(...filters));
+  if (rows.some(row => row.assigneeAgentId && ['queued', 'running', 'waiting', 'submitted', 'approved'].includes(row.delegationStatus ?? ''))) return true;
+  if (parentCommentId) return false;
+  const children = await db.select().from(kanbanCards).where(and(eq(kanbanCards.parentCardId, cardId), isNull(kanbanCards.deletedAt)));
+  return children.some(child => child.assigneeId && child.assigneeId !== agentId && child.columnStatus !== 'cancelled');
 }
 
 export async function collaborationDelegationRequirement(card: CardRow, agentId: string | null | undefined, parentCommentId: string | null = null): Promise<{ required: boolean; alreadyDelegated: boolean; reports: AvailableDelegationReport[] }> {
-  if (!agentId || !collaborationModeRequiresDelegation(card)) return { required: false, alreadyDelegated: false, reports: [] };
+  if (!agentId || card.coordinationOnly) return { required: false, alreadyDelegated: false, reports: [] };
+  const assignment = await structuralAssignment(card.companyId, agentId);
   const reports = await activeDirectReportsForAgent(card.companyId, agentId);
-  if (reports.length === 0) return { required: false, alreadyDelegated: false, reports };
   const alreadyDelegated = await actorHasDelegatedInScope(card.id, agentId, parentCommentId);
-  // Stage D (roadmap P1 #6): mandatory-delegation is now advisory. The planner
-  // decides whether to delegate; prompts still carry the collaboration
-  // guidance, but no completion is bounced for skipping delegation. All
-  // enforcement call sites read `required` from here, so this single switch
-  // retires the hard rule.
-  return { required: false, alreadyDelegated, reports };
+  return { required: !alreadyDelegated && (assignment.delegationRequired || (collaborationModeRequiresDelegation(card) && assignment.targets.length > 0)), alreadyDelegated, reports };
 }
 
 function messageDelegationRequirementFeedback(reports: DelegationReport[]): string {
@@ -487,6 +460,16 @@ export async function completionBlockedByChildren(card: CardRow, targetStatus: C
   const normalizedTarget = normalizeCardStatus(targetStatus);
   if (normalizedTarget !== 'done' && normalizedTarget !== 'in_review') return null;
   const children = await db.select().from(kanbanCards).where(and(eq(kanbanCards.parentCardId, card.id), isNull(kanbanCards.deletedAt)));
+  const delegation = await collaborationDelegationRequirement(card, card.assigneeId);
+  const requests = await db.select().from(cardComments).where(and(eq(cardComments.cardId, card.id), eq(cardComments.action, 'delegate_request'), isNull(cardComments.parentCommentId)));
+  const pendingRequests = requests.filter(row => row.delegationStatus !== 'approved' && row.delegationStatus !== 'cancelled');
+  const delegatedEvidence = await delegatedEvidenceStatus(card);
+  if (!delegatedEvidence.ready && !pendingRequests.length) return { blocked: true, targetStatus: normalizedTarget, childCount: requests.length, incompleteCount: delegatedEvidence.missing.length, incompleteTitles: delegatedEvidence.missing, message: 'Delegated reports lack current server-accepted evidence. Restore or re-review the actual employee delivery before parent completion.' };
+  if (delegation.required || pendingRequests.length) return { blocked: true, targetStatus: normalizedTarget, childCount: children.length + requests.length, incompleteCount: pendingRequests.length || 1, incompleteTitles: pendingRequests.slice(0, 5).map(row => row.body.slice(0, 150)), message: delegation.required ? 'structural_delegation_required: Boss routes execution to department heads; staffed heads allocate to employees. No successful delegation exists. Restore unavailable staff or assign eligible staff.' : 'Waiting for delegated assignments to be accepted with evidence.' };
+  if (children.length && card.assigneeId && (await structuralAssignment(card.companyId, card.assigneeId)).delegationRequired) {
+    const acceptance = await acceptedDescendantEvidence(card);
+    if (!acceptance.ready) return { blocked: true, targetStatus: normalizedTarget, childCount: children.length, incompleteCount: acceptance.issues.length || 1, incompleteTitles: acceptance.issues.slice(0, 5), message: `Required child evidence is not accepted: ${acceptance.issues.join(' ')}` };
+  }
   if (children.length === 0 || childCompletionPolicySatisfied(card, children)) return null;
   const blockingChildren = blockingChildrenForPolicy(card, children);
   const incompleteTitles = blockingChildren.slice(0, 5).map((child) => `${child.title} (${child.columnStatus ?? 'todo'})`);
@@ -676,6 +659,8 @@ export async function addTaskLog(input: {
   durationSeconds?: number;
 }, transaction?: TransactionEffects) {
   const executor = transaction?.executor ?? db;
+  const [card] = await executor.select({ companyId: kanbanCards.companyId, projectId: kanbanCards.projectId }).from(kanbanCards).where(eq(kanbanCards.id, input.cardId)).limit(1);
+  if (card) input = await sanitizeCompanyOutput(card.companyId, input);
   const [log] = await executor.insert(taskLogs).values({
     cardId: input.cardId,
     agentId: input.agentId ?? null,
@@ -686,7 +671,6 @@ export async function addTaskLog(input: {
     costUsd: input.costUsd?.toString(),
     durationSeconds: input.durationSeconds,
   }).returning();
-  const [card] = await executor.select({ companyId: kanbanCards.companyId, projectId: kanbanCards.projectId }).from(kanbanCards).where(eq(kanbanCards.id, input.cardId)).limit(1);
   if (card && log) {
     const publish = () => publishLiveEvent({ type: 'task_log.created', companyId: card.companyId, entityType: 'task_log', entityId: log.id, cardId: input.cardId, projectId: card.projectId, action: input.type });
     if (transaction) transaction.afterCommit.push(publish);
@@ -707,7 +691,10 @@ export async function addCardMessage(input: {
   reviewerScope?: 'phase' | 'final' | null;
   delegationStatus?: string | null;
   metadata?: Record<string, unknown>;
+  deduplicationKey?: string | null;
 }) {
+  const [scopeCard] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, input.cardId)).limit(1);
+  if (scopeCard) input = await sanitizeCompanyOutput(scopeCard.companyId, input);
   const [comment] = await db.insert(cardComments).values({
     cardId: input.cardId,
     parentCommentId: input.parentCommentId ?? null,
@@ -721,7 +708,9 @@ export async function addCardMessage(input: {
     action: input.action,
     body: clipText(input.body, MESSAGE_BOARD_COMMENT_LIMIT),
     metadata: input.metadata ?? {},
-  }).returning();
+    deduplicationKey: input.deduplicationKey ?? null,
+  }).onConflictDoNothing().returning();
+  if (!comment && input.deduplicationKey) return (await db.select().from(cardComments).where(eq(cardComments.deduplicationKey, input.deduplicationKey)).limit(1))[0] ?? null;
   const [card] = await db.select({ companyId: kanbanCards.companyId, projectId: kanbanCards.projectId }).from(kanbanCards).where(eq(kanbanCards.id, input.cardId)).limit(1);
   if (card && comment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: comment.id, cardId: input.cardId, projectId: card.projectId, action: input.action });
   return comment ?? null;
@@ -904,6 +893,7 @@ function handoffMessageBody(fromAgent: AgentRow, target: AgentRow, item: AgentRe
 // record) when they plan or split.
 
 export async function recordReviewScore(card: CardRow, reviewer: AgentRow, verdict: string, output: string | null | undefined, reportScore?: number | null): Promise<number | null> {
+  if (await isBossAssessment(card.companyId, reviewer.id)) return null;
   if (!card.assigneeId) return null;
   const extraction = extractAgentReport(output);
   const report = reportScore !== undefined && reportScore !== null ? { score: reportScore } : extraction && 'report' in extraction ? extraction.report : null;
@@ -1283,84 +1273,64 @@ export async function processChildSplits(card: CardRow, splitter: AgentRow, chil
     await addCardMessage({ cardId: card.id, authorType: 'system', action: 'split_rejected', body: `Split request from ${splitter.name} was rejected:\n${error}` });
     return { created: [], errors: [error] };
   }
-  const [company] = await db.select().from(companies).where(eq(companies.id, card.companyId)).limit(1);
-  const [position] = splitter.positionId
-    ? await db.select({ isCompanyBoss: positions.isCompanyBoss }).from(positions).where(eq(positions.id, splitter.positionId)).limit(1)
-    : [];
-  const reports = await activeDirectReportsForAgent(card.companyId, splitter.id);
-  const companyAgents = await db.select({ id: agents.id, slug: agents.slug, name: agents.name, departmentId: agents.departmentId })
-    .from(agents).where(and(eq(agents.companyId, card.companyId), eq(agents.isActive, true), isNull(agents.deletedAt)));
-  const live = await db.select({ id: kanbanCards.id }).from(kanbanCards).where(and(
-    eq(kanbanCards.parentCardId, card.id),
-    isNull(kanbanCards.deletedAt),
-    drizzleSql`${kanbanCards.columnStatus} NOT IN ('done', 'cancelled')`,
-  ));
-  const agentBySlug = new Map(companyAgents.map((agent) => [agent.slug, agent as SplitAgentRef]));
-  const evaluation = evaluateSplitPlan({
-    parent: { id: card.id, splitRound: card.splitRound ?? 0, decisionMode: card.decisionMode },
-    splitter: { id: splitter.id, slug: splitter.slug, name: splitter.name, departmentId: splitter.departmentId },
-    splitterIsCompanyBoss: Boolean(position?.isCompanyBoss),
-    directReports: reports.filter((report): report is typeof report & { id: string } => Boolean(report.id)).map((report) => ({ id: report.id, slug: report.slug, name: report.name, departmentId: report.departmentId ?? null })),
-    resolveAgent: (slug) => agentBySlug.get(slug) ?? null,
-    liveChildren: live.length,
-    maxChildrenPerCard: company?.maxChildrenPerCard ?? 3,
-  }, children);
-
-  if (!evaluation.ok) {
-    await addCardMessage({ cardId: card.id, authorType: 'system', action: 'split_rejected', body: `Split request from ${splitter.name} was rejected:\n${evaluation.errors.join('\n')}`, metadata: { errors: evaluation.errors } });
-    await addTaskLog({ cardId: card.id, agentId: splitter.id, type: 'children', status: 'warning', message: 'Child card split rejected by the split rules.', output: evaluation.errors.join('\n') });
-    return { created: [], errors: evaluation.errors };
+  children = await sanitizeCompanyOutput(card.companyId, children);
+  const assignment = await structuralAssignment(card.companyId, splitter.id);
+  if (!assignment.members.some(member => member.id === splitter.id)) return { created: [], errors: ['split_actor_wrong_company'] };
+  const reports = assignment.available;
+  const requestKey = createHash('sha256').update(JSON.stringify([card.id, splitter.id, children])).digest('hex');
+  let result: { rows: CardRow[]; round: number; candidates: import('./card-splitting.ts').SplitCandidate[]; repeated: boolean };
+  try {
+    result = await db.transaction(async tx => {
+      const [current] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).for('update').limit(1);
+      if (!current || current.assigneeId !== splitter.id || current.companyId !== splitter.companyId) throw new Error('split_authority_changed: only the current card owner may split.');
+      const existing = await tx.select().from(kanbanCards).where(and(eq(kanbanCards.parentCardId, card.id), isNull(kanbanCards.deletedAt)));
+      const prior = existing.filter(child => child.splitRequestKey?.startsWith(requestKey + ':'));
+      if (prior.length === children.length) return { rows: prior.sort((x,y) => x.splitRequestKey!.localeCompare(y.splitRequestKey!)), round: current.splitRound ?? 1, candidates: [], repeated: true };
+      const evaluation = evaluateSplitPlan({
+        parent: { id: current.id, splitRound: current.splitRound ?? 0, decisionMode: assignment.delegationRequired ? 'auto' : current.decisionMode },
+        splitter: { id: splitter.id, slug: splitter.slug, name: splitter.name, departmentId: splitter.departmentId },
+        splitterIsCompanyBoss: assignment.role === 'ceo',
+        directReports: reports.map(agent => ({ id: agent.id, slug: agent.slug, name: agent.name, departmentId: agent.departmentId })),
+        resolveAgent: slug => assignment.members.find(agent => agent.slug === slug && agent.isActive !== false) ?? null,
+        liveChildren: existing.filter(child => !['done','cancelled'].includes(child.columnStatus ?? 'todo')).length,
+        maxChildrenPerCard: assignment.company?.maxChildrenPerCard ?? 3,
+      }, children);
+      if (!evaluation.ok) throw new Error(evaluation.errors.join('\n'));
+      const ids = evaluation.candidates.map(() => randomUUID());
+      const rows: CardRow[] = [];
+      for (const candidate of evaluation.candidates) {
+        const dependencyCardIds = candidate.dependsOn.map(index => ids[index]!);
+        const [child] = await tx.insert(kanbanCards).values({
+          id: ids[candidate.index], companyId: card.companyId, projectId: card.projectId, goalId: card.goalId,
+          departmentId: candidate.assignee.departmentId ?? card.departmentId, parentCardId: card.id,
+          title: candidate.child.title, body: candidate.child.body, priority: splitPriorityToNumber(candidate.child.priority, card.priority),
+          assigneeId: candidate.assignee.id, reviewerId: candidate.reviewer.id, columnStatus: 'todo', decisionMode: 'auto',
+          critical: candidate.child.critical ?? false, requiredChildPolicy: 'all_required_accepted', childRequirementLevel: 'required',
+          maxRetries: card.maxRetries, timeoutSeconds: card.timeoutSeconds, createdBy: card.createdBy,
+          splitRequestKey: requestKey + ':' + candidate.index, dependencyCardIds,
+        }).returning();
+        if (!child) throw new Error('split_insert_failed: no child row was created; retry after correcting the database failure.');
+        rows.push(child);
+      }
+      for (const row of rows) if (row.dependencyCardIds?.length) await tx.insert(cardDependencies).values(row.dependencyCardIds.map(dependsOnCardId => ({ cardId: row.id, dependsOnCardId })));
+      await tx.update(kanbanCards).set({ splitRound: evaluation.round, requiredChildPolicy: current.requiredChildPolicy && current.requiredChildPolicy !== 'manual' ? current.requiredChildPolicy : 'all_required_accepted', rollupStatus: 'waiting_on_children', updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
+      return { rows, round: evaluation.round, candidates: evaluation.candidates, repeated: false };
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'split_insert_failed';
+    await addCardMessage({ cardId: card.id, authorType: 'system', action: 'split_rejected', body: message });
+    return { created: [], errors: [message] };
   }
-
-  const round = evaluation.round;
-  const createdIds: string[] = [];
-  const announced: Array<{ title: string; assignee: SplitAgentRef; reviewer: SplitAgentRef; cardId: string }> = [];
-  for (const candidate of evaluation.candidates) {
-    const [child] = await db.insert(kanbanCards).values({
-      companyId: card.companyId,
-      projectId: card.projectId,
-      goalId: card.goalId,
-      departmentId: candidate.assignee.departmentId ?? card.departmentId,
-      parentCardId: card.id,
-      title: candidate.child.title,
-      body: candidate.child.body,
-      priority: splitPriorityToNumber(candidate.child.priority, card.priority),
-      assigneeId: candidate.assignee.id,
-      reviewerId: candidate.reviewer.id,
-      columnStatus: 'todo',
-      decisionMode: 'auto',
-      // Critical children (persisted data, irreversible external actions) get a
-      // blind review panel under the company default.
-      critical: candidate.child.critical ?? false,
-      requiredChildPolicy: 'all_required_accepted',
-      childRequirementLevel: 'required',
-      maxRetries: card.maxRetries,
-      timeoutSeconds: card.timeoutSeconds,
-      createdBy: card.createdBy,
-    }).returning();
-    if (!child) continue;
-    createdIds[candidate.index] = child.id;
-    announced.push({ title: child.title, assignee: candidate.assignee, reviewer: candidate.reviewer, cardId: child.id });
+  const created = result.rows.map(child => child.id);
+  if (result.repeated) return { created, errors: [] };
+  const announced = result.rows.map((child,index) => ({ title: child.title, cardId: child.id, assignee: result.candidates[index]!.assignee, reviewer: result.candidates[index]!.reviewer }));
+  for (const [index, child] of result.rows.entries()) {
     await addStageLog(child.id, splitter.id, null, 'todo', 'decomposition');
-    await addCardMessage({ cardId: child.id, agentId: splitter.id, action: 'split_child_opened', body: formatChildOpening(card.title, round, candidate.reviewer), metadata: { parentCardId: card.id, round } });
+    await addCardMessage({ cardId: child.id, agentId: splitter.id, action: 'split_child_opened', body: formatChildOpening(card.title, result.round, result.candidates[index]!.reviewer), metadata: { parentCardId: card.id, round: result.round } });
     publishLiveEvent({ type: 'card.created', companyId: card.companyId, entityType: 'card', entityId: child.id, cardId: child.id, projectId: card.projectId });
   }
-  for (const candidate of evaluation.candidates) {
-    const childId = createdIds[candidate.index];
-    const deps = candidate.dependsOn.map((index) => createdIds[index]).filter((id): id is string => Boolean(id));
-    if (childId && deps.length) await setCardDependencies(childId, deps);
-  }
-  const created = createdIds.filter((id): id is string => Boolean(id));
-
-  await db.update(kanbanCards).set({
-    splitRound: round,
-    requiredChildPolicy: card.requiredChildPolicy && card.requiredChildPolicy !== 'manual' ? card.requiredChildPolicy : 'all_required_accepted',
-    updatedAt: new Date(),
-  }).where(eq(kanbanCards.id, card.id));
-  await ensureParentWaitingOnChildren(card.id, { childCount: created.length, actor: 'decomposition', agentId: splitter.id, message: `Round ${round}: waiting on ${created.length} child card(s).` });
-  await addCardMessage({ cardId: card.id, agentId: splitter.id, action: 'split_opened', body: formatSplitAnnouncement(round, announced), metadata: { round, childIds: created } });
-  await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: splitter.id, agentId: splitter.id, action: 'card.split', entityType: 'card', entityId: card.id, details: { round, childIds: created } });
-  publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'card.split' });
+  await ensureParentWaitingOnChildren(card.id, { childCount: created.length, actor: 'decomposition', agentId: splitter.id, message: 'Waiting on department/employee child evidence.' });
+  await addCardMessage({ cardId: card.id, agentId: splitter.id, action: 'split_opened', body: formatSplitAnnouncement(result.round, announced), metadata: { round: result.round, childIds: created } });
   return { created, errors: [] };
 }
 
@@ -1368,10 +1338,11 @@ export async function processChildSplits(card: CardRow, splitter: AgentRow, chil
 // on this turn is integration, not fresh work.
 async function integrationSection(card: CardRow): Promise<string> {
   if (card.rollupStatus !== 'integrating') return '';
-  const children = await db.select().from(kanbanCards).where(and(eq(kanbanCards.parentCardId, card.id), isNull(kanbanCards.deletedAt)));
+  const evidence = await acceptedDescendantEvidence(card);
   return [
-    'INTEGRATION TURN: all child cards of this card are closed. Integrate their output into this card\'s own deliverable, verify the whole against the card body, then report completion as usual. Do not open another split round unless something is genuinely missing.',
-    ...children.map((child) => `- ${child.title} [${child.columnStatus ?? 'todo'}]: ${clipText(child.executionLog ?? child.body, 600)}`),
+    'GOAL ASSESSMENT TURN: assess accepted department/employee evidence against the requested goal and acceptance criteria. Cite the original artifacts and authors. Strategy-only Boss must not clone, run tests, author another deliverable or present this assessment as independent professional QA. Request targeted corrections if coverage is missing; preserve explicit platform gates.',
+    evidence.ready ? 'All required descendant evidence and gates are current and server-accepted.' : `Acceptance is no longer current: ${evidence.issues.join(' ')}`,
+    ...evidence.products.slice(0, 40).map(product => `- ${product.title} [product=${product.id}; card=${product.cardId}; author=${product.agentId}; run=${product.taskRunId}]: ${product.url ?? ''} ${clipText(product.summary ?? '', 600)}`),
   ].join('\n');
 }
 
@@ -1541,6 +1512,7 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
     const digest = (await buildAgentDigest(target.id, card.companyId)).text;
     const questionMetadata = commentMetadata(comment.metadata);
     const prompt = [
+      await buildCommonCompanyContext(card.companyId, target.id, card.tags ?? []),
       questionMetadata.brainstorm
         ? `BRAINSTORM: the owner of this card is consulting department heads before planning. As head of your department, propose concretely how your department would contribute (scope, deliverables, risks, rough effort), or answer "not participating" with a one-line reason if this genuinely does not concern your department.`
         : questionMetadata.authorKind === 'user'
@@ -1567,10 +1539,14 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { peerQuestionCommentId: comment.id, megacorpsPromptChars: prompt.length, contextMode: 'full_bootstrap' },
     });
-    const result = await adapter.dispatch(executionAgent, task);
-    if (!result.success) throw new Error(result.output || 'peer_answer_failed');
+    const result = await sanitizeCompanyOutput(card.companyId, await adapter.dispatch(executionAgent, task));
+    const normalizedAnswer = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    if (!result.success || !result.output.trim() || ['failed', 'rejected', 'invalid', 'permission', 'input_required'].includes(normalizedAnswer.outcome)) throw new Error(normalizedAnswer.reason ?? result.output ?? 'peer_answer_failed');
     await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: target.id, action: 'peer_answer', body: result.output, delegationStatus: 'done' });
-    await db.update(cardComments).set({ delegationStatus: 'done' }).where(eq(cardComments.id, comment.id));
+    if ((comment.metadata as Record<string, unknown> | null)?.helpRequestId) {
+      const resumed = await resumeDelegatedQuestion(comment);
+      if (resumed) await enqueueMessageTaskRun(resumed, 'message');
+    } else await db.update(cardComments).set({ delegationStatus: 'done' }).where(eq(cardComments.id, comment.id));
     await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), durationSeconds: result.durationSeconds, outputTokens: result.tokensUsed, costUsd: result.costUsd.toString() }).where(eq(heartbeatRuns.id, run.id));
     await db.insert(costEvents).values({ companyId: card.companyId, agentId: target.id, projectId: card.projectId, provider: target.adapterType ?? 'unknown', model: target.hermesProfile ?? 'peer-question', outputTokens: result.tokensUsed, costUsd: result.costUsd.toString() });
     await db.update(agents).set({ isBusy: false, spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${result.costUsd}` }).where(eq(agents.id, target.id));
@@ -1578,10 +1554,11 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
     publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'peer_question.answered' });
     return true;
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'peer_answer_failed';
+    const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'peer_answer_failed');
     // One failed attempt ends the question rather than retrying forever; the
     // asking agent sees the failure in the thread and can re-ask.
     await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
+    if (commentMetadataString(comment.metadata, 'helpRequestId')) await blockDelegatedAssignment(card, commentMetadataString(comment.metadata, 'helpRequestId')!, `delegated_help_failed: ${message}`);
     await addCardMessage({ cardId: card.id, parentCommentId: comment.id, authorType: 'system', action: 'peer_question_failed', body: `Peer answer from ${target.name} failed: ${clipText(message, 1000)}` });
     await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, target.id));
@@ -1595,7 +1572,7 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
 // later tick — capacity is respected the same way task dispatch respects it.
 export async function sweepPeerQuestions(app: FastifyInstance): Promise<number> {
   const queued = await db.select().from(cardComments)
-    .where(and(eq(cardComments.action, 'peer_question'), eq(cardComments.delegationStatus, 'queued')))
+    .where(and(inArray(cardComments.action, ['peer_question', 'agent_question']), eq(cardComments.delegationStatus, 'queued')))
     .orderBy(cardComments.createdAt)
     .limit(PEER_QUESTION_SWEEP_BATCH);
   let answered = 0;
@@ -1607,6 +1584,7 @@ export async function sweepPeerQuestions(app: FastifyInstance): Promise<number> 
     }
     const [target] = comment.assigneeAgentId ? await db.select().from(agents).where(and(eq(agents.id, comment.assigneeAgentId), isNull(agents.deletedAt))).limit(1) : [];
     if (!target || target.isActive === false) {
+      if (commentMetadataString(comment.metadata, 'helpRequestId')) await blockDelegatedAssignment(card, commentMetadataString(comment.metadata, 'helpRequestId')!, 'delegated_help_recipient_unavailable: Restore the responsible head/manager or explicitly reassign this help request.');
       await db.update(cardComments).set({ delegationStatus: 'cancelled' }).where(eq(cardComments.id, comment.id));
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, authorType: 'system', action: 'peer_question_failed', body: 'The target agent is no longer available; this peer question was cancelled.' });
       continue;
@@ -1696,16 +1674,18 @@ export async function createMessageDelegations(parent: CardRow, leader: AgentRow
   sourceOutput?: string | null;
 } = {}): Promise<CardCommentRow[]> {
   if (titles.length === 0) return [];
-  if (normalizeDecisionMode(parent.decisionMode) === 'solo') throw new Error('delegation_forbidden_solo: this card is in solo mode; do the work yourself or ask to change its collaboration mode.');
+  const structural = await structuralAssignment(parent.companyId, leader.id);
+  if (structural.role === 'ceo' && !parent.coordinationOnly) throw new Error('boss_execution_requires_child_card: Use report.children to route deliverables to department heads with Acceptance criteria; report.mentions is available for pure help questions.');
+  if (normalizeDecisionMode(parent.decisionMode) === 'solo' && !structural.delegationRequired) throw new Error('delegation_forbidden_solo: this card is in solo mode; ask to change its collaboration mode.');
   const depth = await delegationDepthOf(input.parentCommentId);
   const scopeFilter = input.parentCommentId ? eq(cardComments.parentCommentId, input.parentCommentId) : isNull(cardComments.parentCommentId);
   const [existingScope] = await db.select({ count: drizzleSql<number>`count(*)::int` }).from(cardComments)
     .where(and(eq(cardComments.cardId, parent.id), eq(cardComments.action, 'delegate_request'), scopeFilter));
   const boundsError = delegationBoundsError({ depth, existingInScope: existingScope?.count ?? 0, adding: titles.length });
   if (boundsError) throw new Error(boundsError);
-  const allDirectReports = await db.select().from(agents).where(and(eq(agents.companyId, parent.companyId), eq(agents.bossId, leader.id), eq(agents.isActive, true), isNull(agents.deletedAt)));
+  const allDirectReports = structural.targets;
   const directReports = await activeDirectReportsForAgent(parent.companyId, leader.id);
-  if (directReports.length === 0) return [];
+  if (directReports.length === 0) throw new Error('delegation_target_unavailable: No eligible available direct report exists. Restore the responsible department/employee runtime or availability; management cannot substitute its own execution.');
   const availableIds = new Set(directReports.map((report) => report.id));
   const unavailableDirectReports = allDirectReports.filter((report) => !availableIds.has(report.id));
   const scope = input.reviewerScope ?? (input.parentCommentId ? 'phase' : 'final');
@@ -1742,10 +1722,11 @@ export async function createMessageDelegations(parent: CardRow, leader: AgentRow
       reviewerScope: scope,
       delegationStatus: 'queued',
       metadata,
+      deduplicationKey: createHash('sha256').update(JSON.stringify([parent.id, leader.id, input.parentCommentId ?? null, input.sourceTaskRunId ?? null, rawTitle])).digest('hex'),
     });
     if (comment) {
       comments.push(comment);
-      await enqueueMessageTaskRun(comment, 'message');
+      if (comment.delegationStatus === 'queued') await enqueueMessageTaskRun(comment, 'message');
     }
   }
   await addTaskLog({ cardId: parent.id, agentId: leader.id, type: 'message_delegation', status: 'queued', message: `Created ${comments.length} Message Board delegation(s) for direct reports.` });
@@ -2281,11 +2262,12 @@ function matchScore(card: CardRow, agent: AgentRow): number {
 }
 
 async function selectBestAgent(card: CardRow): Promise<AgentRow | null> {
-  const rows = await db.select().from(agents).where(and(eq(agents.companyId, card.companyId), isNull(agents.deletedAt)));
-  const bossPositions = card.parentCardId
-    ? []
-    : await db.select({ id: positions.id }).from(positions).where(and(eq(positions.companyId, card.companyId), eq(positions.isCompanyBoss, true), eq(positions.isActive, true)));
-  const bossPositionIds = new Set(bossPositions.map((position) => position.id));
+  const structure = await structuralAssignment(card.companyId, card.assigneeId ?? '');
+  let rows = structure.bosses.length === 1 ? structure.bosses : [];
+  if (card.parentCardId) {
+    const [parent] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.parentCardId), eq(kanbanCards.companyId, card.companyId), isNull(kanbanCards.deletedAt))).limit(1);
+    rows = parent?.assigneeId ? structure.targetsFor(parent.assigneeId) : [];
+  }
   const companyPolicies = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, card.companyId), eq(budgetPolicies.isActive, true)));
   const availabilityCache = createRuntimeAvailabilityCache();
   const available = [];
@@ -2295,8 +2277,6 @@ async function selectBestAgent(card: CardRow): Promise<AgentRow | null> {
     if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'hermes-ssh' }, availabilityCache))) continue;
     available.push(agent);
   }
-  const bossAgents = available.filter((agent) => agent.positionId && bossPositionIds.has(agent.positionId));
-  if (bossAgents.length > 0) return bossAgents.sort((a, b) => matchScore(card, b) - matchScore(card, a))[0] ?? null;
   return available.sort((a, b) => matchScore(card, b) - matchScore(card, a))[0] ?? null;
 }
 
@@ -2304,7 +2284,7 @@ async function ensureAssigned(card: CardRow, source: string): Promise<CardRow | 
   if (card.assigneeId) return card;
   const agent = await selectBestAgent(card);
   if (!agent) {
-    await addTaskLog({ cardId: card.id, type: source, status: 'queued', message: 'No available agent found for auto-assignment.' });
+    await addTaskLog({ cardId: card.id, type: source, status: 'queued', message: card.parentCardId ? 'No eligible available target in the parent’s structural delegation scope. Restore its department/employee runtime or availability.' : 'The company Boss is unavailable or missing. Restore its runtime, availability or budget before automatic strategy-first assignment.' });
     return null;
   }
   const [updated] = await db.update(kanbanCards).set({
@@ -2557,6 +2537,8 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
   const policy = parent.requiredChildPolicy ?? 'all_required_accepted';
   const ready = childCompletionPolicySatisfied(parent, children);
   if (!ready) return;
+  const evidence = await acceptedDescendantEvidence(parent);
+  if (!evidence.ready) return;
   // Integration first (company pipeline design §7): the children's output goes
   // back to the parent's owner, who integrates it into the parent's own
   // deliverable; only that deliverable goes to the reviewer. Without an owner
@@ -2578,7 +2560,8 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
       await createPendingApproval(updated, null, 'Child work is complete and ready for review.');
       await enqueueTaskRun(parentCardId, 'review', 'queue');
     } else {
-      await cascadeParentStatus(updated.parentCardId);
+      await sealDeliveryAcceptance(updated.id);
+    await cascadeParentStatus(updated.parentCardId);
     }
     return;
   }
@@ -2596,8 +2579,8 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
     cardId: parentCardId,
     authorType: 'system',
     action: 'split_round_complete',
-    body: `All ${children.length} child card(s) of round ${parent.splitRound} are closed. Returning to ${integrator?.name ?? 'the owner'} to integrate their output into this card's deliverable before review.`,
-    metadata: { round: parent.splitRound, childIds: children.map((child) => child.id) },
+    body: `Required child deliveries in round ${parent.splitRound} have current accepted evidence. Returning to ${integrator?.name ?? 'the owner'} to assess goal coverage using the original deliverables.`,
+    metadata: { round: parent.splitRound, childIds: children.map((child) => child.id), acceptedProductIds: evidence.products.map(p => p.id) },
   });
   await addActivity({
     companyId: parent.companyId,
@@ -2637,7 +2620,7 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
 
   const retryCount = (card.retryCount ?? 0) + 1;
   const maxRetries = card.maxRetries ?? 3;
-  const message = error instanceof Error ? error.message : 'dispatch_failed';
+  const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'dispatch_failed');
   const blocked = retryCount >= maxRetries;
   const failedRunId = runId ?? card.activeHeartbeatRunId ?? null;
   const updated = await db.transaction(async (tx) => {
@@ -2844,7 +2827,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { adapterSessionId, messageCommentId: comment.id, megacorpsPromptChars: prompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
-    const result = await adapter.dispatch(executionAgent, task);
+    const result = await sanitizeCompanyOutput(card.companyId, await adapter.dispatch(executionAgent, task));
     const [latestTaskRun] = await db.select().from(taskRuns).where(eq(taskRuns.id, taskRun.id)).limit(1);
     if (latestTaskRun && latestTaskRun.status !== 'running') {
       if (result.success) await rememberTaskAdapterSession(card, agent, 'message', result, taskRun.id);
@@ -2864,6 +2847,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
     const normalizedMessage = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
     if (!result.success || ['failed', 'rejected', 'invalid', 'permission'].includes(normalizedMessage.outcome)) {
       const errorMessage = normalizedMessage.reason ?? (result.output || 'message_delegation_failed');
+      if (normalizedMessage.outcome === 'permission') await blockDelegatedAssignment(card, comment.id, errorMessage);
       await db.update(heartbeatRuns).set({ status: 'failed', error: errorMessage }).where(eq(heartbeatRuns.id, run.id));
       await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: errorMessage, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       if (normalizedMessage.outcome !== 'permission' && await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message', agentId: agent.id, message: errorMessage })) return card;
@@ -2871,7 +2855,15 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'delegate_failed', body: errorMessage, delegationStatus: 'failed' });
       return card;
     }
-    await persistAgentWorkProducts(card, agent.id, taskRun.id, normalizedMessage.workProducts);
+    await persistAgentWorkProducts(card, agent.id, taskRun.id, normalizedMessage.workProducts, null, normalizedMessage.report);
+    if ((normalizedMessage.outcome === 'progress' || normalizedMessage.outcome === 'input_required') && !normalizedMessage.report?.delegations?.length) {
+      await db.update(cardComments).set({ delegationStatus: 'waiting' }).where(eq(cardComments.id, comment.id));
+      if (normalizedMessage.question) await routeDelegatedQuestion(card, comment, agent.id, taskRun.id, normalizedMessage.question);
+      else await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'agent_update', body: result.output, delegationStatus: 'waiting' });
+      await completeTaskRun(taskRun.id, { status: 'success', preserveCard: true, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      if (normalizedMessage.outcome === 'progress') await enqueueMessageTaskRun(comment, 'message');
+      return card;
+    }
     const messagePlan = structuredDelegationPlan(result.output);
     const messageNotes = reportNotesFromOutput(result.output);
     if (messageNotes.length) { try { await processReportNotes(card, agent, messageNotes); } catch { /* note delivery must never fail the run */ } }
@@ -2890,7 +2882,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       return card;
     }
     const delegated = await createMessageDelegations(card, agent, messagePlan ? messagePlan.subroutineLines : delegationItems(result.output), { parentCommentId: comment.id, reviewerScope: 'phase', sourceTaskRunId: taskRun.id, sourceOutput: result.output });
-    if (delegated.length > 0) {
+    if (delegated.length > 0 || await childDelegationsPending(comment.id)) {
       await db.update(cardComments).set({ delegationStatus: 'waiting' }).where(eq(cardComments.id, comment.id));
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'agent_delegated', body: result.output, delegationStatus: 'waiting' });
       await completeTaskRun(taskRun.id, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
@@ -2908,7 +2900,8 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
     }
     if (normalizedMessage.outcome === 'progress' || normalizedMessage.outcome === 'input_required') {
       await db.update(cardComments).set({ delegationStatus: 'waiting' }).where(eq(cardComments.id, comment.id));
-      await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: normalizedMessage.question ? 'agent_question' : 'agent_update', body: normalizedMessage.question ?? result.output, delegationStatus: 'waiting' });
+      if (normalizedMessage.question) await routeDelegatedQuestion(card, comment, agent.id, taskRun.id, normalizedMessage.question);
+      else await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'agent_update', body: result.output, delegationStatus: 'waiting' });
       await completeTaskRun(taskRun.id, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       if (normalizedMessage.outcome === 'progress') await enqueueMessageTaskRun(comment, 'message');
       return card;
@@ -2933,11 +2926,12 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       await enqueueMessageTaskRun(report, 'message_review');
     } else {
       await db.update(cardComments).set({ delegationStatus: 'approved' }).where(inArray(cardComments.id, [comment.id, report?.id ?? comment.id]));
+      if (report) await acceptDelegatedDelivery(card, report.id);
       await continueAfterMessageReportApproval(card, comment);
     }
     return card;
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'message_delegation_failed';
+    const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'message_delegation_failed');
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
     await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
     await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: message });
@@ -2975,7 +2969,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { adapterSessionId, reportCommentId: report.id, requestCommentId: request?.id ?? null, megacorpsPromptChars: prompt.length },
     });
-    const result = await adapter.dispatch(executionAgent, task);
+    const result = await sanitizeCompanyOutput(card.companyId, await adapter.dispatch(executionAgent, task));
     const [latestTaskRun] = await db.select().from(taskRuns).where(eq(taskRuns.id, taskRun.id)).limit(1);
     if (latestTaskRun && latestTaskRun.status !== 'running') {
       if (result.success) await rememberTaskAdapterSession(card, reviewer, 'message_review', result, taskRun.id);
@@ -2987,7 +2981,8 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
     const explicitDecision = explicitReviewDecision(result.output);
     const decision = explicitDecision ?? reviewDecision(result.output, report.reviewerScope === 'final' ? 'quality' : 'help');
-    if (!result.success && !explicitDecision) {
+    const normalizedReview = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    if (!result.success || ['failed', 'rejected', 'permission', 'input_required', 'invalid'].includes(normalizedReview.outcome)) {
       const errorMessage = result.output || 'message_review_failed';
       await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: errorMessage, durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
       await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: errorMessage, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
@@ -3024,6 +3019,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
       await addCardMessage({ cardId: card.id, parentCommentId: report.id, agentId: reviewer.id, action: 'delegate_review_rejected', body: result.output, delegationStatus: 'rejected' });
     } else {
       await db.update(cardComments).set({ delegationStatus: 'approved' }).where(inArray(cardComments.id, [report.id, request?.id ?? report.id]));
+      await acceptDelegatedDelivery(card, report.id);
       await addCardMessage({ cardId: card.id, parentCommentId: report.id, agentId: reviewer.id, action: report.reviewerScope === 'final' ? 'final_review_approved' : 'phase_review_approved', body: result.output, delegationStatus: 'approved' });
       await continueAfterMessageReportApproval(card, request);
     }
@@ -3032,7 +3028,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
     await completeTaskRun(taskRun.id, { status: decision === 'revision_requested' ? 'failed' : 'success', error: decision === 'revision_requested' ? result.output : null, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     return card;
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'message_review_failed';
+    const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'message_review_failed');
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
     const settled = await observedSettledMessageReview(taskRun, report, request);
     if (settled?.settled) {
@@ -3068,15 +3064,17 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
   const [comment] = await db.select().from(cardComments).where(and(eq(cardComments.id, taskRun.messageCommentId), eq(cardComments.cardId, card.id))).limit(1);
   if (!comment) throw new Error('message_comment_not_found');
   const actorAgentId = taskRun.agentId;
+  input = await sanitizeCompanyOutput(card.companyId, input);
   const output = [input.summary, input.output, input.report ? JSON.stringify(input.report) : null].filter(Boolean).join('\n\n') || `Webhook marked message task ${input.status}`;
   const normalizedMessage = normalizeAgentResult({ output, report: input.report ?? undefined });
   if (normalizedMessage.outcome === 'invalid') throw new Error(normalizedMessage.reason!);
-  await persistAgentWorkProducts(card, actorAgentId, taskRun.id, normalizedMessage.workProducts);
+  await persistAgentWorkProducts(card, actorAgentId, taskRun.id, normalizedMessage.workProducts, null, normalizedMessage.report);
   const terminalFailure = input.status === 'blocked' || input.status === 'cancelled' || ['failed', 'rejected', 'permission'].includes(normalizedMessage.outcome);
   const heartbeatRunId = taskRun.heartbeatRunId;
 
   if (taskRun.kind === 'message') {
     if (terminalFailure) {
+      if (normalizedMessage.outcome === 'permission') await blockDelegatedAssignment(card, comment.id, normalizedMessage.reason ?? output);
       await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: actorAgentId, action: 'delegate_failed', body: output, delegationStatus: 'failed' });
       if (actorAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actorAgentId));
@@ -3086,7 +3084,11 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
     }
     if ((normalizedMessage.outcome === 'progress' || normalizedMessage.outcome === 'input_required') && !(normalizedMessage.report?.delegations?.length)) {
       await db.update(cardComments).set({ delegationStatus: 'waiting' }).where(eq(cardComments.id, comment.id));
-      await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: actorAgentId, action: normalizedMessage.question ? 'agent_question' : 'agent_update', body: normalizedMessage.question ?? output, delegationStatus: 'waiting' });
+      if (normalizedMessage.question) await routeDelegatedQuestion(card, comment, actorAgentId, taskRun.id, normalizedMessage.question);
+      else await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: actorAgentId, action: 'agent_update', body: output, delegationStatus: 'waiting' });
+      await completeTaskRun(taskRun.id, { status: 'success', preserveCard: true, output, costUsd: input.costUsd });
+      if (actorAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actorAgentId));
+      if (heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date() }).where(eq(heartbeatRuns.id, heartbeatRunId));
       return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'waiting', delegated: false, reviewerId: comment.reviewerAgentId };
     }
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), isNull(agents.deletedAt))).limit(1) : [];
@@ -3101,7 +3103,7 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
     const delegated = actorAgent
       ? await createMessageDelegations(card, actorAgent, delegationItems(output), { parentCommentId: comment.id, reviewerScope: 'phase', sourceTaskRunId: taskRun.id, sourceOutput: output })
       : [];
-    if (delegated.length > 0) {
+    if (delegated.length > 0 || await childDelegationsPending(comment.id)) {
       await db.update(cardComments).set({ delegationStatus: 'waiting' }).where(eq(cardComments.id, comment.id));
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: actorAgentId, action: 'agent_delegated', body: output, delegationStatus: 'waiting' });
       if (actorAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actorAgentId));
@@ -3142,6 +3144,7 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
       await enqueueMessageTaskRun(report, 'message_review');
     } else {
       await db.update(cardComments).set({ delegationStatus: 'approved' }).where(inArray(cardComments.id, [comment.id, report?.id ?? comment.id]));
+      if (report) await acceptDelegatedDelivery(card, report.id);
       await continueAfterMessageReportApproval(card, comment);
     }
     return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'submitted', delegated: false, reviewerId: comment.reviewerAgentId };
@@ -3181,6 +3184,7 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
     }
   } else {
     await db.update(cardComments).set({ delegationStatus: 'approved' }).where(inArray(cardComments.id, [comment.id, request?.id ?? comment.id]));
+    await acceptDelegatedDelivery(card, comment.id);
     await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: actorAgentId, action: comment.reviewerScope === 'final' ? 'final_review_approved' : 'phase_review_approved', body: output, delegationStatus: 'approved' });
     await continueAfterMessageReportApproval(card, request);
   }
@@ -3197,6 +3201,9 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const [project] = await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1);
     if (project?.autoMergeAfterApproval && !project.mergeReadiness?.ready) throw new Error('managed_merge_unready: Finish managed repository protection setup before dispatch.');
   }
+  await assertCompanyExecutionReady(card.companyId, card.assigneeId, card.departmentId);
+  const repositoryAccess = await workerRepositoryReadiness(card.companyId, card.assigneeId, card.projectId);
+  if (repositoryAccess.status === 'blocked') throw new Error(`worker_repository_unready: ${repositoryAccess.issues.join(' ')}`);
   if (!card.assigneeId) {
     const assigned = await ensureAssigned(card, source);
     if (!assigned) throw new Error('card_has_no_available_agent');
@@ -3252,7 +3259,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const stopLockRenewal = startExecutionLockRenewal(card.id, run.id);
     let result: Awaited<ReturnType<typeof adapter.dispatch>>;
     try {
-      result = await adapter.dispatch(executionAgent, task);
+      result = await sanitizeCompanyOutput(card.companyId, await adapter.dispatch(executionAgent, task));
     } finally {
       stopLockRenewal();
     }
@@ -3424,13 +3431,14 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       return updated;
     }
     const delegationRequirement = await collaborationDelegationRequirement(card, agent.id, null);
-    if (delegationRequirement.required) {
+    const structuralIssue = await structuralCompletionIssue(card, agent.id, normalizedResult);
+    if ((delegationRequirement.required && normalizedResult.outcome === 'completed') || structuralIssue) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       return sendAgentFeedbackAndRequeue({
         card: lockedCard,
         agent,
         kind: 'dispatch',
-        message: `collaboration_mode_requires_delegation\n\n${collaborationDelegationInstructions(delegationRequirement.reports)}`,
+        message: structuralIssue ?? `structural_delegation_required: Route execution to the listed eligible department heads/employees with scope and acceptance criteria. Unavailable staff is an availability issue.\n\n${collaborationDelegationInstructions(delegationRequirement.reports)}`,
         runId: run.id,
         taskRunId: options.taskRunId,
         output: result.output,
@@ -3450,7 +3458,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         result,
       });
     }
-    const effectiveReviewerId = resolveEffectiveReviewerId(card, agent);
+    const effectiveReviewerId = await resolveEffectiveReviewerId(card, agent);
     const needsInputQuestion = normalizedResult.outcome === 'input_required' ? normalizedResult.question : null;
     const completionDecision = needsInputQuestion
       ? needsInputCompletionDecision(effectiveReviewerId)
@@ -3571,7 +3579,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await enqueueTaskRun(updated.id, 'review', 'queue');
     }
     if (dispatchMergePlan) await applyMergeGatePlan(updated, dispatchMergePlan);
-    if (effectiveNextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
+    if (effectiveNextStatus === 'done') { await sealDeliveryAcceptance(updated.id); await cascadeParentStatus(updated.parentCardId); }
     if (effectiveNextStatus === 'in_progress' && normalizedResult.outcome === 'progress' && !childBlock) await enqueueTaskRun(updated.id, 'dispatch', 'queue');
     return updated;
   } catch (error) {
@@ -3953,7 +3961,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     await completeTaskRun(options.taskRunId, { status: rejected ? 'failed' : 'success', error: rejected ? result.output : null, output: childBlock ? childBlock.message : result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
     if (mergePlan) await applyMergeGatePlan(updated, mergePlan, { approvedBy: reviewer.id, fromStatus: card.columnStatus });
-    if (effectiveNextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
+    if (effectiveNextStatus === 'done') { await sealDeliveryAcceptance(updated.id); await cascadeParentStatus(updated.parentCardId); }
     return updated;
   } catch (error) {
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
@@ -4021,6 +4029,7 @@ async function spawnDueScheduledCards(app: FastifyInstance, companyIds: string[]
       reviewerId: template.reviewerId,
       requiresApproval: template.requiresApproval,
       decisionMode: template.decisionMode,
+      coordinationOnly: template.coordinationOnly,
       maxRetries: template.maxRetries,
       maxRevisions: template.maxRevisions,
       timeoutSeconds: template.timeoutSeconds,
@@ -4347,6 +4356,7 @@ export function startDispatchLoop(app: FastifyInstance): void {
 }
 
 export const dispatchInternals = {
+  ensureAssigned,
   claimNextTaskRun,
   adapterFailureMessage,
   asksForConfirmationInsteadOfWorking,
@@ -4867,17 +4877,17 @@ function delegationSourceContextForPrompt(comment: Pick<CardCommentRow, 'metadat
   ].join('\n');
 }
 
-async function buildMessageDelegationPrompt(card: CardRow, comment: CardCommentRow, options: PromptBuildOptions = {}): Promise<string> {
+async function buildMessageDelegationPromptCore(card: CardRow, comment: CardCommentRow, options: PromptBuildOptions = {}): Promise<string> {
   const [assignee, reviewer] = await Promise.all([
     comment.assigneeAgentId ? db.select().from(agents).where(and(eq(agents.id, comment.assigneeAgentId), isNull(agents.deletedAt))).limit(1) : Promise.resolve([]),
     comment.reviewerAgentId ? db.select().from(agents).where(and(eq(agents.id, comment.reviewerAgentId), isNull(agents.deletedAt))).limit(1) : Promise.resolve([]),
   ]);
   const reports = comment.assigneeAgentId ? await activeDirectReportsForAgent(card.companyId, comment.assigneeAgentId) : [];
   const nestedDelegationAlreadySatisfied = comment.assigneeAgentId ? await actorHasDelegatedInScope(card.id, comment.assigneeAgentId, comment.id) : false;
-  const nestedDelegationRequired = collaborationModeRequiresDelegation(card) && reports.length > 0 && !nestedDelegationAlreadySatisfied;
+  const nestedDelegationRequired = (await collaborationDelegationRequirement(card, comment.assigneeAgentId, comment.id)).required;
   const nestedDelegationProtocol = nestedDelegationRequired
     ? [
-      'Collaboration Mode is ON for this card.',
+      'Structural or explicitly selected collaboration delegation is required for this assignment.',
       'Because you have active direct reports and have not delegated inside this delegated assignment yet, you MUST return a DELEGATE block before reporting this assignment complete.',
       `Active direct reports: ${directReportList(reports)}.`,
       'DELEGATE:',
@@ -4927,7 +4937,7 @@ async function buildMessageDelegationPrompt(card: CardRow, comment: CardCommentR
   ].join('\n');
 }
 
-async function buildMessageReviewPrompt(card: CardRow, report: CardCommentRow, request: CardCommentRow | null | undefined, options: PromptBuildOptions = {}): Promise<string> {
+async function buildMessageReviewPromptCore(card: CardRow, report: CardCommentRow, request: CardCommentRow | null | undefined, options: PromptBuildOptions = {}): Promise<string> {
   const [assignee, reviewer] = await Promise.all([
     report.assigneeAgentId ? db.select().from(agents).where(and(eq(agents.id, report.assigneeAgentId), isNull(agents.deletedAt))).limit(1) : Promise.resolve([]),
     report.reviewerAgentId ? db.select().from(agents).where(and(eq(agents.id, report.reviewerAgentId), isNull(agents.deletedAt))).limit(1) : Promise.resolve([]),
@@ -4961,7 +4971,7 @@ async function buildMessageReviewPrompt(card: CardRow, report: CardCommentRow, r
   ].join('\n');
 }
 
-async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+async function buildTaskPromptCore(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
   if (options.continuation) {
     const [deltaContext, reports, delegationAlreadySatisfied] = await Promise.all([
       buildKanbanDeltaContext(card, options),
@@ -4988,17 +4998,13 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
   const [runtime] = assignee?.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, assignee.runtimeId)).limit(1) : [];
   const reports = await activeDirectReportsForCard(card);
   const delegationAlreadySatisfied = card.assigneeId ? await actorHasDelegatedInScope(card.id, card.assigneeId, null) : false;
-  const docs = await db.select().from(knowledgeDocs).where(eq(knowledgeDocs.companyId, card.companyId)).orderBy(desc(knowledgeDocs.updatedAt)).limit(10);
+
   const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.assigneeId, includeFocusProjectRepo: false });
   // Cross-surface digest: what this agent did and concluded elsewhere (other
   // cards, Direct Chat notes) so a fresh Kanban session starts with the same
   // memory the chat sessions see. Continuation turns skip it — the adapter
   // session already carries the bootstrap version.
   const digest = assignee ? (await buildAgentDigest(assignee.id, card.companyId)).text : '';
-  const matchingDocs = docs.filter((doc) => {
-    const tags = doc.tags ?? [];
-    return tags.length === 0 || tags.some((tag) => (card.tags ?? []).includes(tag));
-  }).slice(0, 5);
   return [
     [
       'Current assignment:',
@@ -5017,14 +5023,13 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
     await brainstormSection(card, assignee),
     assignee ? await teamResourceView(card.companyId, assignee.id) : '',
     kanbanContext ? `Kanban context snapshot:\n${kanbanContext}` : '',
-    matchingDocs.length ? `Company knowledge:\n${matchingDocs.map((doc) => `## ${doc.title}\nTags: ${(doc.tags ?? []).join(', ') || 'general'}\n${clipText(doc.body, KNOWLEDGE_DOC_CHAR_LIMIT)}`).join('\n\n---\n\n')}` : '',
     `Repository protocol:\n${projectGitProtocol(company, project, card, assignee, runtime)}`,
     'Completion protocol:',
     completionProtocol(card, reports, { delegationAlreadySatisfied, fanoutCap: effectiveFanoutCap(company?.maxChildrenPerCard) }),
   ].filter(Boolean).join('\n\n');
 }
 
-export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+async function buildReviewPromptCore(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
   const origin = protocolHelpOrigin(card, card.reviewerId ?? '');
   if (origin) return [
     `Provide protocol repair guidance for card ${card.id}: ${card.title}.`,
@@ -5095,4 +5100,45 @@ export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptio
     childRows.length > 0 ? 'Legacy child-card results and work products:' : '',
     childRows.length > 0 ? childResultSummary || 'No child result details captured.' : '',
   ].join('\n\n');
+}
+
+async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+ const common = await buildCommonCompanyContext(card.companyId, card.assigneeId, card.tags ?? []);
+ const assignment = card.assigneeId ? await structuralAssignment(card.companyId, card.assigneeId) : null;
+ if (assignment?.delegationRequired) return [common,
+   `${assignment.role === 'ceo' ? 'STRATEGY' : 'DEPARTMENT MANAGEMENT'} assignment: ${card.title} [${card.id}]`,
+   card.body, `Coordination only: ${card.coordinationOnly ? 'explicitly selected by the operator; no fabricated child work' : 'no; required execution must be delegated'}.`,
+   'Available structural targets (choose suitable scope; do not invent staff):',
+   ...assignment.available.map(a => `${a.slug}: ${a.name}; department ${assignment.divisions.find(d => d.id === a.departmentId)?.name}; ${assignment.divisions.find(d => d.id === a.departmentId)?.description ?? ''}`),
+   'Use report.children [{title, body: "Scope plus ## Acceptance checklist", assigneeSlug, dependsOn?}] for execution deliverables. A successful split creates required children; wait for verified acceptance. Use report.broadcast to consult departments and report.mentions for concrete peer questions. Completed report summaries are goal assessments citing verified work products, never a substitute for children or a new implementation PR.',
+   `Explicit approval gate: ${card.requiresApproval ? 'required' : 'not required unless an indispensable external decision arises'}. Forced brainstorm: ${card.forceBrainstorm ? 'required before splitting' : 'no'}.`,
+   await buildKanbanDeltaContext(card, options), await integrationSection(card), await clientCheckpointSection(card),
+   'Return a megacorps-report. Use status progress while delegating/waiting, completed for an evidence-supported goal assessment after child acceptance, input_required only for an actionable question or permission request. Never execute the implementation yourself.',
+ ].filter(Boolean).join('\n\n');
+ return [common, await buildTaskPromptCore(card, options)].join('\n\n');
+}
+
+export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+ const common = await buildCommonCompanyContext(card.companyId, card.reviewerId, card.tags ?? []);
+ if (await isBossAssessment(card.companyId, card.reviewerId)) return [common,
+   `GOAL ASSESSMENT for ${card.id}: ${card.title}. This is not independent quality review.`,
+   'Assess acceptance coverage using department evidence and the explicit sole-head SELF-CHECK. Never clone, run tests, implement, or professionally review the artifact. Required independent-review policy is enforced separately; missing staff requires an actionable client decision.',
+   `Acceptance: ${acceptanceOf(card.body) ?? card.body}`,
+   `Department result:\n${clipText(card.executionLog, 12000)}`,
+   await integrationSection(card),
+   'Return an explicit verdict approved only when the goal is covered by evidence, revision_requested with concrete missing scope, or escalate for a necessary client decision. Label the result GOAL ASSESSMENT; do not assign a professional QA score.',
+ ].join('\n\n');
+ return [common, await buildReviewPromptCore(card, options)].join('\n\n');
+}
+
+async function buildMessageDelegationPrompt(card: CardRow, comment: CardCommentRow, options: PromptBuildOptions = {}): Promise<string> {
+ comment = await sanitizeCompanyOutput(card.companyId, comment);
+ return [await buildCommonCompanyContext(card.companyId, comment.assigneeAgentId, card.tags ?? []), await buildMessageDelegationPromptCore(card, comment, options)].join('\n\n');
+}
+
+async function buildMessageReviewPrompt(card: CardRow, report: CardCommentRow, request: CardCommentRow | null | undefined, options: PromptBuildOptions = {}): Promise<string> {
+ report = await sanitizeCompanyOutput(card.companyId, report);
+ request = await sanitizeCompanyOutput(card.companyId, request);
+ if (await isBossAssessment(card.companyId, report.reviewerAgentId)) return [await buildCommonCompanyContext(card.companyId, report.reviewerAgentId, card.tags ?? []), 'GOAL ASSESSMENT: assess scope coverage using the delegated report and cited evidence. This is not independent professional QA. Never clone, test or implement. Return approved, revision_requested or escalate with the concrete goal coverage reason.', `Assignment: ${request?.body ?? card.body}`, `Department report: ${report.body}`].join('\n\n');
+ return [await buildCommonCompanyContext(card.companyId, report.reviewerAgentId, card.tags ?? []), await buildMessageReviewPromptCore(card, report, request, options)].join('\n\n');
 }

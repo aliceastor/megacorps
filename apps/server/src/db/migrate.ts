@@ -1,6 +1,7 @@
 import { sql } from './client.ts';
 import { CEO_POSITION_PROMPT, LEGACY_CEO_POSITION_PROMPT } from '../role-playbooks.ts';
 import { managedMergeMigration, managedMergeRunFenceMigration, managedMergeLockOrderMigration } from './managed-merge-migration.ts';
+import { deliveryAcceptanceMigration } from './delivery-acceptance-migration.ts';
 
 type Migration = { version: number; name: string; run: () => Promise<void> };
 
@@ -40,6 +41,17 @@ const migrations: Migration[] = [
   { version: 22, name: 'managed-authorized-merge', run: async () => { await sql.unsafe(managedMergeMigration); } },
   { version: 23, name: 'managed-merge-run-fence', run: async () => { await sql.unsafe(managedMergeRunFenceMigration); } },
   { version: 24, name: 'managed-merge-lock-order', run: async () => { await sql.unsafe(managedMergeLockOrderMigration); } },
+  { version: 25, name: 'structural-role-prompts', run: async () => {
+    await sql.unsafe(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS boss_role_prompt TEXT;
+ALTER TABLE departments ADD COLUMN IF NOT EXISTS head_role_prompt TEXT;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS delivery_acceptance JSONB;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS split_request_key TEXT;
+ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS coordination_only BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE UNIQUE INDEX IF NOT EXISTS kanban_cards_split_request_key_unique ON kanban_cards(split_request_key);`);
+    await sql.unsafe(`ALTER TABLE card_comments ADD COLUMN IF NOT EXISTS deduplication_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS card_comments_deduplication_key_unique ON card_comments(deduplication_key);`);
+    await sql.unsafe(deliveryAcceptanceMigration);
+  } },
 ];
 
 // Merge closure (company pipeline §19). external_waits.authorized_head_sha

@@ -4,6 +4,7 @@ import { extractAgentReport } from './agent-report.ts';
 import { db } from './db/client.ts';
 import { agents, approvals, cardComments, heartbeatRuns, kanbanCards, taskLogs, workProducts } from './db/schema.ts';
 import { publishLiveEvent } from './live.ts';
+import { sanitizeCompanyOutput } from './output-secrets.ts';
 
 type Verdict = 'approved' | 'revision_requested' | 'escalate';
 /** Retain canonical evidence when the report arrived separately from prose. */
@@ -89,6 +90,7 @@ export async function persistAgentWorkProducts(
 ): Promise<void> {
   if (report?.artifactRefs?.length) products = [...products, { type: 'report', title: 'Agent report evidence references', metadata: { evidenceReport: report } }];
   if (!products.length) return;
+  products = await sanitizeCompanyOutput(card.companyId, products);
   const prior = taskRunId ? await db.select().from(workProducts).where(and(eq(workProducts.cardId, card.id), eq(workProducts.taskRunId, taskRunId))) : [];
   const keys = new Set(prior.map((product) => productKey(product as ReportedWorkProduct)));
   const rows = products.filter((product) => { const key = productKey(product); if (keys.has(key)) return false; keys.add(key); return true; }).map((product) => ({

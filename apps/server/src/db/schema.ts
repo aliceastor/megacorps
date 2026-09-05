@@ -29,6 +29,7 @@ export const companies = pgTable('companies', {
   name: text('name').notNull(),
   slug: text('slug').notNull().unique(),
   mission: text('mission'),
+  bossRolePrompt: text('boss_role_prompt'),
   // Informational: where the company's shared NFS export lives (for humans and
   // the UI). Runtimes mount it themselves and record their local mount root.
   nfsShareUrl: text('nfs_share_url'),
@@ -76,6 +77,7 @@ export const departments = pgTable('departments', {
   // splits them to members; the description is what the CEO reads to decide
   // which departments a brainstorm or a task concerns.
   headAgentId: uuid('head_agent_id'),
+  headRolePrompt: text('head_role_prompt'),
   description: text('description'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
@@ -211,6 +213,9 @@ export const machineRunners = pgTable('machine_runners', {
 }, (table) => ({ companySlugUnique: unique().on(table.companyId, table.slug) }));
 
 export const kanbanCards = pgTable('kanban_cards', {
+  splitRequestKey: text('split_request_key').unique(),
+  coordinationOnly: boolean('coordination_only').notNull().default(false),
+  deliveryAcceptance: jsonb('delivery_acceptance').$type<import('../delivery-acceptance.ts').DeliveryAcceptance>(),
   id: uuid('id').primaryKey().defaultRandom(),
   companyId: uuid('company_id').notNull().references(() => companies.id),
   departmentId: uuid('department_id').references(() => departments.id),
@@ -410,6 +415,8 @@ export const taskLogs = pgTable('task_logs', {
 });
 
 export const cardComments = pgTable('card_comments', {
+  acceptedDelivery: text('accepted_delivery'),
+  deduplicationKey: text('deduplication_key').unique(),
   id: uuid('id').primaryKey().defaultRandom(),
   cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
   parentCommentId: uuid('parent_comment_id'),

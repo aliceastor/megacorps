@@ -67,6 +67,6 @@ export async function agentRuntimeAvailable(input: { companyId: string; runtimeI
     runtime = row ?? null;
     cache?.runtimes.set(input.runtimeId, runtime);
   }
-  if (!runtime || runtime.isActive === false) return false;
+  if (!runtime || runtime.companyId !== input.companyId || runtime.isActive === false) return false;
   return runnerRuntimeAvailable({ companyId: input.companyId, adapterType: input.adapterType, runtimeName: runtime.name }, cache);
 }

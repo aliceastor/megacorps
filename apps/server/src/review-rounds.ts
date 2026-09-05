@@ -1,3 +1,5 @@
+import { sealDeliveryAcceptance } from './delivery-acceptance.ts';
+import { buildCommonCompanyContext } from './company-context.ts';
 // Blind review rounds (company pipeline design §17): the database side of the
 // panel. A panel round gives every reviewer a sealed slot and a panel_review
 // task run; findings go to review_findings, never to the message board or the
@@ -219,8 +221,8 @@ async function findingsAwaitingVerification(panelRound: ReviewRoundRow | null): 
 // No eligible reviewer (or nobody answered): a critical or client-reviewed
 // card waits for a human; anything else takes the single review path.
 async function routeUnavailable(card: CardRow, kind: RoundKind, reason: string): Promise<'human_gate' | 'single_fallback'> {
-  if (card.critical || card.requiresApproval) {
-    const gateReason = `Blind ${kind} review unavailable (${reason}); this card is critical or requires client approval, so it waits for a human decision.`;
+  if (card.critical || card.requiresApproval || await panelRequiredForCard(card)) {
+    const gateReason = `Blind ${kind} review unavailable (${reason}); independent review is required. Add an eligible reviewer or request an explicit client decision; this cannot be labelled independent QA.`;
     await ensureHumanGate(card, card.assigneeId, gateReason, { kind: 'review_unavailable' });
     await addCardMessage({ cardId: card.id, authorType: 'system', action: 'review_unavailable', body: gateReason, metadata: { kind, humanGate: true } });
     await addTaskLog({ cardId: card.id, agentId: card.assigneeId, type: 'review', status: 'warning', message: gateReason });
@@ -311,6 +313,7 @@ export async function buildPanelReviewPrompt(card: CardRow, round: ReviewRoundRo
     const findings = sortFindings(rows.map(findingFromRow));
     const products = await db.select().from(workProducts).where(eq(workProducts.cardId, card.id)).orderBy(desc(workProducts.createdAt)).limit(20);
     return [
+      await buildCommonCompanyContext(card.companyId, reviewer.id, card.tags ?? []),
       options.continuation
         ? `Continue this existing blind review session: verification round ${round.round} for card ${card.id}: ${card.title}.`
         : `Blind verification round ${round.round} for card ${card.id}: ${card.title}.`,
@@ -775,7 +778,7 @@ async function approveAfterRound(card: CardRow, round: ReviewRoundRow): Promise<
   await resolvePendingApproval(card, 'approved', `Blind review round ${round.round} approved the card.`);
   await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'review-panel', agentId: round.authorAgentId, action: 'review.approved', entityType: 'card', entityId: card.id, details: { roundId: round.id, round: round.round, kind: round.kind, panel: true } });
   publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'review.approved' });
-  if (updated) await cascadeParentStatus(updated.parentCardId);
+  if (updated) { await sealDeliveryAcceptance(updated.id); await cascadeParentStatus(updated.parentCardId); }
 }
 
 async function rejectAfterRound(card: CardRow, round: ReviewRoundRow, findings: MergedFinding[], message: string): Promise<void> {

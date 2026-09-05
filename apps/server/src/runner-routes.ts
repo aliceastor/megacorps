@@ -1,3 +1,8 @@
+import { sealDeliveryAcceptance } from './delivery-acceptance.ts';
+import { structuralCompletionIssue, structuralReviewer, companyExecutionReadiness, structuralAssignment } from './company-workflow.ts';
+import { workerRepositoryReadiness } from './worker-readiness.ts';
+import { buildCommonCompanyContext } from './company-context.ts';
+import { collaborationDelegationRequirement } from './dispatch.ts';
 import { createHash } from 'node:crypto';
 import { and, asc, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
@@ -13,11 +18,12 @@ import { generateRunnerApiKey, hashRunnerApiKey, requireAgentSessionAuth, requir
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
 import { cascadeParentStatus, completeTaskRun, completionBlockedByChildren, completionStatusForQualityGate, createPendingApproval, enqueueTaskRun } from './dispatch.ts';
 import { agentResultExecutionLog, normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
+import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { applyMergeGatePlan, mergeCompletionStatus, planMergeGate } from './merge-gate.ts';
 import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
 import { finishProtocolHelp, protocolHelpOrigin, resetProtocolRepair } from './protocol-repair.ts';
 import { guardedCompletionUpdate, completionStillCurrent } from './completion-guard.ts';
-import { ensureHumanGate } from './review-rounds.ts';
+import { ensureHumanGate, panelRequiredForCard, openPanelRound } from './review-rounds.ts';
 import { childrenFromOutput, processChildSplits, createMessageDelegations, performWebhookHandoff, resolveClientCheckpointRequest, finishRunWaitingOnClient, resolveBrainstormRequest, finishRunWaitingOnBrainstorm, delegationItems } from './dispatch.ts';
 import { delegationLineFromReportItem } from './agent-report.ts';
 import { checkpointFromOutput } from './client-checkpoints.ts';
@@ -122,6 +128,7 @@ async function createRunnerTaskCompletion(input: {
     return card;
   }
   const runAgentId = input.run.agentId ?? card.assigneeId;
+  input.body = await sanitizeCompanyOutput(card.companyId, input.body);
   let output = [input.body.summary, input.body.output].filter(Boolean).join('\n\n');
   const normalized = normalizeAgentResult({ output, report: input.body.report, workProducts: input.body.workProducts });
   const protocolGuidance = input.run.kind === 'review' && Boolean(protocolHelpOrigin(card, runAgentId ?? ''));
@@ -175,13 +182,13 @@ async function createRunnerTaskCompletion(input: {
     }
     if (children.length) {
       const split = await processChildSplits(card, actor, children);
-      if (split.errors.length || !split.created.length) throw httpError(409, split.errors.join('\n') || 'No children created.', 'child_split_rejected');
+      if (split.errors.length || !split.created.length) return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: 'dispatch', message: split.errors.join('\n') || 'child_split_rejected: No children created.', taskRunId: input.run.id, runId: input.run.heartbeatRunId, output, result: { sessionId: actor.currentSessionId ?? '' } });
       card = (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
     }
     const lines = normalized.report?.delegations ? delegations.map(delegationLineFromReportItem) : delegationItems(output);
     if (lines.length) {
       try { delegated = (await createMessageDelegations(card, actor, lines, { reviewerScope: 'final', sourceTaskRunId: input.run.id, sourceOutput: output })).length > 0; }
-      catch (error) { throw httpError(409, String(error), 'delegation_rejected'); }
+      catch (error) { return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: 'dispatch', message: String(error), taskRunId: input.run.id, runId: input.run.heartbeatRunId, output, result: { sessionId: actor.currentSessionId ?? '' } }); }
       if (!delegated) throw httpError(409, 'No eligible delegate for the requested work.', 'delegation_rejected');
     }
   }
@@ -190,9 +197,14 @@ async function createRunnerTaskCompletion(input: {
     : input.body.status === 'cancelled'
       ? 'cancelled'
       : 'success';
-  const qualityReviewerId = input.run.kind === 'dispatch' && (input.body.status === 'success' || input.body.status === 'done') && card.reviewerId && card.reviewerId !== card.assigneeId
-    ? card.reviewerId
+  const qualityReviewerId = input.run.kind === 'dispatch' && runAgentId && (input.body.status === 'success' || input.body.status === 'done')
+    ? await structuralReviewer(card.companyId, runAgentId, card.reviewerId)
     : null;
+  if (actor && input.run.kind === 'dispatch' && normalized.outcome === 'completed') {
+    const required = await collaborationDelegationRequirement(card, actor.id);
+    const issue = await structuralCompletionIssue(card, actor.id, normalized);
+    if (required.required || issue) return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: 'dispatch', message: issue ?? 'structural_delegation_required: Route execution to eligible department heads/employees with scope and acceptance criteria before completion.', taskRunId: input.run.id, runId: input.run.heartbeatRunId, output, result: { sessionId: actor.currentSessionId ?? '' } });
+  }
   let requestedNextStatus: CardStatus = input.body.status === 'failed'
     ? 'blocked'
     : input.body.status === 'success'
@@ -237,7 +249,7 @@ async function createRunnerTaskCompletion(input: {
     executionLog: output || undefined,
     costUsd: input.body.costUsd?.toString(),
     completedAt: nextStatus === 'done' ? now : nextStatus === 'blocked' || nextStatus === 'cancelled' ? null : undefined,
-    reviewerId: helpReviewerId ?? undefined,
+    reviewerId: helpReviewerId ?? qualityReviewerId ?? undefined,
     reviewFeedback: normalized.question ?? undefined,
     lastError: nextStatus === 'blocked' || nextStatus === 'cancelled' ? normalized.question ?? input.body.error ?? input.body.summary ?? `runner_${nextStatus}` : null,
     executionLockId: null,
@@ -308,8 +320,8 @@ async function createRunnerTaskCompletion(input: {
   });
   if (comment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: comment.id, cardId: card.id, projectId: card.projectId, action: comment.action });
   if (nextStatus === 'in_review' && qualityReviewerId && updated) {
-    await createPendingApproval(updated, runAgentId, 'Runner completion requires quality review.');
-    await enqueueTaskRun(card.id, 'review', 'queue');
+    if (await panelRequiredForCard(updated)) await openPanelRound(updated, { kind: 'panel' });
+    else { await createPendingApproval(updated, runAgentId, 'Runner completion requires review or goal assessment.'); await enqueueTaskRun(card.id, 'review', 'queue'); }
   }
   if (nextStatus === 'needs_review' && helpReviewerId) {
     await createPendingApproval(updated, runAgentId, normalized.question ?? 'Runner requested help.');
@@ -317,7 +329,7 @@ async function createRunnerTaskCompletion(input: {
   }
   if (humanGate && updated) await ensureHumanGate(updated, runAgentId, 'Runner completion requires human approval.');
   if (mergePlan) await applyMergeGatePlan(updated, mergePlan);
-  if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
+  if (nextStatus === 'done') { await sealDeliveryAcceptance(card.id); await cascadeParentStatus(card.parentCardId); }
   return updated ?? card;
 }
 
@@ -488,6 +500,12 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
         if (!runRetryReady(payload.card, run.kind)) continue;
         const fromStatus = cardStatus(payload.card.columnStatus);
         if (run.kind === 'dispatch') {
+          const readiness = await companyExecutionReadiness(payload.card.companyId, payload.agent.id);
+          const repository = await workerRepositoryReadiness(payload.card.companyId, payload.agent.id, payload.card.projectId);
+          if (!readiness.ready || repository.status === 'blocked') {
+            await db.update(taskRuns).set({ error: [...readiness.issues, ...readiness.runtimeIssues, ...repository.issues].join(' '), updatedAt: new Date() }).where(eq(taskRuns.id, run.id));
+            continue;
+          }
           if (!(await cardDependenciesMet(payload.card.id))) continue;
           try {
             assertStatusMove(fromStatus, 'in_progress', 'machine');
@@ -552,7 +570,7 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
           detail: `Runner ${runner.name} claimed ${claimed.kind} task run.`,
           metadata: { taskRunId: claimed.id, agentId: payload.agent.id },
         });
-        return claimedPayload;
+        return { ...claimedPayload, companyContext: await buildCommonCompanyContext(payload.card.companyId, payload.agent.id, payload.card.tags ?? []) };
       }
       if (candidates.length < pageSize) return { taskRun: null };
       offset += candidates.length;
@@ -585,6 +603,16 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
     if (ctx.session.cardId && ctx.session.cardId !== id) return reply.code(403).send({ error: 'agent_session_card_mismatch' });
     const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, id), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card || card.companyId !== ctx.agent.companyId) return reply.code(404).send({ error: 'card_not_found' });
+    const readiness = await companyExecutionReadiness(card.companyId, ctx.agent.id, card.departmentId);
+    if (!readiness.structureReady) return reply.code(409).send({ error: 'company_structure_unready', issues: readiness.issues });
+    if (!card.assigneeId) {
+      const structure = await structuralAssignment(card.companyId, ctx.agent.id);
+      const [parent] = card.parentCardId ? await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.parentCardId), eq(kanbanCards.companyId, card.companyId))).limit(1) : [];
+      const permitted = parent?.assigneeId ? structure.targetsFor(parent.assigneeId).some(a => a.id === ctx.agent.id) : !card.parentCardId && structure.role === 'ceo';
+      if (!permitted) return reply.code(409).send({ error: 'structural_assignment_required', message: 'Unassigned root work starts with the Boss; child work stays within its parent’s delegation scope. An operator may explicitly assign a card.' });
+    }
+    const repository = await workerRepositoryReadiness(card.companyId, ctx.agent.id, card.projectId);
+    if (repository.status === 'blocked') return reply.code(409).send({ error: 'worker_repository_unready', issues: repository.issues });
     if (card.assigneeId && card.assigneeId !== ctx.agent.id) return reply.code(409).send({ error: 'card_assigned_to_other_agent' });
     const fromStatus = cardStatus(card.columnStatus);
     assertStatusMove(fromStatus, 'in_progress', 'agent:worker');

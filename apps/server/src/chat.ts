@@ -1,3 +1,5 @@
+import { buildCommonCompanyContext } from './company-context.ts';
+import { companyOutputSanitizer, sanitizeCompanyOutput } from './output-secrets.ts';
 import { createHash } from 'node:crypto';
 import { createChatMessageSchema, createChatSessionSchema } from '@megacorps/shared';
 import { and, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
@@ -106,6 +108,7 @@ async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, pr
   const companyGoals = await db.select().from(goals).where(eq(goals.companyId, companyId)).orderBy(desc(goals.createdAt));
   const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt });
   return [
+    await buildCommonCompanyContext(companyId, agent.id),
     `Project: ${project?.name ?? 'No project / general chat'}`,
     project?.description ? `Project description: ${project.description}` : '',
     projectRepoContext(company, project, runtime, agent),
@@ -436,6 +439,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       });
       // Stream partial output to the requesting user only (targeted live event);
       // throttled so a chatty adapter cannot flood the socket.
+      const sanitizeOutput = await companyOutputSanitizer(session.companyId);
       let partialBuffer = '';
       let lastPartialSentAt = 0;
       const PARTIAL_THROTTLE_MS = 700;
@@ -453,10 +457,10 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
           entityId: session.id,
           sessionId: session.id,
           projectId: session.projectId,
-          data: { agentId: agent.id, runId: run.id, text: stripHermesSessionMetadata(partialBuffer) },
+          data: { agentId: agent.id, runId: run.id, text: stripHermesSessionMetadata(sanitizeOutput.partial(partialBuffer)) },
         });
       };
-      const result = await adapter.dispatch(executionAgent, chatTask, { onOutput: publishPartial });
+      const result = sanitizeOutput(await adapter.dispatch(executionAgent, chatTask, { onOutput: publishPartial }));
       if (!result.success) throw new Error(result.output || 'agent_chat_failed');
       if (supportsScopedDirectChatAdapterSession(agent.adapterType)) {
         await rememberAdapterSession({
@@ -552,7 +556,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       publishLiveEvent({ type: 'chat.reply.finished', companyId: session.companyId, entityType: 'chat_session', entityId: session.id, sessionId: session.id, projectId: session.projectId, data: { agentId: agent.id, runId: run.id, status: 'success' } });
       return { session: updatedSession, userMessage, agentMessage, ...(workItemMessage ? { workItemMessage } : {}) };
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'agent_chat_failed';
+      const message = await sanitizeCompanyOutput(session.companyId, error instanceof Error ? error.message : 'agent_chat_failed');
       await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
       await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
       const [systemMessage] = await db.insert(chatMessages).values({

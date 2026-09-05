@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
 type Company = { id: string; name: string; slug: string };
-type Department = { id: string; companyId: string; name: string; slug: string; headAgentId?: string | null; description?: string | null };
+type Department = { id: string; companyId: string; name: string; slug: string; headAgentId?: string | null; description?: string | null; headRolePrompt?: string | null };
 type Agent = { id: string; companyId: string; departmentId?: string | null; bossId?: string | null; name: string; role: string; adapterType?: string | null; isActive?: boolean; isBusy?: boolean };
 type Goal = { id: string; companyId: string; departmentId?: string | null; projectId?: string | null; title: string; body?: string | null };
 
@@ -27,6 +27,8 @@ export function DepartmentsPage() {
   const [deptSlug, setDeptSlug] = useState('');
   const [deptHead, setDeptHead] = useState('');
   const [deptDescription, setDeptDescription] = useState('');
+  const [headRolePrompt, setHeadRolePrompt] = useState('');
+  const [settingsRolePrompt, setSettingsRolePrompt] = useState('');
   const [settingsHead, setSettingsHead] = useState('');
   const [settingsDescription, setSettingsDescription] = useState('');
   const [goalTitle, setGoalTitle] = useState('');
@@ -69,7 +71,8 @@ export function DepartmentsPage() {
   useEffect(() => {
     setSettingsHead(selectedDepartment?.headAgentId ?? '');
     setSettingsDescription(selectedDepartment?.description ?? '');
-  }, [selectedDepartment?.id, selectedDepartment?.headAgentId, selectedDepartment?.description]);
+    setSettingsRolePrompt(selectedDepartment?.headRolePrompt ?? '');
+  }, [selectedDepartment?.id, selectedDepartment?.headAgentId, selectedDepartment?.description, selectedDepartment?.headRolePrompt]);
   useEffect(() => {
     if (selectedAgentId && !companyAgents.some((agent) => agent.id === selectedAgentId)) setSelectedAgentId('');
   }, [companyAgents, selectedAgentId]);
@@ -79,11 +82,12 @@ export function DepartmentsPage() {
     setBusy(true);
     setError('');
     try {
-      const department = await api<Department>('/api/departments', { method: 'POST', body: JSON.stringify({ companyId, name: deptName.trim(), slug: deptSlug.trim(), headAgentId: deptHead || null, description: deptDescription.trim() || null }) });
+      const department = await api<Department>('/api/departments', { method: 'POST', body: JSON.stringify({ companyId, name: deptName.trim(), slug: deptSlug.trim(), headAgentId: deptHead || null, description: deptDescription.trim() || null, headRolePrompt: headRolePrompt.trim() || null }) });
       setDeptName('');
       setDeptSlug('');
       setDeptHead('');
       setDeptDescription('');
+    setHeadRolePrompt('');
       setDepartmentCreateOpen(false);
       setToast(t('departments.added'));
       await refreshQueries();
@@ -132,7 +136,7 @@ export function DepartmentsPage() {
     setBusy(true);
     setError('');
     try {
-      await api<Department>(`/api/departments/${selectedDepartment.id}`, { method: 'PUT', body: JSON.stringify({ headAgentId: settingsHead || null, description: settingsDescription.trim() || null }) });
+      await api<Department>(`/api/departments/${selectedDepartment.id}`, { method: 'PUT', body: JSON.stringify({ headAgentId: settingsHead || null, description: settingsDescription.trim() || null, headRolePrompt: settingsRolePrompt.trim() || null }) });
       setToast(t('departments.settingsSaved'));
       await refreshQueries();
     } catch (err) {
@@ -180,6 +184,7 @@ export function DepartmentsPage() {
               {companyAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
             </select>
           </label>
+          <label className="field-label field-wide">Head role instructions (optional)<textarea className="input" rows={3} maxLength={8000} value={headRolePrompt} onChange={event => setHeadRolePrompt(event.target.value)} /><span className="field-hint">Adds responsibilities to the department head role; expertise stays in the position prompt.</span></label>
           <label className="field-label field-wide">{t('departments.description')}
             <span className="field-hint">{t('departments.descriptionHint')}</span>
             <textarea className="input" rows={2} value={deptDescription} onChange={(event) => setDeptDescription(event.target.value)} disabled={!companyId} />
@@ -267,6 +272,10 @@ export function DepartmentsPage() {
             <label className="field-label field-wide">{t('departments.description')}
               <span className="field-hint">{t('departments.descriptionHint')}</span>
               <textarea className="input" rows={2} value={settingsDescription} onChange={(event) => setSettingsDescription(event.target.value)} />
+            </label>
+            <label className="field-label field-wide">Head role instructions (optional)
+              <textarea className="input" rows={3} maxLength={8000} value={settingsRolePrompt} onChange={event => setSettingsRolePrompt(event.target.value)} />
+              <span className="field-hint">Adds responsibilities to the built-in head role. Platform gates remain required.</span>
             </label>
           </div>
           <button className="btn btn-primary" disabled={busy} onClick={() => void saveDepartmentSettings()}>{t('departments.saveSettings')}</button>

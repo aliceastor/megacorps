@@ -18,6 +18,11 @@ export function memoryDb(t: TestContext, fixtures: Array<[Table, Row[]]>) {
   function matches(table: Table, row: Row, condition?: SQL): boolean {
     if (!condition) return true;
     const query = dialect.sqlToQuery(condition);
+    if (query.sql.includes('AS knowledge_tag')) {
+      const wanted = query.params.slice(1) as string[];
+      const tags = (row.tags ?? []).map((value: string) => value.trim().toLowerCase()).filter(Boolean);
+      if (tags.length && !tags.some((value: string) => wanted?.includes(value))) return false;
+    }
     if (query.sql.includes('EXISTS (SELECT 1 FROM "task_runs"')) {
       const runTable = [...tables.keys()].find((item) => getTableName(item) === 'task_runs');
       const runParam = /"task_runs"\."id" = \$(\d+)/.exec(query.sql);
@@ -52,18 +57,23 @@ export function memoryDb(t: TestContext, fixtures: Array<[Table, Row[]]>) {
     if (query.sql.includes("->>'humanGate' = 'true'") && row.payload?.humanGate !== true) return false;
     return true;
   }
-  function query(table: Table, mode: 'select' | 'update' | 'insert', values?: Row | Row[]) {
+  function query(table: Table, mode: 'select' | 'update' | 'insert' | 'delete', values?: Row | Row[]) {
     let condition: SQL | undefined;
     let limit = Infinity;
     let offset = 0;
     let executed: Row[] | undefined;
+    let ignoreConflicts = false;
     const orders: Array<{ key: string; descending: boolean }> = [];
     const execute = () => {
       if (executed) return executed;
       let selected = rows(table).filter((row) => matches(table, row, condition));
       if (mode === 'insert') {
         selected = (Array.isArray(values) ? values : [values!]).map((row) => ({ id: randomUUID(), createdAt: new Date(), updatedAt: new Date(), ...row }));
+        if (ignoreConflicts) selected = selected.filter(row => !rows(table).some(existing => existing.id === row.id || (row.deduplicationKey && existing.deduplicationKey === row.deduplicationKey) || (row.splitRequestKey && existing.splitRequestKey === row.splitRequestKey)));
         rows(table).push(...selected);
+      } else if (mode === 'delete') {
+        const remaining = rows(table).filter(row => !selected.includes(row));
+        rows(table).splice(0, rows(table).length, ...remaining);
       } else if (mode === 'update') {
         for (const row of selected) for (const [key, value] of Object.entries(values!)) {
           if (value !== undefined && !(value instanceof SQL)) row[key] = value;
@@ -90,10 +100,11 @@ export function memoryDb(t: TestContext, fixtures: Array<[Table, Row[]]>) {
       },
       limit: (value: number) => { limit = value; return chain; },
       offset: (value: number) => { offset = value; return chain; },
+      groupBy: () => chain,
       innerJoin: () => { if (rows(table).length) throw new Error('nonempty joins need an explicit fixture'); return chain; },
       leftJoin: (joined: Table) => { if (rows(joined).length) throw new Error('nonempty left joins need an explicit fixture'); return chain; },
       for: () => chain,
-      onConflictDoNothing: () => chain,
+      onConflictDoNothing: () => { ignoreConflicts = true; return chain; },
       returning: () => chain,
       then: (resolve: (value: Row[]) => unknown, reject: (error: unknown) => unknown) => Promise.resolve().then(execute).then(resolve, reject),
     };
@@ -102,6 +113,18 @@ export function memoryDb(t: TestContext, fixtures: Array<[Table, Row[]]>) {
   t.mock.method(db, 'select', () => ({ from: (table: Table) => query(table, 'select') }) as any);
   t.mock.method(db, 'update', (table: Table) => ({ set: (value: Row) => query(table, 'update', value) }) as any);
   t.mock.method(db, 'insert', (table: Table) => ({ values: (value: Row | Row[]) => query(table, 'insert', value) }) as any);
-  t.mock.method(db, 'transaction', async (work: (tx: typeof db) => Promise<unknown>) => work(db));
+  t.mock.method(db, 'delete', (table: Table) => query(table, 'delete'));
+  t.mock.method(db, 'transaction', async (work: (tx: typeof db) => Promise<unknown>) => {
+    const before = new Map([...tables].map(([table, rows]) => [table, rows.map(ref => ({ ref, value: structuredClone(ref) }))]));
+    try { return await work(db); }
+    catch (error) {
+      for (const table of tables.keys()) if (!before.has(table)) tables.delete(table);
+      for (const [table, snapshot] of before) {
+        for (const { ref, value } of snapshot) { for (const key of Object.keys(ref)) delete ref[key]; Object.assign(ref, value); }
+        rows(table).splice(0, rows(table).length, ...snapshot.map(row => row.ref));
+      }
+      throw error;
+    }
+  });
   return { rows };
 }

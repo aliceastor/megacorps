@@ -149,6 +149,7 @@ const createCardBaseSchema = z.object({
   parentCardId: z.string().uuid().nullable().optional(),
   dependencyCardIds: z.array(z.string().uuid()).default([]),
   requiresApproval: z.boolean().default(false),
+  coordinationOnly: z.boolean().default(false),
   // Blind review panel (company pipeline §17). critical marks work that touches
   // persisted data or performs an irreversible external action; with the
   // company default critical_only that alone puts the card on a panel.
@@ -255,6 +256,7 @@ export const createCompanySchema = z.object({
   name: z.string().trim().min(1).max(160),
   slug: z.string().trim().regex(/^[a-z0-9-]+$/).max(80),
   mission: z.string().trim().max(2000).optional(),
+  bossRolePrompt: z.string().trim().max(8000).nullable().optional(),
   nfsShareUrl: z.string().trim().max(1000).nullable().optional(),
   // Live child cards allowed per card when an agent splits (hard cap 5).
   maxChildrenPerCard: z.number().int().min(1).max(5).optional(),
@@ -271,11 +273,13 @@ export const createDepartmentSchema = z.object({
   slug: z.string().trim().regex(/^[a-z0-9-]+$/).max(80),
   headAgentId: z.string().uuid().nullable().optional(),
   description: z.string().trim().max(2000).nullable().optional(),
+  headRolePrompt: z.string().trim().max(8000).nullable().optional(),
 });
 export const updateDepartmentSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   headAgentId: z.string().uuid().nullable().optional(),
   description: z.string().trim().max(2000).nullable().optional(),
+  headRolePrompt: z.string().trim().max(8000).nullable().optional(),
 });
 
 export const createPositionSchema = z.object({

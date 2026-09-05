@@ -11,12 +11,14 @@ import { db } from './db/client.ts';
 import { normalizeAgentResult } from './agent-results.ts';
 import { apiHelpCatalog } from './api-help.ts';
 import { reviewPanelSlot } from './review-rounds.ts';
+import { readyCompany } from './test-support/ready-company.ts';
 
 function fixture(t: TestContext) {
   const card: any = { id: randomUUID(), companyId: randomUUID(), title: 'Build change', body: 'Implement the requested change.', assigneeId: randomUUID(), reviewerId: null, projectId: null, columnStatus: 'todo', requiresApproval: false, deletedAt: null, tags: [], dependencyCardIds: [], retryCount: 0 };
   const agent = { id: card.assigneeId, companyId: card.companyId, name: 'Builder', slug: 'builder', isActive: true, isBusy: false, bossId: null, adapterType: 'webhook', capabilities: [], deletedAt: null };
   const run = { id: randomUUID(), companyId: card.companyId, cardId: card.id, agentId: agent.id, kind: 'dispatch', status: 'running' };
   const state = memoryDb(t, [[kanbanCards, [card]], [agents, [agent]], [taskRuns, [run]]]);
+  readyCompany(state, card.companyId);
   // These fixtures have no position/department rows; the roster's LEFT JOIN
   // keeps the agent rows intact. Keep this narrow support local to this suite.
   const select = db.select.bind(db);

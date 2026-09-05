@@ -1,3 +1,6 @@
+import { sealDeliveryAcceptance, acceptedDescendantEvidence } from './delivery-acceptance.ts';
+import { delegatedEvidenceStatus } from './delegated-acceptance.ts';
+import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 // External event application (company pipeline design §13 item 2, §19).
 //
 // The transition a POST /api/external-events used to perform inline now lives
@@ -85,11 +88,15 @@ export async function applyExternalEvent(args: { card: CardRow; input: ApplyExte
   requestedStatus = childBlock ? 'in_progress' : mergePlan ? mergeCompletionStatus(mergePlan) : requestedStatus;
   const companyId = input.companyId ?? current.companyId;
   const superseded = new Error('external_completion_superseded');
-  const committed = await db.transaction(async (tx) => {
+  const committed = await retryMergeGateWrite(() => db.transaction(async (tx) => {
     const [card] = await tx.select().from(kanbanCards).where(and(eq(kanbanCards.id, current.id), isNull(kanbanCards.deletedAt))).for('update').limit(1);
     if (!card || card.columnStatus !== current.columnStatus || ['done', 'cancelled'].includes(card.columnStatus ?? '')) return null;
     const [authorized] = await tx.select().from(kanbanCards).where(completionCondition(current)).limit(1);
     if (!authorized) return null;
+    if (requestedStatus === 'done') {
+      const descendants = await acceptedDescendantEvidence(card, tx, true);
+      if (descendants.issues.length || (descendants.requiredCount && !descendants.ready) || !(await delegatedEvidenceStatus(card, tx)).ready) return null;
+    }
     // A supplied wait belongs only to a card that is still parked on it.
     // Reject before the first mutation; returning null commits a transaction.
     if (input.waitId && card.columnStatus !== 'waiting_on_external') return null;
@@ -112,7 +119,7 @@ export async function applyExternalEvent(args: { card: CardRow; input: ApplyExte
     }
     const [event] = await tx.insert(externalEvents).values({ companyId, projectId: input.projectId ?? card.projectId, rootCardId: input.rootCardId ?? await rootCardId(card), cardId: card.id, provider: input.provider, eventType: input.eventType, externalId: input.externalId ?? null, externalUrl: input.externalUrl ?? null, status: input.status, payloadHash: hashValue(input.payload ?? {}), payloadSummary: input.payloadSummary ?? null, payload: input.payload ?? {}, processedAt: now }).returning();
     return { card, event };
-  }).catch((error) => { if (error === superseded) return null; throw error; });
+  })).catch((error) => { if (error === superseded) return null; throw error; });
   if (!committed) return { event: null, newStatus: current.columnStatus };
   const { card, event } = committed;
   const fromStatus = normalizeCardStatus(card.columnStatus) ?? 'todo';
@@ -120,7 +127,7 @@ export async function applyExternalEvent(args: { card: CardRow; input: ApplyExte
   if (fromStatus !== toStatus) {
     await recordStageAction({ cardId: card.id, agentId: card.assigneeId, actor, fromStatus, toStatus, action: input.status === 'success' ? 'external_success' : toStatus === 'in_progress' ? 'external_failure' : toStatus === 'blocked' ? 'block' : 'manual_move', detail: childBlock?.message ?? 'External ' + input.provider + '/' + input.eventType + ' reported ' + input.status + '.', metadata: { externalEventId: event?.id, childBlock } });
     if (toStatus === 'in_review') await enqueueTaskRun(card.id, 'review', 'queue');
-    if (toStatus === 'done') await cascadeParentStatus(card.parentCardId);
+    if (toStatus === 'done') { await sealDeliveryAcceptance(card.id); await cascadeParentStatus(card.parentCardId); }
   }
   if (mergePlan) await applyMergeGatePlan({ ...card, columnStatus: requestedStatus }, mergePlan);
   await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'webhook', status: input.status === 'failure' || input.status === 'timeout' ? 'failed' : 'success', message: 'External event ' + input.provider + '/' + input.eventType + ': ' + input.status, output: input.payloadSummary ?? undefined });

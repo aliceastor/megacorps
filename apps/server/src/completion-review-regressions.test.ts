@@ -11,12 +11,14 @@ import { getAdapter } from './adapters/registry.ts';
 import { sweepExternalWaitPolls } from './external-events.ts';
 import { registerRoutes } from './routes.ts';
 import { db } from './db/client.ts';
+import { readyCompany } from './test-support/ready-company.ts';
 
 function fixture(t: TestContext) {
   const card: any = { id: 'card', companyId: 'company', title: 'Deliver work', assigneeId: 'author', reviewerId: null, columnStatus: 'in_progress', tags: [], dependencyCardIds: [], runRetryState: {}, protocolRepairState: {}, updatedAt: new Date(0) };
   const actor: any = { id: 'author', companyId: 'company', name: 'Author', slug: 'author', isActive: true, isBusy: false, adapterType: 'webhook', capabilities: [] };
   const run: any = { id: 'run', cardId: card.id, companyId: card.companyId, agentId: actor.id, kind: 'dispatch', status: 'running', lockedBy: 'runner' };
   const state = memoryDb(t, [[kanbanCards, [card]], [agents, [actor]], [taskRuns, [run]], [machineRunners, [{ id: 'runner', companyId: card.companyId, name: 'Runner', apiKeyHash: hashRunnerApiKey('synthetic-runner') }]]]);
+  readyCompany(state, card.companyId);
   const app = Fastify(); t.after(() => app.close());
   const complete = async (payload: any) => { await registerRunnerRoutes(app); return app.inject({ method: 'POST', url: '/api/runner/task-runs/run/complete', headers: { 'x-megacorps-runner-key': 'synthetic-runner' }, payload: { status: 'success', ...payload } }); };
   return { card, actor, run, state, complete };
@@ -42,6 +44,7 @@ for (const request of ['children', 'delegations', 'checkpoint', 'help']) test(`r
 
 test('report artifactRefs survive runner quality gate', async (t) => {
   const { card, state, complete } = fixture(t); card.reviewerId = 'reviewer'; card.projectId = 'project';
+  state.rows(agents).push({ id: 'reviewer', companyId: card.companyId, name: 'Reviewer', adapterType: 'webhook', isActive: true, isBusy: false });
   state.rows(projects).push({ id: 'project', companyId: 'company', repoUrl: 'https://gitea.test/org/repo', completionRequiresMerge: true });
   const response = await complete({ report: report({ artifactRefs: ['https://gitea.test/org/repo/pulls/12'] }) });
   assert.equal(response.statusCode, 200, response.body); assert.equal(card.columnStatus, 'in_review');

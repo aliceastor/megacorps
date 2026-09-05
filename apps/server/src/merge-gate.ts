@@ -27,6 +27,9 @@ import { applyExternalEvent, rootCardId } from './external-events.ts';
 import { enqueueTaskRun } from './dispatch.ts';
 import { openPanelRound, panelRequiredForCard } from './review-rounds.ts';
 import { completionCondition, completionStillCurrent, guardedCompletionUpdate } from './completion-guard.ts';
+import { acceptedDescendantEvidence } from './delivery-acceptance.ts';
+import { acceptedDelegatedProducts } from './delegated-acceptance.ts';
+import { structuralAssignment } from './company-workflow.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type ProjectRow = typeof projects.$inferSelect;
@@ -334,6 +337,11 @@ export async function planMergeGate(card: CardRow, options: { fetchImpl?: typeof
   const project = await projectForCard(card);
   const blocked = (reason: Exclude<MergeSkipReason, 'not_required'>, detail: string): MergeGatePlan => ({ disposition: 'blocked', reason, detail });
   if (!project || project.completionRequiresMerge !== true) return { disposition: 'not_required', reason: 'not_required', detail: null };
+  if (!card.coordinationOnly && card.assigneeId && (await structuralAssignment(card.companyId, card.assigneeId)).delegationRequired) {
+    const inherited = await acceptedDescendantEvidence(card);
+    if (inherited.ready) return { disposition: 'not_required', reason: 'not_required', detail: null };
+    if (!(await acceptedDelegatedProducts(card)).length) return blocked('no_candidate', `Strategy/management completion requires accepted descendant or delegated evidence: ${inherited.issues.join(' ') || 'No accepted required department work exists.'}`);
+  }
   if (!project.repoUrl) return blocked('no_repo', 'Configure the project repository before approving merge completion.');
   const products = await db.select().from(workProducts).where(eq(workProducts.cardId, card.id)).orderBy(desc(workProducts.createdAt)).limit(50);
   let candidate = selectMergeCandidate(products, project);

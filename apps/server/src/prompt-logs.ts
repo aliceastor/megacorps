@@ -29,13 +29,17 @@ const secretKeyPattern = /(?:api[_-]?key|token|secret|password|bearer[_-]?token|
 const urlCredentialPattern = /(https?:\/\/)[^\/\s:@]+:[^\/\s@]+@/gi;
 const gitCredentialLinePattern = /((?:token|password)\s*[:=]?\s*)[A-Za-z0-9._~+\/-]{12,}/gi;
 
-export function redactPromptForLog(prompt: string): string {
+export function redactPromptForLog(prompt: string, knownSecrets: string[] = []): string {
+  for (const secret of [...new Set(knownSecrets)].filter(Boolean).sort((a, b) => b.length - a.length)) {
+    prompt = prompt.split(secret).join('[redacted]').split(encodeURIComponent(secret)).join('[redacted]');
+  }
   return prompt
     .replace(jsonSecretPattern, '$1[redacted]$3')
     .replace(headerSecretPattern, '$1[redacted]')
     .replace(bearerPattern, '$1[redacted]')
     .replace(urlCredentialPattern, '$1[redacted]@')
-    .replace(gitCredentialLinePattern, '$1[redacted]');
+    .replace(gitCredentialLinePattern, '$1[redacted]')
+    .replace(/([?&](?:access_token|token|api_key|password|secret)=)[^&#\s]+/gi, '$1[redacted]');
 }
 
 function promptHash(prompt: string): string {
@@ -53,6 +57,8 @@ export function promptSnapshotForAdapter(agent: AgentLike, task: TaskContext): s
 }
 
 export async function recordPromptLog(input: PromptLogInput) {
+  const { sanitizeCompanyOutput } = await import('./output-secrets.ts');
+  input = await sanitizeCompanyOutput(input.companyId, input);
   const prompt = redactPromptForLog(input.prompt);
   await db.insert(promptLogs).values({
     companyId: input.companyId,
