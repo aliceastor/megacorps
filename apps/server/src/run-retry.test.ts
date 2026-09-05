@@ -41,6 +41,21 @@ for (const kind of ['review', 'message', 'message_review']) {
   });
 }
 
+test('ignored reviewer completion settles idempotently without changing the preserved card or retry state', async (t) => {
+  const card = { id: 'card', companyId: 'company', columnStatus: 'in_review', updatedAt: new Date('2026-08-01T00:00:00Z'), runRetryState: { review: { failures: 4, nextRunAt: '2026-10-01T00:00:00.000Z' } } };
+  const run = { id: 'review', cardId: card.id, kind: 'review', status: 'running', lockedBy: 'worker', lockedAt: new Date('2026-08-01T00:00:00Z') };
+  memoryDb(t, [[kanbanCards, [card]], [taskRuns, [run]]]);
+  const before = structuredClone(card);
+  await completeTaskRun(run.id, { status: 'failed', error: 'Human gate preserved', preserveCard: true, releaseLock: true });
+  assert.equal(run.status, 'failed');
+  assert.equal(run.lockedBy, null);
+  assert.deepEqual(card, before);
+  const settled = structuredClone(run);
+  await completeTaskRun(run.id, { status: 'success' });
+  assert.deepEqual(run, settled);
+  assert.deepEqual(card, before);
+});
+
 test('success resets only its kind, duplicate completion does not count twice, operator run resets the stop', async (t) => {
   const card: any = { id: 'card', companyId: 'company', columnStatus: 'in_review', reviewerId: 'reviewer', deletedAt: null };
   const state = memoryDb(t, [[kanbanCards, [card]], [taskRuns, []]]);

@@ -52,7 +52,9 @@ test('completed implementation report preserves an explicit external wait and it
 for (const duringWrite of [false, true]) {
   test(`permission webhook preserves a human gate ${duringWrite ? 'created between read and write' : 'already pending'}`, async (t) => {
     const { card, run, state } = fixture(t);
-    card.columnStatus = 'in_review'; card.executionLog = 'Human is deciding';
+    card.columnStatus = 'in_review'; card.executionLog = 'Human is deciding'; run.kind = 'review';
+    card.updatedAt = new Date('2026-08-01T00:00:00Z');
+    card.runRetryState = { review: { failures: 4, nextRunAt: '2026-10-01T00:00:00.000Z' } };
     const before = structuredClone(card);
     const approval = { id: randomUUID(), cardId: card.id, type: 'task_review', status: 'pending', payload: { humanGate: true } };
     if (duringWrite) {
@@ -73,7 +75,12 @@ for (const duringWrite of [false, true]) {
     assert.equal(response.json().newStatus, 'in_review');
     assert.deepEqual(card, before);
     assert.deepEqual(state.rows(approvals), [approval]);
-    assert.notEqual(run.status, 'success');
+    assert.equal(run.status, 'failed');
+    const settled = structuredClone(run);
+    const duplicate = await send({ cardId: card.id, taskRunId: run.id, status: 'done', output: 'Clone pending approval' });
+    assert.ok(duplicate.statusCode < 500, duplicate.body);
+    assert.deepEqual(card, before);
+    assert.deepEqual(run, settled);
   });
 }
 
@@ -320,12 +327,19 @@ test('a late reviewer permission blocker preserves a human gate created during t
   const { card, agent, run, state } = fixture(t);
   card.assigneeId = 'author'; card.reviewerId = agent.id; card.columnStatus = 'in_review'; run.kind = 'review';
   const approval = { id: randomUUID(), cardId: card.id, type: 'task_review', status: 'pending', payload: { humanGate: true } };
+  let before: any;
   t.mock.method(getAdapter('webhook'), 'dispatch', async () => {
     state.rows(approvals).push(approval);
+    card.updatedAt = new Date('2026-08-01T00:00:00Z');
+    card.runRetryState = { review: { failures: 4, nextRunAt: '2026-10-01T00:00:00.000Z' } };
+    before = structuredClone(card);
     return { success: true, output: 'Clone pending approval', sessionId: 's', tokensUsed: 0, costUsd: 0, durationSeconds: 1 };
   });
   await reviewCard(card.id, { taskRunId: run.id });
   assert.equal(card.columnStatus, 'in_review');
+  assert.ok(before, 'actual reviewer transport must be reached');
+  assert.deepEqual(card, before);
+  assert.equal(run.status, 'failed');
   assert.deepEqual(state.rows(approvals), [approval]);
 });
 

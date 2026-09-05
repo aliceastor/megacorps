@@ -3039,7 +3039,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const heartbeatRunId = webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId;
       if (actorAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actorAgentId));
       if (heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: reason }).where(eq(heartbeatRuns.id, heartbeatRunId));
-      await completeTaskRun(taskRunId, { status: 'failed', error: reason, output: executionLog, costUsd: body.costUsd });
+      await completeTaskRun(taskRunId, { status: 'failed', preserveCard: true, error: reason, output: executionLog, costUsd: body.costUsd });
       await db.insert(taskLogs).values({ cardId: card.id, agentId: actorAgentId, type: 'webhook', status: 'warning', message: 'Pending human gate preserved; late permission blocker was not applied to the card.', output: reason });
       return { ok: true, cardId: card.id, taskRunId, newStatus: parked.columnStatus, preservedHumanGate: true };
     }

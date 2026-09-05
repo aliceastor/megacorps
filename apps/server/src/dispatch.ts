@@ -3332,8 +3332,8 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     if (normalizedResult.outcome === 'permission') {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       const blocked = await parkPermissionBlockedResult(card.id, agent.id, run.id, normalizedResult.reason!, result.output);
-      await completeTaskRun(options.taskRunId, { status: 'failed', error: normalizedResult.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
-      return blocked;
+      await completeTaskRun(options.taskRunId, { status: 'failed', preserveCard: blocked.preservedHumanGate, error: normalizedResult.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      return blocked.card;
     }
     if (normalizedResult.outcome === 'failed' || normalizedResult.outcome === 'rejected') {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
@@ -3786,8 +3786,8 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     const normalizedReview = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
     if (normalizedReview.outcome === 'permission') {
       const blocked = await parkPermissionBlockedResult(card.id, reviewer.id, run.id, normalizedReview.reason!, result.output);
-      await completeTaskRun(options.taskRunId, { status: 'failed', error: normalizedReview.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
-      return blocked;
+      await completeTaskRun(options.taskRunId, { status: 'failed', preserveCard: blocked.preservedHumanGate, error: normalizedReview.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      return blocked.card;
     }
     const explicitDecision = normalizedReview.verdictExplicit ? normalizedReview.verdict : null;
     if (!result.success && !explicitDecision) {

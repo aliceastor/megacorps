@@ -113,5 +113,5 @@ export async function parkPermissionBlockedResult(cardId: string, agentId: strin
   await db.insert(taskLogs).values({ cardId, agentId, type: 'dispatch', status: 'failed', message: reason, output });
   if (!updated) throw new Error('card_update_failed');
   publishLiveEvent({ type: 'card.updated', companyId: updated.companyId, entityType: 'card', entityId: cardId, cardId, projectId: updated.projectId, action: 'agent.permission_blocked' });
-  return updated;
+  return { card: updated, preservedHumanGate };
 }

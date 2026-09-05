@@ -41,6 +41,8 @@ export type RunCompletion = {
   releaseLock?: boolean;
   // A rejected deliverable is a valid review, not an adapter failure.
   retryableFailure?: boolean;
+  // Settle an ignored result without changing the current card or retry history.
+  preserveCard?: boolean;
 };
 
 export async function completeRetryableRun(runId: string, input: RunCompletion): Promise<boolean> {
@@ -59,7 +61,7 @@ export async function completeRetryableRun(runId: string, input: RunCompletion):
       durationSeconds: input.durationSeconds, completedAt: now, updatedAt: now,
       ...(input.releaseLock ? { lockedBy: null, lockedAt: null } : {}),
     }).where(and(eq(taskRuns.id, runId), inArray(taskRuns.status, ['queued', 'running']))).returning();
-    if (!finished || input.status === 'cancelled') return null;
+    if (!finished || input.status === 'cancelled' || input.preserveCard) return null;
     const state: RunRetryState = { ...card.runRetryState };
     const failed = input.status === 'failed' && input.retryableFailure === true;
     const failures = failed ? Math.min(RUN_FAILURE_LIMIT, (state[kind]?.failures ?? 0) + 1) : 0;
