@@ -20,7 +20,7 @@ test('managed setup defaults protect new repo, opt-out remains read-only, failed
   t.mock.method(globalThis, 'fetch', async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const path = new URL(String(url)).pathname;
     if (path.endsWith('/version') && offline) throw new Error('offline');
-    if (init?.method === 'POST' && path.endsWith('/branch_protections')) { writes++; rules.set(path, [JSON.parse(String(init.body))]); }
+    if (init?.method === 'POST' && path.endsWith('/branch_protections')) { writes++; rules.set(path, [...rules.get(path) ?? [], { ...JSON.parse(String(init.body)), created_at: new Date().toISOString() }]); }
     const value = path.endsWith('/version') ? { version: '1.22.6' } : path.endsWith('/user') ? { login: 'service' } : path.endsWith('/permission') ? { permission: 'admin' } : path.endsWith('/collaborators') || path.endsWith('/hooks') ? [] : path.endsWith('/branch_protections') ? rules.get(path) ?? [] : { default_branch: 'main' };
     return new Response(JSON.stringify(value));
   });
@@ -31,15 +31,15 @@ test('managed setup defaults protect new repo, opt-out remains read-only, failed
     assert.equal(response.statusCode, 201, response.body); return response.json();
   };
   const ready = await create('ready');
-  assert.equal(ready.autoMergeAfterApproval, true); assert.equal(ready.mergeReadiness.ready, true); assert.equal(writes, 1);
+  assert.equal(ready.autoMergeAfterApproval, true); assert.equal(ready.mergeReadiness.ready, true); assert.equal(writes, 2);
   const optout = await create('optout', { autoMergeAfterApproval: false });
-  assert.equal(optout.autoMergeAfterApproval, false); assert.equal(writes, 1);
+  assert.equal(optout.autoMergeAfterApproval, false); assert.equal(writes, 2);
   const unconfigured = await create('external', { repoProvider: 'gitea-local', repoUrl: 'https://foreign.test/org/repo', autoMergeAfterApproval: true });
-  assert.equal(unconfigured.mergeReadiness.ready, false); assert.equal(writes, 1);
+  assert.equal(unconfigured.mergeReadiness.ready, false); assert.equal(writes, 2);
   const before = JSON.stringify(state.rows(projects));
   await app.inject({ method: 'GET', url: `/api/projects/${optout.id}/merge-readiness`, headers });
   await app.inject({ method: 'GET', url: '/api/projects', headers });
-  assert.equal(JSON.stringify(state.rows(projects)), before); assert.equal(writes, 1);
+  assert.equal(JSON.stringify(state.rows(projects)), before); assert.equal(writes, 2);
   offline = true;
   const draft = await create('retry');
   assert.equal(draft.mergeReadiness.ready, false); assert.equal(draft.autoMergeAfterApproval, true);

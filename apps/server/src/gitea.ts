@@ -355,22 +355,47 @@ export async function giteaManagedReadiness(config: GiteaConfig, org: string, re
       }
       if (collaborators.length < 50) break;
     }
-    let rules = await get(`${path}/branch_protections`);
-    if (!Array.isArray(rules)) throw new Error('Branch protection inventory is unavailable.');
-    if (rules.length === 0 && options.establish) {
-      await giteaFetch(config, `${path}/branch_protections`, { method: 'POST', fetchImpl: options.fetchImpl, body: {
-        rule_name: branch, enable_push: false, enable_merge_whitelist: true,
-        merge_whitelist_usernames: [service.login], merge_whitelist_teams: [], unprotected_file_patterns: '',
-      } });
-      rules = await get(`${path}/branch_protections`);
+    if (!/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/.test(branch)) throw new Error('Managed automatic merge supports default branches containing only ASCII letters, digits, underscore, dot, slash and hyphen, starting with a letter, digit or underscore. Keep this repository opted out or explicitly choose a supported branch; existing names and rules were preserved.');
+    // Plain exact rules use EqualFold in 1.22.6. A literal character class
+    // selects the case-sensitive glob engine while matching only this branch.
+    const allowRuleName = `[${branch[0]}]${branch.slice(1)}`;
+    const expected = [
+      { rule_name: allowRuleName, enable_push: false, enable_merge_whitelist: true, merge_whitelist_usernames: [service.login], merge_whitelist_teams: [], unprotected_file_patterns: '' },
+      { rule_name: '**', enable_push: true, enable_push_whitelist: false, enable_merge_whitelist: true, merge_whitelist_usernames: [], merge_whitelist_teams: [], unprotected_file_patterns: '', protected_file_patterns: '' },
+    ];
+    const inspect = (rules: any): Set<string> => {
+      if (!Array.isArray(rules)) throw new Error('Branch protection inventory is unavailable.');
+      const names = new Set<string>();
+      const created = new Map<string, number>();
+      for (const rule of rules) {
+        const name = rule.rule_name ?? rule.branch_name;
+        if (![allowRuleName, '**'].includes(name) || names.has(name)) throw new Error('Additional, plain exact or overlapping branch protection rules require administrator review: automatic merge needs a case-sensitive literal default glob and the ** nondefault merge-deny fallback. Existing rules were preserved.');
+        names.add(name);
+        const timestamp = typeof rule.created_at === 'string' ? Date.parse(rule.created_at) : NaN;
+        if (!Number.isFinite(timestamp)) throw new Error('Provider protection created_at timestamps are missing or invalid; rule precedence cannot be verified. Existing rules were preserved.');
+        created.set(name, Math.floor(timestamp / 1000));
+        const users = rule.merge_whitelist_usernames, teams = rule.merge_whitelist_teams;
+        if (rule.enable_merge_whitelist !== true || rule.unprotected_file_patterns || !Array.isArray(users) || !Array.isArray(teams) || teams.length !== 0) throw new Error('Branch merge whitelists and file exceptions are unsafe or unknown. Existing rules were preserved; review both managed protection rules.');
+        if (name === allowRuleName && (rule.enable_push !== false || users.length !== 1 || users[0] !== service.login)) throw new Error('Default branch must deny direct pushes and allow merges only by the verified server service identity. Existing rules were preserved.');
+        if (name === '**' && (rule.enable_push !== true || rule.enable_push_whitelist !== false || users.length !== 0 || rule.protected_file_patterns)) throw new Error('The ** fallback must permit normal work-branch pushes and deny merges to everyone, including the service identity. Existing rules were preserved.');
+      }
+      if (names.size === 2 && created.get(allowRuleName)! >= created.get('**')!) throw new Error('The case-sensitive default protection must be strictly older than the ** fallback at provider-second precision. Tied or reversed rules require administrator review; existing rules were preserved.');
+      return names;
+    };
+    let names = inspect(await get(`${path}/branch_protections`));
+    if (names.size !== 2 && options.establish) {
+      if (names.has('**')) throw new Error('The existing ** fallback precedes any new default rule. Administrator review is required; existing rules were preserved.');
+      if (!names.has(allowRuleName)) await giteaFetch(config, `${path}/branch_protections`, { method: 'POST', fetchImpl: options.fetchImpl, body: expected[0] });
+      // Gitea orders globs by CreatedUnix (seconds), so separate creation even
+      // on fast providers. Readback, not this elapsed delay, establishes order.
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      await giteaFetch(config, `${path}/branch_protections`, { method: 'POST', fetchImpl: options.fetchImpl, body: expected[1] });
+      names = inspect(await get(`${path}/branch_protections`));
     }
-    // Multiple/wildcard rules have provider-specific ordering. Do not overwrite
-    // unknown rules or claim that our exact rule necessarily takes precedence.
-    if (!Array.isArray(rules) || rules.length !== 1 || (rules[0].rule_name ?? rules[0].branch_name) !== branch) throw new Error('Establish one unambiguous protection rule for the default branch; existing overlapping rules require administrator review.');
-    const rule = rules[0];
-    if (rule.enable_push !== false || rule.enable_merge_whitelist !== true || rule.unprotected_file_patterns ||
-      !Array.isArray(rule.merge_whitelist_usernames) || rule.merge_whitelist_usernames.length !== 1 || rule.merge_whitelist_usernames[0] !== service.login ||
-      !Array.isArray(rule.merge_whitelist_teams) || rule.merge_whitelist_teams.length !== 0) throw new Error('Default branch must deny direct pushes and allow merges only by the verified server service identity, without unprotected file exceptions. Existing rules were preserved.');
+    // The older literal glob matches only default, with case preserved; **
+    // matches every other/nested branch. No plain exact rule may shadow them.
+    // Enabled empty merge whitelists reject even repository/global admins.
+    if (names.size !== 2) throw new Error('Explicitly retry managed setup to establish the case-sensitive default protection before the ** nondefault merge-deny fallback.');
     result.ready = true;
   } catch (error) {
     // Do not expose provider response text or credentials in setup responses.

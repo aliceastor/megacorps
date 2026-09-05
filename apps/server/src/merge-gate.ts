@@ -673,7 +673,7 @@ async function handlePullRequestEvent(match: MergeWaitMatch, payload: GiteaPullR
   const headSha = pull?.head?.sha ?? null;
   const defaultBranch = normalizeBranchRef(project.defaultBranch) ?? 'main';
   if (project.autoMergeAfterApproval && pull?.base?.ref && normalizeBranchRef(pull.base.ref) !== defaultBranch) {
-    const message = `Pull request retargeted from authorized ${defaultBranch} to ${pull.base.ref}. Gitea 1.22 cannot atomically bind the merge request to a base branch. ${pull.merged ? 'The provider reports an external merge; MegaCorps cannot undo or cancel that effect.' : 'No further merge will be initiated for this changed target.'} Completion remains unverified; inspect the provider state and target branch.`;
+    const message = `Pull request retargeted from authorized ${defaultBranch} to ${pull.base.ref}. Managed nondefault branch protection must deny this merge because Gitea 1.22 has no expected-base request field. ${pull.merged ? 'The provider reports an external merge despite that boundary; MegaCorps cannot undo or cancel that effect. Inspect provider policy changes.' : 'No further merge will be initiated for this changed target.'} Completion remains unverified; inspect the provider state and target branch.`;
     await db.update(mergeIntents).set({ lastResult: message }).where(eq(mergeIntents.waitId, wait.id));
     await db.update(kanbanCards).set({ lastError: message, updatedAt: new Date() }).where(completionCondition(card));
     return { verdict: 'ignore', cardId: card.id, waitId: wait.id };

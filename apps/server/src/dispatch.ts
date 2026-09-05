@@ -642,7 +642,7 @@ function projectGitProtocol(company: typeof companies.$inferSelect | null | unde
     ...(project.completionRequiresMerge
       ? [`12. Completion gate: this project counts a card as done only when its pull request is merged into ${project.defaultBranch ?? 'main'}; report the PR URL and head commit SHA as workProducts, and do not push further commits to the PR after review approval unless asked (a new head reopens review).`]
       : []),
-    ...(project.autoMergeAfterApproval ? ['13. Produce the evidence and pull request; MegaCorps performs the authorized merge after all approvals. Do not merge or use admin curl for reporting. Report repository permission denials as concrete blockers; do not change runtime policy or switch identities to bypass them.'] : []),
+    ...(project.autoMergeAfterApproval ? ['13. Produce the evidence and pull request; MegaCorps performs the authorized merge after all approvals. Managed work branches support normal append pushes; provider protection forbids force pushes and branch deletion. Do not merge or use admin curl for reporting. Report repository permission denials as concrete blockers; do not change runtime policy or switch identities to bypass them.'] : []),
   ].join('\n');
 }
 
