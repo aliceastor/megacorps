@@ -148,6 +148,8 @@ for (const width of [390, 1158])
     await page.getByLabel('Runtime name', { exact: true }).fill('A2A');
     await page.getByLabel('A2A URL', { exact: true }).fill('https://runtime.example.test');
     await page.getByRole('button', { name: 'Save runtime', exact: true }).click();
+    await expect(page.getByRole('combobox', { name: 'Choose runtime', exact: true })).toHaveValue('runtime');
+    await expect(page.getByRole('button', { name: 'Check connection (no task execution)', exact: true })).toBeEnabled();
     await expect(finish).toBeDisabled();
     await page.screenshot({ path: testInfo.outputPath(`runtime-configured-${width}.png`), fullPage: true });
     await page.getByRole('button', { name: 'Check connection (no task execution)', exact: true }).click();
