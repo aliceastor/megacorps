@@ -142,7 +142,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const [departmentId, setDepartmentId] = useState('');
   const [positionId, setPositionId] = useState('');
   const [runtimeId, setRuntimeId] = useState('');
-  const [adapterType, setAdapterType] = useState('hermes-ssh');
+  const [adapterType, setAdapterType] = useState('a2a');
   const [agentCreateOpen, setAgentCreateOpen] = useState(false);
   const [agentCreateStep, setAgentCreateStep] = useState(1);
   const [creating, setCreating] = useState(false);
@@ -559,7 +559,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
             {agentCreateStep === 3 && <div className="page-stack">
               <div className="form-grid">
                 <label className="field-label">{t('settings.adapter')}<select className="input" value={adapterType} onChange={(event) => setAdapterType(event.target.value)}>
-                  <option value="hermes-ssh">Hermes SSH</option>
+                  <option value="a2a">A2A</option>
                   <option value="hermes-gateway">Hermes HTTP API</option>
                   <option value="codex-app">Codex App Server</option>
                   <option value="webhook">Webhook</option>
@@ -675,7 +675,8 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
               <label className="field-label">{t('common.slug')}<input className="input" value={String(agentDraft?.slug ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), slug: e.target.value })} /></label>
               <label className="field-label">{t('agents.profile')}<input className="input" value={String(agentDraft?.hermesProfile ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), hermesProfile: e.target.value })} /></label>
               <label className="field-label">{t('settings.adapter')}<select className="input" value={String(agentDraft?.adapterType ?? 'hermes-ssh')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), adapterType: e.target.value })}>
-                <option value="hermes-ssh">Hermes SSH</option>
+                <option value="a2a">A2A</option>
+                {selected?.adapterType === 'hermes-ssh' && <option value="hermes-ssh">Hermes SSH ({t('setup.legacy')})</option>}
                 <option value="hermes-gateway">Hermes HTTP API</option>
                 <option value="codex-app">Codex App Server</option>
                 <option value="webhook">Webhook</option>

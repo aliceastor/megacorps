@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { unambiguousCompanyId } from '@megacorps/shared';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
@@ -20,8 +21,8 @@ function usage(): string {
     'Commands:',
     '  megacorps login --email <email> --password <password> [--api-url <url>]',
     '  megacorps apply -f megacorps.yml [--api-url <url>] [--session <session-cookie-value>]',
-    '  megacorps runner register --name <name> --slug <slug> [--company-id <uuid>] [--supported-runtimes hermes-ssh,codex-app] [--max-concurrent 2] [--workspace-root <path>] [--scratch-root <path>] [--api-url <url>] [--session <session-cookie-value>]',
-    '  megacorps runner daemon --runner-key <key> [--workspace-root <path>] [--supported-runtimes hermes-ssh,codex-app] [--interval-ms 5000] [--scaffold-status needs_review] [--scaffold-poll-interval-seconds 300] [--api-url <url>] [--once] [--no-complete]',
+    '  megacorps runner register --name <name> --slug <slug> [--company-id <uuid>] [--supported-runtimes a2a,codex-app] [--max-concurrent 2] [--workspace-root <path>] [--scratch-root <path>] [--api-url <url>] [--session <session-cookie-value>]',
+    '  megacorps runner daemon --runner-key <key> [--workspace-root <path>] [--supported-runtimes a2a,codex-app] [--interval-ms 5000] [--scaffold-status needs_review] [--scaffold-poll-interval-seconds 300] [--api-url <url>] [--once] [--no-complete]',
     '',
     'Env:',
     '  MEGACORPS_API_URL, MEGACORPS_SESSION, MEGACORPS_RUNNER_KEY, MEGACORPS_RUNNER_WORKSPACE_ROOT',
@@ -153,7 +154,7 @@ async function applyManifest(flags: Flags): Promise<void> {
   const options = apiOptions(flags);
   if (!options.auth.session) throw new Error('MEGACORPS_SESSION or --session is required for apply');
   const manifest = parseYaml(await readFile(file, 'utf8')) as ManifestRecord;
-  const defaultCompanyRef = text(manifest.defaultCompany) ?? 'default';
+  const defaultCompanyRef = text(manifest.defaultCompany);
   const companies = indexByKeys(await apiRequest<ApiObject[]>(options, '/api/companies'));
 
   for (const item of records(manifest.companies)) {
@@ -166,7 +167,7 @@ async function applyManifest(flags: Flags): Promise<void> {
     console.log(`${existing ? 'updated' : 'created'} company ${row.name ?? row.slug ?? row.id}`);
   }
 
-  if (!companies.has(defaultCompanyRef)) {
+  if (defaultCompanyRef && !companies.has(defaultCompanyRef)) {
     const refreshed = indexByKeys(await apiRequest<ApiObject[]>(options, '/api/companies'));
     for (const [key, row] of refreshed) companies.set(key, row);
   }
@@ -188,7 +189,8 @@ async function applyManifest(flags: Flags): Promise<void> {
   }
 
   function companyFor(item: ManifestRecord): ApiObject {
-    return byRef(companies, item.companyId ?? item.company ?? item.companySlug ?? defaultCompanyRef, 'company');
+    const reference = item.companyId ?? item.company ?? item.companySlug ?? defaultCompanyRef ?? unambiguousCompanyId([...companies.values()].map(company => String(company.id)));
+    return byRef(companies, reference, 'company');
   }
 
   for (const item of records(manifest.departments)) {

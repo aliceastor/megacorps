@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Building2, CheckCircle2, Loader2, Network, Pause, Save, Users, Wifi } from 'lucide-react';
 import { api } from '@/lib/api';
+import { useLocale } from '@/lib/locale-context';
 
 type Company = { id: string; name: string; slug: string };
 type Department = { id: string; companyId: string; name: string; slug: string };
@@ -73,6 +74,7 @@ function OChartNode({ agent, agents, departments, positions, selectedId, onSelec
 }
 
 export function CompanyOChartPage() {
+  const { t } = useLocale();
   const queryClient = useQueryClient();
   const companiesQuery = useQuery({ queryKey: ['companies'], queryFn: () => api<Company[]>('/api/companies') });
   const departmentsQuery = useQuery({ queryKey: ['departments'], queryFn: () => api<Department[]>('/api/departments') });
@@ -230,7 +232,7 @@ export function CompanyOChartPage() {
         <label className="field-label">Reports to<select className="input" value={String(agentDraft.bossId ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, bossId: event.target.value || null })}><option value="">Top-level</option>{companyAgents.filter((agent) => agent.id !== selectedAgent.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
         <label className="field-label">Profile<input className="input" value={String(agentDraft.hermesProfile ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, hermesProfile: event.target.value })} /></label>
         <label className="field-label">Adapter<select className="input" value={String(agentDraft.adapterType ?? 'hermes-ssh')} onChange={(event) => setAgentDraft({ ...agentDraft, adapterType: event.target.value, runtimeId: '' })}>
-          <option value="hermes-ssh">Hermes SSH</option>
+          <option value="a2a">A2A</option>{selectedAgent.adapterType === 'hermes-ssh' && <option value="hermes-ssh">Hermes SSH ({t('setup.legacy')})</option>}
           <option value="hermes-gateway">Hermes HTTP API</option>
           <option value="codex-app">Codex App Server</option>
           <option value="webhook">Webhook</option>

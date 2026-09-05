@@ -20,6 +20,14 @@ test('PostgreSQL companyless bootstrap, audit, complete inventory and deletion t
     await migrate(); assert.equal((await sql`SELECT * FROM companies`).length, 0);
     const denied = await call('POST', '/api/auth/bootstrap', { email: 'invalid@example.test', name: 'Denied', password: 'Synthetic-password-2026', token: 'wrong' });
     assert.ok([401,503].includes(denied.statusCode)); assert.equal((await sql`SELECT * FROM users`).length, 0);
+    const previousToken=process.env.BOOTSTRAP_TOKEN;process.env.BOOTSTRAP_TOKEN='Synthetic-bootstrap-token-2026';
+    try {
+      const bootstrap=await call('POST','/api/auth/bootstrap',{email:'bootstrap@example.test',name:'Bootstrap',password:'Synthetic-password-2026',token:process.env.BOOTSTRAP_TOKEN});
+      assert.equal(bootstrap.statusCode,200,bootstrap.body);assert.equal(bootstrap.json().user.role,'admin');
+      assert.equal((await sql`SELECT * FROM companies`).length,0);
+      const bootId=bootstrap.json().user.id;
+      await sql`DELETE FROM activity_log WHERE user_id=${bootId}`;await sql`DELETE FROM users WHERE id=${bootId}`;
+    } finally {if(previousToken===undefined)delete process.env.BOOTSTRAP_TOKEN;else process.env.BOOTSTRAP_TOKEN=previousToken;}
     const signup = await call('POST', '/api/auth/signup', { email: 'first@example.test', name: 'First', password: 'Synthetic-password-2026' });
     assert.equal(signup.statusCode, 200, signup.body); assert.equal(signup.json().user.role, 'admin');
     userId = signup.json().user.id; session = String(signup.headers['set-cookie']).split(';')[0]!;
@@ -39,6 +47,13 @@ test('PostgreSQL companyless bootstrap, audit, complete inventory and deletion t
   }
   await t.test('unused exact seed can be cleaned; customization and archived business records are preserved', async () => {
     await pristine(); assert.equal(await sql.begin(tx => cleanupUnusedDefault(tx)), true);
+    const setupSeed = await pristine();
+    await sql`UPDATE companies SET setup_key=${randomUUID()} WHERE id=${setupSeed.id}`;
+    assert.equal(await sql.begin(tx => cleanupUnusedDefault(tx)),false);
+    await sql`UPDATE companies SET setup_key=NULL,setup_draft='{"stage":"boss"}'::jsonb WHERE id=${setupSeed.id}`;
+    assert.equal(await sql.begin(tx => cleanupUnusedDefault(tx)),false);
+    await sql`UPDATE companies SET setup_draft=NULL WHERE id=${setupSeed.id}`;
+    assert.equal(await sql.begin(tx => cleanupUnusedDefault(tx)),true);
     const customized = await pristine(); await sql`UPDATE companies SET mission='Keep this purpose' WHERE id=${customized.id}`;
     assert.equal(await sql.begin(tx => cleanupUnusedDefault(tx)), false);
     await sql`UPDATE companies SET mission=NULL WHERE id=${customized.id}`;
@@ -77,4 +92,20 @@ test('PostgreSQL companyless bootstrap, audit, complete inventory and deletion t
     const audit = await sql`SELECT * FROM activity_log WHERE entity_id=${company.id}`;
     assert.ok(audit.some(row => row.action==='company.created')); assert.ok(audit.every(row => row.company_id===null && row.details.formerCompany.id===company.id));
   });
+  await t.test('actual setup routes resume persisted entities and require a successful endpoint response before enabling dispatch',async t=>{
+    const setupKey=randomUUID();const input={setupKey,name:'PG Studio',slug:'pg-studio'};
+    const first=await call('POST','/api/company-setup',input);assert.equal(first.statusCode,201,first.body);
+    const conflict=await call('POST','/api/company-setup',{...input,setupKey:randomUUID()});assert.equal(conflict.statusCode,409,conflict.body);assert.equal(conflict.json().error,'setup_slug_taken');
+    const id=first.json().company.id;assert.equal((await call('POST','/api/company-setup',input)).json().company.id,id);
+    for(const payload of [{step:'boss',name:'Boss',slug:'boss'},{step:'boss',name:'Boss',slug:'boss'},{step:'department',name:'Team',slug:'team'},{step:'head',name:'Head',slug:'head'},{step:'runtime',name:'A2A',a2aBaseUrl:'https://runtime.example.test'}]){
+      const saved=await call('PUT',`/api/companies/${id}/setup`,payload);assert.equal(saved.statusCode,200,saved.body);
+    }
+    assert.equal((await sql`SELECT * FROM agents WHERE company_id=${id}`).length,2);
+    assert.equal((await call('PUT',`/api/companies/${id}/setup`,{step:'finish'})).statusCode,409);
+    t.mock.method(globalThis,'fetch',async()=>new Response(JSON.stringify({name:'Synthetic live endpoint'}),{status:200}));
+    const checked=await call('POST',`/api/companies/${id}/setup/probe`);assert.equal(checked.statusCode,200,checked.body);assert.ok(checked.json().results.every((row:any)=>row.success));
+    const ready=await call('PUT',`/api/companies/${id}/setup`,{step:'finish'});assert.equal(ready.statusCode,200,ready.body);
+    assert.equal((await sql`SELECT auto_dispatch_enabled FROM companies WHERE id=${id}`)[0]!.auto_dispatch_enabled,true);
+  });
+
 });

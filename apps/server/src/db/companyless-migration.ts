@@ -6,7 +6,7 @@ export async function cleanupUnusedDefault(tx: InventorySql): Promise<boolean> {
   const catalog = await lockCompanyInventory(tx);
   const [company] = await tx.unsafe("SELECT * FROM companies WHERE slug='default'");
   if (!company) return false;
-  const expected: Record<string, unknown> = { group_id: null, name: 'Default Company', slug: 'default', mission: null, boss_role_prompt: null, nfs_share_url: null, max_children_per_card: 3, panel_review_default: 'critical_only', dispatch_interval_seconds: 10, auto_dispatch_enabled: true };
+  const expected: Record<string, unknown> = { setup_key: null, setup_draft: null, group_id: null, name: 'Default Company', slug: 'default', mission: null, boss_role_prompt: null, nfs_share_url: null, max_children_per_card: 3, panel_review_default: 'critical_only', dispatch_interval_seconds: 10, auto_dispatch_enabled: true };
   if (Object.entries(company).some(([key, value]) => !['id','created_at'].includes(key) && (!(key in expected) || value !== expected[key]))) return false;
   const inventory = await companyDeletionInventory(tx, company.id, catalog);
   if (Object.entries(inventory).some(([table, rows]) => table !== 'positions' && rows.count > 0)) return false;

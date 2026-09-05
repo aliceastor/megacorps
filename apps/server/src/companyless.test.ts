@@ -80,3 +80,12 @@ test('companyless bootstrap denies an invalid token and creates the first admin 
   assert.equal(allowed.statusCode, 200, allowed.body); assert.equal(allowed.json().user.role, 'admin');
   assert.equal(state.rows(companies).length, 0); assert.equal(state.rows(companyMemberships).length, 0);
 });
+
+test('unrelated legacy company edits remain possible; only a new dispatch enable requires setup', async t => {
+  const { app, headers, state }=await fixture(t,1);const company=state.rows(companies)[0]!;company.autoDispatchEnabled=true;
+  const edit=await app.inject({method:'PUT',url:`/api/companies/${company.id}`,headers,payload:{name:'Edited legacy',autoDispatchEnabled:true}});
+  assert.equal(edit.statusCode,200,edit.body);assert.equal(company.name,'Edited legacy');
+  company.autoDispatchEnabled=false;
+  const enable=await app.inject({method:'PUT',url:`/api/companies/${company.id}`,headers,payload:{autoDispatchEnabled:true}});
+  assert.equal(enable.statusCode,409,enable.body);assert.equal(company.autoDispatchEnabled,false);
+});

@@ -312,7 +312,7 @@ export const createAgentSchema = z.object({
   companyId: z.string().uuid().optional(),
   title: z.string().trim().max(120).optional(),
   soul: z.string().trim().max(8000).nullable().optional(),
-  adapterType: z.enum(agentAdapterTypes).default('hermes-ssh'),
+  adapterType: z.enum(agentAdapterTypes).default('a2a'),
   adapterConfig: z.record(z.string(), z.unknown()).optional(),
   runtimeId: z.string().uuid().nullable().optional(),
   hermesProfile: z.string().trim().min(1).max(80).optional(),
@@ -826,3 +826,10 @@ export const updateBudgetPolicySchema = partialWithoutDefaults(createBudgetPolic
 export const updateKnowledgeDocSchema = partialWithoutDefaults(createKnowledgeDocSchema);
 export type UpdateCompanyInput = z.infer<typeof updateCompanySchema>;
 export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
+
+/** Legacy clients may omit company context only when visibility is unambiguous. */
+export function unambiguousCompanyId(visibleIds: string[]): string {
+  const ids=[...new Set(visibleIds)];
+  if(ids.length!==1) throw new Error('company_required: Pass companyId or an explicit template company/defaultCompany. Create a company first if none exists.');
+  return ids[0]!;
+}

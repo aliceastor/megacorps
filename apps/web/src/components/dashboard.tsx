@@ -51,6 +51,7 @@ export function Dashboard() {
   const shortDay = (day: string) => day.slice(5);
 
   return <div style={{ display: 'grid', gap: 16 }}>
+    {data.stats.companies === 0 && <section className="card section-card"><h2>{t('setup.title')}</h2><p>{t('setup.intro')}</p><Link className="btn btn-primary" href="/companies">{t('setup.start')}</Link></section>}
     <div className="page-head">
       <div><h1>{t('title.dashboard')}</h1><p>{t('dashboard.subtitle')}</p></div>
     </div>

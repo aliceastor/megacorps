@@ -1,3 +1,4 @@
+import { registerCompanySetupRoutes, setupConnectionFingerprint, recordSetupConnectionCheck } from './company-setup.ts';
 import { companyDeletionInventory, deletionBlockers, lockCompanyInventory } from './company-inventory.ts';
 import { structuralCompletionIssue, companyExecutionReadiness, structuralReviewer } from './company-workflow.ts';
 import { workerRepositoryReadiness } from './worker-readiness.ts';
@@ -474,6 +475,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(503).send({ ok: false, database: 'down' });
     }
   });
+  await registerCompanySetupRoutes(app);
   await registerChatRoutes(app);
   await registerCronRoutes(app);
   await registerRunnerRoutes(app);
@@ -1131,7 +1133,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         maxChildrenPerCard: input.maxChildrenPerCard ?? 3,
         panelReviewDefault: input.panelReviewDefault ?? 'critical_only',
         dispatchIntervalSeconds: input.dispatchIntervalSeconds,
-        autoDispatchEnabled: input.autoDispatchEnabled,
+        autoDispatchEnabled: false,
       }).returning();
       if (!created) return null;
       await tx.insert(companyMemberships).values({ companyId: created.id, userId: user.id, role: 'admin', status: 'active' }).onConflictDoNothing();
@@ -1163,6 +1165,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const id = (request.params as { id: string }).id;
     const user = await requireCompanyRole(request, reply, id, 'operator'); if (!user) return reply;
     const input = updateCompanySchema.parse(request.body);
+    if (input.autoDispatchEnabled === true) {
+      const [current] = await db.select().from(companies).where(eq(companies.id,id)).limit(1);
+      if (current?.autoDispatchEnabled !== true) {
+        if (current?.setupDraft && !current.setupDraft.completed) return reply.code(409).send({ error: 'company_setup_finish_required', message: 'Finish company setup and check the runtime connections before enabling automatic dispatch.' });
+        const readiness = await companyExecutionReadiness(id);
+        if (!readiness.ready) return reply.code(409).send({ error: 'company_setup_required', message: [...readiness.issues,...readiness.runtimeIssues].join(' ') });
+      }
+    }
     const [company] = await db.update(companies).set({
       name: input.name,
       slug: input.slug,
@@ -2339,6 +2349,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [agent] = await db.select().from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     const user = await requireCompanyRole(request, reply, agent.companyId, 'operator'); if (!user) return reply;
+    const fingerprint = await setupConnectionFingerprint(id);
     try {
       const adapter = getAdapter(agent.adapterType ?? 'hermes-ssh');
       const executionAgent = await buildExecutionAgent(agent);
@@ -2352,9 +2363,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         prompt: promptSnapshotForAdapter(executionAgent, task),
         metadata: { requestedByUserId: user.id, megacorpsPromptChars: task.body.length },
       });
-      return await adapter.dispatch(executionAgent, task);
+      const result = await adapter.dispatch(executionAgent, task);
+      if (fingerprint) await recordSetupConnectionCheck(id, fingerprint, result.success === true && !result.needsInput, 'execution');
+      return result;
     }
-    catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : 'connection_failed' }); }
+    catch (error) { if (fingerprint) await recordSetupConnectionCheck(id, fingerprint, false, 'execution'); return reply.code(502).send({ error: error instanceof Error ? error.message : 'connection_failed' }); }
   });
 
   app.get('/api/projects', async (request, reply) => {

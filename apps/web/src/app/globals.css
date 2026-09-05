@@ -7045,3 +7045,17 @@ button.card:hover {
   .conv-composer.collapsed .conv-composer-editor { flex-basis: 100%; }
   .conv-thread-meta { margin-left: 0; }
 }
+
+.company-setup { max-width: 920px; width: 100%; box-sizing: border-box; }
+.company-setup .panel-title { flex-wrap: wrap; gap: 12px; }
+.company-setup h2:focus { outline: none; }
+.company-setup .form-grid { margin: 20px 0; }
+.company-setup .input { box-sizing: border-box; min-width: 0; max-width: 100%; }
+.company-setup .action-row { flex-wrap: wrap; gap: 10px; }
+.setup-actions { margin-top: 24px; }
+.setup-steps { display: flex; flex-wrap: wrap; padding: 0; list-style: none; gap: 12px; margin: 24px 0; }
+.setup-steps li { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.setup-steps li span { border: 1px solid var(--border); border-radius: 50%; width: 25px; height: 25px; display: inline-grid; place-items: center; }
+.setup-steps li[aria-current="step"] { color: var(--foreground); font-weight: 600; }
+.setup-steps li[aria-current="step"] span { border-color: var(--primary); color: var(--primary); }
+@media (max-width: 600px) { .company-setup .form-grid { grid-template-columns: minmax(0, 1fr); } .company-setup .btn { white-space: normal; } }

@@ -210,7 +210,7 @@ export function AdminPage() {
           <input type="checkbox" checked={settings?.signupEnabled ?? true} onChange={(event) => setSettings((current) => ({ ...(current ?? { signupEnabled: true, kanbanTaskTimeoutSeconds: 300, chatTaskTimeoutSeconds: 300, apiTokenConfigured: false }), signupEnabled: event.target.checked }))} />
           Signup enabled
         </label>
-        <p className="auth-note">Signup defaults to enabled in the DB. If no active admin exists, the next signup becomes global admin and default-company admin.</p>
+        <p className="auth-note">Signup defaults to enabled in the DB. If no active admin exists, the next signup becomes global admin and can create the first company. Company membership requires an explicit company or invitation.</p>
         <button className="btn btn-primary" onClick={saveSettings} disabled={busy || !settings}><Save size={15} /> Save settings</button>
       </section>
 

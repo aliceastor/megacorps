@@ -3,9 +3,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Building2, Plus, Save, Target, Trash2 } from 'lucide-react';
 import { ApiError, api } from '@/lib/api';
+import { CompanySetup } from './company-setup';
 import { useLocale } from '@/lib/locale-context';
 
-type Company = { id: string; name: string; slug: string; mission?: string | null; bossRolePrompt?: string | null; nfsShareUrl?: string | null; panelReviewDefault?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean; createdAt?: string };
+type Company = { setupDraft?: { completed?: boolean }; id: string; name: string; slug: string; mission?: string | null; bossRolePrompt?: string | null; nfsShareUrl?: string | null; panelReviewDefault?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean; createdAt?: string };
 // When a single-mode card still gets a blind review panel (§17): critical cards only (default), every card, or never.
 type PanelReviewDefault = 'critical_only' | 'always' | 'never';
 const PANEL_REVIEW_DEFAULTS: PanelReviewDefault[] = ['critical_only', 'always', 'never'];
@@ -19,7 +20,7 @@ type Project = { id: string; companyId: string };
 type Card = { id: string; companyId: string };
 type Goal = { id: string; companyId: string; departmentId?: string | null; projectId?: string | null; title: string; body?: string | null };
 type Membership = { companyId: string; role: 'viewer' | 'operator' | 'admin'; status?: string };
-type Me = { memberships: Membership[] };
+type Me = { user?: { id:string; role:string }; memberships: Membership[] };
 
 function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -57,6 +58,9 @@ export function CompaniesPage() {
   const goalsQuery = useQuery({ queryKey: ['goals'], queryFn: () => api<Goal[]>('/api/goals') });
   const meQuery = useQuery({ queryKey: ['me'], queryFn: () => api<Me>('/api/me') });
   const [companyId, setCompanyId] = useState('');
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [setupCompanyId, setSetupCompanyId] = useState<string>();
+  useEffect(() => { const id = new URLSearchParams(window.location.search).get('setup'); if (id) { setSetupCompanyId(id); setSetupOpen(true); } }, []);
   const readinessQuery = useQuery({ queryKey: ['company-execution-readiness', companyId], enabled: Boolean(companyId), queryFn: () => api<{ ready: boolean; issues: string[]; setupIssues: string[]; runtimeIssues: string[] }>(`/api/companies/${companyId}/execution-readiness`) });
   const [companyName, setCompanyName] = useState('');
   const [companySlug, setCompanySlug] = useState('');
@@ -64,7 +68,7 @@ export function CompaniesPage() {
   const [bossRolePrompt, setBossRolePrompt] = useState('');
   const [nfsShareUrl, setNfsShareUrl] = useState('');
   const [dispatchInterval, setDispatchInterval] = useState(10);
-  const [autoDispatch, setAutoDispatch] = useState(true);
+  const [autoDispatch, setAutoDispatch] = useState(false);
   const [panelReviewDefault, setPanelReviewDefault] = useState<PanelReviewDefault>('critical_only');
   const [goalTitle, setGoalTitle] = useState('');
   const [goalBody, setGoalBody] = useState('');
@@ -104,7 +108,7 @@ export function CompaniesPage() {
     if (!companiesQuery.data) return;
     const activeCompany = companiesQuery.data.find((company) => company.id === companyId) ?? companiesQuery.data[0];
     if (activeCompany) selectCompany(activeCompany);
-    else startNewCompany(false);
+    else { startNewCompany(false); setSetupOpen(true); }
   }, [companiesQuery.data]);
   useEffect(() => {
     if (loadError) setError(loadError instanceof Error ? loadError.message : t('companies.loadFailed'));
@@ -131,7 +135,7 @@ export function CompaniesPage() {
     setMission('');
     setBossRolePrompt('');
     setDispatchInterval(10);
-    setAutoDispatch(true);
+    setAutoDispatch(false);
     setPanelReviewDefault('critical_only');
     setGoalTitle('');
     setGoalBody('');
@@ -170,8 +174,11 @@ export function CompaniesPage() {
     }
   }
 
+  const deletionPreview = useQuery({ queryKey: ['company-deletion-preview',companyId], enabled: Boolean(companyId && canDeleteSelectedCompany), queryFn: () => api<{canDelete:boolean;blocking:Record<string,number>;inventory:Record<string,{count:number;ids:string[]}>}>(`/api/companies/${companyId}/deletion-preview`) });
   async function deleteCompany() {
     if (!selectedCompany) return;
+    const preview = await deletionPreview.refetch();
+    if (!preview.data?.canDelete) { setError(preview.error ? companyDeleteErrorMessage(preview.error,t) : `${t('companies.deleteBlocked')} (${formatBlocking(preview.data?.blocking)})`); return; }
     if (!window.confirm(`${t('companies.deleteCompany')} "${selectedCompany.name}"? ${t('companies.deleteConfirmDetail')}`)) return;
     setBusy(true);
     setError('');
@@ -206,12 +213,15 @@ export function CompaniesPage() {
   return <div className="page-stack companies-page">
     <div className="page-head">
       <div><h1>{t('title.companies')}</h1><p>{t('companies.subtitle')}</p></div>
-      <button className="btn" onClick={() => startNewCompany()}><Plus size={15} /> {t('companies.newCompany')}</button>
+      {!setupOpen && <button className="btn btn-primary" onClick={() => { setSetupCompanyId(undefined); setSetupOpen(true); window.history.replaceState(null,'','?setup=new'); }}><Plus size={15} /> {t('setup.start')}</button>}
     </div>
+    {!setupOpen && selectedCompany && ((selectedCompany.setupDraft && !selectedCompany.setupDraft.completed) || readinessQuery.data?.ready === false) && <button className="btn" onClick={() => { setSetupCompanyId(selectedCompany.id); setSetupOpen(true); window.history.replaceState(null,'', '?setup='+selectedCompany.id); }}>{t('setup.resume')}</button>}
+    {setupOpen && meQuery.data?.user && <CompanySetup key={setupCompanyId ?? 'new'} initialCompanyId={setupCompanyId === 'new' ? undefined : setupCompanyId} userId={meQuery.data.user.id} onSaved={() => { void refreshQueries(); }} onClose={() => { setSetupOpen(false); window.history.replaceState(null,'',window.location.pathname); }} />}
     {toast && <p className="status-pill">{toast}</p>}
     {error && <p className="form-error">{error}</p>}
 
-    <div className="split-layout company-workbench">
+    {!setupOpen && canDeleteSelectedCompany && <details className="card section-card"><summary>{t('setup.deletionPreview')}</summary>{deletionPreview.error && <p role="alert">{companyDeleteErrorMessage(deletionPreview.error,t)}</p>}<p>{deletionPreview.data?.canDelete ? t('setup.deletionEmpty') : formatBlocking(deletionPreview.data?.blocking)}</p>{Object.entries(deletionPreview.data?.inventory ?? {}).filter(([,row]) => row.count>0).map(([table,row])=><details key={table}><summary>{table}: {row.count}</summary><p style={{overflowWrap:'anywhere'}}>{row.ids.join(', ')}</p></details>)}</details>}
+    {!setupOpen && <div className="split-layout company-workbench">
       <aside className="card section-card">
         <div className="panel-title"><h2>{t('companies.list')}</h2><span className="status-pill">{companies.length}</span></div>
         <div className="table-list">
@@ -274,6 +284,6 @@ export function CompaniesPage() {
           </div>
         </section>
       </main>
-    </div>
+    </div>}
   </div>;
 }

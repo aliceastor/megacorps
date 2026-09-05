@@ -10,13 +10,14 @@ type Company = { id: string; name: string; slug: string; mission?: string | null
 type Department = { id: string; companyId: string; name: string; slug: string };
 type Membership = { id: string; companyId: string; userId: string; role: string; status: string; userEmail?: string; userName?: string };
 
-const adapterTypes = ['hermes-ssh', 'hermes-gateway', 'codex-app', 'webhook', 'openclaw'];
+const adapterTypes = ['a2a', 'hermes-gateway', 'codex-app', 'webhook', 'openclaw'];
 
 type ConfigField = { key: string; label: string; description?: string; type?: 'text' | 'number' | 'password' };
 
 const megacorpsApiDescription = 'MegaCorps API base URL that agents use for task-complete callbacks.';
 
 function configFields(adapterType: string): ConfigField[] {
+  if (adapterType === 'a2a') return [{ key: 'a2aBaseUrl', label: 'A2A URL' }, { key: 'a2aAgentPath', label: 'A2A agent path' }, { key: 'a2aBearerToken', label: 'A2A bearer token', type: 'password' }];
   if (adapterType === 'hermes-gateway') return [
     { key: 'hermesGatewayUrl', label: 'Hermes HTTP API URL' },
     { key: 'hermesDashboardToken', label: 'Hermes dashboard token', type: 'password' },
@@ -87,8 +88,8 @@ export function SettingsPage() {
   const [memberships, setMemberships] = useState<Membership[]>([]);
   const [runtimeId, setRuntimeId] = useState('');
   const [runtimeCompanyId, setRuntimeCompanyId] = useState('');
-  const [runtimeName, setRuntimeName] = useState('Hermes SSH Runtime');
-  const [runtimeAdapter, setRuntimeAdapter] = useState('hermes-ssh');
+  const [runtimeName, setRuntimeName] = useState('A2A Runtime');
+  const [runtimeAdapter, setRuntimeAdapter] = useState('a2a');
   const [runtimeLocalWorkspaceRoot, setRuntimeLocalWorkspaceRoot] = useState('');
   const [runtimeNfsMountRoot, setRuntimeNfsMountRoot] = useState('');
   const [runtimeLocalScratchRoot, setRuntimeLocalScratchRoot] = useState('');
@@ -100,7 +101,7 @@ export function SettingsPage() {
   const [companyName, setCompanyName] = useState('');
   const [companyMission, setCompanyMission] = useState('');
   const [companyInterval, setCompanyInterval] = useState(10);
-  const [autoDispatch, setAutoDispatch] = useState(true);
+  const [autoDispatch, setAutoDispatch] = useState(false);
   const [deptName, setDeptName] = useState('');
   const [deptSlug, setDeptSlug] = useState('');
   const [memberEmail, setMemberEmail] = useState('');
@@ -268,11 +269,11 @@ export function SettingsPage() {
     </div>
     {tab === 'runtimes' && <div className="data-grid">
       <section className="card section-card">
-        <div className="panel-title"><h2>{t('settings.agentRuntimes')}</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeCompanyId(companyId || companies[0]?.id || ''); setRuntimeName(''); setRuntimeAdapter('hermes-ssh'); setRuntimeLocalWorkspaceRoot(''); setRuntimeLocalScratchRoot(''); setRuntimeConfigState({}); }}>{t('common.new')}</button></div>
+        <div className="panel-title"><h2>{t('settings.agentRuntimes')}</h2><button className="btn" onClick={() => { setRuntimeId(''); setRuntimeCompanyId(companyId || companies[0]?.id || ''); setRuntimeName(''); setRuntimeAdapter('a2a'); setRuntimeLocalWorkspaceRoot(''); setRuntimeLocalScratchRoot(''); setRuntimeNfsMountRoot(''); setRuntimeActive(true); setRuntimeConfigState({}); }}>{t('common.new')}</button></div>
         <div className="form-grid">
           <label className="field-label">{t('common.company')}<select className="input" value={runtimeCompanyId} onChange={(event) => setRuntimeCompanyId(event.target.value)}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
           <label className="field-label">{t('common.name')}<input className="input" value={runtimeName} onChange={(event) => setRuntimeName(event.target.value)} /></label>
-          <label className="field-label">{t('settings.adapter')}<select className="input" value={runtimeAdapter} onChange={(event) => setRuntimeAdapter(event.target.value)}>{adapterTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
+          <label className="field-label">{t('settings.adapter')}<select className="input" value={runtimeAdapter} onChange={(event) => setRuntimeAdapter(event.target.value)}>{runtimes.find(runtime => runtime.id === runtimeId)?.adapterType === 'hermes-ssh' && <option value="hermes-ssh">Hermes SSH ({t('setup.legacy')})</option>}{adapterTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
           <label className="field-label">{t('settings.localWorkspaceRoot')}
             <span className="field-hint">{t('settings.workspaceRootHint')}</span>
             <input className="input" value={runtimeLocalWorkspaceRoot} onChange={(event) => setRuntimeLocalWorkspaceRoot(event.target.value)} />

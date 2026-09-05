@@ -162,3 +162,16 @@ test('partial updates leave omitted defaulted fields untouched', () => {
   assert.equal(createCardSchema.parse({ title: 't', body: 'b', requiresApproval: true }).priority, 'normal');
   assert.deepEqual(partialWithoutDefaults(createKnowledgeDocSchema).parse({}), {});
 });
+
+test('new agents default to connected A2A while unrelated legacy updates omit adapter changes', () => {
+  assert.equal(createAgentSchema.parse({name:'New',slug:'new',role:'worker'}).adapterType,'a2a');
+  assert.equal(updateAgentSchema.parse({name:'Renamed'}).adapterType,undefined);
+  assert.equal(createAgentSchema.parse({name:'Legacy',slug:'legacy',role:'worker',adapterType:'hermes-ssh'}).adapterType,'hermes-ssh');
+});
+
+test('omitted template company selects only one distinct visible company', async () => {
+  const { unambiguousCompanyId } = await import('./index.ts');
+  assert.equal(unambiguousCompanyId(['only','only']),'only');
+  assert.throws(()=>unambiguousCompanyId([]),/company_required/);
+  assert.throws(()=>unambiguousCompanyId(['default','other']),/company_required/);
+});

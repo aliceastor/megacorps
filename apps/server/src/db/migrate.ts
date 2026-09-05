@@ -15,6 +15,7 @@ const MIGRATION_LOCK_KEY = 727274001;
 // created before the version table will re-run v1 exactly once to get recorded.
 // Never edit an applied migration's statements — add the change as a new version.
 const migrations: Migration[] = [
+  { version: 28, name: 'resumable-company-setup', run: async () => { await sql.unsafe('ALTER TABLE companies ADD COLUMN IF NOT EXISTS setup_key UUID UNIQUE; ALTER TABLE companies ADD COLUMN IF NOT EXISTS setup_draft JSONB;'); } },
   { version: 27, name: 'companyless-bootstrap-and-global-audit', run: async () => {
     await sql.begin(async tx => {
       await tx.unsafe('ALTER TABLE activity_log ALTER COLUMN company_id DROP NOT NULL');
