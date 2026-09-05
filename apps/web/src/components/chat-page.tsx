@@ -56,6 +56,14 @@ type LiveEvent = {
   data?: Record<string, unknown>;
 };
 
+type NewSessionScope = {
+  companyId: string;
+  agentId: string;
+  projectId: string | null;
+  agentName: string;
+  originIdentity: string;
+};
+
 function pendingUserMessage(session: ChatSession, body: string): ChatMessage {
   return {
     id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -85,11 +93,15 @@ function shortTime(value?: string): string {
   return value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
 }
 
-function agentStatus(agent?: Agent | null): { label: string; color: string } {
-  if (!agent) return { label: 'No agent', color: 'var(--muted)' };
-  if (agent.isActive === false) return { label: 'Paused', color: 'var(--danger)' };
-  if (agent.isBusy) return { label: 'Busy', color: 'var(--success)' };
-  return { label: 'Idle', color: 'var(--primary)' };
+function agentStatus(agent: Agent | null | undefined, t: (key: string) => string): { label: string; color: string } {
+  if (!agent) return { label: t('chat.statusNoAgent'), color: 'var(--muted)' };
+  if (agent.isActive === false) return { label: t('chat.statusPaused'), color: 'var(--danger)' };
+  if (agent.isBusy) return { label: t('chat.statusBusy'), color: 'var(--success)' };
+  return { label: t('chat.statusIdle'), color: 'var(--primary)' };
+}
+
+function draftKey(companyId: string, agentId: string, projectFilter: string, sessionId: string): string {
+  return sessionId ? `session:${sessionId}` : `new:${companyId}:${agentId}:${projectFilter}`;
 }
 
 function fetchCompanies(): Promise<Company[]> {
@@ -115,23 +127,26 @@ async function fetchChatMessages(sessionId: string): Promise<ChatMessage[]> {
 
 export function ChatPage() {
   const queryClient = useQueryClient();
-  const { t } = useLocale();
+  const { t, tf } = useLocale();
   const [companies, setCompanies] = useState<Company[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messagesBySession, setMessagesBySession] = useState<Record<string, ChatMessage[]>>({});
   const [companyId, setCompanyId] = useState('');
   const [agentId, setAgentId] = useState('');
   const [projectFilter, setProjectFilter] = useState('all');
   const [sessionId, setSessionId] = useState('');
-  const [draft, setDraft] = useState('');
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [mobilePane, setMobilePane] = useState<'sessions' | 'conversation'>('sessions');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [replyingSessionId, setReplyingSessionId] = useState<string | null>(null);
   const [partialReply, setPartialReply] = useState('');
   const [error, setError] = useState('');
   const messageEndRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const activeIdentityRef = useRef('');
   const companiesQuery = useQuery({ queryKey: ['companies'], queryFn: fetchCompanies });
   const agentsQuery = useQuery({ queryKey: ['agents'], queryFn: fetchAgents });
   const projectsQuery = useQuery({ queryKey: ['projects'], queryFn: fetchProjects });
@@ -152,7 +167,20 @@ export function ChatPage() {
   const selectedProject = projectFilter !== 'all' && projectFilter !== '__none' ? projects.find((project) => project.id === projectFilter) ?? null : null;
   const selectedAgent = agents.find((agent) => agent.id === agentId) ?? null;
   const selectedSession = sessions.find((session) => session.id === sessionId) ?? null;
-  const status = agentStatus(selectedAgent);
+  const status = agentStatus(selectedAgent, t);
+  const activeDraftKey = draftKey(companyId, agentId, projectFilter, sessionId);
+  activeIdentityRef.current = activeDraftKey;
+  const draft = drafts[activeDraftKey] ?? '';
+  const messages = sessionId ? messagesBySession[sessionId] ?? [] : [];
+  const sessionProject = selectedSession?.projectId ? projects.find((project) => project.id === selectedSession.projectId) ?? null : null;
+  const headerProjectName = sessionProject?.name ?? selectedProject?.name ?? (projectFilter === '__none' ? t('chat.noProject') : t('chat.allProjects'));
+
+  function updateSessionMessages(targetSessionId: string, update: (current: ChatMessage[]) => ChatMessage[]) {
+    setMessagesBySession((current) => ({
+      ...current,
+      [targetSessionId]: update(current[targetSessionId] ?? []),
+    }));
+  }
 
   async function refreshBase() {
     setLoading(true);
@@ -171,39 +199,18 @@ export function ChatPage() {
       setCompanyId(nextCompany?.id ?? '');
       setAgentId(nextAgent?.id ?? '');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load chat data');
+      setError(err instanceof Error ? err.message : t('chat.loadFailed'));
     } finally {
       setLoading(false);
     }
   }
 
-  async function loadSessions(nextAgentId = agentId, nextCompanyId = companyId, nextProjectFilter = projectFilter) {
-    if (!nextAgentId || !nextCompanyId) {
-      setSessions([]);
-      setSessionId('');
-      setMessages([]);
-      return;
-    }
-    const rows = await queryClient.fetchQuery({
-      queryKey: ['chatSessions', nextCompanyId, nextAgentId, nextProjectFilter],
-      queryFn: () => fetchChatSessions(nextCompanyId, nextAgentId, nextProjectFilter),
-    });
-    setSessions(rows);
-    const nextSession = rows.find((session) => session.id === sessionId) ?? rows[0];
-    setSessionId(nextSession?.id ?? '');
-    if (!nextSession) setMessages([]);
-  }
-
   async function loadMessages(nextSessionId = sessionId) {
     if (!nextSessionId) {
-      setMessages([]);
       return;
     }
     const rows = await queryClient.fetchQuery({ queryKey: ['chatMessages', nextSessionId], queryFn: () => fetchChatMessages(nextSessionId) });
-    setMessages((current) => {
-      const pending = current.filter((message) => message.sessionId === nextSessionId && message.metadata?.pending);
-      return mergeMessages(rows, pending);
-    });
+    updateSessionMessages(nextSessionId, (current) => mergeMessages(current, rows));
   }
 
   useEffect(() => {
@@ -222,7 +229,7 @@ export function ChatPage() {
   useEffect(() => {
     const baseError = companiesQuery.error ?? agentsQuery.error ?? projectsQuery.error;
     if (baseError) {
-      setError(baseError instanceof Error ? baseError.message : 'Failed to load chat data');
+      setError(baseError instanceof Error ? baseError.message : t('chat.loadFailed'));
       setLoading(false);
     }
   }, [companiesQuery.error, agentsQuery.error, projectsQuery.error]);
@@ -231,27 +238,21 @@ export function ChatPage() {
     setSessions(sessionsQuery.data);
     const nextSession = sessionsQuery.data.find((session) => session.id === sessionId) ?? sessionsQuery.data[0];
     setSessionId(nextSession?.id ?? '');
-    if (!nextSession) setMessages([]);
   }, [sessionsQuery.data]);
   useEffect(() => {
     if (!messagesQuery.data || !sessionId) return;
-    setMessages((current) => {
-      const pending = current.filter((message) => message.sessionId === sessionId && message.metadata?.pending);
-      return mergeMessages(messagesQuery.data, pending);
-    });
+    updateSessionMessages(sessionId, (current) => mergeMessages(current, messagesQuery.data));
   }, [messagesQuery.data, sessionId]);
   useEffect(() => {
     if (!companyId) return;
     if (!companyAgents.some((agent) => agent.id === agentId)) {
       setAgentId(companyAgents[0]?.id ?? '');
       setSessionId('');
-      setMessages([]);
     }
   }, [companyId, companyAgents, agentId]);
   useEffect(() => {
     if (projectFilter !== 'all' && projectFilter !== '__none' && !companyProjects.some((project) => project.id === projectFilter)) setProjectFilter('all');
   }, [companyProjects, projectFilter]);
-  useEffect(() => { void loadSessions(); }, [agentId, companyId, projectFilter]);
   useEffect(() => { void loadMessages(); }, [sessionId]);
   useEffect(() => {
     if (selectedSession && selectedAgent?.isBusy) setReplyingSessionId(selectedSession.id);
@@ -268,61 +269,103 @@ export function ChatPage() {
       }
       if (detail.type === 'chat.reply.finished' && detail.sessionId === sessionId) { setReplyingSessionId(null); setPartialReply(''); }
       if (detail.type === 'chat.message.created' && detail.sessionId === sessionId) setPartialReply('');
-      if (detail.sessionId === sessionId) void loadMessages(detail.sessionId);
-      void loadSessions(agentId, companyId, projectFilter);
+      if (detail.sessionId === sessionId) {
+        void queryClient.invalidateQueries({ queryKey: ['chatMessages', detail.sessionId] })
+          .then(() => loadMessages(detail.sessionId!));
+      }
+      void queryClient.invalidateQueries({ queryKey: ['chatSessions'] });
     }
     window.addEventListener('megacorps-live', onLive);
     return () => window.removeEventListener('megacorps-live', onLive);
   }, [agentId, companyId, projectFilter, sessionId]);
   useEffect(() => { messageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages.length, replyingSessionId]);
+  useEffect(() => {
+    const composer = composerRef.current;
+    if (!composer) return;
+    composer.style.height = 'auto';
+    composer.style.height = `${Math.min(composer.scrollHeight, 180)}px`;
+  }, [draft]);
 
-  async function createSession(select = true): Promise<ChatSession | null> {
-    if (!companyId || !agentId || !selectedAgent) return null;
+  async function createSession(select = true, requestedScope?: NewSessionScope): Promise<ChatSession | null> {
+    const scope = requestedScope ?? (selectedAgent ? {
+      companyId,
+      agentId,
+      projectId: selectedProject?.id ?? null,
+      agentName: selectedAgent.name,
+      originIdentity: activeIdentityRef.current,
+    } : null);
+    if (!scope || !scope.companyId || !scope.agentId || selectedAgent?.isActive === false) return null;
     setError('');
     const session = await api<ChatSession>('/api/chat/sessions', {
       method: 'POST',
-      body: JSON.stringify({ companyId, agentId, projectId: selectedProject?.id ?? null, title: `Chat with ${selectedAgent.name}` }),
+      body: JSON.stringify({ companyId: scope.companyId, agentId: scope.agentId, projectId: scope.projectId, title: tf('chat.sessionTitle', { name: scope.agentName }) }),
     });
-    setSessions((current) => [session, ...current]);
-    if (select) {
-      setSessionId(session.id);
-      setMessages([]);
+    if (activeIdentityRef.current === scope.originIdentity) {
+      setSessions((current) => [session, ...current.filter((row) => row.id !== session.id)]);
+      if (select) {
+        setSessionId(session.id);
+        setMobilePane('conversation');
+      }
     }
     return session;
   }
 
   async function sendMessage() {
     const body = draft.trim();
-    if (!body || sending || !agentId) return;
+    if (!body || sending || !agentId || selectedAgent?.isActive === false) return;
+    const submittedDraftKey = activeDraftKey;
+    const submittedScope: NewSessionScope | null = selectedAgent ? {
+      companyId,
+      agentId,
+      projectId: selectedProject?.id ?? null,
+      agentName: selectedAgent.name,
+      originIdentity: submittedDraftKey,
+    } : null;
+    const existingTarget = selectedSession;
     setSending(true);
     setError('');
     let optimisticId: string | undefined;
+    let targetSessionId: string | undefined;
+    let targetDraftKey: string | undefined;
     try {
-      const target = selectedSession ?? await createSession(false);
-      if (!target) throw new Error('No chat session available');
-      setSessionId(target.id);
+      const target = existingTarget ?? (submittedScope ? await createSession(false, submittedScope) : null);
+      if (!target) throw new Error(t('chat.noSessionAvailable'));
+      targetSessionId = target.id;
+      targetDraftKey = draftKey(target.companyId, target.agentId, projectFilter, target.id);
+      if (!existingTarget && activeIdentityRef.current === submittedDraftKey) {
+        setDrafts((current) => ({ ...current, [targetDraftKey!]: current[submittedDraftKey] ?? body }));
+        setSessionId(target.id);
+        setMobilePane('conversation');
+      }
       const optimistic = pendingUserMessage(target, body);
       optimisticId = optimistic.id;
-      setMessages((current) => mergeMessages(current, [optimistic]));
+      updateSessionMessages(target.id, (current) => mergeMessages(current, [optimistic]));
       setReplyingSessionId(target.id);
       const result = await api<ChatSendResult>(`/api/chat/sessions/${target.id}/messages`, {
         method: 'POST',
         body: JSON.stringify({ body }),
       });
       const nextMessages = [result.userMessage, result.agentMessage, result.systemMessage].filter(Boolean) as ChatMessage[];
-      setMessages((current) => mergeMessages(current, nextMessages, optimisticId));
+      updateSessionMessages(target.id, (current) => mergeMessages(current, nextMessages, optimisticId));
       if (result.session) setSessions((current) => current.map((session) => session.id === result.session?.id ? result.session : session));
-      setDraft((current) => current.trim() === body ? '' : current);
+      setDrafts((current) => {
+        const next = { ...current };
+        if (next[submittedDraftKey]?.trim() === body) next[submittedDraftKey] = '';
+        if (targetDraftKey && next[targetDraftKey]?.trim() === body) next[targetDraftKey] = '';
+        return next;
+      });
       void queryClient.invalidateQueries({ queryKey: ['chatMessages', target.id] });
       void queryClient.invalidateQueries({ queryKey: ['chatSessions'] });
-      await loadSessions(agentId, companyId, projectFilter);
     } catch (err) {
       const apiError = err instanceof ApiError ? err : null;
       const data = apiError?.data as Partial<ChatSendResult> | undefined;
       const nextMessages = [data?.userMessage, data?.agentMessage, data?.systemMessage].filter(Boolean) as ChatMessage[];
-      if (nextMessages.length) setMessages((current) => mergeMessages(current, nextMessages, optimisticId));
+      if (nextMessages.length) updateSessionMessages(targetSessionId ?? sessionId, (current) => mergeMessages(current, nextMessages, optimisticId));
+      else if (targetSessionId && optimisticId) updateSessionMessages(targetSessionId, (current) => current.filter((message) => message.id !== optimisticId));
       if (selectedSession) void queryClient.invalidateQueries({ queryKey: ['chatMessages', selectedSession.id] });
-      setError(err instanceof Error ? err.message : 'Message failed');
+      if (activeIdentityRef.current === submittedDraftKey || activeIdentityRef.current === targetDraftKey) {
+        setError(err instanceof Error ? err.message : t('chat.messageFailed'));
+      }
     } finally {
       setSending(false);
       setReplyingSessionId(null);
@@ -331,71 +374,74 @@ export function ChatPage() {
 
   return <div className="chat-page">
     <div className="page-head">
-      <div><h1>Direct Chat</h1><p>{selectedCompany ? selectedCompany.name : 'Company'} / {selectedProject?.name ?? (projectFilter === '__none' ? 'No project' : 'All projects')} / {selectedAgent ? selectedAgent.name : 'Agent sessions'}</p></div>
+      <div><h1>{t('chat.title')}</h1><p>{selectedCompany ? selectedCompany.name : t('chat.company')} / {selectedProject?.name ?? (projectFilter === '__none' ? t('chat.noProject') : t('chat.allProjects'))} / {selectedAgent ? selectedAgent.name : t('chat.agentSessions')}</p></div>
       <div className="page-head-actions">
-        <Link className="btn" href={selectedAgent ? `/logs?agentId=${selectedAgent.id}&surface=chat` : '/logs?surface=chat'} title="See exactly what this agent was sent in Direct Chat">
-          <FileText size={14} /> Injected context
+        <Link className="btn" href={selectedAgent ? `/logs?agentId=${selectedAgent.id}&surface=chat` : '/logs?surface=chat'} title={t('chat.injectedContextTitle')}>
+          <FileText size={14} /> {t('chat.injectedContext')}
         </Link>
-        <button className="btn" onClick={() => void refreshBase()} disabled={loading}>{loading ? <Loader2 size={14} className="spin" /> : <MessageSquare size={14} />} Refresh</button>
+        <button className="btn" onClick={() => void refreshBase()} disabled={loading}>{loading ? <Loader2 size={14} className="spin" /> : <MessageSquare size={14} />} {t('chat.refresh')}</button>
       </div>
     </div>
 
-    {error && <p className="form-error">{error}</p>}
+    {error && <div className="chat-error-row" role="alert"><p className="form-error">{error}</p>{draft.trim() && selectedAgent?.isActive !== false && <button className="btn" onClick={() => void sendMessage()} disabled={sending}>{t('chat.retry')}</button>}</div>}
 
-    <section className="card chat-scope-controls" aria-label="Chat scope">
+    <section className="card chat-scope-controls" aria-label={t('chat.scope')}>
       <label className="chat-scope-field">
-        <span>Company</span>
-        <select className="input" aria-label="Company" value={companyId} onChange={(event) => {
+        <span>{t('chat.company')}</span>
+        <select className="input" aria-label={t('chat.company')} value={companyId} onChange={(event) => {
           const nextCompanyId = event.target.value;
           const nextAgent = agents.find((agent) => agent.companyId === nextCompanyId);
           setCompanyId(nextCompanyId);
           setProjectFilter('all');
           setAgentId(nextAgent?.id ?? '');
           setSessionId('');
-          setMessages([]);
+          setMobilePane('sessions');
+          setError('');
         }}>
           {companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}
         </select>
       </label>
       <label className="chat-scope-field">
-        <span>Project</span>
-        <select className="input" aria-label="Project" value={projectFilter} onChange={(event) => {
+        <span>{t('chat.project')}</span>
+        <select className="input" aria-label={t('chat.project')} value={projectFilter} onChange={(event) => {
           setProjectFilter(event.target.value);
           setSessionId('');
-          setMessages([]);
+          setMobilePane('sessions');
+          setError('');
         }}>
-          <option value="all">All projects</option>
+          <option value="all">{t('chat.allProjects')}</option>
           <option value="__none">{t('chat.noProject')}</option>
           {companyProjects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}
         </select>
       </label>
       <label className="chat-scope-field">
-        <span>Agent</span>
-        <select className="input" aria-label="Agent" value={agentId} onChange={(event) => {
+        <span>{t('chat.agent')}</span>
+        <select className="input" aria-label={t('chat.agent')} value={agentId} onChange={(event) => {
           setAgentId(event.target.value);
           setSessionId('');
-          setMessages([]);
+          setMobilePane('sessions');
+          setError('');
         }} disabled={!companyAgents.length}>
           {companyAgents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name} — {agent.role}</option>)}
         </select>
       </label>
     </section>
 
-    <section className="card chat-shell chat-workspace">
+    <section className={`card chat-shell chat-workspace chat-mobile-${mobilePane}`}>
       <aside className="chat-rail session-rail">
         <div className="chat-rail-head">
-          <div><b>Sessions</b><span>{selectedAgent?.adapterType ?? 'adapter'}</span></div>
-          <button className="btn icon-btn" aria-label="New session" onClick={() => void createSession()} disabled={!agentId}><Plus size={15} /></button>
+          <div><b>{t('chat.sessions')}</b><span>{selectedAgent?.adapterType ?? t('chat.adapter')}</span></div>
+          <button className="btn icon-btn" aria-label={t('chat.newSession')} onClick={() => void createSession()} disabled={!agentId || selectedAgent?.isActive === false}><Plus size={15} /></button>
         </div>
         <div className="chat-agent-card">
           <span className="chat-avatar large">{selectedAgent?.name.slice(0, 2).toUpperCase() ?? '--'}</span>
-          <div><b>{selectedAgent?.name ?? 'No agent'}</b><span>{selectedAgent?.role || 'No identity'}</span></div>
+          <div><b>{selectedAgent?.name ?? t('chat.statusNoAgent')}</b><span>{selectedAgent?.role || t('chat.noIdentity')}</span></div>
           <em style={{ color: status.color }}>{status.label}</em>
         </div>
         <div className="chat-list">
-          {sessions.map((session) => <button className={`chat-list-item ${session.id === sessionId ? 'active' : ''}`} key={session.id} onClick={() => setSessionId(session.id)}>
+          {sessions.map((session) => <button className={`chat-list-item ${session.id === sessionId ? 'active' : ''}`} key={session.id} onClick={() => { setSessionId(session.id); setMobilePane('conversation'); setError(''); }}>
             <b>{session.title}</b>
-            <span>{shortTime(session.updatedAt)} / {session.projectId ? projects.find((project) => project.id === session.projectId)?.name ?? 'project' : 'no project'} / {session.agentSessionId ? 'resumable' : 'new'}</span>
+            <span>{shortTime(session.updatedAt)} / {session.projectId ? projects.find((project) => project.id === session.projectId)?.name ?? t('chat.project') : t('chat.noProject')} / {session.agentSessionId ? t('chat.resumable') : t('common.new')}</span>
           </button>)}
           {!sessions.length && <p className="chat-empty">{t('chat.noSessions')}</p>}
         </div>
@@ -403,36 +449,41 @@ export function ChatPage() {
 
       <section className="chat-thread">
         <header className="chat-thread-head">
+          <button className="btn chat-mobile-sessions-btn" onClick={() => setMobilePane('sessions')}>{t('chat.sessions')}</button>
           <div className="chat-agent-card compact-card">
             <span className="chat-avatar">{selectedAgent?.name.slice(0, 2).toUpperCase() ?? '--'}</span>
-            <div><b>{selectedAgent?.name ?? t('chat.selectAgent')}</b><span>{selectedSession?.title ?? t('chat.newSession')}</span></div>
+            <div><b>{selectedAgent?.name ?? t('chat.selectAgent')}</b><span>{selectedSession?.title ?? t('chat.newSession')} · {headerProjectName}</span></div>
           </div>
           <span className="status-pill" style={{ color: status.color }}>{status.label}</span>
         </header>
         <div className="chat-messages">
           {messages.map((message) => <article className={`chat-bubble ${message.authorType}`} key={message.id}>
             {message.authorType === 'user' ? <div>{message.body}</div> : <Markdown text={message.body} />}
-            <span>{message.authorType} / {message.metadata?.pending ? 'sending' : shortTime(message.createdAt)}{message.costUsd ? ` / $${message.costUsd}` : ''}</span>
+            <span>{t(`common.${message.authorType}`)} / {message.metadata?.pending ? t('chat.sending') : shortTime(message.createdAt)}{message.costUsd ? ` / $${message.costUsd}` : ''}</span>
           </article>)}
           {replyingSessionId === sessionId && <article className="chat-bubble agent typing-bubble" aria-live="polite">
             {partialReply && <div className="chat-partial-text"><Markdown text={partialReply} /></div>}
-            <div className="typing-dots" aria-label={`${selectedAgent?.name ?? 'Agent'} ${t('chat.replying')}`}>
+            <div className="typing-dots" aria-label={`${selectedAgent?.name ?? t('chat.agent')} ${t('chat.replying')}`}>
               <i /><i /><i />
             </div>
-            <span>{selectedAgent?.name ?? 'Agent'} {t('chat.replying')}</span>
+            <span>{selectedAgent?.name ?? t('chat.agent')} {t('chat.replying')}</span>
           </article>}
-          {!messages.length && replyingSessionId !== sessionId && <div className="chat-empty-state">
+          {!messages.length && replyingSessionId !== sessionId && selectedAgent?.isActive !== false && <div className="chat-empty-state">
             <MessageSquare size={24} />
-            <b>{selectedAgent ? selectedAgent.name : 'Direct chat'}</b>
-            <span>{selectedSession ? selectedSession.title : 'New session'}</span>
+            <b>{selectedAgent ? selectedAgent.name : t('chat.title')}</b>
+            <span>{selectedSession ? selectedSession.title : t('chat.newSession')}</span>
           </div>}
+          {selectedAgent?.isActive === false && <div className="chat-paused-state"><b>{t('chat.pausedMessage')}</b><Link className="btn" href="/agents">{t('chat.manageAgents')}</Link></div>}
           <div ref={messageEndRef} />
         </div>
         <footer className="chat-composer">
-          <textarea className="input" rows={2} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
-            if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') void sendMessage();
-          }} placeholder={t('chat.messagePlaceholder')} />
-          <button className="btn btn-primary icon-btn" aria-label="Send message" onClick={() => void sendMessage()} disabled={sending || !draft.trim() || !agentId}>
+          <textarea ref={composerRef} className="input" rows={2} value={draft} onChange={(event) => setDrafts((current) => ({ ...current, [activeDraftKey]: event.target.value }))} onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              void sendMessage();
+            }
+          }} placeholder={t('chat.messagePlaceholder')} aria-label={t('chat.messagePlaceholder')} disabled={!selectedAgent || selectedAgent.isActive === false} />
+          <button className="btn btn-primary icon-btn" aria-label={t('chat.send')} onClick={() => void sendMessage()} disabled={sending || !draft.trim() || !agentId || selectedAgent?.isActive === false}>
             {sending ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
           </button>
         </footer>

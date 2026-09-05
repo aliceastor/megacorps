@@ -5040,8 +5040,31 @@ button.card {
 }
 
 .chat-composer textarea {
-  resize: vertical;
+  resize: none;
+  overflow-y: auto;
   max-height: 180px;
+}
+
+.chat-mobile-sessions-btn { display: none; }
+
+.chat-error-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chat-error-row .form-error { margin: 0; }
+
+.chat-paused-state {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 10%, var(--card));
 }
 
 .chat-empty,
@@ -5752,26 +5775,22 @@ button.agent-node-card {
   .topbar { flex-wrap: wrap; height: auto; padding: 12px 16px; }
   .page-head { align-items: stretch; }
   .chat-shell {
-    height: auto;
-    min-height: 0;
-    max-height: none;
-    grid-template-columns: 1fr;
-  }
-  .chat-rail {
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
-    grid-template-rows: auto auto auto auto;
-  }
-  .chat-list {
-    max-height: 260px;
-  }
-  .chat-thread {
-    height: min(620px, calc(100dvh - 132px));
-    min-height: 420px;
+    height: clamp(420px, calc(100dvh - 250px), 780px);
   }
 }
 
 @media (max-width: 760px) {
+  .chat-scope-controls { grid-template-columns: 1fr; }
+  .chat-workspace { grid-template-columns: 1fr; }
+  .chat-workspace.chat-mobile-sessions .chat-thread { display: none; }
+  .chat-workspace.chat-mobile-conversation .session-rail { display: none; }
+  .chat-workspace .chat-rail {
+    border-right: 0;
+  }
+  .chat-mobile-sessions-btn {
+    display: inline-flex;
+    align-self: flex-start;
+  }
   .form-grid,
   .project-form-grid,
   .project-toggle-grid,
@@ -6437,6 +6456,8 @@ button.card:hover {
 }
 .markdown-body a { color: inherit; text-decoration: underline; }
 .markdown-body table { border-collapse: collapse; margin: 6px 0 8px; }
+.chat-bubble .markdown-body { min-width: 0; max-width: 100%; }
+.chat-bubble .markdown-body table { display: block; max-width: 100%; overflow-x: auto; }
 .markdown-body th,
 .markdown-body td { border: 1px solid var(--border); padding: 4px 8px; }
 
