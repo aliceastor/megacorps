@@ -10,12 +10,18 @@ async function mockLogs(page: Page, width: number) {
   let heldOld: Route | null = null;
   let detailMode: 'normal' | 'hold' | 'fail' = 'normal';
   let heldDetail: Route | null = null;
+  let holdNextPage = false;
+  let heldNextPage: Route | null = null;
+  let heldAgentCompany: string | null = null;
+  let heldAgentRoute: Route | null = null;
+  let servedPromptDetailBytes = 0;
   const corpusSize = 273;
   const promptRows = Array.from({ length: 50 }, (_, index) => ({
     id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
     companyId: 'company-1', agentId: 'agent-1', source: 'chat', adapterType: 'codex-app',
     title: `Prompt ${index}`, preview: `Preview ${index}`, promptHash: `hash-${index}`, contextMode: 'full_bootstrap', createdAt: '2026-09-06T01:02:03.000Z',
   }));
+  const promptDetail = { ...promptRows[0], prompt: 'FULL SYNTHETIC PROMPT BODY', error: 'synthetic detail diagnostic', adapterSessionId: 'session-17', durationSeconds: 9, costUsd: '0.1234', metadata: { contextMode: 'full_bootstrap' } };
   const taskRow = {
     id: '10000000-0000-4000-8000-000000000001', companyId: 'company-1', cardId: 'card-1', agentId: 'agent-1', kind: 'dispatch', source: 'manual', status: 'failed',
     attemptNumber: 2, adapterSessionId: 'session-17', adapterTurnId: 'turn-17', durationSeconds: 9, costUsd: '0.1234', error: 'synthetic run failure', preview: 'bounded output preview', createdAt: '2026-09-06T02:00:00.000Z',
@@ -27,19 +33,28 @@ async function mockLogs(page: Page, width: number) {
     requests.push({ path, search: url.search });
     if (path === '/api/me') return route.fulfill({ json: { user: { id: 'user', role: 'admin' }, memberships: [{ companyId: 'company-1', role: 'admin' }] } });
     if (path.startsWith('/api/notifications')) return route.fulfill({ json: { notifications: [], unreadCount: 0 } });
-    if (path === '/api/agents') return route.fulfill({ json: [{ id: 'agent-1', name: 'Agent One', companyId: 'company-1' }, { id: 'agent-2', name: 'Agent Two', companyId: 'company-2' }] });
+    if (path === '/api/agents') {
+      const companyId = url.searchParams.get('companyId');
+      if (companyId === heldAgentCompany) { heldAgentRoute = route; return; }
+      const labels = [{ id: 'agent-1', name: 'Agent One', companyId: 'company-1' }, { id: 'agent-2', name: 'Agent Two', companyId: 'company-2' }];
+      return route.fulfill({ json: companyId ? labels.filter(agent => agent.companyId === companyId) : labels });
+    }
     if (path === '/api/prompt-logs' && url.searchParams.get('q') === 'old') { heldOld = route; return; }
     if (path === '/api/prompt-logs') {
       const q = url.searchParams.get('q');
       if (url.searchParams.get('companyId') === 'company-2' || url.searchParams.get('agentId') === 'agent-2') return route.fulfill({ json: { items: [{ ...promptRows[0], companyId: 'company-2', agentId: 'agent-2', title: 'Company two result' }], nextCursor: null } });
       if (q === 'new') return route.fulfill({ json: { items: [{ ...promptRows[0], title: 'New result' }], nextCursor: null } });
-      if (url.searchParams.get('cursor')) return route.fulfill({ json: { items: [{ ...promptRows[0], id: '00000000-0000-4000-8000-999999999999', title: 'Next page result' }], nextCursor: null } });
+      if (url.searchParams.get('cursor')) {
+        if (holdNextPage) { heldNextPage = route; return; }
+        return route.fulfill({ json: { items: [{ ...promptRows[0], id: '00000000-0000-4000-8000-999999999999', title: 'Next page result' }], nextCursor: null } });
+      }
       return route.fulfill({ json: { items: promptRows, nextCursor: 'synthetic-cursor' } });
     }
     if (/^\/api\/prompt-logs\//.test(path)) {
       if (detailMode === 'hold') { heldDetail = route; return; }
       if (detailMode === 'fail') { detailMode = 'normal'; return route.fulfill({ status: 503, json: { error: 'temporary_detail_failure' } }); }
-      return route.fulfill({ json: { ...promptRows[0], prompt: 'FULL SYNTHETIC PROMPT BODY', error: 'synthetic detail diagnostic', adapterSessionId: 'session-17', durationSeconds: 9, costUsd: '0.1234', metadata: { contextMode: 'full_bootstrap' } } });
+      servedPromptDetailBytes = Buffer.byteLength(JSON.stringify(promptDetail));
+      return route.fulfill({ json: promptDetail });
     }
     if (path === '/api/activity') {
       if (activityFails) return route.fulfill({ status: 503, json: { error: 'temporary_log_failure' } });
@@ -54,12 +69,25 @@ async function mockLogs(page: Page, width: number) {
   return {
     corpusSize,
     summaryResponseBytes: Buffer.byteLength(JSON.stringify({ items: promptRows, nextCursor: 'synthetic-cursor' })),
-    detailResponseBytes: Buffer.byteLength(JSON.stringify({ ...promptRows[0], prompt: 'FULL SYNTHETIC PROMPT BODY', metadata: { contextMode: 'full_bootstrap' } })),
+    detailResponseBytes: Buffer.byteLength(JSON.stringify(promptDetail)),
     requests,
     recoverActivity: () => { activityFails = false; },
     releaseOld: async () => { await heldOld?.fulfill({ json: { items: [{ ...promptRows[0], title: 'Old result' }], nextCursor: null } }); },
     holdNextDetail: () => { detailMode = 'hold'; },
     failNextDetail: () => { detailMode = 'fail'; },
+    holdPage: () => { holdNextPage = true; },
+    releasePage: async () => {
+      holdNextPage = false;
+      await heldNextPage?.fulfill({ json: { items: [{ ...promptRows[0], id: '00000000-0000-4000-8000-999999999999', title: 'Next page result' }], nextCursor: null } });
+      heldNextPage = null;
+    },
+    holdLabels: (companyId: string) => { heldAgentCompany = companyId; },
+    releaseLabels: async () => {
+      heldAgentCompany = null;
+      try { await heldAgentRoute?.fulfill({ json: [{ id: 'agent-1', name: 'Agent One', companyId: 'company-1' }] }); } catch { /* the stale company's aborted response is expected */ }
+      heldAgentRoute = null;
+    },
+    servedPromptDetailBytes: () => servedPromptDetailBytes,
     releaseDetail: async () => {
       detailMode = 'normal';
       try { await heldDetail?.fulfill({ json: { ...promptRows[0], prompt: 'ABANDONED DETAIL BODY', metadata: {} } }); } catch { /* the aborted response is expected */ }
@@ -88,6 +116,7 @@ for (const width of [390, 1158]) test(`logs stay lazy, bounded and truthful at $
   await page.getByRole('button', { name: 'Show details' }).first().click();
   await expect(page.getByLabel('prompts detail')).toContainText('FULL SYNTHETIC PROMPT BODY');
   await expect(page.getByLabel('prompts detail')).toContainText('synthetic detail diagnostic');
+  expect(state.detailResponseBytes).toBe(state.servedPromptDetailBytes());
   expect(state.requests.filter(row => /^\/api\/prompt-logs\//.test(row.path))).toHaveLength(1);
   await testInfo.attach(`logs-populated-detail-${width}`, { body: await page.screenshot({ path: testInfo.outputPath(`logs-populated-detail-${width}.png`), fullPage: true }), contentType: 'image/png' });
 
@@ -105,7 +134,10 @@ for (const width of [390, 1158]) test(`logs stay lazy, bounded and truthful at $
 
   await page.getByPlaceholder('Filter logs').fill('');
   await expect(page.getByText('Prompt 0', { exact: true })).toBeVisible();
+  state.holdPage();
   await page.getByRole('button', { name: 'Next page' }).click();
+  await expect(page.getByRole('button', { name: 'Show details' }).first()).toBeDisabled();
+  await state.releasePage();
   await expect(page.getByText('Next page result', { exact: true })).toBeVisible();
   expect(await page.locator('.prompt-log-row').count()).toBe(1);
   await expect(page.locator('.log-detail')).toHaveCount(0);
@@ -130,11 +162,38 @@ for (const width of [390, 1158]) test(`logs stay lazy, bounded and truthful at $
   if (width === 390) {
     await page.getByRole('button', { name: 'Toggle sidebar' }).click();
     await expect(page.getByRole('button', { name: 'Toggle sidebar' })).toHaveAttribute('aria-expanded', 'true');
-    sidebarSettled = await expect.poll(async () => page.evaluate(() => {
+    await page.evaluate(async () => { await document.fonts.ready; });
+    await page.waitForTimeout(300);
+    await expect.poll(async () => page.evaluate(() => {
       const sidebar = document.querySelector('.sidebar')?.getBoundingClientRect();
       const main = document.querySelector('.app-frame > main')?.getBoundingClientRect();
       return Boolean(sidebar && main && main.top >= sidebar.bottom - 1);
-    })).toBe(true).then(() => true, () => false);
+    })).toBe(true);
+    const geometry = await page.evaluate(() => {
+      const controls = [...document.querySelectorAll('button,input,select')].filter(element => {
+        const style = getComputedStyle(element);
+        return style.visibility !== 'hidden' && style.display !== 'none';
+      });
+      return {
+        documentFits: document.documentElement.scrollWidth <= innerWidth,
+        unreachableControls: controls.flatMap(element => {
+          const rect = element.getBoundingClientRect();
+          let parent = element.parentElement;
+          let reachableByScroll = false;
+          while (parent && parent !== document.body) {
+            const overflowX = getComputedStyle(parent).overflowX;
+            if ((overflowX === 'auto' || overflowX === 'scroll') && parent.scrollWidth > parent.clientWidth) { reachableByScroll = true; break; }
+            parent = parent.parentElement;
+          }
+          return rect.width > 0 && rect.height > 0 && (rect.left < -1 || rect.right > innerWidth + 1) && !reachableByScroll
+            ? [`${element.tagName.toLowerCase()}[${element.getAttribute('aria-label') ?? element.getAttribute('placeholder') ?? element.textContent?.trim() ?? ''}] left=${rect.left} right=${rect.right}`]
+            : [];
+        }),
+      };
+    });
+    expect(geometry.documentFits).toBe(true);
+    expect(geometry.unreachableControls).toEqual([]);
+    sidebarSettled = true;
   }
   const metrics = { width, corpusSize: state.corpusSize, initialLogRequests: initialLogReads.length, summaryResponseBytes: state.summaryResponseBytes, renderedRows, hiddenPromptBodies, initialDomNodes, detailRequests: state.requests.filter(row => /^\/api\/prompt-logs\//.test(row.path)).length, detailResponseBytes: state.detailResponseBytes, fitsViewport: true, sidebarSettled };
   console.log(`LOGS_METRICS ${JSON.stringify(metrics)}`);
@@ -145,6 +204,7 @@ for (const width of [390, 1158]) test(`logs stay lazy, bounded and truthful at $
 test('logs abandon detail work and react to rapid same-page scope changes', async ({ page }) => {
   test.setTimeout(60_000);
   const state = await mockLogs(page, 1158);
+  state.holdLabels('company-1');
   await page.goto('/logs?agentId=agent-1&surface=chat&companyId=company-1');
   await expect(page.getByText('Prompt 0', { exact: true })).toBeVisible();
 
@@ -166,8 +226,12 @@ test('logs abandon detail work and react to rapid same-page scope changes', asyn
   await page.waitForTimeout(280);
   await page.evaluate(() => history.pushState({}, '', '/logs?agentId=agent-2&surface=chat&companyId=company-2&q=new'));
   await expect(page.getByText('Company two result', { exact: true })).toBeVisible();
+  await expect(page.getByRole('option', { name: 'Agent Two' })).toHaveCount(1);
+  await state.releaseLabels();
   await state.releaseOld();
   await expect(page.getByText('Old result', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('option', { name: 'Agent One' })).toHaveCount(0);
+  await expect(page.getByRole('option', { name: 'Agent Two' })).toHaveCount(1);
   await expect(page.locator('.log-detail')).toHaveCount(0);
   await expect.poll(() => state.requests.some(row => row.path === '/api/prompt-logs' && row.search.includes('companyId=company-2') && row.search.includes('agentId=agent-2') && row.search.includes('surface=chat') && row.search.includes('q=new'))).toBe(true);
 });

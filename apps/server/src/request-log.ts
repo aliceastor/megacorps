@@ -11,6 +11,7 @@ type LoggedRequest = AuthenticatedRequest & {
 };
 
 const SENSITIVE_KEY = /(password|pass|token|secret|jwt|apiKey|keyPath|privateKey)/i;
+const SENSITIVE_QUERY_KEY = /^(?:password|pass|access[_-]?token|token|secret|jwt|api[_-]?key|key[_-]?path|private[_-]?key)$/i;
 const MAX_TEXT = 3000;
 const MAX_SERIALIZED_BYTES = 32 * 1024;
 const MAX_COLLECTION_ITEMS = 100;
@@ -49,7 +50,7 @@ function sanitizePath(path: string): string {
   const params = new URLSearchParams(path.slice(separator + 1));
   const sanitized = new URLSearchParams();
   for (const [key, value] of params) {
-    sanitized.append(key, SENSITIVE_KEY.test(key) ? REDACTED_PAYLOAD : value);
+    sanitized.append(key, SENSITIVE_QUERY_KEY.test(key) ? REDACTED_PAYLOAD : value);
   }
   const query = sanitized.toString();
   return query ? `${pathname}?${query}` : pathname;

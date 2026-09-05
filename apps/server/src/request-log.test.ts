@@ -53,13 +53,35 @@ test('saturation and persistence failure diagnostics never expose raw or encoded
   await app.inject({ url: '/api/synthetic-saturation?token=synthetic-error-secret' });
   await tick();
   for (let index = 0; index < 32; index++) await app.inject({ url: `/api/synthetic-saturation?ordinary=${index}` });
-  const saturated = await app.inject({ url: '/api/synthetic-saturation?t%6Fken=synthetic-overflow-secret&password=synthetic-password-secret' });
+  const saturated = await app.inject({ url: '/api/synthetic-saturation?api%5Fkey=synthetic-overflow-secret&password=synthetic-password-secret' });
   assert.equal(saturated.statusCode, 200);
-  const output = JSON.stringify(warnings);
-  assert.doesNotMatch(output, /synthetic-(?:error|overflow|password)-secret/);
-  assert.match(output, /\[redacted\]|api_event_persist_failed/);
+  const persistenceWarning = warnings.find(args => args.includes('failed to persist api event log'));
+  const saturationWarning = warnings.find(args => args.includes('api event log dropped because persistence is saturated'));
+  assert.ok(persistenceWarning, 'the controlled insert rejection must emit its own warning');
+  assert.ok(saturationWarning, 'the overflow request must emit a saturation warning');
+  assert.doesNotMatch(JSON.stringify(persistenceWarning), /synthetic-error-secret/);
+  assert.doesNotMatch(JSON.stringify(saturationWarning), /synthetic-(?:overflow|password)-secret/);
+  assert.match(JSON.stringify(saturationWarning), /redacted/);
   for (const release of releases) release();
   await tick();
+});
+
+test('registered hooks redact every raw and encoded API-key query alias from persisted paths', async t => {
+  const writes: any[] = [];
+  t.mock.method(db, 'insert', () => ({ values: async (value: unknown) => { writes.push(value); } }) as any);
+  const app = Fastify(); t.after(() => app.close()); registerRequestLogging(app);
+  app.get('/api/synthetic-alias', async () => ({ ok: true }));
+  const aliases = ['apiKey', 'api_key', 'api-key', 'api%5Fkey', 't%6Fken'];
+  for (const [index, alias] of aliases.entries()) {
+    const response = await app.inject({ url: `/api/synthetic-alias?${alias}=synthetic-alias-secret-${index}` });
+    assert.equal(response.statusCode, 200);
+  }
+  await tick();
+  assert.equal(writes.length, aliases.length);
+  for (const [index, write] of writes.entries()) {
+    assert.doesNotMatch(write.path, new RegExp(`synthetic-alias-secret-${index}`), aliases[index]);
+    assert.match(write.path, /redacted/, aliases[index]);
+  }
 });
 
 test('log reads keep lifecycle metadata without parsing or storing recursive payloads', async () => {
