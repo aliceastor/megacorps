@@ -90,7 +90,8 @@ async function retirement(tx: InventorySql, sourceId: string, targetId: string, 
   await tx.unsafe('DELETE FROM positions WHERE company_id=$1',[sourceId]);
   await tx.unsafe('DELETE FROM company_memberships WHERE company_id=$1',[sourceId]);
   await tx.unsafe('DELETE FROM companies WHERE id=$1',[sourceId]);
-  await tx.unsafe("INSERT INTO activity_log(company_id,actor_type,actor_id,user_id,action,entity_type,entity_id,details) VALUES(NULL,'user',$1,$1::uuid,'company.retired','company',$2,$3::jsonb)",[actorId,sourceId,JSON.stringify({version:1,result})]);
+  // actor_id is TEXT while user_id is UUID: bind them separately, as in deletion.
+  await tx.unsafe("INSERT INTO activity_log(company_id,actor_type,actor_id,user_id,action,entity_type,entity_id,details) VALUES(NULL,'user',$1,$2::uuid,'company.retired','company',$3,$4::jsonb)",[actorId,actorId,sourceId,JSON.stringify({version:1,result})]);
   return result;
 }
 

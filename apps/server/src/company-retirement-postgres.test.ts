@@ -116,6 +116,8 @@ test('PostgreSQL seeded company retirement preserves settings and enforces trans
     await sql.unsafe("CREATE FUNCTION fail_retirement() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic retirement failure'; END $$");
     await sql.unsafe('CREATE TRIGGER fail_retirement BEFORE DELETE ON companies FOR EACH ROW EXECUTE FUNCTION fail_retirement()');
     const failed=await call(source!.id,target!.id,true); assert.equal(failed.statusCode,500,failed.body);
+    assert.equal(failed.json().code,'P0001',failed.body);
+    assert.equal(failed.json().message,'synthetic retirement failure',failed.body);
     assert.deepEqual((await sql`SELECT * FROM projects WHERE id=${project!.id}`)[0],project);
     assert.deepEqual((await sql`SELECT * FROM agent_runtimes WHERE id=${runtime!.id}`)[0],runtime);
     assert.deepEqual((await sql`SELECT * FROM activity_log WHERE id=${audit!.id}`)[0],audit);
