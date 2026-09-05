@@ -56,10 +56,11 @@ for (const via of ['auto_review', 'webhook', 'runner', 'human', 'manual', 'panel
 for (const status of ['failed', 'progress', 'input_required', 'bogus']) {
   test(`runner must normalize ${status} report before accepting success alias`, async (t) => {
     const card: any = { id: 'card', companyId: 'company', columnStatus: 'in_progress', assigneeId: 'agent' };
-    memoryDb(t, [[kanbanCards, [card]], [taskRuns, [{ id: 'run', cardId: 'card', companyId: 'company', kind: 'dispatch', status: 'running', lockedBy: 'runner' }]], [machineRunners, [{ id: 'runner', companyId: 'company', name: 'Runner', apiKeyHash: hashRunnerApiKey('synthetic-runner') }]]]);
+    memoryDb(t, [[kanbanCards, [card]], [agents, [{ id: 'agent', companyId: 'company', isActive: true, adapterType: 'webhook' }]], [taskRuns, [{ id: 'run', cardId: 'card', companyId: 'company', kind: 'dispatch', status: 'running', lockedBy: 'runner' }]], [machineRunners, [{ id: 'runner', companyId: 'company', name: 'Runner', apiKeyHash: hashRunnerApiKey('synthetic-runner') }]]]);
     const app = Fastify(); t.after(() => app.close()); await registerRunnerRoutes(app);
     const response = await app.inject({ method: 'POST', url: '/api/runner/task-runs/run/complete', headers: { 'x-megacorps-runner-key': 'synthetic-runner' }, payload: { status: 'success', report: { kind: 'megacorps-report', status, summary: 'Current result' } } });
     assert.ok(response.statusCode < 500, response.body);
     assert.notEqual(card.columnStatus, 'done');
+    if (status === 'bogus') assert.equal(card.protocolRepairState?.dispatch?.failures, 1);
   });
 }

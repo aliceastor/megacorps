@@ -33,6 +33,9 @@ const migrations: Migration[] = [
   { version: 20, name: 'review-message-retry-state', run: async () => {
     await sql.unsafe(`ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS run_retry_state JSONB NOT NULL DEFAULT '{}';`);
   } },
+  { version: 21, name: 'bounded-protocol-repair', run: async () => {
+    await sql.unsafe(`ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS protocol_repair_state JSONB NOT NULL DEFAULT '{}';`);
+  } },
 ];
 
 // Merge closure (company pipeline §19). external_waits.authorized_head_sha

@@ -36,6 +36,41 @@ function fixture(t: TestContext) {
 const report = (status: string, extra = {}) => ({ kind: 'megacorps-report', status, summary: 'Current result', ...extra });
 const product = { type: 'pull_request', title: 'Change', url: 'https://github.com/example/repo/pull/1' };
 
+test('transport-level permission denial bypasses protocol and transport retries', async (t) => {
+  const { card, run, state } = fixture(t);
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: false, output: JSON.stringify(report('input_required', { summary: 'Permission denied: repository write requires authorization.', request: { kind: 'permission', question: 'Authorize the repository write.' }, workProducts: [product] })), sessionId: 's', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
+  await dispatchCard(card.id, 'manual', { taskRunId: run.id });
+  assert.equal(card.columnStatus, 'blocked');
+  assert.equal(card.retryCount, 0);
+  assert.equal(card.protocolRepairState?.dispatch, undefined);
+  assert.match(card.lastError, /permission/i);
+  assert.equal(state.rows(taskRuns).filter((task) => task.status === 'queued').length, 0);
+  assert.equal(state.rows(workProducts).length, 1);
+});
+
+test('webhook malformed report consumes one persisted protocol attempt per run', async (t) => {
+  const { card, run, state } = fixture(t);
+  const send = await webhook(t);
+  const payload = { cardId: card.id, taskRunId: run.id, status: 'done', report: report('bogus') };
+  const response = await send(payload);
+  assert.ok(response.statusCode < 500, response.body);
+  assert.equal(card.protocolRepairState?.dispatch?.failures, 1);
+  const comments = state.rows(cardComments).length;
+  await send(payload);
+  assert.equal(card.protocolRepairState.dispatch.failures, 1);
+  assert.equal(state.rows(cardComments).length, comments);
+});
+
+test('direct dispatch cannot finish without required merge evidence', async (t) => {
+  const { card, run, state } = fixture(t);
+  card.projectId = randomUUID();
+  state.rows(projects).push({ id: card.projectId, companyId: card.companyId, completionRequiresMerge: true, repoUrl: null });
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: JSON.stringify(report('completed', { summary: 'Implemented the requested product change.' })), sessionId: 's', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
+  await dispatchCard(card.id, 'manual', { taskRunId: run.id });
+  assert.notEqual(card.columnStatus, 'done');
+  assert.equal(card.completedAt, null);
+});
+
 test('completed implementation report preserves an explicit external wait and its evidence', async (t) => {
   const { card, run, state } = fixture(t);
   const send = await webhook(t);
@@ -355,13 +390,3 @@ for (const [label, output] of unsafeOutputs) {
     assert.equal(state.rows(cardComments).filter((row) => row.action === 'delegate_report').length, 0);
   });
 }
-
-test('direct dispatch cannot finish without required merge evidence', async (t) => {
-  const { card, run, state } = fixture(t);
-  card.projectId = randomUUID();
-  state.rows(projects).push({ id: card.projectId, companyId: card.companyId, completionRequiresMerge: true, repoUrl: null });
-  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: JSON.stringify(report('completed', { summary: 'Implemented the requested product change.' })), sessionId: 's', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
-  await dispatchCard(card.id, 'manual', { taskRunId: run.id });
-  assert.notEqual(card.columnStatus, 'done');
-  assert.equal(card.completedAt, null);
-});

@@ -21,6 +21,8 @@ import { registerChatRoutes } from './chat.ts';
 import { runAgentMaintenance } from './agent-maintenance.ts';
 import { delegationLineFromReportItem } from './agent-report.ts';
 import { normalizeAgentResult, persistAgentWorkProducts } from './agent-results.ts';
+import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
+import { resetProtocolRepair } from './protocol-repair.ts';
 import { parseA2aPushPayload, verifyA2aPushSignature } from './a2a-client.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
@@ -2769,7 +2771,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       issues: parsedBody.error.issues,
     });
     const normalizedResult = normalizeAgentResult({ output: [parsedBody.data.summary, parsedBody.data.output].filter(Boolean).join('\n\n'), report: parsedBody.data.report, workProducts: parsedBody.data.workProducts });
-    if (normalizedResult.outcome === 'invalid') return reply.code(409).send({ error: 'agent_report_invalid', message: normalizedResult.reason });
     const body = { ...parsedBody.data, report: normalizedResult.report ?? undefined, workProducts: normalizedResult.workProducts };
     const taskRunId = body.taskRunId ?? body.idempotencyKey;
     let requestedStatus = normalizeCardStatus(body.status);
@@ -2806,6 +2807,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (taskRunId && !webhookTaskRun) return reply.code(404).send({ error: 'task_run_not_found' });
     if (webhookTaskRun && webhookTaskRun.cardId !== card.id) return reply.code(409).send({ error: 'task_run_card_mismatch' });
     if ((webhookTaskRun && !['queued', 'running'].includes(webhookTaskRun.status)) || (!['message', 'message_review', 'panel_review'].includes(webhookTaskRun?.kind ?? '') && ['done', 'cancelled'].includes(card.columnStatus ?? ''))) return { ok: true, stale: true, cardId: card.id, taskRunId, newStatus: card.columnStatus };
+    if (normalizedResult.outcome === 'invalid' || (webhookTaskRun?.kind === 'review' && (normalizedResult.verdictError || (normalizedResult.source === 'report' && normalizedResult.outcome === 'completed' && !normalizedResult.verdict)))) {
+      const reason = normalizedResult.reason ?? normalizedResult.verdictError ?? 'review_verdict_missing: return one evidence-supported current verdict.';
+      const actorId = webhookTaskRun?.agentId ?? callerAgent?.id ?? card.assigneeId;
+      const [actor] = actorId ? await db.select().from(agents).where(and(eq(agents.id, actorId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
+      if (actor && (!webhookTaskRun || ['dispatch', 'review'].includes(webhookTaskRun.kind))) await sendAgentFeedbackAndRequeue({ card, agent: actor, kind: webhookTaskRun?.kind === 'review' ? 'review' : 'dispatch', message: reason, taskRunId, runId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId, result: { sessionId: actor.currentSessionId ?? '' } });
+      return reply.code(409).send({ error: 'agent_report_invalid', message: reason });
+    }
     const reviewRevisionRequested = webhookTaskRun?.kind === 'review' && normalizedResult.verdict === 'revision_requested';
     if (webhookTaskRun?.kind === 'review') {
       if (normalizedResult.verdictError || (normalizedResult.source === 'report' && normalizedResult.outcome === 'completed' && !normalizedResult.verdict)) return reply.code(409).send({ error: 'review_verdict_invalid', message: normalizedResult.verdictError ?? 'review_verdict_missing: return an explicit current verdict in your report.' });
@@ -2889,6 +2897,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
     const [productProject] = card.projectId ? await db.select().from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1) : [];
     await persistAgentWorkProducts(card, actorAgentId, taskRunId ?? null, body.workProducts, productProject);
+    if (!webhookTaskRun || ['dispatch', 'review'].includes(webhookTaskRun.kind)) await resetProtocolRepair(card.id, webhookTaskRun?.kind === 'review' ? 'review' : 'dispatch', normalizedResult, true);
     const webhookNotes = actorAgent && !blockedResult ? reportNotesFromOutput(executionLog, body.report ?? null) : [];
     if (actorAgent && webhookNotes.length) {
       try { await processReportNotes(card, actorAgent, webhookNotes); } catch (error) { app.log.warn({ error, cardId: card.id }, 'report note processing failed'); }

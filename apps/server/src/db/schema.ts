@@ -1,5 +1,6 @@
 import { boolean, integer, jsonb, numeric, pgTable, primaryKey, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core';
 import type { RunRetryState } from '../run-retry.ts';
+import type { ProtocolRepairState } from '../protocol-repair.ts';
 
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -241,6 +242,7 @@ export const kanbanCards = pgTable('kanban_cards', {
   maxRevisions: integer('max_revisions').default(3),
   retryCount: integer('retry_count').default(0),
   runRetryState: jsonb('run_retry_state').$type<RunRetryState>().notNull().default({}),
+  protocolRepairState: jsonb('protocol_repair_state').$type<ProtocolRepairState>().notNull().default({}),
   maxRetries: integer('max_retries').default(3),
   timeoutSeconds: integer('timeout_seconds'),
   // Number of split rounds this card has opened (round-based child creation).

@@ -24,6 +24,7 @@ import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { extractAgentReport, structuredDelegationPlan } from './agent-report.ts';
 import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
+import { protocolRepairSession, recordProtocolFailure, resetProtocolRepair } from './protocol-repair.ts';
 import type { AgentReportDelegation } from '@megacorps/shared';
 import type { TaskResult } from './adapters/hermes.ts';
 import { notify } from './notifications.ts';
@@ -2220,6 +2221,11 @@ function supportsScopedKanbanAdapterSession(adapterType?: string | null): boolea
 }
 
 export async function scopedAdapterSession(card: CardRow, agent: AgentRow, kind: TaskRunKind): Promise<AdapterSessionRow | null> {
+  if (kind === 'dispatch' || kind === 'review') {
+    const repairSession = protocolRepairSession(card, kind, agent.id);
+    if (repairSession === null) return null;
+    if (repairSession !== undefined) return { adapterSessionId: repairSession, updatedAt: new Date(card.protocolRepairState[kind]!.updatedAt) } as AdapterSessionRow;
+  }
   if (!supportsScopedKanbanAdapterSession(agent.adapterType)) return null;
   return findAdapterSession({
     companyId: card.companyId,
@@ -2650,7 +2656,7 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
   return updated;
 }
 
-async function sendAgentFeedbackAndRequeue(input: {
+export async function sendAgentFeedbackAndRequeue(input: {
   card: CardRow;
   agent: AgentRow;
   kind: Extract<TaskRunKind, 'dispatch' | 'review'>;
@@ -2660,87 +2666,15 @@ async function sendAgentFeedbackAndRequeue(input: {
   output?: string | null;
   result?: { sessionId: string; turnId?: string | null; costUsd?: number; durationSeconds?: number };
 }): Promise<CardRow> {
-  const previousOutput = input.output?.trim();
-  const feedback = [
-    'MegaCorps could not accept your previous Kanban reply. Continue in the same task session and send a corrected response.',
-    `Error: ${input.message}`,
-    previousOutput && previousOutput !== input.message ? `Previous agent output:\n${clipText(previousOutput, 4000)}` : '',
-    input.kind === 'dispatch'
-      ? 'Follow the Completion protocol exactly. If delegation is required, return a valid DELEGATE block or send the same block through the webhook with status="in_progress".'
-      : 'Follow the review protocol exactly. Return APPROVE/DONE, REVISION_REQUESTED with concrete guidance, or ESCALATE when your manager must decide.',
-  ].filter(Boolean).join('\n\n');
-  const nextStatus: CardStatus = input.kind === 'dispatch'
-    ? 'todo'
-    : normalizeCardStatus(input.card.columnStatus) ?? 'needs_review';
-  const updated = await db.transaction(async (tx) => {
-    const [row] = await tx.update(kanbanCards).set({
-      columnStatus: nextStatus,
-      executionLog: previousOutput ?? input.card.executionLog,
-      lastError: input.message,
-      nextRunAt: null,
-      executionLockId: null,
-      executionLockedByAgentId: null,
-      executionLockedAt: null,
-      executionLockExpiresAt: null,
-      activeHeartbeatRunId: null,
-      updatedAt: new Date(),
-    }).where(eq(kanbanCards.id, input.card.id)).returning();
-    await tx.update(agents).set({
-      currentSessionId: input.result?.sessionId,
-      isBusy: false,
-    }).where(eq(agents.id, input.agent.id));
-    if (input.runId) {
-      await tx.update(heartbeatRuns).set({
-        status: 'failed',
-        completedAt: new Date(),
-        error: input.message,
-        durationSeconds: input.result?.durationSeconds,
-        costUsd: input.result?.costUsd === undefined ? undefined : input.result.costUsd.toString(),
-      }).where(eq(heartbeatRuns.id, input.runId));
-    }
-    return row;
-  });
-  if (input.kind === 'dispatch' && input.card.columnStatus !== nextStatus) {
-    await addStageLog(input.card.id, input.agent.id, input.card.columnStatus, nextStatus, 'feedback');
+  const repair = await recordProtocolFailure({ card: input.card, actor: input.agent, kind: input.kind, runKey: input.taskRunId ?? input.runId ?? 'unkeyed', taskRunId: input.taskRunId, sessionId: input.result?.sessionId, reason: input.message });
+  if (!repair.duplicate) {
+    await db.update(agents).set({ currentSessionId: repair.mode === 'same_session' ? input.result?.sessionId : null, isBusy: false }).where(eq(agents.id, input.agent.id));
+    if (input.runId) await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: input.message, durationSeconds: input.result?.durationSeconds, costUsd: input.result?.costUsd?.toString() }).where(eq(heartbeatRuns.id, input.runId));
   }
-  await addTaskLog({
-    cardId: input.card.id,
-    agentId: input.agent.id,
-    type: input.kind,
-    status: 'warning',
-    message: 'Agent reply rejected; correction feedback was sent back to the same agent session and the card was requeued without increasing card retry count.',
-    output: feedback,
-    costUsd: input.result?.costUsd,
-    durationSeconds: input.result?.durationSeconds,
-  });
-  await addCardMessage({
-    cardId: input.card.id,
-    agentId: input.agent.id,
-    action: input.kind === 'dispatch' ? 'agent_error' : 'review_error',
-    body: feedback,
-  });
-  await addActivity({
-    companyId: input.card.companyId,
-    actorType: 'system',
-    actorId: 'feedback',
-    agentId: input.agent.id,
-    action: `${input.kind}.feedback_requeued`,
-    entityType: 'card',
-    entityId: input.card.id,
-    details: { taskRunId: input.taskRunId, runId: input.runId, error: input.message },
-  });
-  await completeTaskRun(input.taskRunId, {
-    status: 'failed',
-    retryableFailure: input.kind === 'review',
-    error: input.message,
-    output: feedback,
-    costUsd: input.result?.costUsd,
-    durationSeconds: input.result?.durationSeconds,
-  });
-  const [retryCard] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, input.card.id)).limit(1);
-  if (input.kind !== 'review' || (retryCard && retryCard.columnStatus !== 'blocked' && (retryCard.runRetryState.review?.failures ?? 0) < RUN_FAILURE_LIMIT)) await enqueueTaskRun(input.card.id, input.kind, 'queue');
-  if (!updated) throw new Error('card_update_failed');
-  return updated;
+  await completeTaskRun(input.taskRunId, { status: 'failed', preserveCard: true, error: input.message, output: repair.feedback, costUsd: input.result?.costUsd, durationSeconds: input.result?.durationSeconds });
+  if (!repair.duplicate && (repair.mode === 'same_session' || repair.mode === 'fresh_context')) await enqueueTaskRun(input.card.id, input.kind, 'queue');
+  else if (!repair.duplicate && repair.mode === 'escalated') await enqueueTaskRun(input.card.id, 'review', 'queue');
+  return repair.card;
 }
 
 function adapterFailureMessage(kind: Extract<TaskRunKind, 'dispatch' | 'review'>, output: string | null | undefined): string {
@@ -3318,23 +3252,24 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       });
       return latest;
     }
+    const normalizedResult = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    if (normalizedResult.outcome === 'permission') {
+      await persistAgentWorkProducts(card, agent.id, options.taskRunId ?? null, normalizedResult.workProducts);
+      await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+      const blocked = await parkPermissionBlockedResult(card.id, agent.id, run.id, normalizedResult.reason!, result.output);
+      await completeTaskRun(options.taskRunId, { status: 'failed', preserveCard: blocked.preservedHumanGate, error: normalizedResult.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      return blocked.card;
+    }
     if (!result.success) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       throw new Error(adapterFailureMessage('dispatch', result.output));
     }
-    const normalizedResult = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
     if (normalizedResult.outcome === 'invalid') {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: normalizedResult.reason!, runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
     }
     await persistAgentWorkProducts(card, agent.id, options.taskRunId ?? null, normalizedResult.workProducts);
     await recordA2aArtifacts(card, agent.id, options.taskRunId, result.artifacts);
-    if (normalizedResult.outcome === 'permission') {
-      await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-      const blocked = await parkPermissionBlockedResult(card.id, agent.id, run.id, normalizedResult.reason!, result.output);
-      await completeTaskRun(options.taskRunId, { status: 'failed', preserveCard: blocked.preservedHumanGate, error: normalizedResult.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
-      return blocked.card;
-    }
     if (normalizedResult.outcome === 'failed' || normalizedResult.outcome === 'rejected') {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       throw new Error(normalizedResult.reason!);
@@ -3410,6 +3345,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     }
     if (delegatedRows.length > 0) {
       const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+      await resetProtocolRepair(card.id, 'dispatch', normalizedResult, result.success);
       const updated = await db.transaction(async (tx) => {
         await tx.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
         const [row] = await tx.update(kanbanCards).set({
@@ -3513,6 +3449,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const dispatchMergePlan = !childBlock && nextStatus === 'done' ? await planMergeGate({ ...card, executionLog: result.output }) : null;
     const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : dispatchMergePlan ? mergeCompletionStatus(dispatchMergePlan) : nextStatus;
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+    await resetProtocolRepair(card.id, 'dispatch', normalizedResult, result.success);
     // Agent release + card stage move + heartbeat completion commit atomically, so a
     // crash mid-completion cannot leave the agent free while the card looks running.
     const updated = await db.transaction(async (tx) => {
@@ -3828,6 +3765,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       });
     }
     const acceptedReviewOutput = result.success || Boolean(explicitDecision);
+    await resetProtocolRepair(card.id, 'review', normalizedReview, result.success);
     if (acceptedReviewOutput && decision) {
       try { await recordReviewScore(card, reviewer, decision, result.output); } catch { /* scoring must never fail a review */ }
     }

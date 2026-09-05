@@ -14,6 +14,8 @@ import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
 import { cascadeParentStatus, completeTaskRun, completionBlockedByChildren, completionStatusForQualityGate, createPendingApproval, enqueueTaskRun } from './dispatch.ts';
 import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
 import { applyMergeGatePlan, mergeCompletionStatus, planMergeGate } from './merge-gate.ts';
+import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
+import { resetProtocolRepair } from './protocol-repair.ts';
 
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
@@ -115,7 +117,12 @@ async function createRunnerTaskCompletion(input: {
   const runAgentId = input.run.agentId ?? card.assigneeId;
   const output = [input.body.summary, input.body.output].filter(Boolean).join('\n\n');
   const normalized = normalizeAgentResult({ output, report: input.body.report, workProducts: input.body.workProducts });
-  if (normalized.outcome === 'invalid') throw httpError(409, normalized.reason!, 'agent_report_invalid');
+  if (normalized.outcome === 'invalid' || (input.run.kind === 'review' && normalized.source === 'report' && normalized.outcome === 'completed' && (!normalized.verdict || normalized.verdictError))) {
+    const [actor] = runAgentId ? await db.select().from(agents).where(eq(agents.id, runAgentId)).limit(1) : [];
+    const reason = normalized.reason ?? normalized.verdictError ?? 'Return one evidence-supported current review verdict.';
+    if (!actor || !['dispatch', 'review'].includes(input.run.kind)) throw httpError(409, reason, 'agent_report_invalid');
+    return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: input.run.kind === 'review' ? 'review' : 'dispatch', message: reason, taskRunId: input.run.id, runId: input.run.heartbeatRunId, result: { sessionId: actor.currentSessionId ?? '' } });
+  }
   await persistAgentWorkProducts(card, runAgentId, input.run.id, normalized.workProducts);
   if (normalized.outcome === 'permission') {
     const parked = await parkPermissionBlockedResult(card.id, runAgentId ?? '', input.run.heartbeatRunId ?? '', normalized.reason!, output);
@@ -148,6 +155,7 @@ async function createRunnerTaskCompletion(input: {
   const mergePlan = !childBlock && requestedNextStatus === 'done' ? await planMergeGate({ ...card, executionLog: normalized.report ? JSON.stringify(normalized.report) : output }) : null;
   const nextStatus: CardStatus = childBlock ? 'in_progress' : mergePlan ? mergeCompletionStatus(mergePlan) : requestedNextStatus;
   const fromStatus = cardStatus(card.columnStatus);
+  if (['dispatch', 'review'].includes(input.run.kind)) await resetProtocolRepair(card.id, input.run.kind === 'review' ? 'review' : 'dispatch', normalized, input.body.status !== 'failed');
   assertStatusMove(fromStatus, nextStatus, 'machine');
   const now = new Date();
   await completeTaskRun(input.run.id, {
