@@ -62,7 +62,13 @@ type NewSessionScope = {
   projectId: string | null;
   agentName: string;
   originIdentity: string;
+  projectFilter: string;
 };
+
+function sessionMatchesScope(session: ChatSession, companyId: string, agentId: string, projectFilter: string): boolean {
+  return Boolean(companyId && agentId) && session.companyId === companyId && session.agentId === agentId
+    && (projectFilter === 'all' || (projectFilter === '__none' ? !session.projectId : session.projectId === projectFilter));
+}
 
 function pendingUserMessage(session: ChatSession, body: string): ChatMessage {
   return {
@@ -131,7 +137,6 @@ export function ChatPage() {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [messagesBySession, setMessagesBySession] = useState<Record<string, ChatMessage[]>>({});
   const [companyId, setCompanyId] = useState('');
   const [agentId, setAgentId] = useState('');
@@ -141,9 +146,11 @@ export function ChatPage() {
   const [mobilePane, setMobilePane] = useState<'sessions' | 'conversation'>('sessions');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
-  const [replyingSessionId, setReplyingSessionId] = useState<string | null>(null);
-  const [partialReply, setPartialReply] = useState('');
+  const [repliesBySession, setRepliesBySession] = useState<Record<string, { pending: boolean; partial: string }>>({});
   const [error, setError] = useState('');
+  const [creationErrors, setCreationErrors] = useState<Record<string, string>>({});
+  const [creatingScopes, setCreatingScopes] = useState<Record<string, boolean>>({});
+  const creationPendingRef = useRef(new Set<string>());
   const messageEndRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const activeIdentityRef = useRef('');
@@ -155,25 +162,36 @@ export function ChatPage() {
     queryFn: () => fetchChatSessions(companyId, agentId, projectFilter),
     enabled: Boolean(companyId && agentId),
   });
-  const messagesQuery = useQuery({
-    queryKey: ['chatMessages', sessionId],
-    queryFn: () => fetchChatMessages(sessionId),
-    enabled: Boolean(sessionId),
-  });
+  const sessions = useMemo(() => (sessionsQuery.data ?? []).filter((session) => sessionMatchesScope(session, companyId, agentId, projectFilter)), [sessionsQuery.data, companyId, agentId, projectFilter]);
 
   const companyAgents = useMemo(() => agents.filter((agent) => agent.companyId === companyId), [agents, companyId]);
   const companyProjects = useMemo(() => projects.filter((project) => project.companyId === companyId), [projects, companyId]);
   const selectedCompany = companies.find((company) => company.id === companyId) ?? null;
   const selectedProject = projectFilter !== 'all' && projectFilter !== '__none' ? projects.find((project) => project.id === projectFilter) ?? null : null;
-  const selectedAgent = agents.find((agent) => agent.id === agentId) ?? null;
+  const selectedAgent = companyAgents.find((agent) => agent.id === agentId) ?? null;
   const selectedSession = sessions.find((session) => session.id === sessionId) ?? null;
+  const messagesQuery = useQuery({
+    queryKey: ['chatMessages', selectedSession?.id],
+    queryFn: () => fetchChatMessages(selectedSession!.id),
+    enabled: Boolean(selectedSession),
+  });
   const status = agentStatus(selectedAgent, t);
-  const activeDraftKey = draftKey(companyId, agentId, projectFilter, sessionId);
+  const activeDraftKey = draftKey(companyId, agentId, projectFilter, selectedSession?.id ?? '');
   activeIdentityRef.current = activeDraftKey;
   const draft = drafts[activeDraftKey] ?? '';
-  const messages = sessionId ? messagesBySession[sessionId] ?? [] : [];
+  const creationScopeKey = draftKey(companyId, agentId, projectFilter, '');
+  const creating = Boolean(creatingScopes[creationScopeKey]);
+  const creationError = creationErrors[activeDraftKey] ?? '';
+  const messages = selectedSession ? messagesBySession[selectedSession.id] ?? [] : [];
+  const reply = selectedSession ? repliesBySession[selectedSession.id] : undefined;
   const sessionProject = selectedSession?.projectId ? projects.find((project) => project.id === selectedSession.projectId) ?? null : null;
-  const headerProjectName = sessionProject?.name ?? selectedProject?.name ?? (projectFilter === '__none' ? t('chat.noProject') : t('chat.allProjects'));
+  const headerProjectName = selectedSession
+    ? selectedSession.projectId ? sessionProject?.name ?? t('chat.project') : t('chat.noProject')
+    : selectedProject?.name ?? (projectFilter === '__none' ? t('chat.noProject') : t('chat.allProjects'));
+
+  function updateReply(targetSessionId: string, pending: boolean, partial = '') {
+    setRepliesBySession((current) => ({ ...current, [targetSessionId]: { pending, partial } }));
+  }
 
   function updateSessionMessages(targetSessionId: string, update: (current: ChatMessage[]) => ChatMessage[]) {
     setMessagesBySession((current) => ({
@@ -234,15 +252,13 @@ export function ChatPage() {
     }
   }, [companiesQuery.error, agentsQuery.error, projectsQuery.error]);
   useEffect(() => {
-    if (!sessionsQuery.data) return;
-    setSessions(sessionsQuery.data);
-    const nextSession = sessionsQuery.data.find((session) => session.id === sessionId) ?? sessionsQuery.data[0];
+    const nextSession = sessions.find((session) => session.id === sessionId) ?? sessions[0];
     setSessionId(nextSession?.id ?? '');
-  }, [sessionsQuery.data]);
+  }, [sessions]);
   useEffect(() => {
-    if (!messagesQuery.data || !sessionId) return;
-    updateSessionMessages(sessionId, (current) => mergeMessages(current, messagesQuery.data));
-  }, [messagesQuery.data, sessionId]);
+    if (!messagesQuery.data || !selectedSession) return;
+    updateSessionMessages(selectedSession.id, (current) => mergeMessages(current, messagesQuery.data));
+  }, [messagesQuery.data, selectedSession?.id]);
   useEffect(() => {
     if (!companyId) return;
     if (!companyAgents.some((agent) => agent.id === agentId)) {
@@ -253,32 +269,35 @@ export function ChatPage() {
   useEffect(() => {
     if (projectFilter !== 'all' && projectFilter !== '__none' && !companyProjects.some((project) => project.id === projectFilter)) setProjectFilter('all');
   }, [companyProjects, projectFilter]);
-  useEffect(() => { void loadMessages(); }, [sessionId]);
   useEffect(() => {
-    if (selectedSession && selectedAgent?.isBusy) setReplyingSessionId(selectedSession.id);
+    if (selectedSession && selectedAgent?.isBusy) {
+      setRepliesBySession((current) => current[selectedSession.id] ? current : { ...current, [selectedSession.id]: { pending: true, partial: '' } });
+    }
   }, [selectedAgent?.isBusy, selectedSession?.id]);
   useEffect(() => {
     function onLive(event: Event) {
       const detail = (event as CustomEvent<LiveEvent>).detail;
       if (!detail?.type.startsWith('chat.')) return;
-      if (detail.type === 'chat.reply.started' && detail.sessionId === sessionId) { setReplyingSessionId(sessionId); setPartialReply(''); }
-      if (detail.type === 'chat.reply.partial' && detail.sessionId === sessionId) {
+      const targetSessionId = detail.sessionId;
+      if (!targetSessionId) return;
+      if (detail.type === 'chat.reply.started') updateReply(targetSessionId, true);
+      if (detail.type === 'chat.reply.partial') {
         const text = typeof detail.data?.text === 'string' ? detail.data.text : '';
-        if (text) setPartialReply(text);
+        if (text) updateReply(targetSessionId, true, text);
         return;
       }
-      if (detail.type === 'chat.reply.finished' && detail.sessionId === sessionId) { setReplyingSessionId(null); setPartialReply(''); }
-      if (detail.type === 'chat.message.created' && detail.sessionId === sessionId) setPartialReply('');
-      if (detail.sessionId === sessionId) {
-        void queryClient.invalidateQueries({ queryKey: ['chatMessages', detail.sessionId] })
-          .then(() => loadMessages(detail.sessionId!));
+      if (detail.type === 'chat.reply.finished') updateReply(targetSessionId, false);
+      if (detail.type === 'chat.message.created') {
+        setRepliesBySession((current) => ({ ...current, [targetSessionId]: { pending: current[targetSessionId]?.pending ?? false, partial: '' } }));
       }
+      void queryClient.invalidateQueries({ queryKey: ['chatMessages', targetSessionId] })
+        .then(() => loadMessages(targetSessionId));
       void queryClient.invalidateQueries({ queryKey: ['chatSessions'] });
     }
     window.addEventListener('megacorps-live', onLive);
     return () => window.removeEventListener('megacorps-live', onLive);
   }, [agentId, companyId, projectFilter, sessionId]);
-  useEffect(() => { messageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages.length, replyingSessionId]);
+  useEffect(() => { messageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages.length, reply?.pending]);
   useEffect(() => {
     const composer = composerRef.current;
     if (!composer) return;
@@ -293,6 +312,7 @@ export function ChatPage() {
       projectId: selectedProject?.id ?? null,
       agentName: selectedAgent.name,
       originIdentity: activeIdentityRef.current,
+      projectFilter,
     } : null);
     if (!scope || !scope.companyId || !scope.agentId || selectedAgent?.isActive === false) return null;
     setError('');
@@ -300,8 +320,8 @@ export function ChatPage() {
       method: 'POST',
       body: JSON.stringify({ companyId: scope.companyId, agentId: scope.agentId, projectId: scope.projectId, title: tf('chat.sessionTitle', { name: scope.agentName }) }),
     });
+    queryClient.setQueryData<ChatSession[]>(['chatSessions', scope.companyId, scope.agentId, scope.projectFilter], (current = []) => [session, ...current.filter((row) => row.id !== session.id)]);
     if (activeIdentityRef.current === scope.originIdentity) {
-      setSessions((current) => [session, ...current.filter((row) => row.id !== session.id)]);
       if (select) {
         setSessionId(session.id);
         setMobilePane('conversation');
@@ -310,9 +330,26 @@ export function ChatPage() {
     return session;
   }
 
+  async function createSessionExplicitly() {
+    if (creationPendingRef.current.has(creationScopeKey) || sending || !selectedAgent || selectedAgent.isActive === false) return;
+    const originIdentity = activeDraftKey;
+    const originScopeKey = creationScopeKey;
+    creationPendingRef.current.add(originScopeKey);
+    setCreatingScopes((current) => ({ ...current, [originScopeKey]: true }));
+    setCreationErrors((current) => ({ ...current, [originIdentity]: '' }));
+    try {
+      await createSession();
+    } catch (err) {
+      setCreationErrors((current) => ({ ...current, [originIdentity]: err instanceof Error ? err.message : t('chat.noSessionAvailable') }));
+    } finally {
+      creationPendingRef.current.delete(originScopeKey);
+      setCreatingScopes((current) => ({ ...current, [originScopeKey]: false }));
+    }
+  }
+
   async function sendMessage() {
     const body = draft.trim();
-    if (!body || sending || !agentId || selectedAgent?.isActive === false) return;
+    if (!body || sending || creationPendingRef.current.has(creationScopeKey) || !selectedAgent || selectedAgent.isActive === false || (sessionId && !selectedSession)) return;
     const submittedDraftKey = activeDraftKey;
     const submittedScope: NewSessionScope | null = selectedAgent ? {
       companyId,
@@ -320,6 +357,7 @@ export function ChatPage() {
       projectId: selectedProject?.id ?? null,
       agentName: selectedAgent.name,
       originIdentity: submittedDraftKey,
+      projectFilter,
     } : null;
     const existingTarget = selectedSession;
     setSending(true);
@@ -330,6 +368,7 @@ export function ChatPage() {
     try {
       const target = existingTarget ?? (submittedScope ? await createSession(false, submittedScope) : null);
       if (!target) throw new Error(t('chat.noSessionAvailable'));
+      if (!submittedScope || !sessionMatchesScope(target, submittedScope.companyId, submittedScope.agentId, submittedScope.projectFilter)) throw new Error(t('chat.noSessionAvailable'));
       targetSessionId = target.id;
       targetDraftKey = draftKey(target.companyId, target.agentId, projectFilter, target.id);
       if (!existingTarget && activeIdentityRef.current === submittedDraftKey) {
@@ -340,14 +379,14 @@ export function ChatPage() {
       const optimistic = pendingUserMessage(target, body);
       optimisticId = optimistic.id;
       updateSessionMessages(target.id, (current) => mergeMessages(current, [optimistic]));
-      setReplyingSessionId(target.id);
+      updateReply(target.id, true);
       const result = await api<ChatSendResult>(`/api/chat/sessions/${target.id}/messages`, {
         method: 'POST',
         body: JSON.stringify({ body }),
       });
       const nextMessages = [result.userMessage, result.agentMessage, result.systemMessage].filter(Boolean) as ChatMessage[];
       updateSessionMessages(target.id, (current) => mergeMessages(current, nextMessages, optimisticId));
-      if (result.session) setSessions((current) => current.map((session) => session.id === result.session?.id ? result.session : session));
+      if (result.session) queryClient.setQueriesData<ChatSession[]>({ queryKey: ['chatSessions'] }, (current) => current?.map((session) => session.id === result.session?.id ? result.session : session));
       setDrafts((current) => {
         const next = { ...current };
         if (next[submittedDraftKey]?.trim() === body) next[submittedDraftKey] = '';
@@ -368,7 +407,7 @@ export function ChatPage() {
       }
     } finally {
       setSending(false);
-      setReplyingSessionId(null);
+      if (targetSessionId) updateReply(targetSessionId, false);
     }
   }
 
@@ -383,7 +422,7 @@ export function ChatPage() {
       </div>
     </div>
 
-    {error && <div className="chat-error-row" role="alert"><p className="form-error">{error}</p>{draft.trim() && selectedAgent?.isActive !== false && <button className="btn" onClick={() => void sendMessage()} disabled={sending}>{t('chat.retry')}</button>}</div>}
+    {(creationError || error) && <div className="chat-error-row" role="alert"><p className="form-error">{creationError || error}</p>{selectedAgent?.isActive !== false && (creationError || draft.trim()) && <button className="btn" onClick={() => void (creationError ? createSessionExplicitly() : sendMessage())} disabled={sending || creating}>{t('chat.retry')}</button>}</div>}
 
     <section className="card chat-scope-controls" aria-label={t('chat.scope')}>
       <label className="chat-scope-field">
@@ -431,7 +470,7 @@ export function ChatPage() {
       <aside className="chat-rail session-rail">
         <div className="chat-rail-head">
           <div><b>{t('chat.sessions')}</b><span>{selectedAgent?.adapterType ?? t('chat.adapter')}</span></div>
-          <button className="btn icon-btn" aria-label={t('chat.newSession')} onClick={() => void createSession()} disabled={!agentId || selectedAgent?.isActive === false}><Plus size={15} /></button>
+          <button className="btn icon-btn" aria-label={t('chat.newSession')} onClick={() => void createSessionExplicitly()} disabled={creating || sending || !selectedAgent || selectedAgent.isActive === false}><Plus size={15} /></button>
         </div>
         <div className="chat-agent-card">
           <span className="chat-avatar large">{selectedAgent?.name.slice(0, 2).toUpperCase() ?? '--'}</span>
@@ -443,7 +482,7 @@ export function ChatPage() {
             <b>{session.title}</b>
             <span>{shortTime(session.updatedAt)} / {session.projectId ? projects.find((project) => project.id === session.projectId)?.name ?? t('chat.project') : t('chat.noProject')} / {session.agentSessionId ? t('chat.resumable') : t('common.new')}</span>
           </button>)}
-          {!sessions.length && <p className="chat-empty">{t('chat.noSessions')}</p>}
+          {!sessions.length && <p className="chat-empty">{sessionsQuery.isLoading ? t('common.loading') : t('chat.noSessions')}</p>}
         </div>
       </aside>
 
@@ -461,14 +500,14 @@ export function ChatPage() {
             {message.authorType === 'user' ? <div>{message.body}</div> : <Markdown text={message.body} />}
             <span>{t(`common.${message.authorType}`)} / {message.metadata?.pending ? t('chat.sending') : shortTime(message.createdAt)}{message.costUsd ? ` / $${message.costUsd}` : ''}</span>
           </article>)}
-          {replyingSessionId === sessionId && <article className="chat-bubble agent typing-bubble" aria-live="polite">
-            {partialReply && <div className="chat-partial-text"><Markdown text={partialReply} /></div>}
+          {reply?.pending && <article className="chat-bubble agent typing-bubble" aria-live="polite">
+            {reply.partial && <div className="chat-partial-text"><Markdown text={reply.partial} /></div>}
             <div className="typing-dots" aria-label={`${selectedAgent?.name ?? t('chat.agent')} ${t('chat.replying')}`}>
               <i /><i /><i />
             </div>
             <span>{selectedAgent?.name ?? t('chat.agent')} {t('chat.replying')}</span>
           </article>}
-          {!messages.length && replyingSessionId !== sessionId && selectedAgent?.isActive !== false && <div className="chat-empty-state">
+          {!messages.length && !reply?.pending && selectedAgent?.isActive !== false && <div className="chat-empty-state">
             <MessageSquare size={24} />
             <b>{selectedAgent ? selectedAgent.name : t('chat.title')}</b>
             <span>{selectedSession ? selectedSession.title : t('chat.newSession')}</span>
@@ -483,7 +522,7 @@ export function ChatPage() {
               void sendMessage();
             }
           }} placeholder={t('chat.messagePlaceholder')} aria-label={t('chat.messagePlaceholder')} disabled={!selectedAgent || selectedAgent.isActive === false} />
-          <button className="btn btn-primary icon-btn" aria-label={t('chat.send')} onClick={() => void sendMessage()} disabled={sending || !draft.trim() || !agentId || selectedAgent?.isActive === false}>
+          <button className="btn btn-primary icon-btn" aria-label={t('chat.send')} onClick={() => void sendMessage()} disabled={sending || creating || !draft.trim() || !selectedAgent || selectedAgent.isActive === false}>
             {sending ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
           </button>
         </footer>

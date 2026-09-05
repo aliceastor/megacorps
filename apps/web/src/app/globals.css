@@ -5833,10 +5833,10 @@ button.agent-node-card {
   .company-o-card { width: 220px; border-radius: 8px; }
   .company-o-children { gap: 12px; }
   .company-o-children::before { left: 110px; right: 110px; }
-  .chat-thread-head { align-items: flex-start; flex-direction: column; }
+  .chat-thread-head { align-items: center; flex-wrap: wrap; gap: 8px; }
+  .chat-thread-head .compact-card { flex: 1 1 180px; }
   .chat-bubble { max-width: 94%; }
-  .chat-composer { grid-template-columns: 1fr; }
-  .chat-composer .icon-btn { width: 100%; }
+  .chat-composer { grid-template-columns: minmax(0, 1fr) auto; }
   .agent-children:not(.org-children) {
     margin-left: 10px !important;
     padding-left: 10px !important;

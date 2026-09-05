@@ -4,6 +4,7 @@ import { writeFileSync } from 'node:fs';
 const companies = [
   { id: 'company-acme', name: 'Acme Research Collective With A Long Name', slug: 'acme' },
   { id: 'company-globex', name: 'Globex', slug: 'globex' },
+  { id: 'company-empty', name: 'Empty company', slug: 'empty' },
 ];
 
 const projects = [
@@ -39,10 +40,14 @@ async function fulfillJson(route: Route, json: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(json) });
 }
 
-async function mockChat(page: Page, options: { failFirstSend?: boolean; sendDelayMs?: number; sessionDelayMs?: number; locale?: 'en' | 'zh-TW' | 'ja' } = {}) {
+async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirstCreate?: boolean; busyAgents?: string[]; holdAgentSessions?: string; sendDelayMs?: number; sessionDelayMs?: number; locale?: 'en' | 'zh-TW' | 'ja' } = {}) {
+  let releaseSessions!: () => void;
+  const sessionsGate = new Promise<void>((resolve) => { releaseSessions = resolve; });
   const messageStore = Object.fromEntries(Object.entries(messages).map(([sessionId, rows]) => [sessionId, rows.map((row) => ({ ...row }))])) as typeof messages;
   const sessionStore = sessions.map((session) => ({ ...session }));
   const state = {
+    releaseSessions,
+    heldSessionGets: 0,
     sendAttempts: 0,
     sentBodies: [] as string[],
     messagePostSessionIds: [] as string[],
@@ -63,11 +68,12 @@ async function mockChat(page: Page, options: { failFirstSend?: boolean; sendDela
     if (path === '/api/notifications') return fulfillJson(route, { notifications: [], unreadCount: 0 });
     if (path === '/api/companies') return fulfillJson(route, companies);
     if (path === '/api/projects') return fulfillJson(route, projects);
-    if (path === '/api/agents') return fulfillJson(route, agents);
+    if (path === '/api/agents') return fulfillJson(route, agents.map((agent) => ({ ...agent, isBusy: options.busyAgents?.includes(agent.id) ?? agent.isBusy })));
     if (path === '/api/chat/sessions' && request.method() === 'GET') {
       const companyId = url.searchParams.get('companyId');
       const agentId = url.searchParams.get('agentId');
       const projectId = url.searchParams.get('projectId');
+      if (agentId === options.holdAgentSessions) { state.heldSessionGets += 1; await sessionsGate; }
       return fulfillJson(route, sessionStore.filter((session) => session.companyId === companyId
         && session.agentId === agentId
         && (!projectId || (projectId === 'none' ? session.projectId === null : session.projectId === projectId))));
@@ -76,6 +82,7 @@ async function mockChat(page: Page, options: { failFirstSend?: boolean; sendDela
       const body = request.postDataJSON() as Record<string, unknown>;
       state.sessionCreates.push(body);
       if (options.sessionDelayMs) await new Promise((resolve) => setTimeout(resolve, options.sessionDelayMs));
+      if (options.failFirstCreate && state.sessionCreates.length === 1) return fulfillJson(route, { message: 'Synthetic session creation failure' }, 503);
       const session = { id: `created-session-${state.sessionCreates.length}`, status: 'active', createdAt: '2026-09-05T12:04:00.000Z', updatedAt: '2026-09-05T12:04:00.000Z', ...body } as typeof sessions[number];
       sessionStore.unshift(session);
       messageStore[session.id] = [];
@@ -360,6 +367,178 @@ async function setSidebar(page: Page, open: boolean) {
   }, { intervals: [100], message: 'sidebar and chat geometry must settle after each transition' }).toBeGreaterThanOrEqual(3);
 }
 
+test('scoped GET loading removes old session click and send targets', async ({ page }) => {
+  await page.setViewportSize({ width: 1158, height: 844 });
+  const state = await mockChat(page, { holdAgentSessions: 'agent-grace' });
+  await page.goto('/chat');
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  await page.getByPlaceholder('Message').fill('Ada private draft');
+  await page.getByLabel('Agent', { exact: true }).selectOption('agent-grace');
+  await expect.poll(() => state.heldSessionGets).toBe(1);
+  const oldSession = page.locator('.session-rail').getByRole('button', { name: /Orbit incident analysis/ });
+  const oldClickable = await oldSession.isVisible();
+  if (oldClickable) {
+    await oldSession.click();
+    await page.getByPlaceholder('Message').fill('Grace loading-window payload');
+    await page.getByRole('button', { name: 'Send message' }).click();
+    await expect.poll(() => state.sendAttempts).toBe(1);
+  }
+  expect.soft(oldClickable, 'old-scope button must not be reachable during delayed GET').toBe(false);
+  expect.soft(state.messagePostSessionIds, 'no request may target Ada while Grace is selected').toEqual([]);
+  await expect.soft(page.getByText('The orbital diagnostics are ready.')).toBeHidden();
+  await expect.soft(page.getByPlaceholder('Message')).toHaveValue('');
+  // Exercise a send during the held GET even after the stale button is removed.
+  await page.getByPlaceholder('Message').fill('Grace loading-window payload');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByText('Reply to: Grace loading-window payload')).toBeVisible();
+  expect(state.sessionCreates).toEqual([{ companyId: 'company-acme', agentId: 'agent-grace', projectId: null, title: 'Chat with Grace Hopper' }]);
+  expect(state.messagePostSessionIds).toEqual(['created-session-1']);
+  state.releaseSessions();
+  await page.locator('.session-rail').getByRole('button', { name: /Compiler migration/ }).click();
+  await page.getByPlaceholder('Message').fill('Grace confirmed payload');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByText('Reply to: Grace confirmed payload')).toBeVisible();
+  expect(state.messagePostSessionIds).toEqual(['created-session-1', 'session-grace']);
+  expect(state.sentBodies).toEqual(['Grace loading-window payload', 'Grace confirmed payload']);
+  await page.getByLabel('Agent', { exact: true }).selectOption('agent-ada');
+  await expect(page.getByPlaceholder('Message')).toHaveValue('Ada private draft');
+});
+
+test('agentless company cannot retain old session history or draft', async ({ page }) => {
+  await openChat(page);
+  await page.getByPlaceholder('Message').fill('Ada private draft');
+  await page.getByLabel('Company', { exact: true }).selectOption('company-empty');
+  const oldSession = page.locator('.session-rail').getByRole('button', { name: /Orbit incident analysis/ });
+  if (await oldSession.isVisible()) await oldSession.click();
+  await expect.soft(oldSession).toBeHidden();
+  await expect.soft(page.getByText('The orbital diagnostics are ready.')).toBeHidden();
+  await expect.soft(page.getByPlaceholder('Message')).toHaveValue('');
+  await expect(page.getByPlaceholder('Message')).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Send message' })).toBeDisabled();
+});
+
+test('stream partials and completion remain owned by their session while another agent is busy', async ({ page }) => {
+  await page.setViewportSize({ width: 1158, height: 844 });
+  const state = await mockChat(page, { busyAgents: ['agent-ada', 'agent-grace'] });
+  await page.goto('/chat');
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  await page.evaluate(() => {
+    for (const detail of [
+      { type: 'chat.reply.started', sessionId: 'session-ada-orbit' },
+      { type: 'chat.reply.partial', sessionId: 'session-ada-orbit', data: { text: 'Ada secret partial' } },
+    ]) window.dispatchEvent(new CustomEvent('megacorps-live', { detail }));
+  });
+  await expect(page.locator('.typing-bubble')).toContainText('Ada secret partial');
+  await page.getByLabel('Agent', { exact: true }).selectOption('agent-grace');
+  await expect(page.locator('.chat-thread-head')).toContainText('Compiler migration');
+  await expect(page.locator('.typing-bubble')).toBeVisible();
+  await expect.soft(page.getByText('Ada secret partial')).toBeHidden();
+  state.appendMessage('session-ada-orbit', { id: 'ada-stream-completed', sessionId: 'session-ada-orbit', companyId: 'company-acme', agentId: 'agent-ada', authorType: 'agent', body: 'Ada completed response' });
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('megacorps-live', { detail: { type: 'chat.reply.partial', sessionId: 'session-ada-orbit', data: { text: 'Ada background partial' } } }));
+    window.dispatchEvent(new CustomEvent('megacorps-live', { detail: { type: 'chat.reply.finished', sessionId: 'session-ada-orbit' } }));
+  });
+  await expect(page.locator('.typing-bubble')).toBeVisible();
+  await expect(page.getByText('Ada completed response')).toBeHidden();
+  await page.getByLabel('Agent', { exact: true }).selectOption('agent-ada');
+  await expect(page.getByText('Ada completed response')).toBeVisible();
+  await expect(page.locator('.typing-bubble')).toBeHidden();
+  await expect(page.getByText('Ada secret partial')).toBeHidden();
+  await expect(page.getByText('Ada background partial')).toBeHidden();
+  await page.getByLabel('Agent', { exact: true }).selectOption('agent-grace');
+  await expect(page.locator('.typing-bubble')).toBeVisible();
+});
+
+test('explicit New session failure retains selection and draft with scoped retry and no duplicates', async ({ page }) => {
+  await page.setViewportSize({ width: 1158, height: 844 });
+  const state = await mockChat(page, { failFirstCreate: true, sessionDelayMs: 400 });
+  await page.goto('/chat');
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  await page.getByPlaceholder('Message').fill('Keep original session draft');
+  const create = page.getByRole('button', { name: 'New session' });
+  await create.click();
+  await expect.soft(create).toBeDisabled();
+  await expect(page.locator('.chat-error-row[role=alert]')).toContainText('Synthetic session creation failure');
+  await expect(page.locator('.chat-thread-head')).toContainText('Orbit incident analysis');
+  await expect(page.getByPlaceholder('Message')).toHaveValue('Keep original session draft');
+  await page.getByLabel('Agent', { exact: true }).selectOption('agent-grace');
+  await expect(page.locator('.chat-error-row[role=alert]')).toBeHidden();
+  await page.getByLabel('Agent', { exact: true }).selectOption('agent-ada');
+  await expect(page.locator('.chat-error-row[role=alert]')).toContainText('Synthetic session creation failure');
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(create).toBeDisabled();
+  await expect(page.locator('.chat-thread-head')).toContainText('Chat with Ada Lovelace');
+  expect(state.sessionCreates).toHaveLength(2);
+  expect(state.sessionCreates[1]).toEqual(state.sessionCreates[0]);
+  expect(state.sendAttempts).toBe(0);
+  await expect(page.locator('.chat-error-row[role=alert]')).toBeHidden();
+  await page.locator('.session-rail').getByRole('button', { name: /Orbit incident analysis/ }).click();
+  await expect(page.getByPlaceholder('Message')).toHaveValue('Keep original session draft');
+});
+
+test('null-project session header identifies No project under All projects filter', async ({ page }) => {
+  await openChat(page);
+  await page.locator('.session-rail').getByRole('button', { name: /General architecture notes/ }).click();
+  await expect(page.getByLabel('Project', { exact: true })).toHaveValue('all');
+  await expect(page.locator('.chat-thread-head')).toContainText('No project');
+  await expect(page.locator('.chat-thread-head')).not.toContainText('All projects');
+});
+
+test('narrow viewport height changes retain usable history composer focus and session navigation', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await mockChat(page);
+  await page.goto('/chat');
+  const rail = page.locator('.session-rail');
+  const composer = page.getByPlaceholder('Message');
+  const samples: unknown[] = [];
+  for (const sidebarOpen of [false, true]) {
+    await setSidebar(page, sidebarOpen);
+    for (const height of [844, 520, 844]) {
+      await expect(rail).toBeVisible();
+      await rail.getByRole('button', { name: /Orbit incident analysis/ }).focus();
+      await page.keyboard.press('Enter');
+      await expect(rail).toBeHidden();
+      await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+      await composer.focus();
+      await composer.fill('Mobile composition');
+      await composer.press('Shift+Enter');
+      await expect(composer).toHaveValue('Mobile composition\n');
+      await composer.dispatchEvent('compositionstart');
+      await composer.dispatchEvent('keydown', { key: 'Enter', code: 'Enter', isComposing: true, bubbles: true });
+      await composer.dispatchEvent('compositionend', { data: '文' });
+      expect(state.sendAttempts).toBe(0);
+      await page.setViewportSize({ width: 390, height });
+      await setSidebar(page, sidebarOpen);
+      await expect(composer).toBeFocused();
+      await page.locator('.chat-composer').scrollIntoViewIfNeeded();
+      await setSidebar(page, sidebarOpen);
+      const sample = await page.evaluate(() => {
+        const box = (selector: string) => {
+          const rect = document.querySelector(selector)!.getBoundingClientRect();
+          return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, width: rect.width, height: rect.height };
+        };
+        return { viewportHeight: innerHeight, scrollY, documentWidth: document.documentElement.scrollWidth, history: box('.chat-messages'), composer: box('.chat-composer'), thread: box('.chat-thread'), sidebar: box('.sidebar'), main: box('main'), focused: document.activeElement?.getAttribute('aria-label') };
+      });
+      samples.push({ sidebarOpen, ...sample });
+      expect(sample.documentWidth).toBe(390);
+      expect(sample.history.height).toBeGreaterThanOrEqual(180);
+      expect(Math.min(sample.history.bottom, height) - Math.max(sample.history.top, 0)).toBeGreaterThanOrEqual(180);
+      expect(sample.composer.top).toBeGreaterThanOrEqual(0);
+      expect(sample.composer.bottom).toBeLessThanOrEqual(height);
+      expect(sample.main.top).toBeGreaterThanOrEqual(sample.sidebar.bottom - 1);
+      await composer.press('Tab');
+      await expect(page.getByRole('button', { name: 'Send message' })).toBeFocused();
+      await page.keyboard.press('Shift+Tab');
+      await expect(composer).toBeFocused();
+      await page.getByRole('button', { name: 'Sessions', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      await expect(rail).toBeVisible();
+      await expect(page.locator('.chat-thread')).toBeHidden();
+    }
+  }
+  writeFileSync(testInfo.outputPath('chat-mobile-height-focus-geometry.json'), JSON.stringify(samples, null, 2));
+});
+
 for (const width of [320, 390, 768, 900, 1158, 1440]) {
   test(`chat controls and reachable composer fit ${width}px in both sidebar states`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 844 });
@@ -377,17 +556,17 @@ for (const width of [320, 390, 768, 900, 1158, 1440]) {
     for (const sidebarOpen of [false, true]) {
       await setSidebar(page, sidebarOpen);
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      const controls = await page.locator('.chat-scope-controls select, .chat-thread button, .chat-composer textarea, .chat-composer button').evaluateAll((nodes) => nodes.filter((node) => (node as HTMLElement).checkVisibility()).map((node) => {
-        const box = node.getBoundingClientRect();
-        return { label: node.getAttribute('aria-label'), left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
-      }));
-      expect(controls.every((box) => box.left >= -1 && box.right <= width + 1)).toBe(true);
       const composer = page.locator('.chat-composer');
       await composer.scrollIntoViewIfNeeded();
       await expect.poll(async () => {
         const box = await composer.boundingBox();
         return box ? box.y + box.height : 9999;
       }).toBeLessThanOrEqual(844);
+      const controls = await page.locator('.chat-scope-controls select, .chat-thread button, .chat-composer textarea, .chat-composer button').evaluateAll((nodes) => nodes.filter((node) => (node as HTMLElement).checkVisibility()).map((node) => {
+        const box = node.getBoundingClientRect();
+        return { label: node.getAttribute('aria-label'), left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
+      }));
+      expect(controls.every((box) => box.left >= -1 && box.right <= width + 1)).toBe(true);
       if (width <= 900) {
         const sidebar = (await page.locator('.sidebar').boundingBox())!;
         const main = (await page.getByRole('main').boundingBox())!;
