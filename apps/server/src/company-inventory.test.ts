@@ -34,3 +34,16 @@ test('empty-company housekeeping is reported without blocking and cycles termina
   assert.equal(inventory.positions?.count, 1);
   assert.deepEqual(deletionBlockers(inventory), {});
 });
+
+test('catalog retains FK link tables identified by composite primary keys', async () => {
+  const { companyInventoryCatalog } = await import('./company-inventory.ts');
+  const tables: Record<string,string[]> = {companies:['id'],kanban_cards:['id','company_id'],card_dependencies:['card_id','depends_on_card_id'],agents:['id','company_id'],tool_registry:['id','company_id'],agent_tool_bindings:['agent_id','tool_id'],card_tool_bindings:['card_id','tool_id'],notifications:['id','company_id'],notification_recipients:['notification_id','user_id']};
+  const relations=[['kanban_cards','company_id','companies'],['agents','company_id','companies'],['tool_registry','company_id','companies'],['notifications','company_id','companies'],['card_dependencies','card_id','kanban_cards'],['card_dependencies','depends_on_card_id','kanban_cards'],['agent_tool_bindings','agent_id','agents'],['agent_tool_bindings','tool_id','tool_registry'],['card_tool_bindings','card_id','kanban_cards'],['card_tool_bindings','tool_id','tool_registry'],['notification_recipients','notification_id','notifications']];
+  const catalog=await companyInventoryCatalog({unsafe:async query=>{
+    if(query.includes('pg_constraint'))return relations.map(([table_name,column_name,target_name])=>({table_name,column_name,target_name,target_column:'id',key_count:1}));
+    if(query.includes('pg_index'))return Object.entries(tables).flatMap(([table_name,columns])=>(columns.includes('id')?['id']:columns).map(column_name=>({table_name,column_name})));
+    if(query.includes('pg_class'))return Object.entries(tables).flatMap(([table_name,columns])=>columns.map(column_name=>({table_name,column_name})));
+    return [{name:'test_schema'}];
+  }});
+  for(const table of ['card_dependencies','agent_tool_bindings','card_tool_bindings','notification_recipients'])assert.ok(catalog.tables.includes(table),table);
+});

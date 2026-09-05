@@ -55,6 +55,14 @@ test('PostgreSQL companyless bootstrap, audit, complete inventory and deletion t
     const preview = await call('GET',`/api/companies/${company.id}/deletion-preview`); assert.equal(preview.statusCode,200,preview.body); assert.equal(preview.json().blocking.projects,1);
     assert.equal((await call('DELETE',`/api/companies/${company.id}`)).statusCode,409);
     await sql`DELETE FROM projects WHERE id=${project!.id}`;
+    const [one] = await sql`INSERT INTO kanban_cards(company_id,title,body) VALUES(${company.id},'One','Test composite links') RETURNING id`;
+    const [two] = await sql`INSERT INTO kanban_cards(company_id,title,body) VALUES(${company.id},'Two','Test composite links') RETURNING id`;
+    await sql`INSERT INTO card_dependencies(card_id,depends_on_card_id) VALUES(${one!.id},${two!.id})`;
+    const composite = await call('GET',`/api/companies/${company.id}/deletion-preview`);
+    assert.equal(composite.statusCode,200,composite.body);assert.equal(composite.json().blocking.card_dependencies,1);
+    assert.equal((await call('DELETE',`/api/companies/${company.id}`)).statusCode,409);
+    await sql`DELETE FROM card_dependencies WHERE card_id=${one!.id}`;
+    await sql`DELETE FROM kanban_cards WHERE company_id=${company.id}`;
     // An additional actual FK is discovered without changing application table lists.
     await sql.unsafe('CREATE TABLE task4_future_rows (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), company_id UUID REFERENCES companies(id))');
     await sql`INSERT INTO task4_future_rows(company_id) VALUES(${company.id})`;
