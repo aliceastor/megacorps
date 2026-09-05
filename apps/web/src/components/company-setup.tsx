@@ -53,6 +53,17 @@ const initial = {
   runtimeCreateKey: '',
 };
 type Fields = typeof initial;
+function reconcileAgentSelections(fields: Fields, state: Setup | null, liveAgents: Agent[]): Fields {
+  if (!state) return fields;
+  const liveIds = new Set(liveAgents.filter(agent => agent.companyId === state.company.id).map(agent => agent.id));
+  const selection = (cachedId: string, persisted: Agent | null) =>
+    liveIds.has(cachedId) ? cachedId : persisted && liveIds.has(persisted.id) ? persisted.id : '';
+  return {
+    ...fields,
+    bossAgentId: selection(fields.bossAgentId, state.boss),
+    headAgentId: selection(fields.headAgentId, state.head),
+  };
+}
 const slugify = (value: string) =>
   value
     .toLowerCase()
@@ -96,7 +107,10 @@ export function CompanySetup({
           cached = JSON.parse(localStorage.getItem(storageKey) ?? '{}');
         } catch {}
         setupKey.current = cached.setupKey || crypto.randomUUID();
-        const data = initialCompanyId ? await api<Setup>(`/api/companies/${initialCompanyId}/setup`) : null;
+        const [data, liveAgents] = await Promise.all([
+          initialCompanyId ? api<Setup>(`/api/companies/${initialCompanyId}/setup`) : Promise.resolve(null),
+          agents.refetch({ throwOnError: true }),
+        ]);
         if (cancelled) return;
         setServer(data);
         const persisted: Partial<Fields> = data
@@ -118,7 +132,7 @@ export function CompanySetup({
               runtimeId: data.draft.runtimeId ?? data.head?.runtimeId ?? '',
             }
           : {};
-        setFields({ ...initial, ...persisted, ...cached.fields, runtimeCreateKey: cached.fields?.runtimeCreateKey || crypto.randomUUID() });
+        setFields(reconcileAgentSelections({ ...initial, ...persisted, ...cached.fields, runtimeCreateKey: cached.fields?.runtimeCreateKey || crypto.randomUUID() }, data, liveAgents.data ?? []));
         setStep(cached.step ?? Math.max(0, steps.indexOf(data?.draft.stage as (typeof steps)[number])));
         setLoaded(true);
       } catch (err) {
@@ -152,8 +166,12 @@ export function CompanySetup({
     }));
   }
   async function reload(id = companyId) {
-    const data = await api<Setup>(`/api/companies/${id}/setup`);
+    const [data, liveAgents] = await Promise.all([
+      api<Setup>(`/api/companies/${id}/setup`),
+      agents.refetch({ throwOnError: true }),
+    ]);
     setServer(data);
+    setFields(current => reconcileAgentSelections(current, data, liveAgents.data ?? []));
     await runtimes.refetch();
     return data;
   }
@@ -380,7 +398,7 @@ export function CompanySetup({
                   {field('bossName', 'setup.bossName', 'bossSlug')}
                   {field('bossSlug', 'setup.bossSlug')}
                 </div>
-                {!server?.boss && members.length > 0 && (
+                {!server?.boss && (
                   <label className="field-label">
                     {t('setup.chooseAgent')}
                     <select
@@ -425,7 +443,7 @@ export function CompanySetup({
                   {field('headName', 'setup.headName', 'headSlug')}
                   {field('headSlug', 'setup.headSlug')}
                 </div>
-                {!server?.head && members.filter((a) => a.id !== server?.boss?.id).length > 0 && (
+                {!server?.head && (
                   <label className="field-label">
                     {t('setup.chooseAgent')}
                     <select

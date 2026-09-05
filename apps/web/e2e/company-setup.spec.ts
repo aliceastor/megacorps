@@ -12,6 +12,8 @@ async function mockSetup(page: Page, width: number) {
     creates: 0,
     bossCreates: 0,
     headCreates: 0,
+    extraAgents: [],
+    deletedAgentIds: [],
   };
   let rejectDepartment = true;
   await page.route('**/api/proxy/**', async (route) => {
@@ -41,7 +43,10 @@ async function mockSetup(page: Page, width: number) {
       };
     } else if (path === '/api/companies/company/setup') {
       if (req.method() === 'PUT') {
-        if (body.step === 'department' && rejectDepartment && !state.prefilled) {
+        if (['boss', 'head'].includes(body.step) && body.agentId && ![state.boss, state.head, ...state.extraAgents].filter(Boolean).some((a: any) => a.id === body.agentId)) {
+          status = 400;
+          json = { error: 'agent_company_mismatch' };
+        } else if (body.step === 'department' && rejectDepartment && !state.prefilled) {
           rejectDepartment = false;
           status = 409;
           json = {
@@ -51,7 +56,7 @@ async function mockSetup(page: Page, width: number) {
         } else {
           if (body.step === 'boss') {
             if (!state.boss) state.bossCreates++;
-            state.boss = { ...state.boss, id: 'boss', ...body };
+            state.boss = { ...state.boss, id: state.boss?.id ?? (state.deletedAgentIds.includes('boss') ? 'replacement-boss' : 'boss'), companyId: 'company', ...body };
             state.company.setupDraft.stage = 'department';
           }
           if (body.step === 'department') {
@@ -60,8 +65,8 @@ async function mockSetup(page: Page, width: number) {
           }
           if (body.step === 'head') {
             if (!state.head) state.headCreates++;
-            state.head = { ...state.head, id: 'head', departmentId: 'department', ...body };
-            state.department.headAgentId = 'head';
+            state.head = { ...state.head, id: state.head?.id ?? (state.deletedAgentIds.includes('head') ? 'replacement-head' : 'head'), companyId: 'company', departmentId: 'department', ...body };
+            state.department.headAgentId = state.head.id;
             state.company.setupDraft.stage = 'runtime';
           }
           if (body.step === 'runtime') {
@@ -106,7 +111,14 @@ async function mockSetup(page: Page, width: number) {
           status: !state.company.setupDraft.completed ? 'draft' : !state.checks ? 'needs_attention' : state.company.autoDispatchEnabled ? 'ready' : 'dispatch_disabled',
         };
     } else if (path === '/api/companies') json = state.company ? [state.company] : [];
-    else if (path === '/api/agents') json = [state.boss, state.head].filter(Boolean);
+    else if (path === '/api/agents') json = [state.boss, state.head, ...state.extraAgents].filter(Boolean);
+    else if (path.startsWith('/api/agents/') && req.method() === 'DELETE') {
+      const id = path.split('/').at(-1);
+      state.deletedAgentIds.push(id);
+      for (const role of ['boss', 'head']) if (state[role]?.id === id) state[role] = null;
+      state.checks = false;
+      json = { ok: true };
+    }
     else if (path === '/api/departments') json = state.department ? [state.department] : [];
     else if (path === '/api/agent-runtimes') json = state.runtimes;
     else if (path.startsWith('/api/agent-runtimes/') && req.method() === 'PUT') {
@@ -131,13 +143,77 @@ async function savedSetup(page: Page, adapterType = 'a2a', completed = false) {
   const state = await mockSetup(page, 1158);
   state.prefilled = true;
   state.company = { id: 'company', name: 'Saved studio', slug: 'saved', autoDispatchEnabled: completed, setupDraft: { stage: 'runtime', completed, runtimeId: 'shared' } };
-  state.boss = { id: 'boss', name: 'Boss', slug: 'boss', runtimeId: 'shared', adapterType };
-  state.head = { id: 'head', name: 'Head', slug: 'head', departmentId: 'department', runtimeId: 'shared', adapterType };
+  state.boss = { id: 'boss', companyId: 'company', name: 'Boss', slug: 'boss', runtimeId: 'shared', adapterType };
+  state.head = { id: 'head', companyId: 'company', name: 'Head', slug: 'head', departmentId: 'department', runtimeId: 'shared', adapterType };
   state.department = { id: 'department', name: 'Team', slug: 'team', headAgentId: 'head' };
   state.runtimes = [{ id: 'shared', name: 'Shared runtime', companyId: 'company', adapterType, config: { a2aBaseUrl: 'https://shared.example.test', preserve: 'synthetic' } }];
   await page.goto('/companies?setup=company');
   return state;
 }
+
+for (const role of ['head', 'boss']) test(`cached deleted ${role} can be replaced without losing draft text or duplicating agents`, async ({ page }, testInfo) => {
+  const state = await savedSetup(page);
+  await page.getByRole('button', { name: 'Check connection (no task execution)', exact: true }).click();
+  await page.getByRole('button', { name: 'Finish and enable dispatch', exact: true }).click();
+  await expect(page.getByText('Setup complete. Automatic dispatch is enabled.', { exact: true })).toBeVisible();
+  await page.reload();
+  const cached = () => page.evaluate(() => JSON.parse(localStorage.getItem('megacorps.company-setup.operator.company') ?? '{}'));
+  await expect.poll(async () => (await cached()).fields?.[`${role}AgentId`]).toBe(role);
+  const runtimeCreateKey = (await cached()).fields.runtimeCreateKey;
+  await page.evaluate(id => fetch(`/api/proxy/api/agents/${id}`, { method: 'DELETE' }).then(r => r.json()), role);
+  await page.reload();
+  await page.getByRole('button', { name: 'Reopen setup and pause dispatch', exact: true }).click();
+  const next = () => page.getByRole('button', { name: 'Save and continue', exact: true }).click();
+  await next();
+  if (role === 'head') {
+    await next();
+    await page.getByRole('textbox', { name: 'Department charter', exact: true }).fill('Unsaved repair charter');
+    await page.reload();
+    await expect(page.getByRole('textbox', { name: 'Department charter', exact: true })).toHaveValue('Unsaved repair charter');
+    await next();
+  }
+  const name = role === 'head' ? 'Department head name' : 'Boss name';
+  await page.getByLabel(name, { exact: true }).fill('Replacement agent');
+  await page.getByText('Optional role customization', { exact: true }).click();
+  const prompt = page.locator('.company-setup details textarea');
+  await prompt.fill('Unsaved repair prompt');
+  await page.reload();
+  await expect(page.getByLabel(name, { exact: true })).toHaveValue('Replacement agent');
+  await page.getByText('Optional role customization', { exact: true }).click();
+  await expect(prompt).toHaveValue('Unsaved repair prompt');
+  const selection = page.getByRole('combobox', { name: 'Choose an existing agent', exact: true });
+  await expect(selection).toHaveValue('');
+  await expect(selection.locator('option').first()).toHaveText('Create a new agent');
+  await page.screenshot({ path: testInfo.outputPath(`replace-deleted-${role}.png`), fullPage: true });
+  const sent = page.waitForRequest(r => r.method() === 'PUT' && r.url().endsWith('/setup'));
+  await page.getByRole('button', { name: 'Save draft', exact: true }).click();
+  expect((await sent).postDataJSON().agentId).toBeUndefined();
+  await expect.poll(() => state[role]?.id).toBe(`replacement-${role}`);
+  await page.reload();
+  await page.getByRole('button', { name: 'Save draft', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Save draft', exact: true })).toBeEnabled();
+  expect(state[`${role}Creates`]).toBe(1);
+  expect(state[role === 'head' ? 'boss' : 'head'].id).toBe(role === 'head' ? 'boss' : 'head');
+  expect(state.department.id).toBe('department');
+  expect(state.company.id).toBe('company');
+  expect((await cached()).fields.runtimeCreateKey).toBe(runtimeCreateKey);
+  expect((await cached()).fields[`${role}AgentId`]).toBe(`replacement-${role}`);
+});
+
+test('a live dirty agent choice survives refresh while its text remains unsaved', async ({ page }) => {
+  const state = await savedSetup(page);
+  await expect(page.getByRole('button', { name: 'Save runtime', exact: true })).toBeVisible();
+  state.head = null;
+  state.extraAgents = [{ id: 'employee', companyId: 'company', name: 'Employee', slug: 'employee' }];
+  await page.reload();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  const selection = page.getByRole('combobox', { name: 'Choose an existing agent', exact: true });
+  await selection.selectOption('employee');
+  await page.getByLabel('Department head name', { exact: true }).fill('Unsaved employee name');
+  await page.reload();
+  await expect(selection).toHaveValue('employee');
+  await expect(page.getByLabel('Department head name', { exact: true })).toHaveValue('Unsaved employee name');
+});
 
 for (const mode of ['a2a', 'codex-app-server']) test(`Add A2A after ${mode} uses a persisted creation key`, async ({ page }) => {
   const state = await savedSetup(page, mode);
