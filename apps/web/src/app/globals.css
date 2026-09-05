@@ -5396,6 +5396,28 @@ button.agent-node-card {
   gap: 8px;
 }
 
+.prompt-log-row > .btn,
+.list-row > .btn {
+  justify-self: start;
+}
+
+.log-detail {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.logs-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .prompt-log-head {
   display: flex;
   justify-content: space-between;

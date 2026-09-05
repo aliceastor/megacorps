@@ -7,7 +7,7 @@ import { sealDeliveryAcceptance } from './delivery-acceptance.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import bcrypt from 'bcryptjs';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { and, desc, eq, inArray, isNull, lte, ne, or, sql as drizzleSql } from 'drizzle-orm';
+import { and, desc, eq, ilike, inArray, isNull, lte, ne, or, sql as drizzleSql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { acceptInviteSchema, updateBudgetPolicySchema, updateCompanySchema, updatePositionSchema, updateAgentRuntimeSchema, updateProjectSchema, updateKnowledgeDocSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createPositionSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateAgentSchema, updateCardSchema, updateCompanyMembershipSchema, updateDepartmentSchema, validateCardTransition } from '@megacorps/shared';
@@ -46,6 +46,7 @@ import { CEO_POSITION_PROMPT, POSITION_TEMPLATES } from './role-playbooks.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
 import { publishLiveEvent } from './live.ts';
 import { resetAdapterSessionsForAgent } from './adapter-sessions.ts';
+import { encodeLogCursor, LogQueryError, parseLogListQuery, type LogCursor } from './log-query.ts';
 import { getCardActions, recordCardAction, recordStageAction } from './card-actions.ts';
 import { hydrateCardDependencyState, setCardDependencies } from './card-dependencies.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
@@ -466,6 +467,38 @@ async function ensureCompanyReferences(companyId: string, input: CompanyReferenc
   }
 }
 
+type LogListQuery = ReturnType<typeof parseLogListQuery>;
+
+function parsedLogQuery(request: FastifyRequest, reply: FastifyReply, legacyDefault: number): LogListQuery | null {
+  try {
+    return parseLogListQuery(request.query as Record<string, string | undefined>, legacyDefault);
+  } catch (error) {
+    if (error instanceof LogQueryError) {
+      reply.code(400).send({ error: error.code, message: error.code === 'invalid_limit' ? 'limit must be a positive integer within the endpoint bound.' : error.code === 'invalid_cursor' ? 'cursor is malformed or is only valid with view=summary.' : 'q must be at most 200 characters.' });
+      return null;
+    }
+    throw error;
+  }
+}
+
+function logCursorFilter(createdAt: unknown, id: unknown, cursor: LogCursor | null) {
+  if (!cursor) return undefined;
+  return drizzleSql`(${createdAt as any} < ${cursor.createdAt}::timestamptz OR (${createdAt as any} = ${cursor.createdAt}::timestamptz AND ${id as any} < ${cursor.id}::uuid))`;
+}
+
+function logSearchFilter(search: string | null, ...fields: unknown[]) {
+  if (!search) return undefined;
+  const pattern = `%${search}%`;
+  return or(...fields.map((field) => ilike(field as any, pattern)));
+}
+
+function summaryPage<T extends { id: string; createdAt?: Date | string | null; cursorCreatedAt?: string | null }, U>(rows: T[], limit: number, project: (row: T) => U) {
+  const pageRows = rows.slice(0, limit);
+  const last = pageRows.at(-1);
+  const rawTimestamp = last?.cursorCreatedAt ?? (last?.createdAt instanceof Date ? last.createdAt.toISOString() : last?.createdAt ?? null);
+  return { items: pageRows.map(project), nextCursor: rows.length > limit && last && rawTimestamp ? encodeLogCursor(rawTimestamp, last.id) : null };
+}
+
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/health', async (request, reply) => {
     try {
@@ -729,60 +762,121 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/system-logs', async (request, reply) => {
     const user = await requireAuth(request, reply); if (!user) return reply;
-    const query = request.query as { limit?: string };
-    const limit = Math.min(Math.max(Number(query.limit ?? 100), 1), 500);
-    return db.select().from(apiEvents).where(eq(apiEvents.userId, user.id)).orderBy(desc(apiEvents.createdAt)).limit(limit);
+    const query = parsedLogQuery(request, reply, 100); if (!query) return reply;
+    const filters = [eq(apiEvents.userId, user.id), logCursorFilter(apiEvents.createdAt, apiEvents.id, query.cursor), logSearchFilter(query.search, apiEvents.method, apiEvents.path, apiEvents.error)].filter(Boolean);
+    if (!query.summary) return db.select().from(apiEvents).where(and(...filters)).orderBy(desc(apiEvents.createdAt), desc(apiEvents.id)).limit(query.limit);
+    const rows = await db.select({ id: apiEvents.id, method: drizzleSql<string>`left(${apiEvents.method}, 32)`, path: drizzleSql<string>`left(${apiEvents.path}, 1000)`, statusCode: apiEvents.statusCode, error: drizzleSql<string | null>`left(${apiEvents.error}, 500)`, durationMs: apiEvents.durationMs, createdAt: apiEvents.createdAt, cursorCreatedAt: drizzleSql<string>`${apiEvents.createdAt}::text` }).from(apiEvents).where(and(...filters)).orderBy(desc(apiEvents.createdAt), desc(apiEvents.id)).limit(query.limit + 1);
+    return summaryPage(rows, query.limit, ({ cursorCreatedAt: _, ...row }) => row);
+  });
+  app.get('/api/system-logs/:id', async (request, reply) => {
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const [row] = await db.select().from(apiEvents).where(and(eq(apiEvents.id, (request.params as { id: string }).id), eq(apiEvents.userId, user.id))).limit(1);
+    return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
   app.get('/api/prompt-logs', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { companyId?: string; cardId?: string; agentId?: string; source?: string; limit?: string };
-    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
+    const raw = request.query as { companyId?: string; cardId?: string; agentId?: string; source?: string; surface?: string };
+    const query = parsedLogQuery(request, reply, 200); if (!query) return reply;
+    if (access.companyIds.length === 0 || (raw.companyId && !access.companyIds.includes(raw.companyId))) return query.summary ? { items: [], nextCursor: null } : [];
     const filters = [
-      query.companyId ? eq(promptLogs.companyId, query.companyId) : inArray(promptLogs.companyId, access.companyIds),
-      query.cardId ? eq(promptLogs.cardId, query.cardId) : undefined,
-      query.agentId ? eq(promptLogs.agentId, query.agentId) : undefined,
-      query.source ? eq(promptLogs.source, query.source) : undefined,
+      raw.companyId ? eq(promptLogs.companyId, raw.companyId) : inArray(promptLogs.companyId, access.companyIds),
+      raw.cardId ? eq(promptLogs.cardId, raw.cardId) : undefined,
+      raw.agentId ? eq(promptLogs.agentId, raw.agentId) : undefined,
+      raw.source ? eq(promptLogs.source, raw.source) : undefined,
+      raw.surface === 'chat' ? eq(promptLogs.source, 'chat') : raw.surface === 'kanban' ? inArray(promptLogs.source, ['dispatch', 'review', 'message', 'message_review']) : undefined,
+      logCursorFilter(promptLogs.createdAt, promptLogs.id, query.cursor),
+      logSearchFilter(query.search, promptLogs.title, promptLogs.source, promptLogs.adapterType, promptLogs.prompt, drizzleSql`${promptLogs.agentId}::text`, drizzleSql`${promptLogs.cardId}::text`, drizzleSql`${promptLogs.chatSessionId}::text`),
     ].filter(Boolean);
-    return db.select().from(promptLogs).where(filters.length ? and(...filters) : undefined).orderBy(desc(promptLogs.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+    if (!query.summary) return db.select().from(promptLogs).where(and(...filters)).orderBy(desc(promptLogs.createdAt), desc(promptLogs.id)).limit(query.limit);
+    const rows = await db.select({ id: promptLogs.id, companyId: promptLogs.companyId, agentId: promptLogs.agentId, cardId: promptLogs.cardId, projectId: promptLogs.projectId, goalId: promptLogs.goalId, heartbeatRunId: promptLogs.heartbeatRunId, taskRunId: promptLogs.taskRunId, chatSessionId: promptLogs.chatSessionId, source: promptLogs.source, adapterType: promptLogs.adapterType, title: drizzleSql<string>`left(${promptLogs.title}, 240)`, preview: drizzleSql<string>`left(${promptLogs.prompt}, 240)`, promptHash: promptLogs.promptHash, contextMode: drizzleSql<string | null>`${promptLogs.metadata}->>'contextMode'`, createdAt: promptLogs.createdAt, cursorCreatedAt: drizzleSql<string>`${promptLogs.createdAt}::text` }).from(promptLogs).where(and(...filters)).orderBy(desc(promptLogs.createdAt), desc(promptLogs.id)).limit(query.limit + 1);
+    return summaryPage(rows, query.limit, (row) => { const { cursorCreatedAt: _, metadata, prompt, ...item } = row as typeof row & { metadata?: Record<string, unknown>; prompt?: string }; return { ...item, contextMode: row.contextMode ?? (typeof metadata?.contextMode === 'string' ? metadata.contextMode : null), preview: row.preview ?? prompt?.slice(0, 240) ?? '' }; });
+  });
+  app.get('/api/prompt-logs/:id', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    if (access.companyIds.length === 0) return reply.code(404).send({ error: 'log_not_found' });
+    const [row] = await db.select().from(promptLogs).where(and(eq(promptLogs.id, (request.params as { id: string }).id), inArray(promptLogs.companyId, access.companyIds))).limit(1);
+    return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
   app.get('/api/admin/activity', async (request, reply) => {
     const user = await requireRole(request, reply, 'admin'); if (!user) return reply;
-    return db.select().from(activityLog).where(isNull(activityLog.companyId)).orderBy(desc(activityLog.createdAt)).limit(200);
+    const query = parsedLogQuery(request, reply, 200); if (!query) return reply;
+    const filters = [isNull(activityLog.companyId), logCursorFilter(activityLog.createdAt, activityLog.id, query.cursor), logSearchFilter(query.search, activityLog.action, activityLog.entityType, activityLog.entityId, activityLog.actorType, activityLog.actorId, drizzleSql`${activityLog.details}::text`)].filter(Boolean);
+    if (!query.summary) return db.select().from(activityLog).where(and(...filters)).orderBy(desc(activityLog.createdAt), desc(activityLog.id)).limit(query.limit);
+    const rows = await db.select({ id: activityLog.id, companyId: activityLog.companyId, actorType: drizzleSql<string>`left(${activityLog.actorType}, 80)`, actorId: drizzleSql<string>`left(${activityLog.actorId}, 500)`, agentId: activityLog.agentId, userId: activityLog.userId, action: drizzleSql<string>`left(${activityLog.action}, 240)`, entityType: drizzleSql<string>`left(${activityLog.entityType}, 120)`, entityId: drizzleSql<string>`left(${activityLog.entityId}, 500)`, createdAt: activityLog.createdAt, cursorCreatedAt: drizzleSql<string>`${activityLog.createdAt}::text` }).from(activityLog).where(and(...filters)).orderBy(desc(activityLog.createdAt), desc(activityLog.id)).limit(query.limit + 1);
+    return summaryPage(rows, query.limit, ({ cursorCreatedAt: _, ...row }) => row);
+  });
+  app.get('/api/admin/activity/:id', async (request, reply) => {
+    const user = await requireRole(request, reply, 'admin'); if (!user) return reply;
+    const [row] = await db.select().from(activityLog).where(and(eq(activityLog.id, (request.params as { id: string }).id), isNull(activityLog.companyId))).limit(1);
+    return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
   app.get('/api/activity', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { companyId?: string; entityType?: string; limit?: string };
-    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
+    const raw = request.query as { companyId?: string; entityType?: string };
+    const query = parsedLogQuery(request, reply, 200); if (!query) return reply;
+    if (access.companyIds.length === 0 || (raw.companyId && !access.companyIds.includes(raw.companyId))) return query.summary ? { items: [], nextCursor: null } : [];
     const filters = [
-      query.companyId ? eq(activityLog.companyId, query.companyId) : inArray(activityLog.companyId, access.companyIds),
-      query.entityType ? eq(activityLog.entityType, query.entityType) : undefined,
+      raw.companyId ? eq(activityLog.companyId, raw.companyId) : inArray(activityLog.companyId, access.companyIds),
+      raw.entityType ? eq(activityLog.entityType, raw.entityType) : undefined,
+      logCursorFilter(activityLog.createdAt, activityLog.id, query.cursor),
+      logSearchFilter(query.search, activityLog.action, activityLog.entityType, activityLog.entityId, activityLog.actorType, activityLog.actorId, drizzleSql`${activityLog.details}::text`),
     ].filter(Boolean);
-    return db.select().from(activityLog).where(filters.length ? and(...filters) : undefined).orderBy(desc(activityLog.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+    if (!query.summary) return db.select().from(activityLog).where(and(...filters)).orderBy(desc(activityLog.createdAt), desc(activityLog.id)).limit(query.limit);
+    const rows = await db.select({ id: activityLog.id, companyId: activityLog.companyId, actorType: drizzleSql<string>`left(${activityLog.actorType}, 80)`, actorId: drizzleSql<string>`left(${activityLog.actorId}, 500)`, agentId: activityLog.agentId, userId: activityLog.userId, action: drizzleSql<string>`left(${activityLog.action}, 240)`, entityType: drizzleSql<string>`left(${activityLog.entityType}, 120)`, entityId: drizzleSql<string>`left(${activityLog.entityId}, 500)`, createdAt: activityLog.createdAt, cursorCreatedAt: drizzleSql<string>`${activityLog.createdAt}::text` }).from(activityLog).where(and(...filters)).orderBy(desc(activityLog.createdAt), desc(activityLog.id)).limit(query.limit + 1);
+    return summaryPage(rows, query.limit, ({ cursorCreatedAt: _, ...row }) => row);
+  });
+  app.get('/api/activity/:id', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    if (access.companyIds.length === 0) return reply.code(404).send({ error: 'log_not_found' });
+    const [row] = await db.select().from(activityLog).where(and(eq(activityLog.id, (request.params as { id: string }).id), inArray(activityLog.companyId, access.companyIds))).limit(1);
+    return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
   app.get('/api/heartbeat-runs', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { companyId?: string; cardId?: string; agentId?: string; status?: string; limit?: string };
-    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
+    const raw = request.query as { companyId?: string; cardId?: string; agentId?: string; status?: string };
+    const query = parsedLogQuery(request, reply, 200); if (!query) return reply;
+    if (access.companyIds.length === 0 || (raw.companyId && !access.companyIds.includes(raw.companyId))) return query.summary ? { items: [], nextCursor: null } : [];
     const filters = [
-      query.companyId ? eq(heartbeatRuns.companyId, query.companyId) : inArray(heartbeatRuns.companyId, access.companyIds),
-      query.cardId ? eq(heartbeatRuns.cardId, query.cardId) : undefined,
-      query.agentId ? eq(heartbeatRuns.agentId, query.agentId) : undefined,
-      query.status ? eq(heartbeatRuns.status, query.status) : undefined,
+      raw.companyId ? eq(heartbeatRuns.companyId, raw.companyId) : inArray(heartbeatRuns.companyId, access.companyIds),
+      raw.cardId ? eq(heartbeatRuns.cardId, raw.cardId) : undefined,
+      raw.agentId ? eq(heartbeatRuns.agentId, raw.agentId) : undefined,
+      raw.status ? eq(heartbeatRuns.status, raw.status) : undefined,
+      logCursorFilter(heartbeatRuns.createdAt, heartbeatRuns.id, query.cursor),
+      logSearchFilter(query.search, heartbeatRuns.source, heartbeatRuns.status, heartbeatRuns.error, drizzleSql`${heartbeatRuns.cardId}::text`, drizzleSql`${heartbeatRuns.agentId}::text`),
     ].filter(Boolean);
-    return db.select().from(heartbeatRuns).where(filters.length ? and(...filters) : undefined).orderBy(desc(heartbeatRuns.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+    if (!query.summary) return db.select().from(heartbeatRuns).where(and(...filters)).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(query.limit);
+    const rows = await db.select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, cardId: heartbeatRuns.cardId, agentId: heartbeatRuns.agentId, source: heartbeatRuns.source, status: heartbeatRuns.status, startedAt: heartbeatRuns.startedAt, completedAt: heartbeatRuns.completedAt, durationSeconds: heartbeatRuns.durationSeconds, error: drizzleSql<string | null>`left(${heartbeatRuns.error}, 500)`, costUsd: heartbeatRuns.costUsd, inputTokens: heartbeatRuns.inputTokens, outputTokens: heartbeatRuns.outputTokens, createdAt: heartbeatRuns.createdAt, cursorCreatedAt: drizzleSql<string>`${heartbeatRuns.createdAt}::text` }).from(heartbeatRuns).where(and(...filters)).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(query.limit + 1);
+    return summaryPage(rows, query.limit, ({ cursorCreatedAt: _, ...row }) => row);
+  });
+  app.get('/api/heartbeat-runs/:id', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    if (access.companyIds.length === 0) return reply.code(404).send({ error: 'log_not_found' });
+    const [row] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, (request.params as { id: string }).id), inArray(heartbeatRuns.companyId, access.companyIds))).limit(1);
+    return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
   app.get('/api/task-runs', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { companyId?: string; cardId?: string; agentId?: string; kind?: string; status?: string; limit?: string };
-    if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
+    const raw = request.query as { companyId?: string; cardId?: string; agentId?: string; kind?: string; status?: string };
+    const query = parsedLogQuery(request, reply, 200); if (!query) return reply;
+    if (access.companyIds.length === 0 || (raw.companyId && !access.companyIds.includes(raw.companyId))) return query.summary ? { items: [], nextCursor: null } : [];
     const filters = [
-      query.companyId ? eq(taskRuns.companyId, query.companyId) : inArray(taskRuns.companyId, access.companyIds),
-      query.cardId ? eq(taskRuns.cardId, query.cardId) : undefined,
-      query.agentId ? eq(taskRuns.agentId, query.agentId) : undefined,
-      query.kind ? eq(taskRuns.kind, query.kind) : undefined,
-      query.status ? eq(taskRuns.status, query.status) : undefined,
+      raw.companyId ? eq(taskRuns.companyId, raw.companyId) : inArray(taskRuns.companyId, access.companyIds),
+      raw.cardId ? eq(taskRuns.cardId, raw.cardId) : undefined,
+      raw.agentId ? eq(taskRuns.agentId, raw.agentId) : undefined,
+      raw.kind ? eq(taskRuns.kind, raw.kind) : undefined,
+      raw.status ? eq(taskRuns.status, raw.status) : undefined,
+      logCursorFilter(taskRuns.createdAt, taskRuns.id, query.cursor),
+      logSearchFilter(query.search, taskRuns.kind, taskRuns.source, taskRuns.status, taskRuns.error, taskRuns.output, drizzleSql`${taskRuns.cardId}::text`, drizzleSql`${taskRuns.agentId}::text`),
     ].filter(Boolean);
-    return db.select().from(taskRuns).where(filters.length ? and(...filters) : undefined).orderBy(desc(taskRuns.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+    if (!query.summary) return db.select().from(taskRuns).where(and(...filters)).orderBy(desc(taskRuns.createdAt), desc(taskRuns.id)).limit(query.limit);
+    const rows = await db.select({ id: taskRuns.id, companyId: taskRuns.companyId, cardId: taskRuns.cardId, agentId: taskRuns.agentId, heartbeatRunId: taskRuns.heartbeatRunId, kind: taskRuns.kind, source: taskRuns.source, status: taskRuns.status, priority: taskRuns.priority, attemptNumber: taskRuns.attemptNumber, maxAttempts: taskRuns.maxAttempts, adapterSessionId: taskRuns.adapterSessionId, adapterTurnId: taskRuns.adapterTurnId, startedAt: taskRuns.startedAt, completedAt: taskRuns.completedAt, durationSeconds: taskRuns.durationSeconds, error: drizzleSql<string | null>`left(${taskRuns.error}, 500)`, preview: drizzleSql<string | null>`left(${taskRuns.output}, 240)`, costUsd: taskRuns.costUsd, createdAt: taskRuns.createdAt, updatedAt: taskRuns.updatedAt, cursorCreatedAt: drizzleSql<string>`${taskRuns.createdAt}::text` }).from(taskRuns).where(and(...filters)).orderBy(desc(taskRuns.createdAt), desc(taskRuns.id)).limit(query.limit + 1);
+    return summaryPage(rows, query.limit, ({ cursorCreatedAt: _, ...row }) => row);
+  });
+  app.get('/api/task-runs/:id', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    if (access.companyIds.length === 0) return reply.code(404).send({ error: 'log_not_found' });
+    const [row] = await db.select().from(taskRuns).where(and(eq(taskRuns.id, (request.params as { id: string }).id), inArray(taskRuns.companyId, access.companyIds))).limit(1);
+    return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
   app.get('/api/cost-events', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
@@ -2108,8 +2202,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/agents', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     if (access.companyIds.length === 0) return [];
-    const query = request.query as { companyId?: string };
+    const query = request.query as { companyId?: string; view?: string };
     if (query.companyId && !access.companyIds.includes(query.companyId)) return [];
+    if (query.view === 'labels') return db.select({ id: agents.id, name: agents.name, companyId: agents.companyId }).from(agents).where(and(
+      query.companyId ? eq(agents.companyId, query.companyId) : inArray(agents.companyId, access.companyIds),
+      isNull(agents.deletedAt),
+    )).orderBy(agents.name);
     const rows = await db.select().from(agents).where(and(
       query.companyId ? eq(agents.companyId, query.companyId) : inArray(agents.companyId, access.companyIds),
       isNull(agents.deletedAt),

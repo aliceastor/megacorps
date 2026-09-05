@@ -1,236 +1,233 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
-import { Activity as ActivityIcon, Clock, FileText, Loader2, Play, Server } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Activity as ActivityIcon, Clock, Copy, FileText, Loader2, Play, Server } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
-type ApiEvent = { id: string; method: string; path: string; statusCode?: number; error?: string | null; durationMs?: number; requestBody?: unknown; responseBody?: unknown; createdAt?: string };
-type ActivityEvent = { id: string; action: string; entityType: string; entityId: string; actorType: string; actorId: string; details?: unknown; createdAt?: string };
-type HeartbeatRun = { id: string; cardId?: string | null; agentId?: string | null; source: string; status: string; error?: string | null; costUsd?: string | null; durationSeconds?: number | null; createdAt?: string };
-type TaskRun = { id: string; cardId: string; agentId?: string | null; heartbeatRunId?: string | null; adapterSessionId?: string | null; adapterTurnId?: string | null; kind: string; source: string; status: string; attemptNumber?: number | null; error?: string | null; costUsd?: string | null; durationSeconds?: number | null; createdAt?: string };
-type CronRun = { id: string; name: string; source: string; status: string; error?: string | null; durationSeconds?: number | null; details?: unknown; createdAt?: string };
-type CronStatus = { enabled: boolean; intervalMs: number; running: boolean; lastStatus: string; lastStartedAt?: string | null; lastCompletedAt?: string | null; lastError?: string | null; recentRuns: CronRun[] };
-type PromptLog = { id: string; companyId: string; agentId?: string | null; cardId?: string | null; projectId?: string | null; goalId?: string | null; heartbeatRunId?: string | null; taskRunId?: string | null; chatSessionId?: string | null; source: string; adapterType: string; title: string; prompt: string; promptHash: string; metadata?: unknown; createdAt?: string };
 type LogTab = 'prompts' | 'runs' | 'activity' | 'api';
+type DatasetKey = 'prompts' | 'activity' | 'api' | 'heartbeats' | 'tasks' | 'cron';
+type SummaryPage<T = any> = { items: T[]; nextCursor: string | null };
+type Dataset = SummaryPage & { loading: boolean; error: string | null; requested: boolean };
 type AgentRef = { id: string; name: string; companyId: string };
+type CronStatus = { enabled: boolean; intervalMs: number; running: boolean; lastStatus: string; lastStartedAt?: string | null; lastCompletedAt?: string | null; lastError?: string | null };
 
-// Every outbound prompt is already logged; the missing piece was being able to
-// ask "what did this agent actually receive, on the board versus in chat".
-const KANBAN_SOURCES = new Set(['dispatch', 'review', 'message', 'message_review']);
+const DATASET_KEYS: DatasetKey[] = ['prompts', 'activity', 'api', 'heartbeats', 'tasks', 'cron'];
+const EMPTY_DATASET: Dataset = { items: [], nextCursor: null, loading: false, error: null, requested: false };
+const TAB_DATASETS: Record<LogTab, DatasetKey[]> = { prompts: ['prompts'], runs: ['cron', 'tasks', 'heartbeats'], activity: ['activity'], api: ['api'] };
+const DATASET_PATH: Record<DatasetKey, string> = {
+  prompts: '/api/prompt-logs',
+  activity: '/api/activity',
+  api: '/api/system-logs',
+  heartbeats: '/api/heartbeat-runs',
+  tasks: '/api/task-runs',
+  cron: '/api/cron/runs',
+};
+const DETAIL_PATH: Record<DatasetKey, string> = {
+  prompts: '/api/prompt-logs',
+  activity: '/api/activity',
+  api: '/api/system-logs',
+  heartbeats: '/api/heartbeat-runs',
+  tasks: '/api/task-runs',
+  cron: '/api/cron/runs',
+};
 
-function contextModeOf(metadata: unknown): string | null {
-  if (!metadata || typeof metadata !== 'object') return null;
-  const mode = (metadata as { contextMode?: unknown }).contextMode;
-  return typeof mode === 'string' ? mode : null;
+function initialParam(name: string, fallback: string): string {
+  if (typeof window === 'undefined') return fallback;
+  return new URLSearchParams(window.location.search).get(name) ?? fallback;
 }
 
-function contextModeLabel(mode: string | null): string {
-  if (mode === 'full_bootstrap') return 'bootstrap (full context injected)';
-  if (mode === 'adapter_session_delta') return 'continuation (delta only)';
-  if (mode === 'adapter_session_continuation') return 'continuation (no re-injection)';
-  if (mode === 'adapter_session_continuation_refresh') return 'continuation (context re-injected: it changed)';
-  return mode ?? 'unknown';
+function displayError(error: unknown): string {
+  return error instanceof Error ? error.message : 'request_failed';
 }
 
 export function LogsPage() {
   const { t } = useLocale();
-  const [promptLogs, setPromptLogs] = useState<PromptLog[]>([]);
-  const [logs, setLogs] = useState<ApiEvent[]>([]);
-  const [activity, setActivity] = useState<ActivityEvent[]>([]);
-  const [runs, setRuns] = useState<HeartbeatRun[]>([]);
-  const [taskRuns, setTaskRuns] = useState<TaskRun[]>([]);
-  const [cron, setCron] = useState<CronStatus | null>(null);
   const [tab, setTab] = useState<LogTab>('prompts');
+  const [filter, setFilter] = useState(() => initialParam('q', ''));
+  const [debouncedFilter, setDebouncedFilter] = useState(() => initialParam('q', ''));
+  const [agentFilter, setAgentFilter] = useState(() => initialParam('agentId', 'all'));
+  const [surfaceFilter, setSurfaceFilter] = useState<'all' | 'kanban' | 'chat'>(() => {
+    const value = initialParam('surface', 'all');
+    return value === 'kanban' || value === 'chat' ? value : 'all';
+  });
+  const [companyId] = useState(() => initialParam('companyId', ''));
   const [agentRefs, setAgentRefs] = useState<AgentRef[]>([]);
-  const [agentFilter, setAgentFilter] = useState('all');
-  const [surfaceFilter, setSurfaceFilter] = useState<'all' | 'kanban' | 'chat'>('all');
-  const [filter, setFilter] = useState('');
+  const [agentError, setAgentError] = useState<string | null>(null);
+  const [datasets, setDatasets] = useState<Record<DatasetKey, Dataset>>(() => Object.fromEntries(DATASET_KEYS.map(key => [key, { ...EMPTY_DATASET }])) as Record<DatasetKey, Dataset>);
+  const [cronStatus, setCronStatus] = useState<CronStatus | null>(null);
   const [cronRunning, setCronRunning] = useState(false);
+  const [cronError, setCronError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<{ key: DatasetKey; id: string } | null>(null);
+  const [detail, setDetail] = useState<any>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const versions = useRef<Record<DatasetKey, number>>(Object.fromEntries(DATASET_KEYS.map(key => [key, 0])) as Record<DatasetKey, number>);
+  const controllers = useRef<Partial<Record<DatasetKey, AbortController>>>({});
+  const detailVersion = useRef(0);
 
-  async function safe<T>(promise: Promise<T>, fallback: T): Promise<T> {
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedFilter(filter.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [filter]);
+
+  async function loadAgents() {
     try {
-      return await promise;
-    } catch {
-      return fallback;
+      const query = new URLSearchParams({ view: 'labels' });
+      if (companyId) query.set('companyId', companyId);
+      setAgentRefs(await api<AgentRef[]>(`/api/agents?${query}`));
+      setAgentError(null);
+    } catch (error) {
+      setAgentError(displayError(error));
     }
   }
 
-  async function refresh() {
-    await Promise.all([
-      safe(api<PromptLog[]>('/api/prompt-logs?limit=300'), []),
-      safe(api<ApiEvent[]>('/api/system-logs?limit=300'), []),
-      safe(api<ActivityEvent[]>('/api/activity?limit=300'), []),
-      safe(api<HeartbeatRun[]>('/api/heartbeat-runs?limit=300'), []),
-      safe(api<TaskRun[]>('/api/task-runs?limit=300'), []),
-      safe(api<CronStatus>('/api/cron/status'), null),
-      safe(api<AgentRef[]>('/api/agents'), []),
-    ]).then(([promptRows, apiLogs, activityLogs, heartbeatRows, taskRunRows, cronStatus, agentRows]) => {
-      setPromptLogs(promptRows);
-      setAgentRefs(agentRows);
-      setLogs(apiLogs);
-      setActivity(activityLogs);
-      setRuns(heartbeatRows);
-      setTaskRuns(taskRunRows);
-      setCron(cronStatus);
-    });
+  useEffect(() => { void loadAgents(); }, [companyId]);
+
+  function queryFor(key: DatasetKey, cursor?: string | null): string {
+    const query = new URLSearchParams({ view: 'summary', limit: '50' });
+    if (cursor) query.set('cursor', cursor);
+    if (debouncedFilter) query.set('q', debouncedFilter);
+    if (companyId && key !== 'api' && key !== 'cron') query.set('companyId', companyId);
+    if (key === 'prompts') {
+      if (agentFilter !== 'all') query.set('agentId', agentFilter);
+      if (surfaceFilter !== 'all') query.set('surface', surfaceFilter);
+    }
+    return query.toString();
   }
 
-  useEffect(() => { void refresh(); }, []);
-  // Read the deep-link filters from the URL rather than useSearchParams, which
-  // would force this whole page behind a Suspense boundary at build time.
+  async function loadDataset(key: DatasetKey, cursor: string | null = null) {
+    const version = ++versions.current[key];
+    controllers.current[key]?.abort();
+    const controller = new AbortController();
+    controllers.current[key] = controller;
+    setDatasets(current => ({ ...current, [key]: { ...current[key], items: cursor ? current[key].items : [], nextCursor: null, loading: true, error: null, requested: true } }));
+    if (!cursor) {
+      setExpanded(null);
+      setDetail(null);
+      setDetailError(null);
+    }
+    try {
+      const page = await api<SummaryPage>(`${DATASET_PATH[key]}?${queryFor(key, cursor)}`, { signal: controller.signal });
+      if (versions.current[key] !== version) return;
+      setDatasets(current => ({ ...current, [key]: { items: page.items, nextCursor: page.nextCursor, loading: false, error: null, requested: true } }));
+    } catch (error) {
+      if (versions.current[key] !== version) return;
+      setDatasets(current => ({ ...current, [key]: { items: [], nextCursor: null, loading: false, error: displayError(error), requested: true } }));
+    }
+  }
+
+  async function loadCronStatus() {
+    try {
+      setCronStatus(await api<CronStatus>('/api/cron/status'));
+      setCronError(null);
+    } catch (error) {
+      setCronStatus(null);
+      setCronError(displayError(error));
+    }
+  }
+
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const agentId = params.get('agentId');
-    const surface = params.get('surface');
-    if (agentId) setAgentFilter(agentId);
-    if (surface === 'kanban' || surface === 'chat') setSurfaceFilter(surface);
-  }, []);
+    for (const key of DATASET_KEYS) {
+      versions.current[key] += 1;
+      controllers.current[key]?.abort();
+    }
+    for (const key of TAB_DATASETS[tab]) void loadDataset(key);
+    if (tab === 'runs') void loadCronStatus();
+  }, [tab, debouncedFilter, agentFilter, surfaceFilter, companyId]);
+
+  async function toggleDetail(key: DatasetKey, id: string, retry = false) {
+    if (!retry && expanded?.key === key && expanded.id === id) {
+      setExpanded(null); setDetail(null); setDetailError(null); return;
+    }
+    const version = ++detailVersion.current;
+    setExpanded({ key, id }); setDetail(null); setDetailError(null); setDetailLoading(true);
+    try {
+      const row = await api<any>(`${DETAIL_PATH[key]}/${encodeURIComponent(id)}`);
+      if (detailVersion.current === version) setDetail(row);
+    } catch (error) {
+      if (detailVersion.current === version) setDetailError(displayError(error));
+    } finally {
+      if (detailVersion.current === version) setDetailLoading(false);
+    }
+  }
 
   async function runCronNow() {
-    setCronRunning(true);
+    setCronRunning(true); setCronError(null);
     try {
       await api('/api/cron/run', { method: 'POST' });
-      await refresh();
+      await Promise.all([loadCronStatus(), loadDataset('cron')]);
+    } catch (error) {
+      setCronError(displayError(error));
     } finally {
       setCronRunning(false);
     }
   }
 
-  const needle = filter.toLowerCase();
-  const agentNameById = useMemo(() => new Map(agentRefs.map((agent) => [agent.id, agent.name])), [agentRefs]);
-  const visiblePrompts = promptLogs.filter((log) => {
-    if (agentFilter !== 'all' && log.agentId !== agentFilter) return false;
-    if (surfaceFilter === 'kanban' && !KANBAN_SOURCES.has(log.source)) return false;
-    if (surfaceFilter === 'chat' && log.source !== 'chat') return false;
-    return !needle || `${log.source} ${log.adapterType} ${log.title} ${agentNameById.get(log.agentId ?? '') ?? ''} ${log.agentId ?? ''} ${log.cardId ?? ''} ${log.chatSessionId ?? ''} ${log.prompt}`.toLowerCase().includes(needle);
-  });
-  const visible = logs.filter((log) => !needle || `${log.method} ${log.path} ${log.error ?? ''}`.toLowerCase().includes(needle));
-  const visibleActivity = activity.filter((event) => !needle || `${event.action} ${event.entityType} ${event.entityId}`.toLowerCase().includes(needle));
-  const visibleRuns = runs.filter((run) => !needle || `${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(needle));
-  const visibleTaskRuns = taskRuns.filter((run) => !needle || `${run.kind} ${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(needle));
-  const visibleCronRuns = (cron?.recentRuns ?? []).filter((run) => !needle || `${run.name} ${run.source} ${run.status} ${run.error ?? ''}`.toLowerCase().includes(needle));
-  const tabs: Array<{ id: LogTab; label: string; count: number; icon: typeof FileText }> = [
-    { id: 'prompts', label: t('logs.prompts'), count: promptLogs.length, icon: FileText },
-    { id: 'runs', label: t('logs.runs'), count: runs.length + taskRuns.length + (cron?.recentRuns.length ?? 0), icon: Clock },
-    { id: 'activity', label: t('logs.activity'), count: activity.length, icon: ActivityIcon },
-    { id: 'api', label: 'API', count: logs.length, icon: Server },
+  const agentNameById = useMemo(() => new Map(agentRefs.map(agent => [agent.id, agent.name])), [agentRefs]);
+  const tabCount = (id: LogTab) => TAB_DATASETS[id].reduce((total, key) => total + datasets[key].items.length, 0);
+  const tabLoaded = (id: LogTab) => TAB_DATASETS[id].some(key => datasets[key].requested);
+  const tabHasMore = (id: LogTab) => TAB_DATASETS[id].some(key => datasets[key].nextCursor);
+  const tabs: Array<{ id: LogTab; label: string; icon: typeof FileText }> = [
+    { id: 'prompts', label: t('logs.prompts'), icon: FileText },
+    { id: 'runs', label: t('logs.runs'), icon: Clock },
+    { id: 'activity', label: t('logs.activity'), icon: ActivityIcon },
+    { id: 'api', label: 'API', icon: Server },
   ];
+  const detailPanel = (key: DatasetKey, id: string, content: unknown) => expanded?.key === key && expanded.id === id ? <div className="log-detail">
+    {detailLoading && <p className="field-hint"><Loader2 size={14} className="spin" /> Loading details…</p>}
+    {detailError && <div role="alert" className="form-error">{detailError} <button className="btn" onClick={() => void toggleDetail(key, id, true)}>Retry</button></div>}
+    {detail && <><button className="btn" onClick={() => void navigator.clipboard.writeText(typeof content === 'string' ? content : JSON.stringify(content, null, 2))}><Copy size={13} /> Copy</button><pre className={key === 'prompts' ? 'log-block prompt-log-body' : 'log-block'}>{typeof content === 'string' ? content : JSON.stringify(content, null, 2)}</pre></>}
+  </div> : null;
+  const stateMessage = (key: DatasetKey, empty: string) => {
+    const state = datasets[key];
+    if (state.loading) return <p className="field-hint"><Loader2 size={14} className="spin" /> Loading…</p>;
+    if (state.error) return <div role="alert" className="form-error">{state.error} <button className="btn" onClick={() => void loadDataset(key)}>Retry</button></div>;
+    if (state.requested && state.items.length === 0) return <p className="field-hint">{empty}</p>;
+    return null;
+  };
+  const pager = (key: DatasetKey) => datasets[key].nextCursor ? <div className="logs-pager"><span>{datasets[key].items.length} loaded; more available</span><button className="btn" onClick={() => void loadDataset(key, datasets[key].nextCursor)}>Next page</button></div> : null;
 
   return <div className="page-stack logs-page">
     <div className="page-head"><div><h1>{t('title.logs')}</h1><p>{t('logs.subtitle')}</p></div></div>
-    <div className="input-wrap"><input placeholder={t('logs.filterPlaceholder')} value={filter} onChange={(event) => setFilter(event.target.value)} /></div>
-    <div className="tab-row page-tabs">
-      {tabs.map((item) => {
+    <div className="input-wrap"><input placeholder={t('logs.filterPlaceholder')} value={filter} onChange={event => setFilter(event.target.value)} /></div>
+    <div className="tab-row page-tabs" role="tablist">
+      {tabs.map(item => {
         const Icon = item.icon;
-        return <button key={item.id} className={`tab ${tab === item.id ? 'active' : ''}`} onClick={() => setTab(item.id)}><Icon size={15} /> {item.label} <span className="status-pill">{item.count}</span></button>;
+        const count = tabLoaded(item.id) ? `${tabCount(item.id)}${tabHasMore(item.id) ? '+' : ''}` : 'not loaded';
+        return <button key={item.id} role="tab" aria-selected={tab === item.id} className={`tab ${tab === item.id ? 'active' : ''}`} onClick={() => setTab(item.id)}><Icon size={15} /> {item.label} <span className="status-pill">{count}</span></button>;
       })}
     </div>
+
     {tab === 'prompts' && <section className="card section-card">
       <h2>{t('logs.outboundPrompts')}</h2>
-      <p className="field-hint">Exactly what each agent was sent, on the Kanban board and in Direct Chat. Bootstrap turns carry the full context; continuations carry only what changed.</p>
+      <p className="field-hint">Prompt metadata loads in bounded pages. Open one row to fetch its full redacted prompt and metadata.</p>
       <div className="form-grid">
-        <label className="field-label">Agent
-          <select className="input" value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}>
-            <option value="all">All agents</option>
-            {agentRefs.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
-          </select>
-        </label>
-        <label className="field-label">Surface
-          <select className="input" value={surfaceFilter} onChange={(event) => setSurfaceFilter(event.target.value as 'all' | 'kanban' | 'chat')}>
-            <option value="all">Kanban and Direct Chat</option>
-            <option value="kanban">Kanban only</option>
-            <option value="chat">Direct Chat only</option>
-          </select>
-        </label>
+        <label className="field-label">Agent<select className="input" value={agentFilter} onChange={event => setAgentFilter(event.target.value)}><option value="all">All agents</option>{agentRefs.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
+        <label className="field-label">Surface<select className="input" value={surfaceFilter} onChange={event => setSurfaceFilter(event.target.value as 'all' | 'kanban' | 'chat')}><option value="all">Kanban and Direct Chat</option><option value="kanban">Kanban only</option><option value="chat">Direct Chat only</option></select></label>
       </div>
-      <div className="table-list">
-        {visiblePrompts.length === 0 ? <p className="field-hint">{t('logs.noPrompts')}</p> : visiblePrompts.map((log) => <article className="list-row prompt-log-row" key={log.id}>
-          <div className="prompt-log-head">
-            <b><FileText size={14} /> {KANBAN_SOURCES.has(log.source) ? 'Kanban' : log.source === 'chat' ? 'Direct Chat' : log.source} · {log.source} / {log.adapterType}</b>
-            <span>{log.createdAt ? new Date(log.createdAt).toLocaleString() : ''}</span>
-          </div>
-          <p>{log.title}</p>
-          <div className="log-meta">
-            <span>injection {contextModeLabel(contextModeOf(log.metadata))}</span>
-            <span>agent {agentNameById.get(log.agentId ?? '') ?? log.agentId ?? 'none'}</span>
-            <span>card {log.cardId ?? 'none'}</span>
-            <span>project {log.projectId ?? 'none'}</span>
-            <span>chat {log.chatSessionId ?? 'none'}</span>
-            <span>run {log.heartbeatRunId ?? 'none'}</span>
-            <span>hash {log.promptHash.slice(0, 12)}</span>
-          </div>
-          <pre className="log-block prompt-log-body">{log.prompt}</pre>
-          <details>
-            <summary>metadata</summary>
-            <pre className="log-block">{JSON.stringify(log.metadata ?? {}, null, 2)}</pre>
-          </details>
-        </article>)}
-      </div>
+      {agentError && <div role="alert" className="form-error">Agent labels: {agentError} <button className="btn" onClick={() => void loadAgents()}>Retry</button></div>}
+      {stateMessage('prompts', t('logs.noPrompts'))}
+      <div className="table-list">{datasets.prompts.items.map(row => <article className="list-row prompt-log-row" key={row.id}>
+        <div className="prompt-log-head"><b><FileText size={14} /> {row.source === 'chat' ? 'Direct Chat' : 'Kanban'} · {row.source} / {row.adapterType}</b><span>{row.createdAt ? new Date(row.createdAt).toLocaleString() : ''}</span></div>
+        <p>{row.title}</p><p className="field-hint">{row.preview}</p>
+        <div className="log-meta"><span>injection {row.contextMode ?? 'unknown'}</span><span>agent {agentNameById.get(row.agentId) ?? row.agentId ?? 'none'}</span><span>card {row.cardId ?? 'none'}</span><span>hash {String(row.promptHash ?? '').slice(0, 12)}</span></div>
+        <button className="btn" onClick={() => void toggleDetail('prompts', row.id)}>{expanded?.key === 'prompts' && expanded.id === row.id ? 'Hide details' : 'Show details'}</button>
+        {detailPanel('prompts', row.id, detail?.prompt ?? '')}
+        {expanded?.key === 'prompts' && expanded.id === row.id && detail && <details><summary>metadata</summary><pre className="log-block">{JSON.stringify(detail.metadata ?? {}, null, 2)}</pre></details>}
+      </article>)}</div>{pager('prompts')}
     </section>}
+
     {tab === 'runs' && <div className="logs-grid">
-      <section className="card section-card">
-        <div className="panel-title">
-          <div><h2>{t('logs.cronHeartbeat')}</h2><span className="status-pill">{cron?.enabled === false ? 'disabled' : cron?.running ? 'running' : cron?.lastStatus ?? 'unknown'}</span></div>
-          <button className="btn" onClick={() => void runCronNow()} disabled={cronRunning}>{cronRunning ? <Loader2 size={14} className="spin" /> : <Play size={14} />} {t('common.runNow')}</button>
-        </div>
-        <div className="meta-grid">
-          <span>{t('logs.interval')} <b>{cron ? `${Math.round(cron.intervalMs / 1000)}s` : '-'}</b></span>
-          <span>{t('logs.lastStarted')} <b>{cron?.lastStartedAt ? new Date(cron.lastStartedAt).toLocaleString() : '-'}</b></span>
-          <span>{t('logs.lastCompleted')} <b>{cron?.lastCompletedAt ? new Date(cron.lastCompletedAt).toLocaleString() : '-'}</b></span>
-          <span>{t('common.errorLabel')} <b>{cron?.lastError ?? 'none'}</b></span>
-        </div>
-        <div className="table-list">
-          {visibleCronRuns.map((run) => <article className="list-row" key={run.id}>
-            <b><Clock size={13} /> {run.name} / {run.status}</b>
-            <p>{run.source} / {run.durationSeconds ?? 0}s / {run.createdAt ? new Date(run.createdAt).toLocaleString() : ''}</p>
-            {run.error && <p className="form-error">{run.error}</p>}
-            <pre className="log-block">{JSON.stringify(run.details ?? {}, null, 2)}</pre>
-          </article>)}
-        </div>
+      <section className="card section-card"><div className="panel-title"><div><h2>{t('logs.cronHeartbeat')}</h2><span className="status-pill">{cronStatus?.enabled === false ? 'disabled' : cronStatus?.running ? 'running' : cronStatus?.lastStatus ?? 'unknown'}</span></div><button className="btn" onClick={() => void runCronNow()} disabled={cronRunning}>{cronRunning ? <Loader2 size={14} className="spin" /> : <Play size={14} />} {t('common.runNow')}</button></div>
+        {cronError && <div role="alert" className="form-error">{cronError} <button className="btn" onClick={() => void loadCronStatus()}>Retry</button></div>}
+        <div className="meta-grid"><span>{t('logs.interval')} <b>{cronStatus ? `${Math.round(cronStatus.intervalMs / 1000)}s` : '-'}</b></span><span>{t('logs.lastStarted')} <b>{cronStatus?.lastStartedAt ? new Date(cronStatus.lastStartedAt).toLocaleString() : '-'}</b></span><span>{t('logs.lastCompleted')} <b>{cronStatus?.lastCompletedAt ? new Date(cronStatus.lastCompletedAt).toLocaleString() : '-'}</b></span><span>{t('common.errorLabel')} <b>{cronStatus?.lastError ?? 'none'}</b></span></div>
+        {stateMessage('cron', 'No scheduler runs on this page.')}<div className="table-list">{datasets.cron.items.map(row => <article className="list-row" key={row.id}><b>{row.name} / {row.status}</b><p>{row.source} / {row.durationSeconds ?? 0}s</p><button className="btn" onClick={() => void toggleDetail('cron', row.id)}>Show details</button>{detailPanel('cron', row.id, detail?.details ?? {})}</article>)}</div>{pager('cron')}
       </section>
-      <section className="card section-card">
-        <h2>{t('logs.taskRuns')}</h2>
-        <div className="table-list">
-          {visibleTaskRuns.map((run) => <article className="list-row" key={run.id}>
-            <b>{run.kind} / {run.status}</b>
-            <p>{run.cardId} / {run.agentId ?? 'no agent'} / attempt {run.attemptNumber ?? 1} / {run.durationSeconds ?? 0}s / ${run.costUsd ?? '0'}</p>
-            <p>heartbeat {run.heartbeatRunId ?? 'pending'} / {run.createdAt ? new Date(run.createdAt).toLocaleString() : ''}</p>
-            <p>adapter session {run.adapterSessionId ?? 'none'} / turn {run.adapterTurnId ?? 'none'}</p>
-            {run.error && <p className="form-error">{run.error}</p>}
-          </article>)}
-        </div>
-      </section>
-      <section className="card section-card">
-        <h2>{t('logs.heartbeatRuns')}</h2>
-        <div className="table-list">
-          {visibleRuns.map((run) => <article className="list-row" key={run.id}>
-            <b>{run.source} / {run.status}</b>
-            <p>{run.cardId ?? 'no card'} / {run.agentId ?? 'no agent'} / {run.durationSeconds ?? 0}s / ${run.costUsd ?? '0'}</p>
-            {run.error && <p className="form-error">{run.error}</p>}
-          </article>)}
-        </div>
-      </section>
+      <section className="card section-card"><h2>{t('logs.taskRuns')}</h2>{stateMessage('tasks', 'No task runs on this page.')}<div className="table-list">{datasets.tasks.items.map(row => <article className="list-row" key={row.id}><b>{row.kind} / {row.status}</b><p>{row.cardId} / {row.agentId ?? 'no agent'} / attempt {row.attemptNumber ?? 1}</p>{row.error && <p className="form-error">{row.error}</p>}<button className="btn" onClick={() => void toggleDetail('tasks', row.id)}>Show details</button>{detailPanel('tasks', row.id, detail?.output ?? detail)}</article>)}</div>{pager('tasks')}</section>
+      <section className="card section-card"><h2>{t('logs.heartbeatRuns')}</h2>{stateMessage('heartbeats', 'No heartbeat runs on this page.')}<div className="table-list">{datasets.heartbeats.items.map(row => <article className="list-row" key={row.id}><b>{row.source} / {row.status}</b><p>{row.cardId ?? 'no card'} / {row.agentId ?? 'no agent'} / {row.durationSeconds ?? 0}s</p><button className="btn" onClick={() => void toggleDetail('heartbeats', row.id)}>Show details</button>{detailPanel('heartbeats', row.id, detail)}</article>)}</div>{pager('heartbeats')}</section>
     </div>}
-    {tab === 'activity' && <section className="card section-card">
-      <h2>{t('logs.activity')}</h2>
-      <div className="table-list">
-        {visibleActivity.map((event) => <article className="list-row" key={event.id}>
-          <b>{event.action}</b>
-          <p>{event.actorType}:{event.actorId} / {event.entityType}:{event.entityId} / {event.createdAt ? new Date(event.createdAt).toLocaleString() : ''}</p>
-          <pre className="log-block">{JSON.stringify(event.details ?? {}, null, 2)}</pre>
-        </article>)}
-      </div>
-    </section>}
-    {tab === 'api' && <section className="card section-card">
-      <h2>{t('logs.apiLifecycle')}</h2>
-      <div className="table-list">
-        {visible.map((log) => <article className="list-row" key={log.id}>
-          <b>{log.method} {log.path}</b>
-          <p>{log.statusCode ?? '-'} / {log.durationMs ?? 0}ms / {log.createdAt ? new Date(log.createdAt).toLocaleString() : ''}</p>
-          {log.error && <p className="form-error">{log.error}</p>}
-          <pre className="log-block">{JSON.stringify({ request: log.requestBody, response: log.responseBody }, null, 2)}</pre>
-        </article>)}
-      </div>
-    </section>}
+
+    {tab === 'activity' && <section className="card section-card"><h2>{t('logs.activity')}</h2>{stateMessage('activity', 'No activity logs on this page.')}<div className="table-list">{datasets.activity.items.map(row => <article className="list-row" key={row.id}><b>{row.action}</b><p>{row.actorType}:{row.actorId} / {row.entityType}:{row.entityId}</p><button className="btn" onClick={() => void toggleDetail('activity', row.id)}>Show details</button>{detailPanel('activity', row.id, detail?.details ?? {})}</article>)}</div>{pager('activity')}</section>}
+    {tab === 'api' && <section className="card section-card"><h2>{t('logs.apiLifecycle')}</h2>{stateMessage('api', 'No API logs on this page.')}<div className="table-list">{datasets.api.items.map(row => <article className="list-row" key={row.id}><b>{row.method} {row.path}</b><p>{row.statusCode ?? '-'} / {row.durationMs ?? 0}ms</p>{row.error && <p className="form-error">{row.error}</p>}<button className="btn" onClick={() => void toggleDetail('api', row.id)}>Show details</button>{detailPanel('api', row.id, { request: detail?.requestBody, response: detail?.responseBody })}</article>)}</div>{pager('api')}</section>}
   </div>;
 }

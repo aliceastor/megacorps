@@ -15,6 +15,13 @@ const MIGRATION_LOCK_KEY = 727274001;
 // created before the version table will re-run v1 exactly once to get recorded.
 // Never edit an applied migration's statements — add the change as a new version.
 const migrations: Migration[] = [
+  { version: 29, name: 'bounded-log-paging', run: async () => { await sql.unsafe(`CREATE INDEX IF NOT EXISTS api_events_user_created_id_idx ON api_events(user_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS prompt_logs_company_created_id_idx ON prompt_logs(company_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS prompt_logs_company_agent_created_id_idx ON prompt_logs(company_id, agent_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS activity_log_company_created_id_idx ON activity_log(company_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS heartbeat_runs_company_created_id_idx ON heartbeat_runs(company_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS task_runs_company_created_id_idx ON task_runs(company_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS cron_runs_created_id_idx ON cron_runs(created_at DESC, id DESC);`); } },
   { version: 28, name: 'resumable-company-setup', run: async () => { await sql.unsafe('ALTER TABLE companies ADD COLUMN IF NOT EXISTS setup_key UUID UNIQUE; ALTER TABLE companies ADD COLUMN IF NOT EXISTS setup_draft JSONB;'); } },
   { version: 27, name: 'companyless-bootstrap-and-global-audit', run: async () => {
     await sql.begin(async tx => {
