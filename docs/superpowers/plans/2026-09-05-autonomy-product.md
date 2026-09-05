@@ -29,16 +29,19 @@
 | --- | --- | --- | --- |
 | 1 | A normalized, preserved report envelope and truthful result/review interpretation | 2, 5, 14 | shared/index.ts; agent-report.ts; dispatch.ts; routes.ts; new agent-results.ts |
 | 2 | Required evidence gates, existing-merge reconciliation and bounded protocol repair | 2, 14 | merge-gate.ts; external-polling.ts; run-retry.ts; dispatch.ts |
+| 2b | Execute authorized exact-head merges and prevent premature merges in managed repositories | 14 | gitea.ts; merge-gate.ts; project policy/schema/editor |
 | 3 | Structural Boss/head behavior and common role/knowledge context | 1, 10, 14 | role-playbooks.ts; agent-position-prompt.ts; dispatch.ts; chat.ts; shared/schema and company/department editors |
 | 4 | Companyless bootstrap, setup wizard, removal of implicit default, legacy SSH hidden from creation | 7, 11 | db/migrate.ts; routes.ts; runner-routes.ts; companies-page.tsx; settings-page.tsx; org editors |
 | 5 | Lazy paginated logs and log-payload suppression | 3, 5 | log-query module; routes.ts; request-log.ts; logs-page.tsx; api-help.ts |
-| 6 | Responsive Projects/Goals/Departments, safe draft reset, simple card creation | 4, 8, 9, 13 | project-authority-panel.tsx; departments-page.tsx; kanban forms; globals.css |
+| 6 | Responsive Projects/Goals/Departments, safe draft reset, simple card and work-product entry | 2, 4, 8, 9, 13 | project-authority-panel.tsx; departments-page.tsx; kanban forms; globals.css |
 | 7 | Conversation-first Direct Chat layout | 4, 12 | chat-page.tsx; globals.css |
 | 8 | Rank/department O-Chart, obstacle-aware edges and safe assignment edits | 4, 6 | company-o-chart-page.tsx; new org-layout.ts; globals.css; routes.ts |
 | 9 | Consistent actual/estimated/unknown usage ledger and scoped budget enforcement | 15 | new usage-settlement.ts; db/schema.ts; db/migrate.ts; adapters; dispatch/chat/runner; budget/dashboard UI |
 | 10 | Executable API contracts, whole-product regression and live lifecycle acceptance | 4, 5, 14 | api-help.ts; shared contracts; integration and browser tests; acceptance report |
 
 Each subsystem receives a concrete task brief before implementation, with file ownership, existing interfaces, test assertions, acceptance and reporting commands. This table remains the coverage ledger; a finished subset does not finish the request.
+
+Implementation inspection identified an additional required step: the existing merge gate only posts authorization and waits; it never performs the authorized merge. Task 2b follows Task 2 and precedes Task 3, adding an explicit managed-project auto-merge policy and default-branch protection without changing Hermes or unrelated repositories. The live Gitea public API reports version 1.22.6; its merge schema uses `Do` and `head_commit_id`, so the implementation must use the installed contract rather than assume latest documentation fields.
 
 ## Task 1: Normalized report and truthful result interpretation
 
