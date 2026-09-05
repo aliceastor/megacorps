@@ -193,3 +193,30 @@ test('exhausted merge checks cannot starve later waits', async (t) => {
   await sweepExternalWaitPolls({ log: { info() {}, warn() {} } } as any);
   assert.equal(state.rows(externalWaits)[30]?.pollCount, 1);
 });
+
+for (const role of ['ordinary', 'boss'] as const) for (const outcome of ['transport_failure', 'failed_report', 'input', 'invalid'] as const) test(`${role} review rejects ${outcome} before accepting a verdict`, async t => {
+  const { card, actor, run, state } = fixture(t);
+  const reviewer = role === 'boss' ? state.rows(agents).find(row => row.positionId)! : { ...actor, id: 'reviewer', slug: 'reviewer' };
+  if (role === 'ordinary') state.rows(agents).push(reviewer);
+  card.columnStatus = 'in_review'; card.reviewerId = reviewer.id; card.requiresApproval = false;
+  run.kind = 'review'; run.agentId = reviewer.id;
+  if (role === 'boss') {
+    card.assigneeId = reviewer.id;
+    const child: any = { id: 'accepted-child', parentCardId: card.id, companyId: card.companyId, projectId: null, title: 'Findings', assigneeId: actor.id, columnStatus: 'done' };
+    state.rows(kanbanCards).push(child);
+    state.rows(workProducts).push({ id: 'original-product', companyId: card.companyId, projectId: null, cardId: child.id, agentId: actor.id, type: 'report', summary: 'Verified durable findings' });
+    const { captureDeliveryAcceptance } = await import('./delivery-acceptance.ts');
+    child.deliveryAcceptance = await captureDeliveryAcceptance(child);
+    assert.ok(child.deliveryAcceptance);
+  }
+  const output = outcome === 'failed_report' ? JSON.stringify(report({ status: 'failed', verdict: 'approved' })) : outcome === 'invalid' ? JSON.stringify(report({ status: 'bogus', verdict: 'approved' })) : 'VERDICT: APPROVED\nThe acceptance criteria are satisfied.';
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: outcome !== 'transport_failure', output, ...(outcome === 'input' ? { needsInput: { question: 'Which acceptance criteria apply?' } } : {}), sessionId: 'review-session', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
+  const reviewing = reviewCard(card.id, { taskRunId: run.id });
+  if (outcome === 'transport_failure' || outcome === 'failed_report') await assert.rejects(reviewing, /review_adapter_failed|agent_report_failed/);
+  else await reviewing;
+  assert.notEqual(card.columnStatus, 'done');
+  assert.equal(run.status, 'failed');
+  assert.equal(state.rows(approvals).filter(row => row.status === 'approved').length, 0);
+  assert.equal(card.assigneeId, role === 'boss' ? reviewer.id : actor.id);
+  if (outcome === 'input' || outcome === 'invalid') assert.equal(card.protocolRepairState.review.failures, 1);
+});

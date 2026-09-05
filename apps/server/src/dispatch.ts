@@ -3796,16 +3796,19 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     }
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     const normalizedReview = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
-    await persistAgentWorkProducts(card, reviewer.id, options.taskRunId ?? null, normalizedReview.workProducts, null, normalizedReview.report);
     if (normalizedReview.outcome === 'permission') {
       const blocked = await parkPermissionBlockedResult(card.id, reviewer.id, run.id, normalizedReview.reason!, result.output);
       await completeTaskRun(options.taskRunId, { status: 'failed', preserveCard: blocked.preservedHumanGate, error: normalizedReview.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       return blocked.card;
     }
-    const explicitDecision = normalizedReview.verdictExplicit ? normalizedReview.verdict : null;
-    if (!result.success && !explicitDecision) {
-      throw new Error(adapterFailureMessage('review', result.output));
+    // Transport/report failure cannot be overridden by an apparent approval.
+    if (!result.success || normalizedReview.outcome === 'failed') {
+      throw new Error(normalizedReview.reason ?? adapterFailureMessage('review', result.output));
     }
+    if (normalizedReview.outcome === 'input_required' || normalizedReview.outcome === 'invalid') {
+      return sendAgentFeedbackAndRequeue({ card, agent: reviewer, kind: 'review', message: normalizedReview.reason ?? normalizedReview.question ?? REVIEW_VERDICT_MISSING_MESSAGE, runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
+    }
+    await persistAgentWorkProducts(card, reviewer.id, options.taskRunId ?? null, normalizedReview.workProducts, null, normalizedReview.report);
     await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
     // Protocol help is guidance for the original actor, not artifact review.
     // Validate it before asking for an ordinary product verdict.
@@ -3842,7 +3845,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
         result,
       });
     }
-    const acceptedReviewOutput = result.success || Boolean(explicitDecision);
+    const acceptedReviewOutput = result.success;
     await resetProtocolRepair(card.id, 'review', normalizedReview, result.success, card, options.taskRunId);
     if (acceptedReviewOutput && decision) {
       try { await recordReviewScore(card, reviewer, decision, result.output); } catch { /* scoring must never fail a review */ }
