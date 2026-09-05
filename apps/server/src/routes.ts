@@ -21,6 +21,7 @@ import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, 
 import { afterAuthorFix, completePanelReviewFromWebhook, ensureHumanGate, hasOpenReviewRound, listReviewRounds, openFixRound, openPanelRound, panelRequiredForCard } from './review-rounds.ts';
 import { dispositionErrors, formatDispositionRules } from './review-panel.ts';
 import { applyMergeGatePlan, handleGiteaWebhookEvent, mergeCompletionStatus, planMergeGate } from './merge-gate.ts';
+import { normalizeCommitWorkProduct } from './work-product-evidence.ts';
 import { openExternalWait } from './external-events.ts';
 import { brainstormFromOutput } from './brainstorm.ts';
 import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointFromOutput } from './client-checkpoints.ts';
@@ -1986,7 +1987,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
     if (!card) return reply;
     const user = await requireCompanyRole(request, reply, card.companyId, 'operator'); if (!user) return reply;
-    const input = createWorkProductSchema.parse(request.body);
+    const parsed = createWorkProductSchema.parse(request.body);
+    const [project] = card.projectId ? await db.select({ repoUrl: projects.repoUrl }).from(projects).where(and(eq(projects.id, card.projectId), eq(projects.companyId, card.companyId), isNull(projects.deletedAt))).limit(1) : [];
+    const input = normalizeCommitWorkProduct(parsed, project?.repoUrl);
+    if (!input) return reply.code(400).send({ error: 'work_product_commit_identity_mismatch' });
     if (input.projectId && input.projectId !== card.projectId) return reply.code(400).send({ error: 'work_product_project_mismatch' });
     if (input.agentId) {
       const company = await agentCompanyId(input.agentId);
