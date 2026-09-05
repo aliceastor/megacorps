@@ -4784,12 +4784,34 @@ button.card {
   gap: 16px;
 }
 
-.chat-shell {
-  height: calc(100dvh - 160px);
-  min-height: 520px;
-  max-height: 860px;
+.chat-scope-controls {
   display: grid;
-  grid-template-columns: minmax(230px, 0.78fr) minmax(260px, 0.86fr) minmax(0, 2fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
+}
+
+.chat-scope-field {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chat-scope-field .input {
+  width: 100%;
+  min-width: 0;
+  color: var(--foreground);
+}
+
+.chat-shell {
+  height: clamp(420px, calc(100dvh - 250px), 780px);
+  min-height: 420px;
+  max-height: 780px;
+  display: grid;
+  grid-template-columns: minmax(220px, 250px) minmax(0, 1fr);
   overflow: hidden;
 }
 

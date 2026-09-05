@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { BriefcaseBusiness, Building2, Circle, FileText, Loader2, MessageSquare, Plus, Send } from 'lucide-react';
+import { Circle, FileText, Loader2, MessageSquare, Plus, Send } from 'lucide-react';
 import Link from 'next/link';
 import { ApiError, api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
@@ -296,7 +296,6 @@ export function ChatPage() {
     if (!body || sending || !agentId) return;
     setSending(true);
     setError('');
-    setDraft('');
     let optimisticId: string | undefined;
     try {
       const target = selectedSession ?? await createSession(false);
@@ -313,6 +312,7 @@ export function ChatPage() {
       const nextMessages = [result.userMessage, result.agentMessage, result.systemMessage].filter(Boolean) as ChatMessage[];
       setMessages((current) => mergeMessages(current, nextMessages, optimisticId));
       if (result.session) setSessions((current) => current.map((session) => session.id === result.session?.id ? result.session : session));
+      setDraft((current) => current.trim() === body ? '' : current);
       void queryClient.invalidateQueries({ queryKey: ['chatMessages', target.id] });
       void queryClient.invalidateQueries({ queryKey: ['chatSessions'] });
       await loadSessions(agentId, companyId, projectFilter);
@@ -342,38 +342,46 @@ export function ChatPage() {
 
     {error && <p className="form-error">{error}</p>}
 
-    <section className="card chat-shell">
-      <aside className="chat-rail company-rail">
-        <div className="chat-rail-head"><Building2 size={16} /><b>Companies</b></div>
-        <div className="chat-list">
-          {companies.map((company) => <button className={`chat-list-item ${company.id === companyId ? 'active' : ''}`} key={company.id} onClick={() => { setCompanyId(company.id); setProjectFilter('all'); setSessionId(''); setMessages([]); }}>
-            <b>{company.name}</b>
-            <span>{agents.filter((agent) => agent.companyId === company.id).length} agents</span>
-          </button>)}
-        </div>
-        <div className="chat-rail-head"><BriefcaseBusiness size={16} /><b>Projects</b></div>
-        <div className="chat-list">
-          <button className={`chat-list-item ${projectFilter === 'all' ? 'active' : ''}`} onClick={() => { setProjectFilter('all'); setSessionId(''); setMessages([]); }}><b>All projects</b><span>{sessions.length} sessions</span></button>
-          <button className={`chat-list-item ${projectFilter === '__none' ? 'active' : ''}`} onClick={() => { setProjectFilter('__none'); setSessionId(''); setMessages([]); }}><b>No project</b><span>General chat</span></button>
-          {companyProjects.map((project) => <button className={`chat-list-item ${project.id === projectFilter ? 'active' : ''}`} key={project.id} onClick={() => { setProjectFilter(project.id); setSessionId(''); setMessages([]); }}>
-            <b>{project.name}</b>
-            <span title={project.description || 'Project chat'}>{project.description || 'Project chat'}</span>
-          </button>)}
-        </div>
-        <div className="chat-rail-head"><MessageSquare size={16} /><b>Agents</b></div>
-        <div className="chat-list">
-          {companyAgents.map((agent) => {
-            const itemStatus = agentStatus(agent);
-            return <button className={`chat-list-item agent ${agent.id === agentId ? 'active' : ''}`} key={agent.id} onClick={() => { setAgentId(agent.id); setSessionId(''); setMessages([]); }}>
-              <span className="chat-avatar">{agent.name.slice(0, 2).toUpperCase()}</span>
-              <span><b>{agent.name}</b><small>{agent.role}</small></span>
-              <Circle size={10} fill={itemStatus.color} color={itemStatus.color} />
-            </button>;
-          })}
-          {!companyAgents.length && <p className="chat-empty">{t('chat.noAgents')}</p>}
-        </div>
-      </aside>
+    <section className="card chat-scope-controls" aria-label="Chat scope">
+      <label className="chat-scope-field">
+        <span>Company</span>
+        <select className="input" aria-label="Company" value={companyId} onChange={(event) => {
+          const nextCompanyId = event.target.value;
+          const nextAgent = agents.find((agent) => agent.companyId === nextCompanyId);
+          setCompanyId(nextCompanyId);
+          setProjectFilter('all');
+          setAgentId(nextAgent?.id ?? '');
+          setSessionId('');
+          setMessages([]);
+        }}>
+          {companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}
+        </select>
+      </label>
+      <label className="chat-scope-field">
+        <span>Project</span>
+        <select className="input" aria-label="Project" value={projectFilter} onChange={(event) => {
+          setProjectFilter(event.target.value);
+          setSessionId('');
+          setMessages([]);
+        }}>
+          <option value="all">All projects</option>
+          <option value="__none">{t('chat.noProject')}</option>
+          {companyProjects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}
+        </select>
+      </label>
+      <label className="chat-scope-field">
+        <span>Agent</span>
+        <select className="input" aria-label="Agent" value={agentId} onChange={(event) => {
+          setAgentId(event.target.value);
+          setSessionId('');
+          setMessages([]);
+        }} disabled={!companyAgents.length}>
+          {companyAgents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name} — {agent.role}</option>)}
+        </select>
+      </label>
+    </section>
 
+    <section className="card chat-shell chat-workspace">
       <aside className="chat-rail session-rail">
         <div className="chat-rail-head">
           <div><b>Sessions</b><span>{selectedAgent?.adapterType ?? 'adapter'}</span></div>
