@@ -53,6 +53,7 @@ const initial = {
   runtimeCreateKey: '',
 };
 type Fields = typeof initial;
+type CachedDraft = { fields?: Partial<Fields>; step?: number; setupKey?: string };
 function reconcileAgentSelections(fields: Fields, state: Setup | null, liveAgents: Agent[]): Fields {
   if (!state) return fields;
   const liveIds = new Set(liveAgents.filter(agent => agent.companyId === state.company.id).map(agent => agent.id));
@@ -90,6 +91,10 @@ export function CompanySetup({
     [error, setError] = useState(''),
     [notice, setNotice] = useState(''),
     [loaded, setLoaded] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const retrySnapshot = useRef<CachedDraft>({});
   const setupKey = useRef('');
   const heading = useRef<HTMLHeadingElement>(null);
   const storageKey = `megacorps.company-setup.${userId}.${companyId || 'new'}`;
@@ -101,14 +106,24 @@ export function CompanySetup({
   useEffect(() => {
     let cancelled = false;
     async function hydrate() {
+      setReady(false);
+      setLoadError('');
+      setError('');
       try {
-        let cached: { fields?: Fields; step?: number; setupKey?: string } = {};
-        try {
+        let cached: CachedDraft = retrySnapshot.current;
+        if (loadAttempt === 0) try {
           cached = JSON.parse(localStorage.getItem(storageKey) ?? '{}');
-        } catch {}
+        } catch { cached = {}; }
         setupKey.current = cached.setupKey || crypto.randomUUID();
+        cached = { ...cached, setupKey: setupKey.current, fields: { ...cached.fields, runtimeCreateKey: cached.fields?.runtimeCreateKey || crypto.randomUUID() } };
+        retrySnapshot.current = cached;
+        // Show cached input immediately, but do not persist or allow mutations until
+        // both remote reads have succeeded. A failed read is not an empty agent list.
+        setFields({ ...initial, ...cached.fields });
+        setStep(cached.step ?? 0);
+        setLoaded(true);
         const [data, liveAgents] = await Promise.all([
-          initialCompanyId ? api<Setup>(`/api/companies/${initialCompanyId}/setup`) : Promise.resolve(null),
+          companyId ? api<Setup>(`/api/companies/${companyId}/setup`) : Promise.resolve(null),
           agents.refetch({ throwOnError: true }),
         ]);
         if (cancelled) return;
@@ -132,13 +147,12 @@ export function CompanySetup({
               runtimeId: data.draft.runtimeId ?? data.head?.runtimeId ?? '',
             }
           : {};
-        setFields(reconcileAgentSelections({ ...initial, ...persisted, ...cached.fields, runtimeCreateKey: cached.fields?.runtimeCreateKey || crypto.randomUUID() }, data, liveAgents.data ?? []));
+        setFields(reconcileAgentSelections({ ...initial, ...persisted, ...cached.fields }, data, liveAgents.data ?? []));
         setStep(cached.step ?? Math.max(0, steps.indexOf(data?.draft.stage as (typeof steps)[number])));
-        setLoaded(true);
+        setReady(true);
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : t('common.error'));
-          setLoaded(true);
+          setLoadError(err instanceof Error ? err.message : t('common.error'));
         }
       }
     }
@@ -146,13 +160,13 @@ export function CompanySetup({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadAttempt]);
   useEffect(() => {
-    if (loaded)
+    if (ready)
       try {
         localStorage.setItem(storageKey, JSON.stringify({ fields, step, setupKey: setupKey.current }));
       } catch {}
-  }, [fields, step, loaded, storageKey]);
+  }, [fields, step, ready, storageKey]);
   useEffect(() => {
     if (loaded) heading.current?.focus();
   }, [step, loaded]);
@@ -166,16 +180,25 @@ export function CompanySetup({
     }));
   }
   async function reload(id = companyId) {
-    const [data, liveAgents] = await Promise.all([
-      api<Setup>(`/api/companies/${id}/setup`),
-      agents.refetch({ throwOnError: true }),
-    ]);
-    setServer(data);
-    setFields(current => reconcileAgentSelections(current, data, liveAgents.data ?? []));
-    await runtimes.refetch();
-    return data;
+    setReady(false);
+    try {
+      const [data, liveAgents] = await Promise.all([
+        api<Setup>(`/api/companies/${id}/setup`),
+        agents.refetch({ throwOnError: true }),
+      ]);
+      setServer(data);
+      setFields(current => reconcileAgentSelections(current, data, liveAgents.data ?? []));
+      await runtimes.refetch();
+      setReady(true);
+      return data;
+    } catch (err) {
+      retrySnapshot.current = { fields, step, setupKey: setupKey.current };
+      setLoadError(err instanceof Error ? err.message : t('common.error'));
+      throw err;
+    }
   }
   async function save(advance = true) {
+    if (!ready || busy) return;
     setBusy(true);
     setError('');
     setNotice('');
@@ -247,6 +270,7 @@ export function CompanySetup({
     }
   }
   async function check(execute = false) {
+    if (!ready || busy) return;
     setBusy(true);
     setError('');
     setNotice('');
@@ -278,6 +302,7 @@ export function CompanySetup({
     }
   }
   async function finish() {
+    if (!ready || busy) return;
     setBusy(true);
     setError('');
     try {
@@ -296,6 +321,7 @@ export function CompanySetup({
     }
   }
   async function reopen() {
+    if (!ready || busy) return;
     setBusy(true);
     setError('');
     setNotice('');
@@ -353,11 +379,12 @@ export function CompanySetup({
           {t('setup.close')}
         </button>
       </div>
+      {!ready && (loadError ? <div><p className="form-error" role="alert">{loadError}</p><button className="btn" onClick={() => setLoadAttempt(attempt => attempt + 1)}>{t('common.retry')}</button></div> : <p role="status">{t('common.loading')}</p>)}
       {server?.draft.completed ? (
         <>
-          <p role="status">{t(server.status === 'ready' ? 'setup.complete' : server.status === 'dispatch_disabled' ? 'setup.dispatchDisabled' : 'setup.needsAttention')}</p>
-          {error && <p className="form-error" role="alert">{error}</p>}
-          <button className="btn btn-primary" disabled={busy} onClick={() => void reopen()}>{t('setup.reopen')}</button>
+          {ready && <p role="status">{t(server.status === 'ready' ? 'setup.complete' : server.status === 'dispatch_disabled' ? 'setup.dispatchDisabled' : 'setup.needsAttention')}</p>}
+          {ready && error && <p className="form-error" role="alert">{error}</p>}
+          <button className="btn btn-primary" disabled={busy || !ready} onClick={() => void reopen()}>{t('setup.reopen')}</button>
           <Link className="btn" href="/kanban">
             {t('nav.kanban')}
           </Link>
@@ -372,7 +399,7 @@ export function CompanySetup({
               </li>
             ))}
           </ol>
-          {error && (
+          {ready && error && (
             <p className="form-error" role="alert">
               {error}
             </p>
@@ -384,6 +411,7 @@ export function CompanySetup({
               void save();
             }}
           >
+            <fieldset disabled={!ready || busy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
             {step === 0 && (
               <div className="form-grid">
                 {field('companyName', 'setup.companyName', 'companySlug')}
@@ -415,6 +443,7 @@ export function CompanySetup({
                       }}
                     >
                       <option value="">{t('setup.newAgent')}</option>
+                      {!ready && fields.bossAgentId && !members.some(a => a.id === fields.bossAgentId) && <option value={fields.bossAgentId}>{fields.bossName}</option>}
                       {members.map((a) => (
                         <option key={a.id} value={a.id}>
                           {a.name}
@@ -460,6 +489,7 @@ export function CompanySetup({
                       }}
                     >
                       <option value="">{t('setup.newAgent')}</option>
+                      {!ready && fields.headAgentId && !members.some(a => a.id === fields.headAgentId) && <option value={fields.headAgentId}>{fields.headName}</option>}
                       {members
                         .filter((a) => a.id !== server?.boss?.id)
                         .map((a) => (
@@ -570,6 +600,7 @@ export function CompanySetup({
                 </>
               )}
             </div>
+            </fieldset>
           </form>
         </>
       )}

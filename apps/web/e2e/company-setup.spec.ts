@@ -20,6 +20,10 @@ async function mockSetup(page: Page, width: number) {
     const req = route.request(),
       path = new URL(req.url()).pathname.replace('/api/proxy', ''),
       body = req.postDataJSON();
+    if (req.method() === 'GET' && path === state.failRead) {
+      await route.fulfill({ status: 503, json: { error: 'temporary_load_failure', message: 'Temporary setup load unavailable. Retry shortly.' } });
+      return;
+    }
     let json: any = [],
       status = 200;
     if (path === '/api/me')
@@ -150,6 +154,87 @@ async function savedSetup(page: Page, adapterType = 'a2a', completed = false) {
   await page.goto('/companies?setup=company');
   return state;
 }
+
+for (const failedRead of ['/api/agents', '/api/companies/company/setup']) test(`failed hydration ${failedRead} preserves cache and retries with fresh identities`, async ({ page }, testInfo) => {
+  test.setTimeout(60_000);
+  const state = await savedSetup(page);
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.getByLabel('Department head name', { exact: true }).fill('Unsaved head name');
+  await page.getByText('Optional role customization', { exact: true }).click();
+  await page.locator('.company-setup details textarea').fill('Unsaved head instructions');
+  const cache = () => page.evaluate(() => localStorage.getItem('megacorps.company-setup.operator.company'));
+  await expect.poll(async () => JSON.parse((await cache()) ?? '{}').fields?.headPrompt).toBe('Unsaved head instructions');
+  const before = await cache();
+  state.failRead = failedRead;
+  await page.reload();
+  await expect(page.getByLabel('Department head name', { exact: true })).toHaveValue('Unsaved head name');
+  await expect(page.getByRole('button', { name: 'Save draft', exact: true })).toBeDisabled();
+  expect(await cache()).toBe(before);
+  await expect(page.getByRole('region', { name: 'Set up your company', exact: true }).getByRole('alert')).toContainText('Temporary setup load unavailable', { timeout: 20_000 });
+  expect(await cache()).toBe(before);
+  await expect(page.getByLabel('Department head name', { exact: true })).toHaveValue('Unsaved head name');
+  await expect(page.getByRole('button', { name: 'Save draft', exact: true })).toBeDisabled();
+  await expect(page.getByRole('combobox', { name: 'Choose an existing agent', exact: true })).toHaveValue('head');
+  await expect(page.locator('.company-setup details textarea')).toHaveValue('Unsaved head instructions');
+  await page.screenshot({ path: testInfo.outputPath(`load-error-${failedRead === '/api/agents' ? 'agents' : 'setup'}.png`), fullPage: true });
+  state.head = null;
+  state.deletedAgentIds.push('head');
+  state.failRead = undefined;
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Save draft', exact: true })).toBeEnabled();
+  await expect(page.getByLabel('Department head name', { exact: true })).toHaveValue('Unsaved head name');
+  await expect(page.getByRole('combobox', { name: 'Choose an existing agent', exact: true })).toHaveValue('');
+  await expect.poll(async () => JSON.parse((await cache()) ?? '{}').fields?.headAgentId).toBe('');
+  const recovered = JSON.parse((await cache())!);
+  const original = JSON.parse(before!);
+  expect(recovered).toEqual({ ...original, fields: { ...original.fields, headAgentId: '' } });
+});
+
+test('failed post-save refresh keeps the current draft unresolved until retry', async ({ page }) => {
+  const state = await savedSetup(page);
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.getByLabel('Department head name', { exact: true }).fill('Saved despite refresh failure');
+  const cache = () => page.evaluate(() => localStorage.getItem('megacorps.company-setup.operator.company'));
+  await expect.poll(async () => JSON.parse((await cache()) ?? '{}').fields?.headName).toBe('Saved despite refresh failure');
+  const before = await cache();
+  state.failRead = '/api/companies/company/setup';
+  await page.getByRole('button', { name: 'Save draft', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Set up your company', exact: true }).getByRole('alert')).toContainText('Temporary setup load unavailable');
+  expect(state.head.name).toBe('Saved despite refresh failure');
+  expect(await cache()).toBe(before);
+  await expect(page.getByRole('button', { name: 'Save draft', exact: true })).toBeDisabled();
+  state.failRead = undefined;
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Save draft', exact: true })).toBeEnabled();
+  expect(await cache()).toBe(before);
+  expect(state.headCreates).toBe(0);
+});
+
+test('companyless hydration failure preserves its draft and creation key until retry succeeds', async ({ page }, testInfo) => {
+  test.setTimeout(60_000);
+  const state = await mockSetup(page, 390);
+  await page.getByLabel('Company name', { exact: true }).fill('Unsaved first company');
+  await page.getByRole('textbox', { name: 'Purpose', exact: true }).fill('Unsaved first purpose');
+  const cache = () => page.evaluate(() => localStorage.getItem('megacorps.company-setup.operator.new'));
+  await expect.poll(async () => JSON.parse((await cache()) ?? '{}').fields?.mission).toBe('Unsaved first purpose');
+  const before = await cache();
+  state.failRead = '/api/agents';
+  await page.reload();
+  await expect(page.getByRole('region', { name: 'Set up your company', exact: true }).getByRole('alert')).toContainText('Temporary setup load unavailable', { timeout: 20_000 });
+  expect(await cache()).toBe(before);
+  await expect(page.getByLabel('Company name', { exact: true })).toHaveValue('Unsaved first company');
+  await expect(page.getByRole('button', { name: 'Save and continue', exact: true })).toBeDisabled();
+  await page.screenshot({ path: testInfo.outputPath('load-error-companyless.png'), fullPage: true });
+  expect(state.creates).toBe(0);
+  state.failRead = undefined;
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Save and continue', exact: true })).toBeEnabled();
+  expect(await cache()).toBe(before);
+  const sent = page.waitForRequest(r => r.method() === 'POST' && r.url().endsWith('/company-setup'));
+  await page.getByRole('button', { name: 'Save and continue', exact: true }).click();
+  expect((await sent).postDataJSON().setupKey).toBe(JSON.parse(before!).setupKey);
+  await expect.poll(() => state.creates).toBe(1);
+});
 
 for (const role of ['head', 'boss']) test(`cached deleted ${role} can be replaced without losing draft text or duplicating agents`, async ({ page }, testInfo) => {
   const state = await savedSetup(page);
