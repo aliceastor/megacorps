@@ -1,3 +1,4 @@
+import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import { and, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -117,7 +118,7 @@ export async function registerTrashRoutes(app: FastifyInstance): Promise<void> {
       if (!existing) return reply.code(404).send({ error: 'project_not_found' });
       if (!existing.deletedAt) return reply.code(409).send({ error: 'project_not_deleted' });
       const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
-      const [project] = await db.update(projects).set({ deletedAt: null, updatedAt: now }).where(eq(projects.id, input.id)).returning();
+      const [project] = await retryMergeGateWrite(() => db.update(projects).set({ deletedAt: null, updatedAt: now }).where(eq(projects.id, input.id)).returning());
       await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'project.restored', entityType: 'project', entityId: input.id, details: { name: existing.name } });
       publishLiveEvent({ type: 'project.updated', companyId: existing.companyId, entityType: 'project', entityId: input.id });
       return { ok: true, type: 'project', item: project };

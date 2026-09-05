@@ -1,3 +1,4 @@
+import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import bcrypt from 'bcryptjs';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { and, desc, eq, inArray, isNull, lte, ne, or, sql as drizzleSql } from 'drizzle-orm';
@@ -2478,7 +2479,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const policy = { ...existing, ...input };
     const managedRepoFullName = input.autoMergeAfterApproval === true ? optInManagedBinding(policy) : existing.managedRepoFullName;
     const mergeReadiness = policy.autoMergeAfterApproval ? await inspectManagedProject({ ...policy, managedRepoFullName }, { establish: input.autoMergeAfterApproval === true }) : null;
-    const [row] = await db.update(projects).set({
+    const [row] = await retryMergeGateWrite(() => db.update(projects).set({
       name: input.name,
       description: input.description,
       repoProvider: input.repoProvider,
@@ -2501,7 +2502,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       publishRepoUrl: input.publishRepoUrl,
       publishToken: input.publishToken,
       updatedAt: new Date(),
-    }).where(eq(projects.id, id)).returning();
+    }).where(eq(projects.id, id)).returning());
     if (!row) return reply.code(404).send({ error: 'project_not_found' });
     publishLiveEvent({ type: 'project.updated', companyId: row.companyId, entityType: 'project', entityId: row.id });
     return row;
@@ -2520,7 +2521,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     if (!purge) {
       const now = new Date();
-      await db.update(projects).set({ deletedAt: now, updatedAt: now }).where(eq(projects.id, id));
+      await retryMergeGateWrite(() => db.update(projects).set({ deletedAt: now, updatedAt: now }).where(eq(projects.id, id)));
       await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'project.archived', entityType: 'project', entityId: id, details: { name: existing.name } });
       publishLiveEvent({ type: 'project.deleted', companyId: existing.companyId, entityType: 'project', entityId: id });
       return { ok: true, archived: true };
@@ -2550,10 +2551,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       workspaceFiles: workspaceFileUsage?.count ?? 0,
     }).filter(([, count]) => Number(count) > 0);
     if (blocking.length > 0) return reply.code(409).send({ error: 'project_not_empty', blocking: Object.fromEntries(blocking) });
-    await db.transaction(async (tx) => {
+    await retryMergeGateWrite(() => db.transaction(async (tx) => {
       await tx.delete(goals).where(eq(goals.projectId, id));
       await tx.delete(projects).where(eq(projects.id, id));
-    });
+    }));
     publishLiveEvent({ type: 'project.deleted', companyId: existing.companyId, entityType: 'project', entityId: id });
     return { ok: true };
   });

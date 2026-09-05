@@ -1,3 +1,4 @@
+import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import { and, desc, eq, inArray, isNull, lt, sql as drizzleSql, isNotNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { inferCardTransitionAction, normalizeCardStatus, type AgentReport, type CardStatus } from '@megacorps/shared';
@@ -2337,7 +2338,7 @@ export async function openHeartbeatRun(card: CardRow, agent: AgentRow, source: s
     startedAt: new Date(),
   }).returning();
   if (!run) throw new Error('heartbeat_run_create_failed');
-  if (taskRunId) await db.update(taskRuns).set({ heartbeatRunId: run.id, agentId: agent.id, updatedAt: new Date() }).where(eq(taskRuns.id, taskRunId));
+  if (taskRunId) await retryMergeGateWrite(() => db.update(taskRuns).set({ heartbeatRunId: run.id, agentId: agent.id, updatedAt: new Date() }).where(eq(taskRuns.id, taskRunId)));
   return run;
 }
 
@@ -3604,7 +3605,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
   if (!reviewerId && hasChildren && card.assigneeId) {
     reviewerId = card.assigneeId;
     await db.update(kanbanCards).set({ reviewerId, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
-    if (options.taskRunId) await db.update(taskRuns).set({ agentId: reviewerId, updatedAt: new Date() }).where(eq(taskRuns.id, options.taskRunId));
+    if (options.taskRunId) await retryMergeGateWrite(() => db.update(taskRuns).set({ agentId: reviewerId, updatedAt: new Date() }).where(eq(taskRuns.id, options.taskRunId!)));
     await addTaskLog({ cardId: card.id, agentId: reviewerId, type: 'review', status: 'queued', message: 'Parent integration review assigned to the parent assignee.' });
   }
   if (reviewerId && reviewerId === card.assigneeId && !hasChildren) {
@@ -3612,7 +3613,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     reviewerId = assignee?.bossId && assignee.bossId !== assignee.id && assignee.bossId !== card.assigneeId ? assignee.bossId : null;
     if (reviewerId) {
       await db.update(kanbanCards).set({ reviewerId, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
-      if (options.taskRunId) await db.update(taskRuns).set({ agentId: reviewerId, updatedAt: new Date() }).where(eq(taskRuns.id, options.taskRunId));
+      if (options.taskRunId) await retryMergeGateWrite(() => db.update(taskRuns).set({ agentId: reviewerId, updatedAt: new Date() }).where(eq(taskRuns.id, options.taskRunId!)));
       await addTaskLog({ cardId: card.id, agentId: reviewerId, type: 'review', status: 'warning', message: 'Self-review prevented; review reassigned to the assignee manager.' });
     }
   }

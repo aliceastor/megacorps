@@ -101,3 +101,41 @@ END $$;
 DROP TRIGGER IF EXISTS mc_merge_task_run_gate ON task_runs;
 CREATE TRIGGER mc_merge_task_run_gate BEFORE INSERT OR UPDATE ON task_runs FOR EACH ROW EXECUTE FUNCTION mc_merge_task_run_gate();
 `;
+
+// Migration 24: UPDATE already owns its project/task row. Acquire every card
+// without waiting, so a child->parent or card->run writer can finish after the
+// failed statement/transaction rolls back. Callers retry the whole DB operation.
+export const managedMergeLockOrderMigration = `
+CREATE OR REPLACE FUNCTION mc_merge_project_gate() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE target UUID; targets UUID[];
+BEGIN
+ IF TG_OP = 'UPDATE' AND ROW(OLD.repo_provider,OLD.repo_url,OLD.default_branch,OLD.auto_merge_after_approval,OLD.completion_requires_merge,OLD.managed_repo_full_name,OLD.deleted_at) IS NOT DISTINCT FROM ROW(NEW.repo_provider,NEW.repo_url,NEW.default_branch,NEW.auto_merge_after_approval,NEW.completion_requires_merge,NEW.managed_repo_full_name,NEW.deleted_at) THEN RETURN NEW; END IF;
+ SELECT array_agg(id ORDER BY id) INTO targets FROM kanban_cards WHERE project_id = OLD.id;
+ IF targets IS NOT NULL THEN
+  PERFORM id FROM kanban_cards WHERE id = ANY(targets) ORDER BY id FOR UPDATE NOWAIT;
+  -- Use exactly the locked set, not a new query that could see unlocked cards.
+  FOREACH target IN ARRAY targets LOOP PERFORM mc_merge_gate_fence(target); END LOOP;
+ END IF;
+ IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+ RETURN NEW;
+END $$;
+CREATE OR REPLACE FUNCTION mc_merge_task_run_gate() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE before_row JSONB; after_row JSONB; target UUID; targets UUID[];
+BEGIN
+ before_row := CASE WHEN TG_OP = 'INSERT' THEN '{}'::jsonb ELSE to_jsonb(OLD) END;
+ after_row := to_jsonb(NEW);
+ IF NEW.kind IN ('dispatch','review','panel_review') AND NEW.status IN ('queued','running') AND
+   (TG_OP = 'INSERT' OR before_row->>'status' NOT IN ('queued','running') OR
+    before_row->>'card_id' IS DISTINCT FROM after_row->>'card_id' OR before_row->>'kind' IS DISTINCT FROM after_row->>'kind' OR before_row->>'agent_id' IS DISTINCT FROM after_row->>'agent_id') THEN
+   SELECT array_agg(value::uuid ORDER BY value::uuid) INTO targets FROM
+     (SELECT DISTINCT value FROM jsonb_array_elements_text(jsonb_build_array(before_row->>'card_id', after_row->>'card_id')) WHERE value IS NOT NULL) ids;
+   IF targets IS NOT NULL THEN
+     IF TG_OP = 'UPDATE' THEN
+       PERFORM id FROM kanban_cards WHERE id = ANY(targets) ORDER BY id FOR UPDATE NOWAIT;
+     END IF;
+     FOREACH target IN ARRAY targets LOOP PERFORM mc_merge_gate_fence(target); END LOOP;
+   END IF;
+ END IF;
+ RETURN NEW;
+END $$;
+`;

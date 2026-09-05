@@ -1,6 +1,6 @@
 import { sql } from './client.ts';
 import { CEO_POSITION_PROMPT, LEGACY_CEO_POSITION_PROMPT } from '../role-playbooks.ts';
-import { managedMergeMigration, managedMergeRunFenceMigration } from './managed-merge-migration.ts';
+import { managedMergeMigration, managedMergeRunFenceMigration, managedMergeLockOrderMigration } from './managed-merge-migration.ts';
 
 type Migration = { version: number; name: string; run: () => Promise<void> };
 
@@ -39,6 +39,7 @@ const migrations: Migration[] = [
   } },
   { version: 22, name: 'managed-authorized-merge', run: async () => { await sql.unsafe(managedMergeMigration); } },
   { version: 23, name: 'managed-merge-run-fence', run: async () => { await sql.unsafe(managedMergeRunFenceMigration); } },
+  { version: 24, name: 'managed-merge-lock-order', run: async () => { await sql.unsafe(managedMergeLockOrderMigration); } },
 ];
 
 // Merge closure (company pipeline §19). external_waits.authorized_head_sha

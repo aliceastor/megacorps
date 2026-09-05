@@ -1,3 +1,4 @@
+import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import { and, eq, isNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { generateAgentToken } from './agent-auth.ts';
@@ -61,7 +62,7 @@ export async function reconcileGiteaProvisioning(app: FastifyInstance): Promise<
     });
     // A project created while Gitea was down has no clone URL yet; heal it.
     if (!project.repoUrl) {
-      await db.update(projects).set({ repoUrl: repo.cloneUrl, updatedAt: new Date() }).where(eq(projects.id, project.id));
+      await retryMergeGateWrite(() => db.update(projects).set({ repoUrl: repo.cloneUrl, updatedAt: new Date() }).where(eq(projects.id, project.id)));
     }
     repos += 1;
     const companyAgents = activeAgents.filter((agent) => agent.companyId === project.companyId);
