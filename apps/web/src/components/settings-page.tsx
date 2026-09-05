@@ -1,4 +1,5 @@
 'use client';
+import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { Save, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
@@ -107,8 +108,9 @@ export function SettingsPage() {
   const [memberEmail, setMemberEmail] = useState('');
   const [memberRole, setMemberRole] = useState('viewer');
   const [toast, setToast] = useState('');
+  const [setupReturnId, setSetupReturnId] = useState('');
 
-  async function refresh() {
+  async function refresh(restoreSetup = false) {
     const [nextRuntimes, nextHealth, nextCompanies, nextDepartments, nextMemberships] = await Promise.all([
       api<Runtime[]>('/api/agent-runtimes'),
       api<RuntimeHealth[]>('/api/agent-runtimes/health'),
@@ -124,9 +126,20 @@ export function SettingsPage() {
     const company = nextCompanies.find((item) => item.id === companyId) ?? nextCompanies[0];
     if (company) selectCompany(company);
     if (!runtimeCompanyId && nextCompanies[0]) setRuntimeCompanyId(nextCompanies[0].id);
+    if (restoreSetup) {
+      const query = new URLSearchParams(window.location.search);
+      const setupCompany = nextCompanies.find(item => item.id === query.get('setup'));
+      if (setupCompany) {
+        setSetupReturnId(setupCompany.id);
+        selectCompany(setupCompany);
+        setRuntimeCompanyId(setupCompany.id);
+        const runtime = nextRuntimes.find(item => item.id === query.get('runtime') && item.companyId === setupCompany.id);
+        if (runtime) selectRuntime(runtime);
+      }
+    }
   }
 
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => { void refresh(true); }, []);
   useEffect(() => { setDeptSlug(deptName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')); }, [deptName]);
 
   const selectedCompanyDepartments = useMemo(() => departments.filter((department) => department.companyId === companyId), [companyId, departments]);
@@ -264,6 +277,7 @@ export function SettingsPage() {
       <div><h1>{t('title.settings')}</h1><p>{t('settings.subtitle')}</p></div>
     </div>
     {toast && <p className="status-pill">{toast}</p>}
+    {setupReturnId && <Link className="btn" href={`/companies?setup=${encodeURIComponent(setupReturnId)}`}>{t('setup.return')}</Link>}
     <div className="tab-row page-tabs">
       {(['runtimes', 'company', 'members', 'advanced'] as const).map((next) => <button key={next} className={`tab ${tab === next ? 'active' : ''}`} onClick={() => setTab(next)}>{t(`settings.tab.${next}`)}</button>)}
     </div>

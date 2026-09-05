@@ -59,10 +59,12 @@ const stepInput = z.discriminatedUnion('step', [
   z.object({
     step: z.literal('runtime'),
     runtimeId: z.string().uuid().optional(),
+    runtimeCreateKey: z.string().uuid().optional(),
     name: text.optional(),
     a2aBaseUrl: z.string().url().optional(),
   }),
   z.object({ step: z.literal('finish') }),
+  z.object({ step: z.literal('reopen') }),
 ]);
 function databaseCode(error: unknown): string | undefined {
   let current = error;
@@ -197,6 +199,15 @@ async function connectionIssues(store: Store, state: Awaited<ReturnType<typeof s
   return issues;
 }
 
+function structureIssues(state: Awaited<ReturnType<typeof setupState>>) {
+  const bosses = state.members.filter(a => state.roles.some(p => p.id === a.positionId && p.isCompanyBoss));
+  return bosses.length !== 1 || bosses[0]?.id !== state.boss?.id ||
+    [state.boss, state.head].some(a => a?.isActive === false || a?.isBusy) ||
+    !state.boss || !state.head || state.boss.id === state.head.id ||
+    state.head.departmentId !== state.department?.id || state.department?.headAgentId !== state.head.id
+    ? ['Finish the distinct Boss and department head setup.'] : [];
+}
+
 export async function registerCompanySetupRoutes(app: FastifyInstance) {
   app.post('/api/company-setup', async (request, reply) => {
     const user = await requireRole(request, reply, 'operator');
@@ -287,10 +298,16 @@ export async function registerCompanySetupRoutes(app: FastifyInstance) {
     const user = await requireCompanyRole(request, reply, id, 'operator');
     if (!user) return reply;
     const state = await setupState(db, id);
+    const readiness = await companyExecutionReadiness(id);
+    const issues = [...readiness.issues, ...structureIssues(state)];
+    const connections = await connectionIssues(db, state);
+    const ready = readiness.ready && issues.length === 0;
     return {
       ...publicState(state),
-      readiness: await companyExecutionReadiness(id),
-      connectionIssues: await connectionIssues(db, state),
+      readiness: { ...readiness, ready, issues },
+      connectionIssues: connections,
+      status: !state.draft.completed ? 'draft' : !ready || connections.length ? 'needs_attention' :
+        state.company.autoDispatchEnabled ? 'ready' : 'dispatch_disabled',
     };
   });
   app.put('/api/companies/:id/setup', async (request, reply) => {
@@ -308,7 +325,10 @@ export async function registerCompanySetupRoutes(app: FastifyInstance) {
         await tx.select().from(companies).where(eq(companies.id, id)).for('update');
         const state = await setupState(tx, id);
         const draft = state.draft;
-        if (input.step === 'company') {
+        if (input.step === 'reopen') {
+          draft.stage = 'company';
+          draft.connectionChecks = {};
+        } else if (input.step === 'company') {
           await tx
             .update(companies)
             .set({ name: input.name, slug: input.slug, mission: input.mission, autoDispatchEnabled: false })
@@ -407,13 +427,22 @@ export async function registerCompanySetupRoutes(app: FastifyInstance) {
           draft.departmentId = saved!.id;
           draft.stage = 'head';
         } else if (input.step === 'runtime') {
-          const requested = input.runtimeId ?? (input.a2aBaseUrl ? draft.runtimeId : undefined);
+          if (input.runtimeId && (input.a2aBaseUrl || input.name || input.runtimeCreateKey))
+            failure('setup_select_or_create_runtime');
+          // Selection never grants ownership of a shared runtime. Creation keys identify
+          // immutable create operations; old clients get a payload-derived retry key.
+          const inputHash = createHash('sha256').update(JSON.stringify({ name: input.name, a2aBaseUrl: input.a2aBaseUrl })).digest('hex');
+          const createKey = input.runtimeCreateKey ?? `legacy:${inputHash}`;
+          const previous = !input.runtimeId ? draft.runtimeCreations?.[createKey] : undefined;
+          if (previous && previous.inputHash !== inputHash) failure('setup_runtime_create_request_changed', 409);
+          const requested = input.runtimeId ?? previous?.runtimeId;
           let [runtime] = requested
             ? await tx.select().from(agentRuntimes).where(eq(agentRuntimes.id, requested)).limit(1)
             : [];
           if (requested && (!runtime || runtime.companyId !== id || runtime.isActive === false))
             failure('runtime_company_mismatch');
           if (!state.boss || !state.head) failure('setup_create_boss_and_head_first');
+          if (previous && runtime?.adapterType !== 'a2a') failure('setup_created_runtime_changed', 409);
           if (!runtime) {
             if (!input.a2aBaseUrl || !input.name) failure('setup_choose_runtime_or_add_connection');
             assertAdapterTargetAllowed(input.a2aBaseUrl, 'a2aBaseUrl');
@@ -427,21 +456,13 @@ export async function registerCompanySetupRoutes(app: FastifyInstance) {
                 isActive: true,
               })
               .returning();
+            draft.runtimeCreations = { ...draft.runtimeCreations, [createKey]: { runtimeId: runtime!.id, inputHash } };
           }
           if (
             runtime!.adapterType === 'hermes-ssh' &&
             ![state.boss, state.head].every((a) => a?.runtimeId === runtime!.id)
           )
             failure('legacy_runtime_use_existing_configuration');
-          if (input.a2aBaseUrl && runtime!.id === draft.runtimeId)
-            await tx
-              .update(agentRuntimes)
-              .set({
-                name: input.name ?? runtime!.name,
-                config: { ...(runtime!.config as Record<string, unknown>), a2aBaseUrl: input.a2aBaseUrl },
-                updatedAt: new Date(),
-              })
-              .where(eq(agentRuntimes.id, runtime!.id));
           for (const agent of [state.boss, state.head])
             await tx
               .update(agents)
@@ -450,25 +471,12 @@ export async function registerCompanySetupRoutes(app: FastifyInstance) {
           draft.runtimeId = runtime!.id;
           draft.stage = 'runtime';
         } else {
-          const currentBosses = state.members.filter((a) =>
-            state.roles.some((p) => p.id === a.positionId && p.isCompanyBoss),
-          );
           const issues = [
             ...(readiness?.issues ?? []),
             ...(readiness?.runtimeIssues ?? []),
             ...(await connectionIssues(tx, state)),
+            ...structureIssues(state),
           ];
-          if (
-            currentBosses.length !== 1 ||
-            currentBosses[0]?.id !== state.boss?.id ||
-            [state.boss, state.head].some((a) => a?.isActive === false || a?.isBusy) ||
-            !state.boss ||
-            !state.head ||
-            state.boss.id === state.head.id ||
-            state.head.departmentId !== state.department?.id ||
-            state.department?.headAgentId !== state.head.id
-          )
-            issues.push('Finish the distinct Boss and department head setup.');
           if (issues.length)
             return reply.code(409).send({ error: 'setup_not_ready', message: issues.join(' '), issues });
           draft.completed = true;
@@ -550,7 +558,7 @@ export async function registerCompanySetupRoutes(app: FastifyInstance) {
         success,
         message: success
           ? 'A2A agent-card endpoint responded. No task was executed.'
-          : 'The agent-card endpoint did not respond. Check the runtime URL and retry.',
+          : 'The agent-card endpoint did not respond. In Settings, check the A2A URL, bearer token and agent/profile path, then return to this draft. Discovery does not verify authenticated task execution; use the explicit execution test if needed.',
       });
     }
     return { results };

@@ -15,7 +15,8 @@ type Agent = {
   adapterType?: string;
 };
 type Setup = {
-  company: { id: string; name: string; slug: string; mission?: string; bossRolePrompt?: string };
+  company: { id: string; name: string; slug: string; mission?: string; bossRolePrompt?: string; autoDispatchEnabled?: boolean };
+  status?: 'draft' | 'ready' | 'needs_attention' | 'dispatch_disabled';
   draft: { stage?: string; completed?: boolean; runtimeId?: string };
   boss: Agent | null;
   head: Agent | null;
@@ -49,6 +50,7 @@ const initial = {
   runtimeId: '',
   runtimeName: '',
   runtimeUrl: '',
+  runtimeCreateKey: '',
 };
 type Fields = typeof initial;
 const slugify = (value: string) =>
@@ -116,7 +118,7 @@ export function CompanySetup({
               runtimeId: data.draft.runtimeId ?? data.head?.runtimeId ?? '',
             }
           : {};
-        setFields({ ...initial, ...persisted, ...cached.fields });
+        setFields({ ...initial, ...persisted, ...cached.fields, runtimeCreateKey: cached.fields?.runtimeCreateKey || crypto.randomUUID() });
         setStep(cached.step ?? Math.max(0, steps.indexOf(data?.draft.stage as (typeof steps)[number])));
         setLoaded(true);
       } catch (err) {
@@ -205,7 +207,7 @@ export function CompanySetup({
                       step: 'runtime',
                       ...(fields.runtimeId
                         ? { runtimeId: fields.runtimeId }
-                        : { name: fields.runtimeName, a2aBaseUrl: fields.runtimeUrl }),
+                        : { name: fields.runtimeName, a2aBaseUrl: fields.runtimeUrl, runtimeCreateKey: fields.runtimeCreateKey }),
                     };
         data = await api<Setup>(`/api/companies/${companyId}/setup`, {
           method: 'PUT',
@@ -234,10 +236,11 @@ export function CompanySetup({
       if (execute) {
         for (const agent of [server?.boss, server?.head])
           if (agent) {
-            const result = await api<{ success: boolean }>(`/api/agents/${agent.id}/test-connection`, {
+            const result = await api<{ success: boolean; needsInput?: boolean }>(`/api/agents/${agent.id}/test-connection`, {
               method: 'POST',
             });
             if (!result.success) throw new Error(`${agent.name}: ${t('setup.checkFailed')}`);
+            if (result.needsInput) throw new Error(`${agent.name}: ${t('setup.executionNeedsInput')}`);
           }
         setNotice(t('setup.executionResponded'));
       } else {
@@ -265,6 +268,7 @@ export function CompanySetup({
         body: JSON.stringify({ step: 'finish' }),
       });
       setServer(data);
+      await reload();
       onSaved();
       localStorage.removeItem(storageKey);
     } catch (err) {
@@ -272,6 +276,19 @@ export function CompanySetup({
     } finally {
       setBusy(false);
     }
+  }
+  async function reopen() {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      await api<Setup>(`/api/companies/${companyId}/setup`, { method: 'PUT', body: JSON.stringify({ step: 'reopen' }) });
+      await reload();
+      setStep(0);
+      onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('common.error'));
+    } finally { setBusy(false); }
   }
   function field(key: keyof Fields, label: string, slugKey?: keyof Fields, multiline = false) {
     return (
@@ -320,8 +337,10 @@ export function CompanySetup({
       </div>
       {server?.draft.completed ? (
         <>
-          <p role="status">{t('setup.complete')}</p>
-          <Link className="btn btn-primary" href="/kanban">
+          <p role="status">{t(server.status === 'ready' ? 'setup.complete' : server.status === 'dispatch_disabled' ? 'setup.dispatchDisabled' : 'setup.needsAttention')}</p>
+          {error && <p className="form-error" role="alert">{error}</p>}
+          <button className="btn btn-primary" disabled={busy} onClick={() => void reopen()}>{t('setup.reopen')}</button>
+          <Link className="btn" href="/kanban">
             {t('nav.kanban')}
           </Link>
         </>
@@ -447,7 +466,7 @@ export function CompanySetup({
                   <select
                     className="input"
                     value={fields.runtimeId}
-                    onChange={(e) => change('runtimeId', e.target.value)}
+                    onChange={(e) => setFields(f => ({ ...f, runtimeId: e.target.value, ...(!e.target.value ? { runtimeCreateKey: crypto.randomUUID(), runtimeName: '', runtimeUrl: '' } : {}) }))}
                   >
                     <option value="">{t('setup.addA2a')}</option>
                     {available.map((r) => (
@@ -465,7 +484,7 @@ export function CompanySetup({
                   </div>
                 )}
                 <p>
-                  <Link href="/settings">{t('setup.otherRuntime')}</Link>
+                  <Link href={`/settings?setup=${encodeURIComponent(companyId)}${fields.runtimeId ? `&runtime=${encodeURIComponent(fields.runtimeId)}` : ''}`}>{t('setup.otherRuntime')}</Link>
                 </p>
                 <button type="submit" className="btn" disabled={busy}>
                   {t('setup.saveRuntime')}

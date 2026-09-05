@@ -173,3 +173,72 @@ test('setup start reports a taken company slug as a retryable field error with n
   assert.equal(state.rows(companyMemberships).length, 0);
   assert.equal(state.rows(positions).length, 0);
 });
+
+async function minimum(request: Awaited<ReturnType<typeof fixture>>['request']) {
+  const created = await request('POST', '/api/company-setup', { setupKey: randomUUID(), name: 'Repair', slug: 'repair' });
+  const id = created.json().company.id;
+  for (const payload of [{ step: 'boss', name: 'Boss', slug: 'boss' }, { step: 'department', name: 'Team', slug: 'team' }, { step: 'head', name: 'Head', slug: 'head' }]) {
+    const saved = await request('PUT', `/api/companies/${id}/setup`, payload);
+    assert.equal(saved.statusCode, 200, saved.body);
+  }
+  return id;
+}
+
+for (const adapterType of ['a2a', 'codex-app-server']) test(`Add A2A after selecting shared ${adapterType} preserves the selected runtime and retries exactly once`, async t => {
+  const { request, state } = await fixture(t);
+  const id = await minimum(request);
+  const shared = { id: randomUUID(), companyId: id, name: 'Shared', adapterType, isActive: true, config: { a2aBaseUrl: 'https://shared.example.test', a2aBearerToken: 'synthetic-sentinel', custom: 'keep' }, localWorkspaceRoot: '/keep' };
+  state.rows(agentRuntimes).push(shared);
+  const other = { id: randomUUID(), companyId: id, name: 'Other', runtimeId: shared.id, adapterType, adapterConfig: { preserve: true } };
+  state.rows(agents).push(other);
+  const before = structuredClone({ shared, other });
+  assert.equal((await request('PUT', `/api/companies/${id}/setup`, { step: 'runtime', runtimeId: shared.id })).statusCode, 200);
+  const input = { step: 'runtime', runtimeCreateKey: randomUUID(), name: 'New A2A', a2aBaseUrl: 'https://new.example.test' };
+  const first = await request('PUT', `/api/companies/${id}/setup`, input);
+  assert.equal(first.statusCode, 200, first.body);
+  const newId = first.json().draft.runtimeId;
+  assert.notEqual(newId, shared.id);
+  const again = await request('PUT', `/api/companies/${id}/setup`, input);
+  assert.equal(again.statusCode, 200, again.body);
+  assert.equal(again.json().draft.runtimeId, newId);
+  assert.equal(state.rows(agentRuntimes).length, 2);
+  assert.equal(state.rows(agentRuntimes).find(r => r.id === newId)?.adapterType, 'a2a');
+  assert.deepEqual({ shared, other }, before);
+  const altered = await request('PUT', `/api/companies/${id}/setup`, { ...input, a2aBaseUrl: 'https://different.example.test' });
+  assert.equal(altered.statusCode, 409, altered.body);
+});
+
+for (const broken of ['runtime', 'head']) test(`completed setup can explicitly reopen and repair ${broken} with the same entities`, async t => {
+  const { request, state } = await fixture(t);
+  const id = await minimum(request);
+  await request('PUT', `/api/companies/${id}/setup`, { step: 'runtime', name: 'A2A', a2aBaseUrl: 'https://runtime.example.test' });
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ name: 'Synthetic endpoint' })));
+  await request('POST', `/api/companies/${id}/setup/probe`);
+  assert.equal((await request('PUT', `/api/companies/${id}/setup`, { step: 'finish' })).statusCode, 200);
+  const company = state.rows(companies)[0]!;
+  const ids = state.rows(agents).map(a => a.id);
+  const runtime = state.rows(agentRuntimes)[0]!;
+  const department = state.rows(departments)[0]!;
+  if (broken === 'runtime') runtime.isActive = false;
+  else department.headAgentId = null;
+  const snapshot = structuredClone(company);
+  const status = await request('GET', `/api/companies/${id}/setup`);
+  assert.equal(status.json().status, 'needs_attention');
+  assert.deepEqual(company, snapshot, 'GET must not pause dispatch or mutate draft');
+  const reopen = await request('PUT', `/api/companies/${id}/setup`, { step: 'reopen' });
+  assert.equal(reopen.statusCode, 200, reopen.body);
+  assert.equal(company.autoDispatchEnabled, false);
+  assert.equal(company.setupDraft.completed, false);
+  runtime.isActive = true;
+  const fixed = await request('PUT', `/api/companies/${id}/setup`, { step: 'head', name: 'Head', slug: 'head' });
+  assert.equal(fixed.statusCode, 200, fixed.body);
+  assert.equal((await request('PUT', `/api/companies/${id}/setup`, { step: 'finish' })).statusCode, 409, 'reopen requires new checks');
+  await request('POST', `/api/companies/${id}/setup/probe`);
+  assert.equal((await request('PUT', `/api/companies/${id}/setup`, { step: 'finish' })).statusCode, 200);
+  assert.deepEqual(state.rows(agents).map(a => a.id), ids);
+  assert.equal(state.rows(departments).length, 1);
+  assert.equal(state.rows(agentRuntimes).length, 1);
+  assert.equal((await request('GET', `/api/companies/${id}/setup`)).json().status, 'ready');
+  company.autoDispatchEnabled = false;
+  assert.equal((await request('GET', `/api/companies/${id}/setup`)).json().status, 'dispatch_disabled');
+});

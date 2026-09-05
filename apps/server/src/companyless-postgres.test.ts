@@ -106,6 +106,37 @@ test('PostgreSQL companyless bootstrap, audit, complete inventory and deletion t
     const checked=await call('POST',`/api/companies/${id}/setup/probe`);assert.equal(checked.statusCode,200,checked.body);assert.ok(checked.json().results.every((row:any)=>row.success));
     const ready=await call('PUT',`/api/companies/${id}/setup`,{step:'finish'});assert.equal(ready.statusCode,200,ready.body);
     assert.equal((await sql`SELECT auto_dispatch_enabled FROM companies WHERE id=${id}`)[0]!.auto_dispatch_enabled,true);
+    for (const mode of ['a2a','codex-app-server']) {
+      const [shared] = await sql`INSERT INTO agent_runtimes(company_id,name,adapter_type,config) VALUES(${id},${`Shared ${mode}`},${mode},'{"a2aBaseUrl":"https://shared.example.test","a2aBearerToken":"synthetic-sentinel","custom":"preserve"}'::jsonb) RETURNING *`;
+      const [other] = await sql`INSERT INTO agents(company_id,name,slug,role,adapter_type,runtime_id) VALUES(${id},'Other',${`other-${mode}`},'Employee',${mode},${shared!.id}) RETURNING *`;
+      const selected=await call('PUT',`/api/companies/${id}/setup`,{step:'runtime',runtimeId:shared!.id});
+      assert.equal(selected.statusCode,200,selected.body);
+      const creation={step:'runtime',runtimeCreateKey:randomUUID(),name:'Distinct A2A',a2aBaseUrl:'https://distinct.example.test'};
+      // Actual concurrent route requests serialize on the company row and reuse the operation.
+      const attempts=await Promise.all([call('PUT',`/api/companies/${id}/setup`,creation),call('PUT',`/api/companies/${id}/setup`,creation)]);
+      for(const attempt of attempts)assert.equal(attempt.statusCode,200,attempt.body);
+      const newId=attempts[0]!.json().draft.runtimeId;
+      assert.notEqual(newId,shared!.id);assert.equal(attempts[1]!.json().draft.runtimeId,newId);
+      assert.equal((await sql`SELECT * FROM agent_runtimes WHERE id=${newId}`)[0]!.adapter_type,'a2a');
+      assert.equal((await sql`SELECT * FROM agent_runtimes WHERE company_id=${id} AND name='Distinct A2A'`).length,mode==='a2a'?1:2);
+      assert.deepEqual((await sql`SELECT * FROM agent_runtimes WHERE id=${shared!.id}`)[0],shared);
+      assert.deepEqual((await sql`SELECT * FROM agents WHERE id=${other!.id}`)[0],other);
+    }
+    await call('POST',`/api/companies/${id}/setup/probe`);
+    assert.equal((await call('PUT',`/api/companies/${id}/setup`,{step:'finish'})).statusCode,200);
+    const before=(await call('GET',`/api/companies/${id}/setup`)).json();
+    await sql`UPDATE departments SET head_agent_id=NULL WHERE id=${before.department.id}`;
+    const broken=(await call('GET',`/api/companies/${id}/setup`)).json();
+    assert.equal(broken.status,'needs_attention');assert.equal(broken.company.autoDispatchEnabled,true);
+    const reopened=await call('PUT',`/api/companies/${id}/setup`,{step:'reopen'});
+    assert.equal(reopened.statusCode,200,reopened.body);assert.equal(reopened.json().company.autoDispatchEnabled,false);
+    const fixed=await call('PUT',`/api/companies/${id}/setup`,{step:'head',name:'Head',slug:'head'});
+    assert.equal(fixed.statusCode,200,fixed.body);assert.equal(fixed.json().head.id,before.head.id);
+    assert.equal((await call('PUT',`/api/companies/${id}/setup`,{step:'finish'})).statusCode,409);
+    await call('POST',`/api/companies/${id}/setup/probe`);
+    assert.equal((await call('PUT',`/api/companies/${id}/setup`,{step:'finish'})).statusCode,200);
+    assert.equal((await sql`SELECT * FROM agents WHERE company_id=${id}`).length,4);
+    assert.equal((await sql`SELECT * FROM departments WHERE company_id=${id}`).length,1);
   });
 
 });

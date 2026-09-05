@@ -23,7 +23,7 @@ export const appSettings = pgTable('app_settings', {
 });
 
 export const groups = pgTable('groups', { id: uuid('id').primaryKey().defaultRandom(), name: text('name').notNull(), createdAt: timestamp('created_at', { withTimezone: true }).defaultNow() });
-export type CompanySetupDraft = { stage?: string; bossId?: string; departmentId?: string; headId?: string; runtimeId?: string; completed?: boolean; connectionChecks?: Record<string, { fingerprint: string; checkedAt: string; success: boolean; method: 'probe' | 'execution' }> };
+export type CompanySetupDraft = { stage?: string; bossId?: string; departmentId?: string; headId?: string; runtimeId?: string; runtimeCreations?: Record<string, { runtimeId: string; inputHash: string }>; completed?: boolean; connectionChecks?: Record<string, { fingerprint: string; checkedAt: string; success: boolean; method: 'probe' | 'execution' }> };
 export const companies = pgTable('companies', {
   setupKey: uuid('setup_key').unique(),
   setupDraft: jsonb('setup_draft').$type<CompanySetupDraft>(),
