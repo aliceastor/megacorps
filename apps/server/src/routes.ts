@@ -1,4 +1,5 @@
 import { registerCompanySetupRoutes, setupConnectionFingerprint, recordSetupConnectionCheck } from './company-setup.ts';
+import { registerCompanyRetirementRoutes } from './company-retirement.ts';
 import { companyDeletionInventory, deletionBlockers, lockCompanyInventory } from './company-inventory.ts';
 import { structuralCompletionIssue, companyExecutionReadiness, structuralReviewer } from './company-workflow.ts';
 import { workerRepositoryReadiness } from './worker-readiness.ts';
@@ -476,6 +477,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
   });
   await registerCompanySetupRoutes(app);
+  registerCompanyRetirementRoutes(app);
   await registerChatRoutes(app);
   await registerCronRoutes(app);
   await registerRunnerRoutes(app);
