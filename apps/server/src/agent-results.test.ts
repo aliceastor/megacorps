@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
-import { agents, approvals, cardComments, externalWaits, heartbeatRuns, kanbanCards, reviewFindings, reviewRounds, taskRuns, workProducts } from './db/schema.ts';
+import { agents, approvals, cardComments, externalWaits, heartbeatRuns, kanbanCards, projects, reviewFindings, reviewRounds, taskRuns, workProducts } from './db/schema.ts';
 import { dispatchCard, reviewCard, runMessageDelegation } from './dispatch.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { memoryDb } from './test-support/memory-db.ts';
@@ -355,3 +355,13 @@ for (const [label, output] of unsafeOutputs) {
     assert.equal(state.rows(cardComments).filter((row) => row.action === 'delegate_report').length, 0);
   });
 }
+
+test('direct dispatch cannot finish without required merge evidence', async (t) => {
+  const { card, run, state } = fixture(t);
+  card.projectId = randomUUID();
+  state.rows(projects).push({ id: card.projectId, companyId: card.companyId, completionRequiresMerge: true, repoUrl: null });
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: JSON.stringify(report('completed', { summary: 'Implemented the requested product change.' })), sessionId: 's', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
+  await dispatchCard(card.id, 'manual', { taskRunId: run.id });
+  assert.notEqual(card.columnStatus, 'done');
+  assert.equal(card.completedAt, null);
+});

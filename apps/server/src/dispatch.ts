@@ -3510,7 +3510,8 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const topLevelGuidanceAccepted = parked || humanGate ? false : completionDecision.topLevelGuidanceAccepted;
     const nextStatus: CardStatus = checkpointRequest ? 'waiting_on_client' : brainstormLaunch ? 'waiting_on_brainstorm' : fixRound || humanGate ? 'in_review' : completionDecision.nextStatus;
     const childBlock = parked ? null : await completionBlockedByChildren(card, nextStatus);
-    const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : nextStatus;
+    const dispatchMergePlan = !childBlock && nextStatus === 'done' ? await planMergeGate({ ...card, executionLog: result.output }) : null;
+    const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : dispatchMergePlan ? mergeCompletionStatus(dispatchMergePlan) : nextStatus;
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     // Agent release + card stage move + heartbeat completion commit atomically, so a
     // crash mid-completion cannot leave the agent free while the card looks running.
@@ -3592,6 +3593,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await createPendingApproval(updated, agent.id, 'Assignee needs reviewer guidance');
       await enqueueTaskRun(updated.id, 'review', 'queue');
     }
+    if (dispatchMergePlan) await applyMergeGatePlan(updated, dispatchMergePlan);
     if (effectiveNextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
     if (effectiveNextStatus === 'in_progress' && normalizedResult.outcome === 'progress' && !childBlock) await enqueueTaskRun(updated.id, 'dispatch', 'queue');
     return updated;

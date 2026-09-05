@@ -120,8 +120,7 @@ export function normalizeBranchRef(ref: string | null | undefined): string | nul
   return ref.trim().replace(/^refs\/heads\//, '') || null;
 }
 
-// Agents report short SHAs as often as full ones; a prefix of at least seven
-// hex characters is still the same commit, anything shorter is not trusted.
+// Authorization and closure compare full provider-verified SHAs only.
 export function sameCommit(a: string | null | undefined, b: string | null | undefined): boolean {
   const left = (a ?? '').trim().toLowerCase();
   const right = (b ?? '').trim().toLowerCase();
@@ -239,12 +238,12 @@ export function mergeVerdict(input: { wait: MergeWaitFacts; event: MergeEventFac
   }
 
   // pull_request: only the wait that authorized this PR may react to it.
-  if (event.pullRequestNumber != null && wait.externalId && String(event.pullRequestNumber) !== wait.externalId) return 'ignore';
+  if (wait.externalId && (event.pullRequestNumber == null || String(event.pullRequestNumber) !== wait.externalId)) return 'ignore';
   const action = (event.action ?? '').trim().toLowerCase();
   const closed = action === 'closed' || action === 'merged';
   if (closed && event.merged) {
     const base = normalizeBranchRef(event.baseRef);
-    if (base && base.toLowerCase() !== defaultBranch.toLowerCase()) return 'ignore';
+    if (!base || base !== defaultBranch) return 'ignore';
     // Every wait the merge gate creates carries an authorized head. A wait
     // without one was made by hand (POST /api/cards/:id/external-waits) and
     // keeps the plain "this pull request merged" meaning.
@@ -327,8 +326,7 @@ async function projectForCard(card: Pick<CardRow, 'projectId'>): Promise<Project
 }
 
 // Read-only: decides whether an approved card must park, and on which head.
-// The head comes from the reported work product, and only when that is missing
-// does MegaCorps ask Gitea for the pull request head.
+// Always verify current provider head/base/state, then compare reported evidence.
 export async function planMergeGate(card: CardRow, options: { fetchImpl?: typeof fetch } = {}): Promise<MergeGatePlan> {
   const project = await projectForCard(card);
   const blocked = (reason: Exclude<MergeSkipReason, 'not_required'>, detail: string): MergeGatePlan => ({ disposition: 'blocked', reason, detail });
@@ -354,6 +352,7 @@ export async function planMergeGate(card: CardRow, options: { fetchImpl?: typeof
       if (candidate.pullRequestNumber != null) {
         const pull = await giteaPullRequest(config, slug.org, slug.repo, candidate.pullRequestNumber, options.fetchImpl);
         if (!pull) return blocked('no_head', 'The project pull request was not found. Correct its URL and resubmit for review.');
+        if (!['open', 'closed'].includes(pull.state ?? '') || typeof pull.merged !== 'boolean') return blocked('provider_unavailable', 'The provider returned incomplete pull request state. Restore provider access and retry evidence verification.');
         if (normalizeBranchRef(pull.base?.ref) !== defaultBranch) return blocked('wrong_base', `The pull request must target ${defaultBranch}; correct its base and resubmit for review.`);
         if (pull.state === 'closed' && !pull.merged) return blocked('closed_unmerged', 'The pull request closed without merging. Reopen or replace it and resubmit for review.');
         headSha = pull.head?.sha?.trim().toLowerCase() ?? null;
@@ -558,7 +557,7 @@ export async function reconcileMergeWait(waitId: string, options: { immediate?: 
     const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, wait.cardId), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card || card.columnStatus !== 'waiting_on_external') return false;
     const count = wait.pollCount ?? 0;
-    if (count >= EXTERNAL_POLL_MAX || (!(options.immediate && count === 0) && !pollDecision(wait, Date.now()).poll)) return false;
+    if (count >= EXTERNAL_POLL_MAX || (!(options.immediate && count === 0) && !pollDecision({ ...wait, pollIntervalSeconds: wait.pollIntervalSeconds ?? 30 }, Date.now()).poll)) return false;
     const [claimed] = await db.update(externalWaits).set({ pollCount: count + 1, lastPolledAt: new Date(), pollIntervalSeconds: count + 1 >= EXTERNAL_POLL_MAX ? null : 30 }).where(and(eq(externalWaits.id, wait.id), eq(externalWaits.status, 'waiting'), eq(externalWaits.pollCount, count))).returning();
     if (!claimed) return false;
     const project = await projectForCard(card);

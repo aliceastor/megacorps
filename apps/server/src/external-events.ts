@@ -184,7 +184,7 @@ const POLL_SWEEP_BATCH = 10;
 // receiver) never get here, because their waits carry no interval.
 export async function sweepExternalWaitPolls(app: FastifyInstance): Promise<number> {
   const candidates: ExternalWaitRow[] = await db.select().from(externalWaits)
-    .where(and(eq(externalWaits.status, 'waiting'), isNotNull(externalWaits.pollIntervalSeconds)))
+    .where(and(eq(externalWaits.status, 'waiting'), or(isNotNull(externalWaits.pollIntervalSeconds), and(eq(externalWaits.provider, 'gitea'), isNotNull(externalWaits.authorizedHeadSha)))))
     .orderBy(externalWaits.lastPolledAt, externalWaits.createdAt)
     .limit(POLL_SWEEP_BATCH * 3);
   const now = Date.now();

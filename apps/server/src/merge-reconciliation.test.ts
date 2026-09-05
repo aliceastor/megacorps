@@ -97,3 +97,12 @@ test('simultaneous webhook and reconciliation commit only one success event', as
   assert.equal(card.columnStatus, 'done');
   assert.equal(state.rows(externalEvents).filter((event) => event.status === 'success').length, 1);
 });
+
+test('legacy authorized waits without a poll interval are adopted by the server sweep', async (t) => {
+  const { card, state, pull } = fixture(t);
+  card.columnStatus = 'waiting_on_external';
+  state.rows(externalWaits).push({ id: 'legacy', cardId: card.id, companyId: card.companyId, provider: 'gitea', status: 'waiting', externalId: '12', externalUrl: 'https://gitea.test/org/repo/pulls/12', authorizedHeadSha: head, pollIntervalSeconds: null, pollCount: 0, createdAt: new Date(0), lastPolledAt: null });
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify(pull)));
+  await sweepExternalWaitPolls({ log: { info() {}, warn() {} } } as any);
+  assert.equal(card.columnStatus, 'done');
+});

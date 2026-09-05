@@ -132,6 +132,8 @@ test('mergeVerdict ignores events that are not this wait', () => {
   assert.equal(mergeVerdict({ wait: wait({ status: 'superseded' }), event: pullEvent() }), 'ignore');
   assert.equal(mergeVerdict({ wait: wait({ externalId: '13' }), event: pullEvent() }), 'ignore');
   assert.equal(mergeVerdict({ wait: wait(), event: pullEvent({ baseRef: 'release/1.0' }) }), 'ignore');
+  assert.equal(mergeVerdict({ wait: wait(), event: pullEvent({ baseRef: null }) }), 'ignore');
+  assert.equal(mergeVerdict({ wait: wait(), event: pullEvent({ pullRequestNumber: null }) }), 'ignore');
   assert.equal(mergeVerdict({ wait: wait(), event: pullEvent({ action: 'opened', merged: false }) }), 'ignore');
   assert.equal(mergeVerdict({ wait: wait(), event: pullEvent({ action: 'reopened', merged: false }) }), 'ignore');
 });
