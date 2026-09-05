@@ -114,6 +114,9 @@ export const projects = pgTable('projects', {
   // Merge closure (company pipeline §19): an approved card only counts as done
   // once its authorized head SHA is merged into the default branch.
   completionRequiresMerge: boolean('completion_requires_merge').notNull().default(false),
+  autoMergeAfterApproval: boolean('auto_merge_after_approval').notNull().default(false),
+  managedRepoFullName: text('managed_repo_full_name'),
+  mergeReadiness: jsonb('merge_readiness').$type<import('../gitea.ts').ManagedMergeReadiness>(),
   setupCommand: text('setup_command'),
   testCommand: text('test_command'),
   runtimeServices: jsonb('runtime_services').default({}),
@@ -230,6 +233,7 @@ export const kanbanCards = pgTable('kanban_cards', {
   critical: boolean('critical').notNull().default(false),
   reviewerIds: uuid('reviewer_ids').array().notNull().default([]),
   reviewRound: integer('review_round').notNull().default(0),
+  mergeGateVersion: integer('merge_gate_version').notNull().default(0),
   fixLevel: integer('fix_level').notNull().default(0),
   decisionMode: text('decision_mode'),
   rollupStatus: text('rollup_status'),
@@ -513,6 +517,24 @@ export const externalWaits = pgTable('external_waits', {
   pollCount: integer('poll_count').notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+});
+
+export const mergeIntents = pgTable('merge_intents', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  cardId: uuid('card_id').notNull().references(() => kanbanCards.id),
+  projectId: uuid('project_id').notNull(),
+  // Intentionally no wait FK: gate writers lock their row then the card;
+  // claiming must never acquire a wait-row lock while holding the card.
+  waitId: uuid('wait_id').notNull().unique(),
+  headSha: text('head_sha').notNull(),
+  repoFullName: text('repo_full_name').notNull(),
+  defaultBranch: text('default_branch').notNull(),
+  gateVersion: integer('gate_version').notNull(),
+  state: text('state').notNull().default('prepared'),
+  attemptCount: integer('attempt_count').notNull().default(0),
+  lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
+  lastResult: text('last_result'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 
 export const toolRegistry = pgTable('tool_registry', {

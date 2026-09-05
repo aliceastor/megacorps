@@ -7,6 +7,7 @@
 // for the shared lifecycle primitives the same way review-rounds.ts does.
 
 import { createHash } from 'node:crypto';
+import { settleMergeIntent } from './authorized-merge.ts';
 import { and, desc, eq, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { normalizeCardStatus } from '@megacorps/shared';
@@ -92,6 +93,11 @@ export async function applyExternalEvent(args: { card: CardRow; input: ApplyExte
     // A supplied wait belongs only to a card that is still parked on it.
     // Reject before the first mutation; returning null commits a transaction.
     if (input.waitId && card.columnStatus !== 'waiting_on_external') return null;
+    if (args.verifiedMerge && input.waitId && ['success', 'failure'].includes(input.status)) {
+      const [verifiedWait] = await tx.select().from(externalWaits).where(and(eq(externalWaits.id, input.waitId), eq(externalWaits.cardId, card.id), eq(externalWaits.status, 'waiting'))).limit(1);
+      if (!verifiedWait) return null;
+      if (verifiedWait.authorizedHeadSha) await settleMergeIntent(tx, verifiedWait.id, verifiedWait.authorizedHeadSha, input.status === 'success' ? 'verified' : 'closed');
+    }
     if (requestedStatus && requestedStatus !== card.columnStatus) {
       const [updated] = await tx.update(kanbanCards).set({ columnStatus: requestedStatus, rollupStatus: childBlock ? 'waiting_on_children' : requestedStatus === 'done' ? 'done' : undefined, lastError: requestedStatus === 'blocked' ? input.payloadSummary ?? 'External completion requires correction.' : null, completedAt: requestedStatus === 'done' ? now : null, updatedAt: now }).where(completionCondition(current)).returning();
       if (!updated) return null;

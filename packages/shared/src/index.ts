@@ -600,6 +600,7 @@ const createProjectObjectSchema = z.object({
   // branch. No default here so a partial PUT cannot silently flip it; POST
   // /api/projects turns it on for new gitea-local projects.
   completionRequiresMerge: z.boolean().optional(),
+  autoMergeAfterApproval: z.boolean().optional(),
   setupCommand: z.string().trim().max(2000).nullable().optional(),
   testCommand: z.string().trim().max(2000).nullable().optional(),
   runtimeServices: z.record(z.string(), z.unknown()).default({}),

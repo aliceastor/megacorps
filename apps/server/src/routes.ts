@@ -24,6 +24,8 @@ import { agentResultExecutionLog, normalizeAgentResult, persistAgentWorkProducts
 import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
 import { finishProtocolHelp, protocolHelpOrigin, resetProtocolRepair } from './protocol-repair.ts';
 import { completionCondition, guardedCompletionUpdate } from './completion-guard.ts';
+import { inspectManagedProject, optInManagedBinding } from './managed-project-policy.ts';
+import { mergeIntents } from './db/schema.ts';
 import { parseA2aPushPayload, verifyA2aPushSignature } from './a2a-client.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
@@ -2419,6 +2421,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(502).send({ error: 'gitea_provisioning_failed', detail: error instanceof Error ? error.message : 'unknown Gitea error' });
       }
     }
+    const completionRequiresMerge = input.completionRequiresMerge ?? input.repoProvider === 'gitea-local';
+    const autoMergeAfterApproval = input.autoMergeAfterApproval ?? (Boolean(provisionedRepoUrl) && completionRequiresMerge);
+    const policy = { ...input, companyId, repoUrl: input.repoUrl ?? provisionedRepoUrl, completionRequiresMerge, autoMergeAfterApproval };
+    const managedRepoFullName = autoMergeAfterApproval ? optInManagedBinding(policy) : null;
+    const mergeReadiness = autoMergeAfterApproval ? await inspectManagedProject({ ...policy, managedRepoFullName }, { establish: true }) : null;
     const [row] = await db.insert(projects).values({
       companyId,
       name: input.name,
@@ -2435,7 +2442,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       // Merge closure (§19): the bundled Gitea is the version control MegaCorps
       // administers, so a new gitea-local project defaults to the merge gate;
       // every other provider keeps today's behaviour unless asked.
-      completionRequiresMerge: input.completionRequiresMerge ?? input.repoProvider === 'gitea-local',
+      completionRequiresMerge,
+      autoMergeAfterApproval,
+      managedRepoFullName,
+      mergeReadiness,
       setupCommand: input.setupCommand ?? null,
       testCommand: input.testCommand ?? null,
       runtimeServices: input.runtimeServices,
@@ -2446,6 +2456,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (row) publishLiveEvent({ type: 'project.created', companyId: row.companyId, entityType: 'project', entityId: row.id });
     return reply.code(201).send(row);
   });
+  app.get('/api/projects/:id/merge-readiness', async (request, reply) => {
+    const [project] = await db.select().from(projects).where(and(eq(projects.id, (request.params as { id: string }).id), isNull(projects.deletedAt))).limit(1);
+    if (!project) return reply.code(404).send({ error: 'project_not_found' });
+    if (!(await requireVisibleCompany(request, reply, project.companyId))) return reply;
+    return { autoMergeAfterApproval: project.autoMergeAfterApproval, completionRequiresMerge: project.completionRequiresMerge, ...(await inspectManagedProject(project)) };
+  });
+  app.get('/api/cards/:id/merge-intents', async (request, reply) => {
+    const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, (request.params as { id: string }).id)).limit(1);
+    if (!card) return reply.code(404).send({ error: 'card_not_found' });
+    if (!(await requireVisibleCompany(request, reply, card.companyId))) return reply;
+    return db.select().from(mergeIntents).where(eq(mergeIntents.cardId, card.id));
+  });
   app.put('/api/projects/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const input = updateProjectSchema.parse(request.body);
@@ -2453,6 +2475,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!existing) return reply.code(404).send({ error: 'project_not_found' });
     if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'project_company_immutable' });
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    const policy = { ...existing, ...input };
+    const managedRepoFullName = input.autoMergeAfterApproval === true ? optInManagedBinding(policy) : existing.managedRepoFullName;
+    const mergeReadiness = policy.autoMergeAfterApproval ? await inspectManagedProject({ ...policy, managedRepoFullName }, { establish: input.autoMergeAfterApproval === true && existing.autoMergeAfterApproval !== true }) : null;
     const [row] = await db.update(projects).set({
       name: input.name,
       description: input.description,
@@ -2466,6 +2491,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       pushAfterRun: input.pushAfterRun,
       completionPolicy: input.completionPolicy,
       completionRequiresMerge: input.completionRequiresMerge,
+      autoMergeAfterApproval: input.autoMergeAfterApproval,
+      managedRepoFullName,
+      mergeReadiness,
       setupCommand: input.setupCommand,
       testCommand: input.testCommand,
       runtimeServices: input.runtimeServices,

@@ -15,7 +15,9 @@
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { db } from './db/client.ts';
-import { activityLog, cardComments, externalEvents, externalWaits, kanbanCards, projects, taskLogs, taskRuns, workProducts } from './db/schema.ts';
+import { activityLog, cardComments, externalEvents, externalWaits, kanbanCards, mergeIntents, projects, taskLogs, taskRuns, workProducts } from './db/schema.ts';
+import { executeAuthorizedMerge, settleMergeIntent } from './authorized-merge.ts';
+import { managedMergeTarget } from './managed-project-policy.ts';
 import { recordStageAction, type CardActionActor } from './card-actions.ts';
 import { publishLiveEvent } from './live.ts';
 import { giteaBranchContainsCommit, giteaConfigFromEnv, giteaPullRequest, giteaResolveCommit, giteaSlug } from './gitea.ts';
@@ -416,6 +418,11 @@ async function parkForMergeLocked(card: CardRow, plan: Extract<MergeGatePlan, { 
     for (const wait of waits) await tx.update(externalWaits).set({ status: 'superseded', resolvedAt: now }).where(eq(externalWaits.id, wait.id));
     const [wait] = await tx.insert(externalWaits).values({ companyId: card.companyId, cardId: card.id, waitingFor: plan.waitingFor, provider: MERGE_WAIT_PROVIDER, externalId: plan.externalId, externalUrl: plan.externalUrl, status: 'waiting', authorizedHeadSha: plan.headSha, pollIntervalSeconds: 30, pollCount: 0 }).returning();
     if (!wait) throw new Error('merge_wait_create_failed');
+    const target = managedMergeTarget(plan.project, giteaConfigFromEnv());
+    if (target && plan.candidate.pullRequestNumber) {
+      const [version] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1);
+      await tx.insert(mergeIntents).values({ cardId: card.id, projectId: plan.project.id, waitId: wait.id, headSha: plan.headSha, repoFullName: `${target.org}/${target.repo}`, defaultBranch: plan.defaultBranch, gateVersion: version!.mergeGateVersion ?? 0, state: 'prepared', attemptCount: 0 });
+    }
     return { wait, created: true };
   });
   if (!committed || !committed.created) return committed;
@@ -525,6 +532,7 @@ async function recordDrift(match: MergeWaitMatch, input: { observed: string | nu
     if (!fresh || fresh.columnStatus !== 'waiting_on_external') return null;
     const [authorized] = await tx.select().from(kanbanCards).where(completionCondition(card)).limit(1);
     if (!authorized) return null;
+    await settleMergeIntent(tx, wait.id, wait.authorizedHeadSha!, 'drift');
     const [row] = await tx.update(kanbanCards).set({ columnStatus: 'in_review', completedAt: null, rollupStatus: null, updatedAt: now }).where(completionCondition(card)).returning();
     if (!row) return null;
     const [claimed] = await tx.update(externalWaits).set({ status: 'superseded', resolvedAt: now }).where(and(eq(externalWaits.id, wait.id), eq(externalWaits.status, 'waiting'), eq(externalWaits.authorizedHeadSha, wait.authorizedHeadSha!))).returning();
@@ -587,6 +595,13 @@ export async function reconcileMergeWait(waitId: string, options: { immediate?: 
           if (pull?.head?.sha && pull.base?.ref && typeof pull.merged === 'boolean' && ['open', 'closed'].includes(pull.state ?? '')) {
             const outcome = await handlePullRequestEvent(match, { action: pull.state === 'closed' || pull.merged ? 'closed' : 'synchronized', pull_request: pull, repository: { full_name: `${slug.org}/${slug.repo}` } });
             if (outcome) return true;
+            if (await executeAuthorizedMerge(wait.id, options)) {
+              const after = await giteaPullRequest(config, slug.org, slug.repo, number, options.fetchImpl);
+              if (after?.head?.sha && after.base?.ref && typeof after.merged === 'boolean' && ['open', 'closed'].includes(after.state ?? '')) {
+                const verified = await handlePullRequestEvent(match, { action: after.state === 'closed' || after.merged ? 'closed' : 'synchronized', pull_request: after, repository: { full_name: `${slug.org}/${slug.repo}` } });
+                if (verified) return true;
+              }
+            }
             reason = `Merge check ${count + 1}/${EXTERNAL_POLL_MAX}: reviewed head is still waiting to merge into ${project.defaultBranch ?? 'main'}.`;
           }
         } else {
@@ -623,6 +638,15 @@ export async function handleGiteaWebhookEvent(input: { eventName: string; payloa
         const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, match.card.id), isNull(kanbanCards.deletedAt))).limit(1);
         if (!wait || wait.status !== 'waiting' || !card || card.columnStatus !== 'waiting_on_external') return null;
         const fresh = { ...match, wait, card };
+        if (match.project.autoMergeAfterApproval) {
+          // Webhooks are hints: re-read the provider before releasing the fence.
+          const config = giteaConfigFromEnv(), target = managedMergeTarget(match.project, config);
+          const number = parsePullRequestNumber(wait.externalUrl);
+          if (!config || !target || !number) return null;
+          const pull = await giteaPullRequest(config, target.org, target.repo, number, input.fetchImpl);
+          if (!pull || typeof pull.merged !== 'boolean' || !['open', 'closed'].includes(pull.state ?? '')) return null;
+          return handlePullRequestEvent(fresh, { action: pull.state === 'closed' || pull.merged ? 'closed' : 'synchronized', pull_request: pull, repository: payload.repository });
+        }
         return eventName === 'pull_request' ? handlePullRequestEvent(fresh, payload) : handlePushEvent(fresh, payload, { ...input, budget });
       });
       if (outcome) outcomes.push(outcome);

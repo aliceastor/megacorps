@@ -23,6 +23,13 @@ export async function buildServer() {
   registerRateLimit(app);
   registerCsrfOriginCheck(app);
   app.setErrorHandler((error, request, reply) => {
+    let cause: any = error;
+    for (let depth = 0; cause && depth < 5; depth++, cause = cause.cause) {
+      if (cause.code === 'MC409') {
+        reply.code(409).send({ error: 'merge_in_flight', detail: 'Gitea may already have accepted the authorized merge. This change cannot guarantee cancellation; reconcile the merge before changing gates or project policy.' });
+        return;
+      }
+    }
     if (error instanceof ZodError) {
       request.log.warn({ issues: error.issues }, 'validation failed');
       reply.code(400).send({ error: 'validation_failed', issues: error.issues });

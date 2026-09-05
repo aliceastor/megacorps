@@ -641,6 +641,7 @@ function projectGitProtocol(company: typeof companies.$inferSelect | null | unde
     ...(project.completionRequiresMerge
       ? [`12. Completion gate: this project counts a card as done only when its pull request is merged into ${project.defaultBranch ?? 'main'}; report the PR URL and head commit SHA as workProducts, and do not push further commits to the PR after review approval unless asked (a new head reopens review).`]
       : []),
+    ...(project.autoMergeAfterApproval ? ['13. Produce the evidence and pull request; MegaCorps performs the authorized merge after all approvals. Do not merge or use admin curl for reporting. Report repository permission denials as concrete blockers; do not change runtime policy or switch identities to bypass them.'] : []),
   ].join('\n');
 }
 
@@ -3191,6 +3192,10 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
 export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = 'manual', options: { taskRunId?: string | null } = {}): Promise<CardRow> {
   let [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
+  if (card.projectId) {
+    const [project] = await db.select().from(projects).where(eq(projects.id, card.projectId)).limit(1);
+    if (project?.autoMergeAfterApproval && !project.mergeReadiness?.ready) throw new Error('managed_merge_unready: Finish managed repository protection setup before dispatch.');
+  }
   if (!card.assigneeId) {
     const assigned = await ensureAssigned(card, source);
     if (!assigned) throw new Error('card_has_no_available_agent');

@@ -82,6 +82,7 @@ async function giteaFetch(config: GiteaConfig, path: string, options: GiteaFetch
         authorization,
       },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : 'unknown fetch error';
@@ -308,6 +309,75 @@ export async function giteaPullRequest(config: GiteaConfig, orgSlug: string, rep
   const response = await giteaFetch(config, `/repos/${orgSlug}/${repoSlug}/pulls/${index}`, { allow: [404], fetchImpl });
   if (response.status === 404) return null;
   return (response.json as GiteaPullRequest | null) ?? null;
+}
+
+/** Gitea 1.22.6 immediate merge: the provider atomically rejects a changed head. */
+export async function giteaMergePullRequest(config: GiteaConfig, org: string, repo: string, index: number, head: string, fetchImpl?: typeof fetch): Promise<number> {
+  if (!/^[0-9a-f]{40}$/.test(head)) throw new Error('merge_full_head_required');
+  const result = await giteaFetch(config, `/repos/${org}/${repo}/pulls/${index}/merge`, {
+    method: 'POST', body: { Do: 'merge', head_commit_id: head, force_merge: false, merge_when_checks_succeed: false, delete_branch_after_merge: false },
+    allow: [405, 409, 422], fetchImpl,
+  });
+  return result.status;
+}
+
+export type ManagedMergeReadiness = { ready: boolean; issues: string[]; serviceIdentity?: string; checkedAt: string };
+/** Only explicit provisioning/opt-in may establish a rule. Inspection never writes.
+ * Existing rules are accepted as-is or rejected, never replaced or weakened.
+ */
+export async function giteaManagedReadiness(config: GiteaConfig, org: string, repo: string, branch: string, options: { establish?: boolean; fetchImpl?: typeof fetch; agentUsernames?: string[] } = {}): Promise<ManagedMergeReadiness> {
+  const result: ManagedMergeReadiness = { ready: false, issues: [], checkedAt: new Date().toISOString() };
+  const get = async (path: string) => (await giteaFetch(config, path, { fetchImpl: options.fetchImpl })).json as any;
+  const path = `/repos/${org}/${repo}`;
+  try {
+    const version = await get('/version');
+    if (version?.version !== '1.22.6') throw new Error('Verify immediate exact-head merge support for this Gitea version; supported version is 1.22.6.');
+    const service = await get('/user');
+    if (!service?.login) throw new Error('Server merge credentials must resolve to a service identity.');
+    result.serviceIdentity = service.login;
+    if (options.agentUsernames?.includes(service.login)) throw new Error('The server merge identity must not be an ordinary agent identity.');
+    const permission = await get(`${path}/collaborators/${encodeURIComponent(service.login)}/permission`);
+    if (!['write', 'admin', 'owner'].includes(permission?.permission)) throw new Error('Grant the server service identity repository write permission before enabling merge protection.');
+    const repository = await get(path);
+    if (repository?.default_branch !== branch) throw new Error('Project default branch differs from the provider default branch.');
+    for (const username of options.agentUsernames ?? []) {
+      const access = await get(`${path}/collaborators/${encodeURIComponent(username)}/permission`);
+      if (access.user?.is_admin !== false || !['read', 'write'].includes(access.permission) || username === repository.owner?.login) throw new Error('A company agent has unsafe or unknown effective repository permissions; review its org/team membership and global admin status.');
+    }
+    for (let page = 1; ; page++) {
+      if (page > 20) throw new Error('Collaborator inventory exceeds the verification budget; administrator review is required.');
+      const collaborators = await get(`${path}/collaborators?limit=50&page=${page}`);
+      if (!Array.isArray(collaborators)) throw new Error('Collaborator inventory is incomplete; verify all collaborator privileges before enabling automation.');
+      for (const user of collaborators) {
+        if (user.login === service.login) continue;
+        const access = await get(`${path}/collaborators/${encodeURIComponent(user.login)}/permission`);
+        if (user.is_admin !== false || access.user?.is_admin !== false || !['read', 'write'].includes(access.permission) || user.login === repository.owner?.login) throw new Error('Ordinary collaborators must be verified non-admin/non-owner accounts before enabling automatic merge.');
+      }
+      if (collaborators.length < 50) break;
+    }
+    let rules = await get(`${path}/branch_protections`);
+    if (!Array.isArray(rules)) throw new Error('Branch protection inventory is unavailable.');
+    if (rules.length === 0 && options.establish) {
+      await giteaFetch(config, `${path}/branch_protections`, { method: 'POST', fetchImpl: options.fetchImpl, body: {
+        rule_name: branch, enable_push: false, enable_merge_whitelist: true,
+        merge_whitelist_usernames: [service.login], merge_whitelist_teams: [], unprotected_file_patterns: '',
+      } });
+      rules = await get(`${path}/branch_protections`);
+    }
+    // Multiple/wildcard rules have provider-specific ordering. Do not overwrite
+    // unknown rules or claim that our exact rule necessarily takes precedence.
+    if (!Array.isArray(rules) || rules.length !== 1 || (rules[0].rule_name ?? rules[0].branch_name) !== branch) throw new Error('Establish one unambiguous protection rule for the default branch; existing overlapping rules require administrator review.');
+    const rule = rules[0];
+    if (rule.enable_push !== false || rule.enable_merge_whitelist !== true || rule.unprotected_file_patterns ||
+      !Array.isArray(rule.merge_whitelist_usernames) || rule.merge_whitelist_usernames.length !== 1 || rule.merge_whitelist_usernames[0] !== service.login ||
+      !Array.isArray(rule.merge_whitelist_teams) || rule.merge_whitelist_teams.length !== 0) throw new Error('Default branch must deny direct pushes and allow merges only by the verified server service identity, without unprotected file exceptions. Existing rules were preserved.');
+    result.ready = true;
+  } catch (error) {
+    // Do not expose provider response text or credentials in setup responses.
+    const message = error instanceof Error ? error.message : '';
+    result.issues.push(message.startsWith('gitea_') ? 'Gitea policy verification failed; check server credentials and provider availability, then explicitly retry setup.' : message || 'Managed merge readiness could not be verified.');
+  }
+  return result;
 }
 
 /** Resolve a branch, full SHA or legacy short SHA in the authoritative repository. */

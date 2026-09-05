@@ -20,6 +20,9 @@ type Project = {
   pullBeforeRun?: boolean | null;
   pushAfterRun?: boolean | null;
   completionPolicy?: 'push_branch' | 'pull_request' | 'push_or_pr' | 'manual' | null;
+  completionRequiresMerge?: boolean;
+  autoMergeAfterApproval?: boolean;
+  mergeReadiness?: { ready: boolean; issues: string[]; checkedAt: string } | null;
   setupCommand?: string | null;
   testCommand?: string | null;
   runtimeServices?: Record<string, unknown> | null;
@@ -79,6 +82,8 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
   const [pushAfterRun, setPushAfterRun] = useState(true);
   const [completionPolicy, setCompletionPolicy] = useState<'push_branch' | 'pull_request' | 'push_or_pr' | 'manual'>('push_or_pr');
   const [setupCommand, setSetupCommand] = useState('');
+  const [completionRequiresMerge, setCompletionRequiresMerge] = useState<boolean | undefined>();
+  const [autoMergeAfterApproval, setAutoMergeAfterApproval] = useState<boolean | undefined>();
   const [testCommand, setTestCommand] = useState('');
   const [runtimeServicesJson, setRuntimeServicesJson] = useState('{}');
   const [workspacePathHint, setWorkspacePathHint] = useState('');
@@ -107,6 +112,8 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
     setPullBeforeRun(true);
     setPushAfterRun(true);
     setCompletionPolicy('push_or_pr');
+    setCompletionRequiresMerge(undefined);
+    setAutoMergeAfterApproval(undefined);
     setSetupCommand('');
     setTestCommand('');
     setRuntimeServicesJson('{}');
@@ -128,6 +135,8 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
     setPullBeforeRun(selectedProject.pullBeforeRun !== false);
     setPushAfterRun(selectedProject.pushAfterRun !== false);
     setCompletionPolicy(selectedProject.completionPolicy ?? 'push_or_pr');
+    setCompletionRequiresMerge(selectedProject.completionRequiresMerge ?? false);
+    setAutoMergeAfterApproval(selectedProject.autoMergeAfterApproval ?? false);
     setSetupCommand(selectedProject.setupCommand ?? '');
     setTestCommand(selectedProject.testCommand ?? '');
     setRuntimeServicesJson(JSON.stringify(selectedProject.runtimeServices ?? {}, null, 2));
@@ -167,6 +176,8 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
       pullBeforeRun,
       pushAfterRun,
       completionPolicy,
+      completionRequiresMerge,
+      autoMergeAfterApproval,
       setupCommand: setupCommand || null,
       testCommand: testCommand || null,
       runtimeServices,
@@ -348,6 +359,15 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
             <option value="push_branch">Push branch</option>
             <option value="manual">Manual evidence</option>
           </select></label>
+        </section>
+
+        <section className="project-section">
+          <details><summary>Advanced merge policy</summary>
+            <label className="field-label"><input type="checkbox" checked={completionRequiresMerge ?? repoProvider === 'gitea-local'} onChange={(event) => { setCompletionRequiresMerge(event.target.checked); if (!event.target.checked) setAutoMergeAfterApproval(false); }} /> Require verified merge before completion</label>
+            <label className="field-label"><input type="checkbox" checked={autoMergeAfterApproval ?? (repoProvider === 'gitea-local' && !repoUrl)} onChange={(event) => { setAutoMergeAfterApproval(event.target.checked); if (event.target.checked) setCompletionRequiresMerge(true); }} /> Let MegaCorps merge after all approvals</label>
+            <p>Managed Gitea projects use the server identity to merge the exact approved head. Save to verify branch protection. Disable automatic merge to keep manual merging.</p>
+            {selectedProject?.autoMergeAfterApproval && <p role="status">{selectedProject.mergeReadiness?.ready ? `Protection verified at ${selectedProject.mergeReadiness.checkedAt}` : `Setup required — dispatch is paused: ${selectedProject.mergeReadiness?.issues.join(' ') || 'Verify repository protection.'}`}</p>}
+          </details>
         </section>
 
         <section className="project-section">
