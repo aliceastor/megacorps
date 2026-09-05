@@ -40,14 +40,18 @@ async function fulfillJson(route: Route, json: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(json) });
 }
 
-async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirstCreate?: boolean; busyAgents?: string[]; holdAgentSessions?: string; sendDelayMs?: number; sessionDelayMs?: number; locale?: 'en' | 'zh-TW' | 'ja' } = {}) {
+async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirstCreate?: boolean; busyAgents?: string[]; holdAgentSessions?: string; failSessionGetsForAgents?: string[]; failMessageGetsForSessions?: string[]; sendDelayMs?: number; sessionDelayMs?: number; locale?: 'en' | 'zh-TW' | 'ja' } = {}) {
   let releaseSessions!: () => void;
   const sessionsGate = new Promise<void>((resolve) => { releaseSessions = resolve; });
   const messageStore = Object.fromEntries(Object.entries(messages).map(([sessionId, rows]) => [sessionId, rows.map((row) => ({ ...row }))])) as typeof messages;
   const sessionStore = sessions.map((session) => ({ ...session }));
+  const failingSessionGets = new Set(options.failSessionGetsForAgents ?? []);
+  const failingMessageGets = new Set(options.failMessageGetsForSessions ?? []);
   const state = {
     releaseSessions,
     heldSessionGets: 0,
+    sessionGetCounts: {} as Record<string, number>,
+    messageGetCounts: {} as Record<string, number>,
     sendAttempts: 0,
     sentBodies: [] as string[],
     messagePostSessionIds: [] as string[],
@@ -55,6 +59,10 @@ async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirs
     appendMessage(sessionId: string, message: Record<string, unknown>) {
       messageStore[sessionId] = [...(messageStore[sessionId] ?? []), message];
     },
+    failSessionGets(agentId: string) { failingSessionGets.add(agentId); },
+    recoverSessionGets(agentId: string) { failingSessionGets.delete(agentId); },
+    failMessageGets(sessionId: string) { failingMessageGets.add(sessionId); },
+    recoverMessageGets(sessionId: string) { failingMessageGets.delete(sessionId); },
   };
   await page.addInitScript((locale) => {
     localStorage.setItem('locale', locale);
@@ -73,7 +81,10 @@ async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirs
       const companyId = url.searchParams.get('companyId');
       const agentId = url.searchParams.get('agentId');
       const projectId = url.searchParams.get('projectId');
+      const sessionGetKey = agentId ?? 'missing-agent';
+      state.sessionGetCounts[sessionGetKey] = (state.sessionGetCounts[sessionGetKey] ?? 0) + 1;
       if (agentId === options.holdAgentSessions) { state.heldSessionGets += 1; await sessionsGate; }
+      if (failingSessionGets.has(sessionGetKey)) return fulfillJson(route, { message: 'Synthetic sessions read failure' }, 503);
       return fulfillJson(route, sessionStore.filter((session) => session.companyId === companyId
         && session.agentId === agentId
         && (!projectId || (projectId === 'none' ? session.projectId === null : session.projectId === projectId))));
@@ -89,7 +100,12 @@ async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirs
       return fulfillJson(route, session, 201);
     }
     const messageMatch = path.match(/^\/api\/chat\/sessions\/([^/]+)\/messages$/);
-    if (messageMatch && request.method() === 'GET') return fulfillJson(route, messageStore[messageMatch[1]!] ?? []);
+    if (messageMatch && request.method() === 'GET') {
+      const messageSessionId = messageMatch[1]!;
+      state.messageGetCounts[messageSessionId] = (state.messageGetCounts[messageSessionId] ?? 0) + 1;
+      if (failingMessageGets.has(messageSessionId)) return fulfillJson(route, { message: 'Synthetic history read failure' }, 503);
+      return fulfillJson(route, messageStore[messageSessionId] ?? []);
+    }
     if (messageMatch && request.method() === 'POST') {
       state.sendAttempts += 1;
       state.messagePostSessionIds.push(messageMatch[1]!);
@@ -404,6 +420,123 @@ test('scoped GET loading removes old session click and send targets', async ({ p
   await expect(page.getByPlaceholder('Message')).toHaveValue('Ada private draft');
 });
 
+test('scoped sessions GET failure stays truthful and Retry only refetches that scope', async ({ page }) => {
+  test.setTimeout(45_000);
+  await page.setViewportSize({ width: 1158, height: 844 });
+  const state = await mockChat(page, { failSessionGetsForAgents: ['agent-grace'] });
+  await page.goto('/chat');
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  await page.getByLabel('Agent', { exact: true }).selectOption('agent-grace');
+  await expect.poll(() => state.sessionGetCounts['agent-grace'] ?? 0, { timeout: 15_000 }).toBe(4);
+  const readError = page.locator('.chat-error-row[role=alert]');
+  await expect(readError).toContainText('Synthetic sessions read failure');
+  await expect(page.getByText('No sessions')).toBeHidden();
+  const failedReadCount = state.sessionGetCounts['agent-grace']!;
+  state.recoverSessionGets('agent-grace');
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.locator('.session-rail').getByRole('button', { name: /Compiler migration/ })).toBeVisible();
+  expect(state.sessionGetCounts['agent-grace']).toBe(failedReadCount + 1);
+  expect(state.sendAttempts).toBe(0);
+  expect(state.sessionCreates).toEqual([]);
+  state.failSessionGets('agent-grace');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect.poll(() => state.sessionGetCounts['agent-grace'] ?? 0, { timeout: 15_000 }).toBe(failedReadCount + 5);
+  await expect(readError).toContainText('Synthetic sessions read failure');
+  await page.getByLabel('Agent', { exact: true }).selectOption('agent-ada');
+  await expect(readError).toBeHidden();
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  expect(state.sendAttempts).toBe(0);
+  expect(state.sessionCreates).toEqual([]);
+});
+
+test('initial history GET failure is distinct from an empty conversation and recovers', async ({ page }) => {
+  test.setTimeout(30_000);
+  await page.setViewportSize({ width: 1158, height: 844 });
+  const state = await mockChat(page, { failMessageGetsForSessions: ['session-ada-orbit'] });
+  await page.goto('/chat');
+  await expect(page.locator('.chat-thread-head')).toContainText('Orbit incident analysis');
+  const composer = page.getByPlaceholder('Message');
+  await composer.fill('Initial history recovery draft');
+  await expect.poll(() => state.messageGetCounts['session-ada-orbit'] ?? 0, { timeout: 15_000 }).toBe(4);
+  const readError = page.locator('.chat-error-row[role=alert]');
+  await expect(readError).toContainText('Synthetic history read failure');
+  await expect(page.locator('.chat-empty-state')).toBeHidden();
+  state.recoverMessageGets('session-ada-orbit');
+  const failedReadCount = state.messageGetCounts['session-ada-orbit']!;
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  await expect(readError).toBeHidden();
+  await expect(composer).toHaveValue('Initial history recovery draft');
+  expect(state.messageGetCounts['session-ada-orbit']).toBe(failedReadCount + 1);
+  expect(state.sendAttempts).toBe(0);
+  expect(state.sessionCreates).toEqual([]);
+});
+
+test('selected history GET failure retains history and draft until scoped Retry recovers', async ({ page }) => {
+  test.setTimeout(30_000);
+  await page.setViewportSize({ width: 1158, height: 844 });
+  const state = await mockChat(page);
+  await page.goto('/chat');
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  const composer = page.getByPlaceholder('Message');
+  await composer.fill('History recovery draft');
+  const initialReadCount = state.messageGetCounts['session-ada-orbit']!;
+  state.failMessageGets('session-ada-orbit');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect.poll(() => state.messageGetCounts['session-ada-orbit'] ?? 0, { timeout: 15_000 }).toBe(initialReadCount + 4);
+  const readError = page.locator('.chat-error-row[role=alert]');
+  await expect(readError).toContainText('Synthetic history read failure');
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  await expect(page.locator('.chat-empty-state')).toBeHidden();
+  await expect(composer).toHaveValue('History recovery draft');
+  const failedReadCount = state.messageGetCounts['session-ada-orbit']!;
+  state.recoverMessageGets('session-ada-orbit');
+  state.appendMessage('session-ada-orbit', { id: 'history-recovered', sessionId: 'session-ada-orbit', companyId: 'company-acme', agentId: 'agent-ada', authorType: 'agent', body: 'Recovered selected history' });
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.getByText('Recovered selected history')).toBeVisible();
+  await expect(readError).toBeHidden();
+  await expect(composer).toHaveValue('History recovery draft');
+  expect(state.messageGetCounts['session-ada-orbit']).toBe(failedReadCount + 1);
+  expect(state.sendAttempts).toBe(0);
+  expect(state.sessionCreates).toEqual([]);
+});
+
+test('offscreen live history refresh failure is contained and recovers by session identity', async ({ page }) => {
+  test.setTimeout(45_000);
+  await page.setViewportSize({ width: 1158, height: 844 });
+  const pageErrors: string[] = [];
+  page.on('pageerror', (err) => pageErrors.push(err.message));
+  const state = await mockChat(page);
+  await page.goto('/chat');
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  await page.getByLabel('Agent', { exact: true }).selectOption('agent-grace');
+  await expect(page.locator('.chat-thread-head')).toContainText('Compiler migration');
+  state.appendMessage('session-ada-orbit', { id: 'live-recovered', sessionId: 'session-ada-orbit', companyId: 'company-acme', agentId: 'agent-ada', authorType: 'agent', body: 'Recovered offscreen live history' });
+  state.failMessageGets('session-ada-orbit');
+  const initialReadCount = state.messageGetCounts['session-ada-orbit']!;
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('megacorps-live', { detail: { type: 'chat.message.created', sessionId: 'session-ada-orbit' } }));
+  });
+  await expect.poll(() => state.messageGetCounts['session-ada-orbit'] ?? 0, { timeout: 15_000 }).toBe(initialReadCount + 1);
+  await expect(page.locator('.chat-error-row[role=alert]')).toBeHidden();
+  expect(pageErrors).toEqual([]);
+  await page.getByLabel('Agent', { exact: true }).selectOption('agent-ada');
+  await expect.poll(() => state.messageGetCounts['session-ada-orbit'] ?? 0, { timeout: 15_000 }).toBe(initialReadCount + 5);
+  const readError = page.locator('.chat-error-row[role=alert]');
+  await expect(readError).toContainText('Synthetic history read failure');
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  await expect(page.getByText('Recovered offscreen live history')).toBeHidden();
+  state.recoverMessageGets('session-ada-orbit');
+  const failedReadCount = state.messageGetCounts['session-ada-orbit']!;
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.getByText('Recovered offscreen live history')).toBeVisible();
+  await expect(readError).toBeHidden();
+  expect(state.messageGetCounts['session-ada-orbit']).toBe(failedReadCount + 1);
+  expect(pageErrors).toEqual([]);
+  expect(state.sendAttempts).toBe(0);
+  expect(state.sessionCreates).toEqual([]);
+});
+
 test('agentless company cannot retain old session history or draft', async ({ page }) => {
   await openChat(page);
   await page.getByPlaceholder('Message').fill('Ada private draft');
@@ -490,6 +623,8 @@ test('narrow viewport height changes retain usable history composer focus and se
   await page.goto('/chat');
   const rail = page.locator('.session-rail');
   const composer = page.getByPlaceholder('Message');
+  await expect(rail.getByRole('button', { name: /Orbit incident analysis/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Toggle sidebar' })).toHaveAttribute('aria-expanded', 'false');
   const samples: unknown[] = [];
   for (const sidebarOpen of [false, true]) {
     await setSidebar(page, sidebarOpen);

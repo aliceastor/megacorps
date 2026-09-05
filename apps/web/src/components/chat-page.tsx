@@ -150,6 +150,8 @@ export function ChatPage() {
   const [error, setError] = useState('');
   const [creationErrors, setCreationErrors] = useState<Record<string, string>>({});
   const [creatingScopes, setCreatingScopes] = useState<Record<string, boolean>>({});
+  const [sessionReadErrors, setSessionReadErrors] = useState<Record<string, string>>({});
+  const [messageReadErrors, setMessageReadErrors] = useState<Record<string, string>>({});
   const creationPendingRef = useRef(new Set<string>());
   const messageEndRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -182,6 +184,9 @@ export function ChatPage() {
   const creationScopeKey = draftKey(companyId, agentId, projectFilter, '');
   const creating = Boolean(creatingScopes[creationScopeKey]);
   const creationError = creationErrors[activeDraftKey] ?? '';
+  const sessionReadError = sessionReadErrors[creationScopeKey] ?? '';
+  const messageReadError = selectedSession ? messageReadErrors[selectedSession.id] ?? '' : '';
+  const readError = sessionReadError || messageReadError;
   const messages = selectedSession ? messagesBySession[selectedSession.id] ?? [] : [];
   const reply = selectedSession ? repliesBySession[selectedSession.id] : undefined;
   const sessionProject = selectedSession?.projectId ? projects.find((project) => project.id === selectedSession.projectId) ?? null : null;
@@ -203,12 +208,21 @@ export function ChatPage() {
   async function refreshBase() {
     setLoading(true);
     setError('');
+    const refreshedScopeKey = creationScopeKey;
+    const refreshedSessionId = selectedSession?.id;
     try {
-      const [companyRows, agentRows, projectRows] = await Promise.all([
-        queryClient.fetchQuery({ queryKey: ['companies'], queryFn: fetchCompanies }),
-        queryClient.fetchQuery({ queryKey: ['agents'], queryFn: fetchAgents }),
-        queryClient.fetchQuery({ queryKey: ['projects'], queryFn: fetchProjects }),
+      const [companyResult, agentResult, projectResult, sessionResult, messageResult] = await Promise.all([
+        companiesQuery.refetch(),
+        agentsQuery.refetch(),
+        projectsQuery.refetch(),
+        companyId && agentId ? sessionsQuery.refetch() : Promise.resolve(null),
+        refreshedSessionId ? messagesQuery.refetch() : Promise.resolve(null),
       ]);
+      const baseError = companyResult.error ?? agentResult.error ?? projectResult.error;
+      if (baseError) throw baseError;
+      const companyRows = companyResult.data ?? [];
+      const agentRows = agentResult.data ?? [];
+      const projectRows = projectResult.data ?? [];
       setCompanies(companyRows);
       setProjects(projectRows);
       setAgents(agentRows);
@@ -216,6 +230,13 @@ export function ChatPage() {
       const nextAgent = nextCompany ? agentRows.find((agent) => agent.companyId === nextCompany.id && agent.id === agentId) ?? agentRows.find((agent) => agent.companyId === nextCompany.id) : undefined;
       setCompanyId(nextCompany?.id ?? '');
       setAgentId(nextAgent?.id ?? '');
+      if (sessionResult) {
+        setSessionReadErrors((current) => ({ ...current, [refreshedScopeKey]: sessionResult.error instanceof Error ? sessionResult.error.message : '' }));
+      }
+      if (messageResult && refreshedSessionId) {
+        setMessageReadErrors((current) => ({ ...current, [refreshedSessionId]: messageResult.error instanceof Error ? messageResult.error.message : '' }));
+        if (messageResult.data) updateSessionMessages(refreshedSessionId, (current) => mergeMessages(current, messageResult.data));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : t('chat.loadFailed'));
     } finally {
@@ -227,8 +248,28 @@ export function ChatPage() {
     if (!nextSessionId) {
       return;
     }
-    const rows = await queryClient.fetchQuery({ queryKey: ['chatMessages', nextSessionId], queryFn: () => fetchChatMessages(nextSessionId) });
-    updateSessionMessages(nextSessionId, (current) => mergeMessages(current, rows));
+    try {
+      const rows = await queryClient.fetchQuery({ queryKey: ['chatMessages', nextSessionId], queryFn: () => fetchChatMessages(nextSessionId) });
+      updateSessionMessages(nextSessionId, (current) => mergeMessages(current, rows));
+      setMessageReadErrors((current) => ({ ...current, [nextSessionId]: '' }));
+    } catch (err) {
+      setMessageReadErrors((current) => ({ ...current, [nextSessionId]: err instanceof Error ? err.message : t('chat.loadFailed') }));
+      throw err;
+    }
+  }
+
+  async function retryRead() {
+    if (sessionReadError) {
+      await sessionsQuery.refetch();
+      return;
+    }
+    if (selectedSession && messageReadError) {
+      try {
+        await loadMessages(selectedSession.id);
+      } catch {
+        // loadMessages retains the recoverable error under the requested session.
+      }
+    }
   }
 
   useEffect(() => {
@@ -252,13 +293,28 @@ export function ChatPage() {
     }
   }, [companiesQuery.error, agentsQuery.error, projectsQuery.error]);
   useEffect(() => {
+    if (!companyId || !agentId) return;
+    if (sessionsQuery.error) {
+      setSessionReadErrors((current) => ({ ...current, [creationScopeKey]: sessionsQuery.error instanceof Error ? sessionsQuery.error.message : t('chat.loadFailed') }));
+    } else if (sessionsQuery.data) {
+      setSessionReadErrors((current) => ({ ...current, [creationScopeKey]: '' }));
+    }
+  }, [sessionsQuery.error, sessionsQuery.data, creationScopeKey, companyId, agentId]);
+  useEffect(() => {
     const nextSession = sessions.find((session) => session.id === sessionId) ?? sessions[0];
     setSessionId(nextSession?.id ?? '');
   }, [sessions]);
   useEffect(() => {
-    if (!messagesQuery.data || !selectedSession) return;
-    updateSessionMessages(selectedSession.id, (current) => mergeMessages(current, messagesQuery.data));
-  }, [messagesQuery.data, selectedSession?.id]);
+    if (!selectedSession) return;
+    if (messagesQuery.error) {
+      setMessageReadErrors((current) => ({ ...current, [selectedSession.id]: messagesQuery.error instanceof Error ? messagesQuery.error.message : t('chat.loadFailed') }));
+      return;
+    }
+    if (messagesQuery.data) {
+      updateSessionMessages(selectedSession.id, (current) => mergeMessages(current, messagesQuery.data));
+      setMessageReadErrors((current) => ({ ...current, [selectedSession.id]: '' }));
+    }
+  }, [messagesQuery.error, messagesQuery.data, selectedSession?.id]);
   useEffect(() => {
     if (!companyId) return;
     if (!companyAgents.some((agent) => agent.id === agentId)) {
@@ -291,7 +347,10 @@ export function ChatPage() {
         setRepliesBySession((current) => ({ ...current, [targetSessionId]: { pending: current[targetSessionId]?.pending ?? false, partial: '' } }));
       }
       void queryClient.invalidateQueries({ queryKey: ['chatMessages', targetSessionId] })
-        .then(() => loadMessages(targetSessionId));
+        .then(() => loadMessages(targetSessionId))
+        .catch(() => {
+          // loadMessages records the failure under the event's session identity.
+        });
       void queryClient.invalidateQueries({ queryKey: ['chatSessions'] });
     }
     window.addEventListener('megacorps-live', onLive);
@@ -422,7 +481,7 @@ export function ChatPage() {
       </div>
     </div>
 
-    {(creationError || error) && <div className="chat-error-row" role="alert"><p className="form-error">{creationError || error}</p>{selectedAgent?.isActive !== false && (creationError || draft.trim()) && <button className="btn" onClick={() => void (creationError ? createSessionExplicitly() : sendMessage())} disabled={sending || creating}>{t('chat.retry')}</button>}</div>}
+    {(creationError || readError || error) && <div className="chat-error-row" role="alert"><p className="form-error">{creationError || readError || error}</p>{selectedAgent?.isActive !== false && (creationError || readError || draft.trim()) && <button className="btn" onClick={() => void (creationError ? createSessionExplicitly() : readError ? retryRead() : sendMessage())} disabled={sending || creating}>{t('chat.retry')}</button>}</div>}
 
     <section className="card chat-scope-controls" aria-label={t('chat.scope')}>
       <label className="chat-scope-field">
@@ -482,7 +541,7 @@ export function ChatPage() {
             <b>{session.title}</b>
             <span>{shortTime(session.updatedAt)} / {session.projectId ? projects.find((project) => project.id === session.projectId)?.name ?? t('chat.project') : t('chat.noProject')} / {session.agentSessionId ? t('chat.resumable') : t('common.new')}</span>
           </button>)}
-          {!sessions.length && <p className="chat-empty">{sessionsQuery.isLoading ? t('common.loading') : t('chat.noSessions')}</p>}
+          {!sessions.length && !sessionReadError && <p className="chat-empty">{sessionsQuery.isLoading ? t('common.loading') : t('chat.noSessions')}</p>}
         </div>
       </aside>
 
@@ -507,7 +566,8 @@ export function ChatPage() {
             </div>
             <span>{selectedAgent?.name ?? t('chat.agent')} {t('chat.replying')}</span>
           </article>}
-          {!messages.length && !reply?.pending && selectedAgent?.isActive !== false && <div className="chat-empty-state">
+          {!messages.length && selectedSession && messagesQuery.isLoading && <div className="chat-empty-state"><Loader2 size={24} className="spin" /><span>{t('common.loading')}</span></div>}
+          {!messages.length && !reply?.pending && !messageReadError && !messagesQuery.isLoading && selectedAgent?.isActive !== false && <div className="chat-empty-state">
             <MessageSquare size={24} />
             <b>{selectedAgent ? selectedAgent.name : t('chat.title')}</b>
             <span>{selectedSession ? selectedSession.title : t('chat.newSession')}</span>
