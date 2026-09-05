@@ -18,6 +18,12 @@ export function memoryDb(t: TestContext, fixtures: Array<[Table, Row[]]>) {
   function matches(table: Table, row: Row, condition?: SQL): boolean {
     if (!condition) return true;
     const query = dialect.sqlToQuery(condition);
+    if (query.sql.includes('EXISTS (SELECT 1 FROM "task_runs"')) {
+      const runTable = [...tables.keys()].find((item) => getTableName(item) === 'task_runs');
+      const runParam = /"task_runs"\."id" = \$(\d+)/.exec(query.sql);
+      const runId = query.params[Number(runParam?.[1]) - 1];
+      if (!runTable || !rows(runTable).some((run) => run.id === runId && run.cardId === row.id && ['queued', 'running'].includes(run.status))) return false;
+    }
     if (query.sql.includes('CASE WHEN "external_waits"."provider"')) {
       const bound = /"poll_count" < \$(\d+)/.exec(query.sql);
       if (row.provider === 'gitea' && row.authorizedHeadSha && row.pollCount >= Number(query.params[Number(bound?.[1]) - 1])) return false;

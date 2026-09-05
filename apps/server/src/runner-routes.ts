@@ -138,7 +138,7 @@ async function createRunnerTaskCompletion(input: {
     return parked.card;
   }
   const [actor] = runAgentId ? await db.select().from(agents).where(eq(agents.id, runAgentId)).limit(1) : [];
-  const protocolHelp = actor && input.run.kind === 'review' ? await finishProtocolHelp(card, actor.id, output) : null;
+  const protocolHelp = actor && input.run.kind === 'review' ? await finishProtocolHelp(card, actor.id, output, input.run.id) : null;
   if (protocolHelp) {
     await completeTaskRun(input.run.id, { status: 'success', preserveCard: true, output });
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actor!.id));
@@ -211,7 +211,7 @@ async function createRunnerTaskCompletion(input: {
   const mergePlan = !childBlock && requestedNextStatus === 'done' ? await planMergeGate({ ...card, executionLog: normalized.report ? JSON.stringify(normalized.report) : output }) : null;
   const nextStatus: CardStatus = childBlock ? 'in_progress' : mergePlan ? mergeCompletionStatus(mergePlan) : requestedNextStatus;
   const fromStatus = cardStatus(card.columnStatus);
-  if (['dispatch', 'review'].includes(input.run.kind)) await resetProtocolRepair(card.id, input.run.kind === 'review' ? 'review' : 'dispatch', normalized, input.body.status !== 'failed', card);
+  if (['dispatch', 'review'].includes(input.run.kind)) await resetProtocolRepair(card.id, input.run.kind === 'review' ? 'review' : 'dispatch', normalized, input.body.status !== 'failed', card, input.run.id);
   assertStatusMove(fromStatus, nextStatus, 'machine');
   const now = new Date();
   const settleRun = () => completeTaskRun(input.run.id, {
@@ -245,7 +245,7 @@ async function createRunnerTaskCompletion(input: {
     executionLockExpiresAt: null,
     activeHeartbeatRunId: null,
     updatedAt: now,
-  });
+  }, input.run.id);
   if (!updated) {
     await completeTaskRun(input.run.id, { status: 'success', preserveCard: true, output: 'Late runner result ignored.' });
     return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0] ?? card;

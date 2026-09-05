@@ -14,14 +14,14 @@ export function protocolHelpOrigin(card: { protocolRepairState?: ProtocolRepairS
 }
 
 /** A helper resolves a reporting blocker; it has no authority to approve the deliverable. */
-export async function finishProtocolHelp(card: Card, actorId: string, output: string): Promise<{ card: Card; continueKind: ProtocolKind | null } | null> {
+export async function finishProtocolHelp(card: Card, actorId: string, output: string, taskRunId?: string | null): Promise<{ card: Card; continueKind: ProtocolKind | null } | null> {
   const kind = protocolHelpOrigin(card, actorId);
   if (!kind) return null;
   const old = card.protocolRepairState![kind]!;
   const result = normalizeAgentResult({ output });
   const valid = ['completed', 'progress'].includes(result.outcome) && !result.verdictError && (result.report?.summary ?? output).trim().length >= 24;
   const message = valid ? 'Department protocol guidance received. The original actor gets one correction using this guidance; another malformed reply stops automatic repair.' : 'Department help did not resolve the reporting blocker. Automatic repair has stopped; resolve the existing help request.';
-  const updated = await guardedCompletionUpdate(card, { protocolRepairState: { ...card.protocolRepairState, [kind]: { ...old, mode: valid ? 'helped' : 'blocked', helpAttempted: true } }, columnStatus: valid ? kind === 'dispatch' ? 'todo' : 'in_review' : 'blocked', reviewerId: kind === 'review' ? old.actorId : old.originalReviewerId ?? null, completedAt: null, lastError: message, reviewFeedback: output, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() });
+  const updated = await guardedCompletionUpdate(card, { protocolRepairState: { ...card.protocolRepairState, [kind]: { ...old, mode: valid ? 'helped' : 'blocked', helpAttempted: true } }, columnStatus: valid ? kind === 'dispatch' ? 'todo' : 'in_review' : 'blocked', reviewerId: kind === 'review' ? old.actorId : old.originalReviewerId ?? null, completedAt: null, lastError: message, reviewFeedback: output, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() }, taskRunId);
   if (updated) await db.insert(cardComments).values({ cardId: card.id, agentId: actorId, authorType: 'agent', action: 'protocol_help_response', body: output, metadata: { kind, originalActorId: old.actorId, failures: old.failures } });
   return updated ? { card: updated, continueKind: valid ? kind : null } : null;
 }
@@ -69,7 +69,7 @@ export async function recordProtocolFailure(input: { card: Card; actor: Agent; k
     const old = state[kind];
     const [authorized] = await tx.select().from(kanbanCards).where(completionCondition(input.card)).limit(1);
     if (!authorized) return { card, duplicate: true, mode: old?.mode ?? 'blocked', fallbackId: old?.fallbackId ?? null, feedback: input.reason };
-    const [run] = input.taskRunId ? await tx.select().from(taskRuns).where(eq(taskRuns.id, input.taskRunId)).limit(1) : [];
+    const [run] = input.taskRunId ? await tx.select().from(taskRuns).where(eq(taskRuns.id, input.taskRunId)).for('update').limit(1) : [];
     const pendingApprovals = await tx.select().from(approvals).where(and(eq(approvals.cardId, card.id), eq(approvals.type, 'task_review'), eq(approvals.status, 'pending')));
     if (old?.runKeys.includes(input.runKey) || old?.mode === 'blocked' || (run && !['running', 'queued'].includes(run.status)) || ['done', 'cancelled', 'waiting_on_client'].includes(card.columnStatus ?? '') || pendingApprovals.some((approval) => (approval.payload as Record<string, unknown> | null)?.humanGate === true)) return { card, duplicate: true, mode: old?.mode ?? 'blocked', fallbackId: old?.fallbackId ?? null, feedback: input.reason };
     if (old?.mode === 'escalated') {
@@ -108,15 +108,16 @@ export async function recordProtocolFailure(input: { card: Card; actor: Agent; k
   });
 }
 
-export async function resetProtocolRepair(cardId: string, kind: ProtocolKind, result: AgentResult, adapterSucceeded: boolean, expectedCard?: Card): Promise<void> {
+export async function resetProtocolRepair(cardId: string, kind: ProtocolKind, result: AgentResult, adapterSucceeded: boolean, expectedCard?: Card, taskRunId?: string | null): Promise<void> {
   const summary = result.report?.summary.trim() ?? '';
   const concrete = result.workProducts.length > 0 || (summary.length >= 24 && !/^(?:still\s+)?(?:working|processing|thinking|starting|will\s+|going\s+to\s+)/i.test(summary));
   const meaningful = adapterSucceeded && ((result.source === 'report' && ['progress', 'completed'].includes(result.outcome) && concrete) || (result.source === 'prose' && result.verdictExplicit && !result.verdictError));
   if (!meaningful) return;
   await db.transaction(async (tx) => {
     const [card] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).for('update').limit(1);
+    if (taskRunId) await tx.select({ id: taskRuns.id }).from(taskRuns).where(eq(taskRuns.id, taskRunId)).for('update').limit(1);
     const old = card?.protocolRepairState?.[kind];
     if (!card || !old || old.failures === 0 || old.mode === 'escalated' || ['done', 'cancelled', 'waiting_on_client'].includes(card.columnStatus ?? '')) return;
-    await tx.update(kanbanCards).set({ protocolRepairState: { ...card.protocolRepairState, [kind]: { ...old, failures: 0, mode: 'clear', sessionId: null } }, updatedAt: new Date() }).where(completionCondition(expectedCard ?? card));
+    await tx.update(kanbanCards).set({ protocolRepairState: { ...card.protocolRepairState, [kind]: { ...old, failures: 0, mode: 'clear', sessionId: null } }, updatedAt: new Date() }).where(completionCondition(expectedCard ?? card, taskRunId));
   });
 }

@@ -145,7 +145,7 @@ test('webhook report artifactRefs survive the human approval gate', async (t) =>
   assert.ok(plan.disposition !== 'blocked' || plan.reason !== 'no_candidate', JSON.stringify(plan));
 });
 
-for (const via of ['runner', 'review', 'dispatch']) for (const change of ['human_gate', 'cancelled', 'new_run']) test(`${via} delayed provider plan preserves ${change} and full card`, async (t) => {
+for (const via of ['runner', 'review', 'dispatch']) for (const change of ['human_gate', 'cancelled', 'new_run', 'settled_run']) test(`${via} delayed provider plan preserves ${change} and full card`, async (t) => {
   const { card, actor, run, state, complete } = fixture(t); card.columnStatus = 'in_review'; card.projectId = 'project'; card.reviewerId = actor.id; card.assigneeId = 'owner'; run.kind = 'review';
   if (via === 'dispatch') { card.columnStatus = 'todo'; card.assigneeId = actor.id; card.reviewerId = null; run.kind = 'dispatch'; }
   state.rows(projects).push({ id: 'project', companyId: 'company', repoUrl: 'https://gitea.test/org/repo', defaultBranch: 'main', completionRequiresMerge: true });
@@ -158,6 +158,7 @@ for (const via of ['runner', 'review', 'dispatch']) for (const change of ['human
     if (change === 'human_gate') state.rows(approvals).push({ id: 'human', cardId: card.id, type: 'task_review', status: 'pending', payload: { humanGate: true } });
     if (change === 'cancelled') card.columnStatus = 'cancelled';
     if (change === 'new_run') { card.executionLockId = 'new-run'; card.activeHeartbeatRunId = 'new-heartbeat'; }
+    if (change === 'settled_run') run.status = 'cancelled';
     card.updatedAt = new Date(1234); card.runRetryState = { review: { failures: 4, nextRunAt: null } }; card.protocolRepairState = { review: { failures: 2, mode: 'fresh_context', actorId: actor.id, runKeys: [], visitedActorIds: [], fallbackId: null, sessionId: null, updatedAt: '' } };
     protectedCard = structuredClone(card);
     return new Response(JSON.stringify({ number: 12, state: 'open', merged: false, head: { sha: 'a'.repeat(40) }, base: { ref: 'main' } }));

@@ -2900,13 +2900,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
     const [productProject] = card.projectId ? await db.select().from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1) : [];
     await persistAgentWorkProducts(card, actorAgentId, taskRunId ?? null, body.workProducts, productProject, normalizedResult.report);
-    const protocolHelp = actorAgent && webhookTaskRun?.kind === 'review' ? await finishProtocolHelp(card, actorAgent.id, executionLog) : null;
+    const protocolHelp = actorAgent && webhookTaskRun?.kind === 'review' ? await finishProtocolHelp(card, actorAgent.id, executionLog, taskRunId) : null;
     if (protocolHelp) {
       await completeTaskRun(taskRunId, { status: 'success', preserveCard: true, output: executionLog });
       if (protocolHelp.continueKind) await enqueueTaskRun(card.id, protocolHelp.continueKind, 'queue');
       return { ok: true, cardId: card.id, taskRunId, newStatus: protocolHelp.card.columnStatus };
     }
-    if (!webhookTaskRun || ['dispatch', 'review'].includes(webhookTaskRun.kind)) await resetProtocolRepair(card.id, webhookTaskRun?.kind === 'review' ? 'review' : 'dispatch', normalizedResult, true, card);
+    if (!webhookTaskRun || ['dispatch', 'review'].includes(webhookTaskRun.kind)) await resetProtocolRepair(card.id, webhookTaskRun?.kind === 'review' ? 'review' : 'dispatch', normalizedResult, true, card, taskRunId);
     const webhookNotes = actorAgent && !blockedResult ? reportNotesFromOutput(executionLog, body.report ?? null) : [];
     if (actorAgent && webhookNotes.length) {
       try { await processReportNotes(card, actorAgent, webhookNotes); } catch (error) { app.log.warn({ error, cardId: card.id }, 'report note processing failed'); }
@@ -3050,7 +3050,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       executionLockExpiresAt: completesRun ? null : undefined,
       activeHeartbeatRunId: completesRun ? null : undefined,
       updatedAt: new Date(),
-    });
+    }, taskRunId);
     if (!updatedCard) {
       // The gate can be created after the initial read. Settle this callback
       // without clearing or rewriting any current card/approval state.

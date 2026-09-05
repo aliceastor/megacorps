@@ -15,7 +15,7 @@
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { db } from './db/client.ts';
-import { activityLog, cardComments, externalEvents, externalWaits, kanbanCards, projects, taskLogs, workProducts } from './db/schema.ts';
+import { activityLog, cardComments, externalEvents, externalWaits, kanbanCards, projects, taskLogs, taskRuns, workProducts } from './db/schema.ts';
 import { recordStageAction, type CardActionActor } from './card-actions.ts';
 import { publishLiveEvent } from './live.ts';
 import { giteaBranchContainsCommit, giteaConfigFromEnv, giteaPullRequest, giteaResolveCommit, giteaSlug } from './gitea.ts';
@@ -391,26 +391,27 @@ async function serializeMerge<T>(cardId: string, operation: () => Promise<T>): P
   try { return await current; } finally { if (cardMergeOperations.get(cardId) === current) cardMergeOperations.delete(cardId); }
 }
 
-export async function parkForMerge(card: CardRow, plan: Extract<MergeGatePlan, { disposition: 'wait' }>, options: { approvedBy?: string | null; actor?: CardActionActor; note?: string | null; fromStatus?: string | null; fetchImpl?: typeof fetch } = {}): Promise<ExternalWaitRow | null> {
+export async function parkForMerge(card: CardRow, plan: Extract<MergeGatePlan, { disposition: 'wait' }>, options: { approvedBy?: string | null; actor?: CardActionActor; note?: string | null; fromStatus?: string | null; fetchImpl?: typeof fetch; taskRunId?: string | null } = {}): Promise<ExternalWaitRow | null> {
   const result = await serializeMerge(card.id, async () => parkForMergeLocked(card, plan, options));
   // Committed first: this read closes the event-before-wait race.
   if (result?.created) await reconcileMergeWait(result.wait.id, { immediate: true, fetchImpl: options.fetchImpl });
   return result?.wait ?? null;
 }
 
-async function parkForMergeLocked(card: CardRow, plan: Extract<MergeGatePlan, { disposition: 'wait' }>, options: { approvedBy?: string | null; actor?: CardActionActor; note?: string | null; fromStatus?: string | null }): Promise<{ wait: ExternalWaitRow; created: boolean } | null> {
+async function parkForMergeLocked(card: CardRow, plan: Extract<MergeGatePlan, { disposition: 'wait' }>, options: { approvedBy?: string | null; actor?: CardActionActor; note?: string | null; fromStatus?: string | null; taskRunId?: string | null }): Promise<{ wait: ExternalWaitRow; created: boolean } | null> {
   const actor: CardActionActor = options.actor ?? { type: 'system', id: 'merge-gate' };
   const now = new Date();
   const committed = await db.transaction(async (tx) => {
     // The card row serializes wait creation across server processes.
     const [fresh] = await tx.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).for('update').limit(1);
     if (!fresh || !['in_review', 'needs_review', 'waiting_on_external', 'in_progress'].includes(fresh.columnStatus ?? '')) return null;
-    const [authorized] = await tx.select().from(kanbanCards).where(completionCondition(card)).limit(1);
+    if (options.taskRunId) await tx.select().from(taskRuns).where(eq(taskRuns.id, options.taskRunId)).for('update').limit(1);
+    const [authorized] = await tx.select().from(kanbanCards).where(completionCondition(card, options.taskRunId)).limit(1);
     if (!authorized) return null;
     const waits = await tx.select().from(externalWaits).where(and(eq(externalWaits.cardId, card.id), eq(externalWaits.provider, MERGE_WAIT_PROVIDER), eq(externalWaits.status, 'waiting'))).orderBy(desc(externalWaits.createdAt));
     const existing = waits.find((wait) => sameCommit(wait.authorizedHeadSha, plan.headSha) && wait.externalId === plan.externalId);
     if (existing) return { wait: existing, created: false };
-    const [parked] = await tx.update(kanbanCards).set({ columnStatus: 'waiting_on_external', completedAt: null, lastError: null, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: now }).where(completionCondition(card)).returning();
+    const [parked] = await tx.update(kanbanCards).set({ columnStatus: 'waiting_on_external', completedAt: null, lastError: null, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: now }).where(completionCondition(card, options.taskRunId)).returning();
     if (!parked) return null;
     for (const wait of waits) await tx.update(externalWaits).set({ status: 'superseded', resolvedAt: now }).where(eq(externalWaits.id, wait.id));
     const [wait] = await tx.insert(externalWaits).values({ companyId: card.companyId, cardId: card.id, waitingFor: plan.waitingFor, provider: MERGE_WAIT_PROVIDER, externalId: plan.externalId, externalUrl: plan.externalUrl, status: 'waiting', authorizedHeadSha: plan.headSha, pollIntervalSeconds: 30, pollCount: 0 }).returning();
@@ -449,10 +450,10 @@ export function mergeCompletionStatus(plan: MergeGatePlan): 'done' | 'blocked' |
   return plan.disposition === 'not_required' ? 'done' : plan.disposition === 'blocked' ? 'blocked' : 'waiting_on_external';
 }
 
-export async function noteMergeEvidenceRequired(card: CardRow, plan: Extract<MergeGatePlan, { disposition: 'not_required' | 'blocked' }>): Promise<void> {
+export async function noteMergeEvidenceRequired(card: CardRow, plan: Extract<MergeGatePlan, { disposition: 'not_required' | 'blocked' }>, taskRunId?: string | null): Promise<void> {
   if (plan.reason === 'not_required') return;
   const body = `Completion blocked: ${plan.detail}`;
-  const updated = await guardedCompletionUpdate(card, { columnStatus: 'blocked', completedAt: null, rollupStatus: null, lastError: body, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() });
+  const updated = await guardedCompletionUpdate(card, { columnStatus: 'blocked', completedAt: null, rollupStatus: null, lastError: body, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() }, taskRunId);
   if (!updated) return;
   await postMergeComment(card, 'merge_evidence_required', body, { reason: plan.reason });
   await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'webhook', status: 'warning', message: body });
@@ -460,9 +461,9 @@ export async function noteMergeEvidenceRequired(card: CardRow, plan: Extract<Mer
 }
 
 /** Apply one reviewed completion plan; only not_required permits direct Done. */
-export async function applyMergeGatePlan(card: CardRow, plan: MergeGatePlan, options: { approvedBy?: string | null; actor?: CardActionActor; fromStatus?: string | null; fetchImpl?: typeof fetch } = {}): Promise<void> {
+export async function applyMergeGatePlan(card: CardRow, plan: MergeGatePlan, options: { approvedBy?: string | null; actor?: CardActionActor; fromStatus?: string | null; fetchImpl?: typeof fetch; taskRunId?: string | null } = {}): Promise<void> {
   if (plan.disposition === 'wait') await parkForMerge(card, plan, options);
-  else await noteMergeEvidenceRequired(card, plan);
+  else await noteMergeEvidenceRequired(card, plan, options.taskRunId);
 }
 
 // Convenience for the two approval sites that decide their own next status:
