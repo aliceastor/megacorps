@@ -51,7 +51,7 @@ const cliHelp = {
   manifestExample: [
     'defaultCompany: default',
     'companies:',
-    '  - name: Default Company',
+    '  - name: Example Company',
     '    slug: default',
     'departments:',
     '  - company: default',
@@ -439,7 +439,7 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
   }
 
   if (endpoint.path.includes('/api/admin/users')) {
-    const user = { id: 'user-uuid', email: 'admin@example.com', name: 'Admin', role: 'admin', status: 'active', memberships: [{ companyId: 'company-uuid', companyName: 'Default Company', role: 'admin', status: 'active' }] };
+    const user = { id: 'user-uuid', email: 'admin@example.com', name: 'Admin', role: 'admin', status: 'active', memberships: [{ companyId: 'company-uuid', companyName: 'Example Company', role: 'admin', status: 'active' }] };
     if (endpoint.method === 'GET') return { responseSchema: { type: 'array', items: user }, responseExample: [user], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
     return { responseSchema: { user }, responseExample: { user }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }

@@ -1,3 +1,4 @@
+import { companyDeletionInventory, deletionBlockers, lockCompanyInventory } from './company-inventory.ts';
 import { structuralCompletionIssue, companyExecutionReadiness, structuralReviewer } from './company-workflow.ts';
 import { workerRepositoryReadiness } from './worker-readiness.ts';
 import { sealDeliveryAcceptance } from './delivery-acceptance.ts';
@@ -9,8 +10,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { acceptInviteSchema, updateBudgetPolicySchema, updateCompanySchema, updatePositionSchema, updateAgentRuntimeSchema, updateProjectSchema, updateKnowledgeDocSchema, adminUpdateSettingsSchema, adminUpdateUserSchema, approvalDecisionSchema, cardStatuses, createAgentRuntimeSchema, createAgentSchema, createBudgetPolicySchema, createCardCommentSchema, createCardSchema, createCompanyMembershipSchema, createCompanySchema, createDepartmentSchema, createGoalSchema, createInviteSchema, createKnowledgeDocSchema, createPositionSchema, createProjectSchema, createWorkProductSchema, inferCardTransitionAction, loginSchema, normalizeCardStatus, signupSchema, updateAgentSchema, updateCardSchema, updateCompanyMembershipSchema, updateDepartmentSchema, validateCardTransition } from '@megacorps/shared';
 import { assertSessionSecretReady, signSession, requireAuth, requireRole } from './auth.ts';
-import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany } from './access.ts';
-import { db } from './db/client.ts';
+import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany, resolveMutationCompany } from './access.ts';
+import { db, sql } from './db/client.ts';
 import { activityLog, adapterSessions, agentReviewScores, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
@@ -51,13 +52,6 @@ import { notifications } from './db/schema.ts';
 import { API_TOKEN_HASH_SETTING, readApiTokenSettings, revokeApiToken, rotateApiToken } from './api-token.ts';
 import { CHAT_TASK_TIMEOUT_SETTING, KANBAN_TASK_TIMEOUT_SETTING, readChatTaskTimeoutSeconds, readKanbanTaskTimeoutSeconds, setChatTaskTimeoutSeconds, setKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
 
-async function defaultCompanyId(): Promise<string> {
-  const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
-  if (company) return company.id;
-  const [fallback] = await db.select({ id: companies.id }).from(companies).orderBy(desc(companies.createdAt)).limit(1);
-  if (!fallback) throw new Error('No company exists. Create a company first.');
-  return fallback.id;
-}
 
 function priorityToNumber(priority: string | undefined): number { return priority === 'urgent' ? 3 : priority === 'high' ? 2 : priority === 'low' ? -1 : 0; }
 function actorLabel(user: { email?: string; id?: string } | null): string { return user?.email ?? user?.id ?? 'system'; }
@@ -520,19 +514,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await tx.execute(drizzleSql`SELECT pg_advisory_xact_lock(7042024060602)`);
       const [adminRow] = await tx.select({ id: users.id }).from(users).where(and(eq(users.role, 'admin'), eq(users.status, 'active'))).limit(1);
       if (adminRow) return { blocked: true as const };
-      const [defaultCompany] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
-      const [company] = defaultCompany ? [defaultCompany] : await tx.select({ id: companies.id }).from(companies).orderBy(desc(companies.createdAt)).limit(1);
-      if (!company) throw new Error('No company exists. Run migrations or create a company first.');
       const [existingUser] = await tx.select().from(users).where(eq(users.email, input.email)).limit(1);
       const [user] = existingUser
         ? await tx.update(users).set({ name: input.name, passwordHash, role: 'admin', status: 'active', updatedAt: now }).where(eq(users.id, existingUser.id)).returning()
         : await tx.insert(users).values({ email: input.email, name: input.name, passwordHash, role: 'admin', status: 'active' }).returning();
       if (!user) throw new Error('bootstrap_user_failed');
-      const [membership] = await tx.insert(companyMemberships).values({ companyId: company.id, userId: user.id, role: 'admin', status: 'active' }).onConflictDoUpdate({
-        target: [companyMemberships.companyId, companyMemberships.userId],
-        set: { role: 'admin', status: 'active', updatedAt: now },
-      }).returning();
-      await tx.insert(activityLog).values({ companyId: company.id, actorType: 'system', actorId: 'bootstrap', userId: user.id, action: existingUser ? 'auth.bootstrap_admin_promoted' : 'auth.bootstrap_admin_created', entityType: 'user', entityId: user.id, details: { email: user.email } });
+      const membership = null;
+      await tx.insert(activityLog).values({ companyId: null, actorType: 'system', actorId: 'bootstrap', userId: user.id, action: existingUser ? 'auth.bootstrap_admin_promoted' : 'auth.bootstrap_admin_created', entityType: 'user', entityId: user.id, details: { email: user.email } });
       return { blocked: false as const, user, membership };
     });
     if (result.blocked) return reply.code(409).send({ error: 'bootstrap_already_has_admin' });
@@ -560,13 +548,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const nextSignupAdmin = !adminRow;
       const role = nextSignupAdmin ? 'admin' : 'viewer';
       const companyRole = nextSignupAdmin ? 'admin' : 'viewer';
-      const [defaultCompany] = await tx.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
-      const [company] = defaultCompany ? [defaultCompany] : await tx.select({ id: companies.id }).from(companies).orderBy(desc(companies.createdAt)).limit(1);
-      if (!company) throw new Error('No company exists. Run migrations or create a company first.');
       const [created] = await tx.insert(users).values({ email: input.email, name: input.name, passwordHash, role, status: 'active' }).returning();
       if (!created) throw new Error('signup_failed');
-      const [membership] = await tx.insert(companyMemberships).values({ companyId: company.id, userId: created.id, role: companyRole, status: 'active' }).onConflictDoNothing().returning();
-      await tx.insert(activityLog).values({ companyId: company.id, actorType: 'user', actorId: created.id, userId: created.id, action: nextSignupAdmin ? 'auth.first_admin_signup' : 'auth.signup', entityType: 'user', entityId: created.id, details: { email: created.email, role, companyRole, firstAccount } });
+      const membership = null;
+      await tx.insert(activityLog).values({ companyId: null, actorType: 'user', actorId: created.id, userId: created.id, action: nextSignupAdmin ? 'auth.first_admin_signup' : 'auth.signup', entityType: 'user', entityId: created.id, details: { email: created.email, role, companyRole, firstAccount } });
       return { blocked: false as const, user: created, membership, firstAccount, nextSignupAdmin };
     });
     if (result.blocked) return reply.code(409).send({ error: 'bootstrap_already_has_admin', firstAccount: result.firstAccount, nextSignupWillBeAdmin: result.nextSignupAdmin });
@@ -675,7 +660,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (input.chatTaskTimeoutSeconds !== undefined) await setChatTaskTimeoutSeconds(input.chatTaskTimeoutSeconds);
     const rotated = input.apiTokenAction === 'rotate' ? await rotateApiToken(user.id) : null;
     if (input.apiTokenAction === 'revoke') await revokeApiToken();
-    const companyId = await defaultCompanyId();
+    const companyId = null;
     await db.insert(activityLog).values({
       companyId,
       actorType: 'user',
@@ -733,7 +718,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (input.password !== undefined) updates.passwordHash = await bcrypt.hash(input.password, 12);
     const [updated] = await db.update(users).set(updates).where(eq(users.id, id)).returning();
     if (!updated) return reply.code(500).send({ error: 'user_update_failed' });
-    const companyId = await defaultCompanyId();
+    const companyId = null;
     await db.insert(activityLog).values({ companyId, actorType: 'user', actorId: actor.id, userId: actor.id, action: 'admin.user.updated', entityType: 'user', entityId: id, details: { email: updated?.email, role: input.role, status: input.status, passwordReset: input.password !== undefined } });
     return { user: { id: updated.id, email: updated.email, name: updated.name, role: updated.role, status: updated.status, createdAt: updated.createdAt, updatedAt: updated.updatedAt } };
   });
@@ -755,6 +740,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       query.source ? eq(promptLogs.source, query.source) : undefined,
     ].filter(Boolean);
     return db.select().from(promptLogs).where(filters.length ? and(...filters) : undefined).orderBy(desc(promptLogs.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+  });
+  app.get('/api/admin/activity', async (request, reply) => {
+    const user = await requireRole(request, reply, 'admin'); if (!user) return reply;
+    return db.select().from(activityLog).where(isNull(activityLog.companyId)).orderBy(desc(activityLog.createdAt)).limit(200);
   });
   app.get('/api/activity', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
@@ -1188,79 +1177,42 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!company) return reply.code(404).send({ error: 'company_not_found' });
     return company;
   });
-  app.delete('/api/companies/:id', async (request, reply) => {
-    const id = (request.params as { id: string }).id;
+  app.get('/api/companies/:id/deletion-preview', async (request, reply) => {
+    const id = z.string().uuid().parse((request.params as { id: string }).id);
     const user = await requireCompanyRole(request, reply, id, 'admin'); if (!user) return reply;
-    const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id)).limit(1);
-    if (!company) return reply.code(404).send({ error: 'company_not_found' });
-    const [
-      [departmentUsage],
-      [projectUsage],
-      [goalUsage],
-      [runtimeUsage],
-      [agentUsage],
-      [cardUsage],
-      [knowledgeUsage],
-      [budgetUsage],
-      [approvalUsage],
-      [inviteUsage],
-      [costUsage],
-      [heartbeatUsage],
-      [taskRunUsage],
-      [adapterSessionUsage],
-      [workProductUsage],
-      [chatSessionUsage],
-      [chatMessageUsage],
-      [promptLogUsage],
-    ] = await Promise.all([
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(departments).where(eq(departments.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(projects).where(and(eq(projects.companyId, id), isNull(projects.deletedAt))),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(goals).where(eq(goals.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(agentRuntimes).where(eq(agentRuntimes.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(agents).where(eq(agents.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(kanbanCards).where(eq(kanbanCards.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(knowledgeDocs).where(eq(knowledgeDocs.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(budgetPolicies).where(eq(budgetPolicies.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(approvals).where(eq(approvals.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(userInvites).where(eq(userInvites.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(costEvents).where(eq(costEvents.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(heartbeatRuns).where(eq(heartbeatRuns.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(taskRuns).where(eq(taskRuns.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(adapterSessions).where(eq(adapterSessions.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(workProducts).where(eq(workProducts.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(chatSessions).where(eq(chatSessions.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(chatMessages).where(eq(chatMessages.companyId, id)),
-      db.select({ count: drizzleSql<number>`count(*)::int` }).from(promptLogs).where(eq(promptLogs.companyId, id)),
-    ]);
-    const usage = {
-      departments: departmentUsage?.count ?? 0,
-      projects: projectUsage?.count ?? 0,
-      goals: goalUsage?.count ?? 0,
-      agentRuntimes: runtimeUsage?.count ?? 0,
-      agents: agentUsage?.count ?? 0,
-      cards: cardUsage?.count ?? 0,
-      knowledgeDocs: knowledgeUsage?.count ?? 0,
-      budgetPolicies: budgetUsage?.count ?? 0,
-      approvals: approvalUsage?.count ?? 0,
-      invites: inviteUsage?.count ?? 0,
-      costEvents: costUsage?.count ?? 0,
-      heartbeatRuns: heartbeatUsage?.count ?? 0,
-      taskRuns: taskRunUsage?.count ?? 0,
-      adapterSessions: adapterSessionUsage?.count ?? 0,
-      workProducts: workProductUsage?.count ?? 0,
-      chatSessions: chatSessionUsage?.count ?? 0,
-      chatMessages: chatMessageUsage?.count ?? 0,
-      promptLogs: promptLogUsage?.count ?? 0,
-    };
-    const blocking = Object.entries(usage ?? {}).filter(([, count]) => Number(count) > 0);
-    if (blocking.length > 0) return reply.code(409).send({ error: 'company_not_empty', blocking: Object.fromEntries(blocking) });
-    await db.transaction(async (tx) => {
-      await tx.delete(activityLog).where(eq(activityLog.companyId, id));
-      await tx.delete(positions).where(eq(positions.companyId, id));
-      await tx.delete(companyMemberships).where(eq(companyMemberships.companyId, id));
-      await tx.delete(companies).where(eq(companies.id, id));
+    return sql.begin('isolation level repeatable read read only', async tx => {
+      await tx.unsafe("SET LOCAL statement_timeout='5000ms'");
+      const inventory = await companyDeletionInventory(tx, id);
+      const blocking = deletionBlockers(inventory);
+      return { companyId: id, canDelete: Object.keys(blocking).length === 0, blocking, inventory };
     });
-    return { ok: true };
+  });
+  app.delete('/api/companies/:id', async (request, reply) => {
+    const id = z.string().uuid().parse((request.params as { id: string }).id);
+    const user = await requireCompanyRole(request, reply, id, 'admin'); if (!user) return reply;
+    try {
+      const result = await sql.begin(async tx => {
+        const catalog = await lockCompanyInventory(tx);
+        const [membership] = await tx.unsafe("SELECT cm.id FROM company_memberships cm JOIN users u ON u.id=cm.user_id WHERE cm.company_id=$1 AND cm.user_id=$2 AND cm.role='admin' AND cm.status='active' AND u.status='active' FOR SHARE OF u", [id, user.id]);
+        if (!membership) return { error: 'company_role_required' as const };
+        const [company] = await tx.unsafe('SELECT id,name,slug FROM companies WHERE id=$1', [id]);
+        if (!company) return { error: 'company_not_found' as const };
+        const inventory = await companyDeletionInventory(tx, id, catalog);
+        const blocking = deletionBlockers(inventory);
+        if (Object.keys(blocking).length) return { error: 'company_not_empty' as const, blocking, inventory };
+        await tx.unsafe("UPDATE activity_log SET company_id=NULL, details=coalesce(details,'{}'::jsonb) || jsonb_build_object('formerCompany', $2::jsonb) WHERE company_id=$1", [id, JSON.stringify(company)]);
+        await tx.unsafe('DELETE FROM positions WHERE company_id=$1', [id]);
+        await tx.unsafe('DELETE FROM company_memberships WHERE company_id=$1', [id]);
+        await tx.unsafe('DELETE FROM companies WHERE id=$1', [id]);
+        await tx.unsafe("INSERT INTO activity_log (company_id, actor_type, actor_id, user_id, action, entity_type, entity_id, details) VALUES (NULL,'user',$1,$1::uuid,'company.deleted','company',$2,$3::jsonb)", [user.id, id, JSON.stringify({ formerCompany: company })]);
+        return { ok: true as const };
+      });
+      if ('error' in result) return reply.code(result.error === 'company_role_required' ? 403 : result.error === 'company_not_found' ? 404 : 409).send(result);
+      return result;
+    } catch (error) {
+      if (['55P03','57014','40P01','23503'].includes(String((error as { code?: string }).code))) return reply.code(409).send({ error: 'company_delete_busy', message: 'Company records changed or are busy. Refresh the deletion preview and retry.' });
+      throw error;
+    }
   });
 
   app.get('/api/company-memberships', async (request, reply) => {
@@ -1486,7 +1438,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/cards', async (request, reply) => {
     const input = createCardSchema.parse(request.body);
-    const companyId = input.companyId ?? await defaultCompanyId();
+    const companyId = await resolveMutationCompany(request, reply, input.companyId); if (!companyId) return reply;
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     try {
       await ensureCompanyReferences(companyId, {
@@ -2154,7 +2106,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.post('/api/agents', async (request, reply) => {
     const input = createAgentSchema.parse(request.body);
-    const companyId = input.companyId ?? await defaultCompanyId();
+    const companyId = await resolveMutationCompany(request, reply, input.companyId); if (!companyId) return reply;
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     try { await ensureCompanyReferences(companyId, { departmentId: input.departmentId, positionId: input.positionId, bossId: input.bossId, runtimeId: input.runtimeId, adapterType: input.adapterType }); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
@@ -2340,7 +2292,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.post('/api/agent-runtimes', async (request, reply) => {
     const input = createAgentRuntimeSchema.parse(request.body);
-    const companyId = input.companyId ?? await defaultCompanyId();
+    const companyId = await resolveMutationCompany(request, reply, input.companyId); if (!companyId) return reply;
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     const [row] = await db.insert(agentRuntimes).values({
       ...input,
@@ -2414,7 +2366,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.post('/api/projects', async (request, reply) => {
     const input = createProjectSchema.parse(request.body);
-    const companyId = input.companyId ?? await defaultCompanyId();
+    const companyId = await resolveMutationCompany(request, reply, input.companyId); if (!companyId) return reply;
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     // Built-in Gitea provisioning: a gitea-local project gets its org and repo
     // created (and every active company agent added as a collaborator) before
@@ -2600,7 +2552,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.post('/api/goals', async (request, reply) => {
     const input = createGoalSchema.parse(request.body);
-    const companyId = input.companyId ?? await defaultCompanyId();
+    const companyId = await resolveMutationCompany(request, reply, input.companyId); if (!companyId) return reply;
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     if (input.departmentId && input.projectId) return reply.code(400).send({ error: 'goal_scope_conflict' });
     try {
@@ -2710,14 +2662,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const repoFullName = body?.repository?.full_name ?? 'unknown/unknown';
     const orgSlug = repoFullName.split('/')[0] ?? '';
     const [company] = await db.select().from(companies).where(eq(companies.slug, orgSlug)).limit(1);
-    const companyId = company?.id ?? await defaultCompanyId();
+    const companyId = company?.id ?? null;
     await db.insert(activityLog).values({
       companyId,
       actorType: 'system',
       actorId: 'gitea',
       action: eventName === 'pull_request' ? 'gitea.pull_request' : 'gitea.push',
       entityType: 'repository',
-      entityId: companyId,
+      entityId: repoFullName,
       details: eventName === 'pull_request'
         ? {
           repository: repoFullName,
@@ -2735,7 +2687,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           lastCommit: body?.commits?.[body.commits.length - 1]?.message?.slice(0, 200) ?? null,
         },
     });
-    publishLiveEvent({ type: eventName === 'pull_request' ? 'gitea.pull_request' : 'gitea.push', companyId, entityType: 'repository', entityId: companyId });
+    if (companyId) publishLiveEvent({ type: eventName === 'pull_request' ? 'gitea.pull_request' : 'gitea.push', companyId, entityType: 'repository', entityId: companyId });
     let merge: Awaited<ReturnType<typeof handleGiteaWebhookEvent>> = { event: eventName, matched: 0, outcomes: [] };
     try {
       merge = await handleGiteaWebhookEvent({ eventName, payload: body ?? {}, app });

@@ -1,3 +1,4 @@
+import { cleanupUnusedDefault } from './companyless-migration.ts';
 import { sql } from './client.ts';
 import { CEO_POSITION_PROMPT, LEGACY_CEO_POSITION_PROMPT } from '../role-playbooks.ts';
 import { managedMergeMigration, managedMergeRunFenceMigration, managedMergeLockOrderMigration } from './managed-merge-migration.ts';
@@ -14,6 +15,12 @@ const MIGRATION_LOCK_KEY = 727274001;
 // created before the version table will re-run v1 exactly once to get recorded.
 // Never edit an applied migration's statements — add the change as a new version.
 const migrations: Migration[] = [
+  { version: 27, name: 'companyless-bootstrap-and-global-audit', run: async () => {
+    await sql.begin(async tx => {
+      await tx.unsafe('ALTER TABLE activity_log ALTER COLUMN company_id DROP NOT NULL');
+      await cleanupUnusedDefault(tx);
+    });
+  } },
   { version: 1, name: 'bootstrap', run: runBootstrap },
   { version: 2, name: 'scheduling-and-notifications', run: runSchedulingAndNotifications },
   { version: 3, name: 'message-board-delegation-schema', run: runMessageBoardDelegationSchema },

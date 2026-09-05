@@ -761,7 +761,7 @@ export const cronRuns = pgTable('cron_runs', {
 
 export const activityLog = pgTable('activity_log', {
   id: uuid('id').primaryKey().defaultRandom(),
-  companyId: uuid('company_id').notNull().references(() => companies.id),
+  companyId: uuid('company_id').references(() => companies.id),
   actorType: text('actor_type').notNull().default('system'),
   actorId: text('actor_id').notNull().default('system'),
   agentId: uuid('agent_id').references(() => agents.id),

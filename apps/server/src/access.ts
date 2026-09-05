@@ -60,3 +60,14 @@ export async function requireAnyVisibleCompany(request: FastifyRequest, reply: F
 export async function requireVisibleCompany(request: FastifyRequest, reply: FastifyReply, companyId: string): Promise<AuthUser | null> {
   return requireCompanyRole(request, reply, companyId, 'viewer');
 }
+
+/** An omitted company is compatible only with one authenticated visible company. */
+export async function resolveMutationCompany(request: FastifyRequest, reply: FastifyReply, explicit?: string): Promise<string | null> {
+  const user = await requireAuth(request, reply);
+  if (!user) return null;
+  if (explicit) return explicit;
+  const ids = await visibleCompanyIds(user);
+  if (ids.length === 1) return ids[0]!;
+  await reply.code(400).send({ error: 'company_required', message: 'Pass companyId explicitly. Create a company first if your account has none.', visibleCompanyCount: ids.length });
+  return null;
+}

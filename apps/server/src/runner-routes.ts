@@ -8,7 +8,7 @@ import { and, asc, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { createAgentSessionSchema, createMachineRunnerSchema, inferCardTransitionAction, normalizeCardStatus, runnerHeartbeatSchema, runnerTaskClaimSchema, runnerTaskCompleteSchema, updateMachineRunnerSchema, type CardActorType, type CardStatus } from '@megacorps/shared';
-import { requireAnyVisibleCompany, requireCompanyRole } from './access.ts';
+import { requireAnyVisibleCompany, requireCompanyRole, resolveMutationCompany } from './access.ts';
 import { assertCardTransition, recordCardAction, recordStageAction } from './card-actions.ts';
 import { db } from './db/client.ts';
 import { activityLog, agentRuntimes, agentSessions, agents, cardComments, companies, externalWaits, heartbeatRuns, kanbanCards, machineRunners, projects, taskLogs, taskRuns, workProducts } from './db/schema.ts';
@@ -91,10 +91,6 @@ function reviewCanRun(status: CardStatus): boolean {
   return status === 'in_review' || status === 'needs_review';
 }
 
-async function defaultCompanyId(): Promise<string | null> {
-  const [company] = await db.select({ id: companies.id }).from(companies).where(eq(companies.slug, 'default')).limit(1);
-  return company?.id ?? null;
-}
 
 function runnerSupports(runner: typeof machineRunners.$inferSelect, runtime: typeof agentRuntimes.$inferSelect | null | undefined, adapterType: string): boolean {
   const supported = runner.supportedRuntimes ?? [];
@@ -346,8 +342,8 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
 
   app.post('/api/machine-runners', async (request, reply) => {
     const input = createMachineRunnerSchema.parse(request.body);
-    const companyId = input.companyId ?? await defaultCompanyId();
-    if (!companyId) return reply.code(400).send({ error: 'company_required' });
+    const companyId = await resolveMutationCompany(request, reply, input.companyId);
+    if (!companyId) return reply;
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     const apiKey = generateRunnerApiKey();
     const [runner] = await db.insert(machineRunners).values({
