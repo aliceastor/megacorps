@@ -310,6 +310,13 @@ export async function giteaPullRequest(config: GiteaConfig, orgSlug: string, rep
   return (response.json as GiteaPullRequest | null) ?? null;
 }
 
+/** Resolve a branch, full SHA or legacy short SHA in the authoritative repository. */
+export async function giteaResolveCommit(config: GiteaConfig, org: string, repo: string, ref: string, fetchImpl?: typeof fetch): Promise<string | null> {
+  const response = await giteaFetch(config, `/repos/${org}/${repo}/git/commits/${encodeURIComponent(ref)}`, { allow: [404, 409], fetchImpl });
+  const sha = (response.json as { sha?: string } | null)?.sha?.trim().toLowerCase();
+  return response.status === 200 && sha && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+}
+
 // Containment check for push payloads that do not list the authorized head
 // (Gitea truncates long pushes). Compares against the newest commits on the
 // branch, which is where a just-merged head always is.
@@ -321,6 +328,6 @@ export async function giteaBranchContainsCommit(config: GiteaConfig, orgSlug: st
   if (!wanted) return false;
   return (response.json as Array<{ sha?: string }>).some((commit) => {
     const id = (commit.sha ?? '').toLowerCase();
-    return id.length > 0 && (id === wanted || id.startsWith(wanted) || wanted.startsWith(id));
+    return /^[0-9a-f]{40}$/.test(wanted) && id === wanted;
   });
 }

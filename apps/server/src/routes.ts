@@ -13,7 +13,7 @@ import { adapterRequiresRuntime } from './adapters/config.ts';
 import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completeTaskRun, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, gitRemoteMatchesProjectRepo, isGuidanceEscalation, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, processMentionQuestions, processReportNotes, reportNotesFromOutput, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest, finishRunWaitingOnBrainstorm, resolveBrainstormRequest, recordReviewScore, webhookCompletionDecision } from './dispatch.ts';
 import { afterAuthorFix, completePanelReviewFromWebhook, ensureHumanGate, hasOpenReviewRound, listReviewRounds, openFixRound, openPanelRound, panelRequiredForCard } from './review-rounds.ts';
 import { dispositionErrors, formatDispositionRules } from './review-panel.ts';
-import { handleGiteaWebhookEvent, noteMergeGateSkipped, parkForMerge, planMergeGate } from './merge-gate.ts';
+import { applyMergeGatePlan, handleGiteaWebhookEvent, mergeCompletionStatus, planMergeGate } from './merge-gate.ts';
 import { openExternalWait } from './external-events.ts';
 import { brainstormFromOutput } from './brainstorm.ts';
 import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointFromOutput } from './client-checkpoints.ts';
@@ -851,13 +851,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         // merge gate sits after it. An approved card on a merge-gated project
         // parks on its authorized head instead of going straight to done.
         const mergePlan = input.status === 'approved' ? await planMergeGate(card) : null;
-        const nextStatus = input.status === 'approved' ? (mergePlan?.park ? 'waiting_on_external' : 'done') : 'todo';
+        const nextStatus = input.status === 'approved' && mergePlan ? mergeCompletionStatus(mergePlan) : 'todo';
         await db.update(kanbanCards).set({ columnStatus: nextStatus, completedAt: nextStatus === 'done' ? new Date() : null, reviewFeedback: input.decisionNote ?? card.reviewFeedback, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
         await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'approval', status: input.status === 'approved' ? 'success' : 'failed', message: `Approval ${input.status} by ${actorLabel(user)}.`, output: input.decisionNote });
-        if (mergePlan?.park) {
-          await parkForMerge(card, mergePlan, { approvedBy: user.id, actor: { type: 'user', id: user.id, userId: user.id }, fromStatus: card.columnStatus });
+        if (mergePlan) {
+          await applyMergeGatePlan(card, mergePlan, { approvedBy: user.id, actor: { type: 'user', id: user.id, userId: user.id }, fromStatus: card.columnStatus });
         } else {
-          if (mergePlan) await noteMergeGateSkipped(card, mergePlan);
           await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by approval.` });
         }
       }
@@ -1591,6 +1590,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         incompleteTitles: childBlock.incompleteTitles,
       });
     }
+    const manualMergePlan = toStatus === 'done' ? await planMergeGate({ ...existing, projectId: nextProjectId }) : null;
+    if (manualMergePlan) input.columnStatus = mergeCompletionStatus(manualMergePlan);
     if (input.dependencyCardIds !== undefined) {
       try {
         await setCardDependencies(id, nextDependencyCardIds);
@@ -1653,7 +1654,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         details: { fromAssigneeId: existing.assigneeId, toAssigneeId: nextAssigneeId },
       });
     }
-    if (card && transitionAction && toStatus) {
+    if (card && manualMergePlan) await applyMergeGatePlan(card, manualMergePlan, { actor: { type: 'user', id: user.id, userId: user.id }, approvedBy: user.id, fromStatus });
+    if (card && transitionAction && toStatus && !manualMergePlan) {
       await recordStageAction({
         cardId: card.id,
         agentId: card.assigneeId,
@@ -3006,7 +3008,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             ? 'in_review'
             : completionStatusForQualityGate(requestedStatus, qualityReviewerId);
     const childBlock = await completionBlockedByChildren(card, requestedNextStatus);
-    const nextStatus = childBlock ? 'in_progress' : requestedNextStatus;
+    const mergePlan = !childBlock && requestedNextStatus === 'done' ? await planMergeGate({ ...card, executionLog: body.report ? JSON.stringify(body.report) : executionLog }) : null;
+    const nextStatus = childBlock ? 'in_progress' : mergePlan ? mergeCompletionStatus(mergePlan) : requestedNextStatus;
     const completesRun = delegatedViaWebhook || delegationFailed || Boolean(childBlock) || nextStatus !== 'in_progress';
     const webhookAction = childBlock ? 'webhook.waiting_on_children' : delegatedViaWebhook ? 'webhook.message_delegated' : delegationFailed ? 'webhook.delegation_failed' : `webhook.task_${nextStatus}`;
     const [updatedCard] = await db.update(kanbanCards).set({
@@ -3044,7 +3047,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return { ok: true, cardId: card.id, taskRunId, newStatus: parked.columnStatus, preservedHumanGate: true };
     }
     let externalWaitId: string | null = null;
-    if (nextStatus === 'waiting_on_external') {
+    if (nextStatus === 'waiting_on_external' && !mergePlan) {
       const externalProduct = body.workProducts.find((product) => product.pullRequestUrl || product.url || product.commitSha || product.branch);
       const waitValues = {
         waitingFor: body.summary ?? externalProduct?.title ?? 'external completion',
@@ -3151,6 +3154,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         })),
       });
     }
+    if (mergePlan) await applyMergeGatePlan({ ...card, executionLog }, mergePlan);
     return { ok: true, cardId: body.cardId, taskRunId, requestedStatus, requestedNextStatus, newStatus: nextStatus, reviewerId: escalationReviewerId ?? qualityReviewerId, delegated: delegatedViaWebhook, delegationFailed, messageDelegationCount: delegatedRows.length, childBlock };
   });
 }

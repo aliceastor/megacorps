@@ -34,7 +34,7 @@ import { HANDOVER_LIMITS, formatHandoverSection, type HandoverInput } from './ca
 import { acceptanceOf, formatBriefCoverage, parseCardBrief } from './card-brief.ts';
 import { dispositionErrors, formatDispositionRules } from './review-panel.ts';
 import { afterAuthorFix, cardIdsAwaitingPanelOrHuman, ensureHumanGate, fixSection, hasOpenReviewRound, openFixRound, openPanelRound, panelRequiredForCard, reviewPanelSlot, sweepReviewRounds } from './review-rounds.ts';
-import { noteMergeGateSkipped, parkForMerge, planMergeGate, repoFullNameFromUrl } from './merge-gate.ts';
+import { applyMergeGatePlan, mergeCompletionStatus, noteMergeEvidenceRequired, parkForMerge, planMergeGate, repoFullNameFromUrl } from './merge-gate.ts';
 import { sweepExternalWaitPolls, sweepExternalWaitTimeouts } from './external-events.ts';
 import { EXTERNAL_POLL_MAX, formatPollPrompt } from './external-polling.ts';
 import { assertRunRetryNotExhausted, completeRetryableRun, resetRunRetries, runRetryReady, RUN_FAILURE_LIMIT, type RunCompletion } from './run-retry.ts';
@@ -3694,7 +3694,13 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     // Merge closure (§19): an auto-approval is still an approval, so a
     // merge-gated project parks the card here too instead of finishing it.
     const autoMergePlan = await planMergeGate(card);
-    if (autoMergePlan.park) {
+    if (autoMergePlan.disposition === 'blocked') {
+      await applyMergeGatePlan(card, autoMergePlan);
+      await completeTaskRun(options.taskRunId, { status: 'success', output: autoMergePlan.detail, preserveCard: true });
+      const [blocked] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1);
+      return blocked!;
+    }
+    if (autoMergePlan.disposition === 'wait') {
       await parkForMerge(card, autoMergePlan, { fromStatus: card.columnStatus });
       await addTaskLog({ cardId: card.id, type: 'review', status: 'success', message: `${reason} The card waits for head ${autoMergePlan.headSha} to be merged into ${autoMergePlan.defaultBranch}.` });
       await addCardMessage({ cardId: card.id, authorType: 'system', action: 'review_auto_approved', body: reason });
@@ -3705,7 +3711,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       if (!parked) throw new Error('card_update_failed');
       return parked;
     }
-    await noteMergeGateSkipped(card, autoMergePlan);
+    await noteMergeEvidenceRequired(card, autoMergePlan);
     const [updated] = await db.update(kanbanCards).set({
       columnStatus: 'done',
       rollupStatus: 'done',
@@ -3895,8 +3901,8 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     // Merge closure (§19): once no gate is left, a project that requires a
     // merge parks the card on the exact authorized head instead of finishing.
     const mergePlan = !rejected && !humanGate && !childBlock ? await planMergeGate(card) : null;
-    const mergeParked = mergePlan?.park === true;
-    const targetStatus: CardStatus = rejected ? 'todo' : humanGate ? 'in_review' : mergeParked ? 'waiting_on_external' : 'done';
+    const mergeParked = mergePlan?.disposition === 'wait';
+    const targetStatus: CardStatus = rejected ? 'todo' : humanGate ? 'in_review' : mergePlan ? mergeCompletionStatus(mergePlan) : 'done';
     const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : targetStatus;
     const [updated] = await db.update(kanbanCards).set({
       columnStatus: effectiveNextStatus,
@@ -3927,9 +3933,8 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: childBlock ? 'review.waiting_on_children' : rejected ? (reviewMode === 'help' ? 'review.revision_requested' : 'review.rejected') : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, mode: reviewMode, childBlock } });
     await completeTaskRun(options.taskRunId, { status: rejected ? 'failed' : 'success', error: rejected ? result.output : null, output: childBlock ? childBlock.message : result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
-    if (mergePlan?.park) await parkForMerge(updated, mergePlan, { approvedBy: reviewer.id, fromStatus: card.columnStatus });
-    else if (mergePlan) await noteMergeGateSkipped(updated, mergePlan);
-    if (!rejected && !childBlock && !humanGate && !mergeParked) await cascadeParentStatus(updated.parentCardId);
+    if (mergePlan) await applyMergeGatePlan(updated, mergePlan, { approvedBy: reviewer.id, fromStatus: card.columnStatus });
+    if (effectiveNextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
     return updated;
   } catch (error) {
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));

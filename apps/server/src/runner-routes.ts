@@ -12,6 +12,8 @@ import { runRetryReady } from './run-retry.ts';
 import { generateRunnerApiKey, hashRunnerApiKey, requireAgentSessionAuth, requireRunnerAuth } from './runner-auth.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
 import { cascadeParentStatus, completeTaskRun, completionBlockedByChildren, completionStatusForQualityGate, createPendingApproval, enqueueTaskRun } from './dispatch.ts';
+import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
+import { applyMergeGatePlan, mergeCompletionStatus, planMergeGate } from './merge-gate.ts';
 
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
@@ -106,8 +108,20 @@ async function createRunnerTaskCompletion(input: {
 }) {
   const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, input.run.cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
+  if (['done', 'cancelled'].includes(card.columnStatus ?? '') || (card.executionLockId && card.executionLockId !== input.run.id)) {
+    await completeTaskRun(input.run.id, { status: 'cancelled', preserveCard: true, error: 'stale_runner_completion' });
+    return card;
+  }
   const runAgentId = input.run.agentId ?? card.assigneeId;
   const output = [input.body.summary, input.body.output].filter(Boolean).join('\n\n');
+  const normalized = normalizeAgentResult({ output, report: input.body.report, workProducts: input.body.workProducts });
+  if (normalized.outcome === 'invalid') throw httpError(409, normalized.reason!, 'agent_report_invalid');
+  await persistAgentWorkProducts(card, runAgentId, input.run.id, normalized.workProducts);
+  if (normalized.outcome === 'permission') {
+    const parked = await parkPermissionBlockedResult(card.id, runAgentId ?? '', input.run.heartbeatRunId ?? '', normalized.reason!, output);
+    await completeTaskRun(input.run.id, { status: 'failed', preserveCard: true, error: normalized.reason, output });
+    return parked.card;
+  }
   const runStatus = input.body.status === 'failed' || input.body.status === 'blocked'
     ? 'failed'
     : input.body.status === 'cancelled'
@@ -116,13 +130,23 @@ async function createRunnerTaskCompletion(input: {
   const qualityReviewerId = input.run.kind === 'dispatch' && (input.body.status === 'success' || input.body.status === 'done') && card.reviewerId && card.reviewerId !== card.assigneeId
     ? card.reviewerId
     : null;
-  const requestedNextStatus: CardStatus = input.body.status === 'failed'
+  let requestedNextStatus: CardStatus = input.body.status === 'failed'
     ? 'blocked'
     : input.body.status === 'success'
       ? input.run.kind === 'review' ? 'done' : completionStatusForQualityGate('success', qualityReviewerId)
       : completionStatusForQualityGate(input.body.status, qualityReviewerId);
+  if (normalized.outcome === 'failed' || normalized.outcome === 'rejected') requestedNextStatus = 'blocked';
+  if (normalized.outcome === 'progress') requestedNextStatus = 'in_progress';
+  if (normalized.outcome === 'input_required') requestedNextStatus = 'needs_review';
+  if (input.run.kind === 'review' && normalized.source === 'report' && normalized.outcome === 'completed') {
+    if (!normalized.verdict || normalized.verdictError) throw httpError(409, 'Return an explicit current review verdict.', 'review_verdict_invalid');
+    if (normalized.verdict !== 'approved') requestedNextStatus = normalized.verdict === 'escalate' ? 'needs_review' : 'todo';
+  }
+  const humanGate = requestedNextStatus === 'done' && card.requiresApproval === true;
+  if (humanGate) requestedNextStatus = 'in_review';
   const childBlock = await completionBlockedByChildren(card, requestedNextStatus);
-  const nextStatus: CardStatus = childBlock ? 'in_progress' : requestedNextStatus;
+  const mergePlan = !childBlock && requestedNextStatus === 'done' ? await planMergeGate({ ...card, executionLog: normalized.report ? JSON.stringify(normalized.report) : output }) : null;
+  const nextStatus: CardStatus = childBlock ? 'in_progress' : mergePlan ? mergeCompletionStatus(mergePlan) : requestedNextStatus;
   const fromStatus = cardStatus(card.columnStatus);
   assertStatusMove(fromStatus, nextStatus, 'machine');
   const now = new Date();
@@ -157,27 +181,8 @@ async function createRunnerTaskCompletion(input: {
     updatedAt: now,
   }).where(eq(kanbanCards.id, card.id)).returning();
   if (runAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, runAgentId));
-  if (input.body.workProducts.length > 0) {
-    await db.insert(workProducts).values(input.body.workProducts.map((product) => ({
-      companyId: card.companyId,
-      cardId: card.id,
-      projectId: card.projectId,
-      agentId: runAgentId,
-      taskRunId: input.run.id,
-      type: product.type,
-      title: product.title,
-      summary: product.summary ?? null,
-      url: product.url ?? null,
-      repoProvider: product.repoProvider ?? null,
-      repoUrl: product.repoUrl ?? null,
-      branch: product.branch ?? null,
-      commitSha: product.commitSha ?? null,
-      pullRequestUrl: product.pullRequestUrl ?? null,
-      metadata: product.metadata,
-    })));
-  }
   let externalWaitId: string | null = null;
-  if (nextStatus === 'waiting_on_external') {
+  if (nextStatus === 'waiting_on_external' && !mergePlan) {
     const externalProduct = input.body.workProducts.find((product) => product.pullRequestUrl || product.url || product.commitSha || product.branch);
     const [wait] = await db.insert(externalWaits).values({
       companyId: card.companyId,
@@ -234,6 +239,8 @@ async function createRunnerTaskCompletion(input: {
     await createPendingApproval(updated, runAgentId, 'Runner completion requires quality review.');
     await enqueueTaskRun(card.id, 'review', 'queue');
   }
+  if (humanGate && updated) await createPendingApproval(updated, runAgentId, 'Runner completion requires human approval.');
+  if (mergePlan) await applyMergeGatePlan(card, mergePlan);
   if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
   return updated ?? card;
 }

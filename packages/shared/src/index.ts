@@ -230,6 +230,7 @@ export const runnerTaskClaimSchema = z.object({
 });
 
 export const runnerTaskCompleteSchema = z.object({
+  report: z.unknown().optional(),
   status: z.enum(['success', 'failed', 'cancelled', 'done', 'blocked', 'needs_review', 'in_review', 'waiting_on_external']),
   summary: z.string().trim().max(2000).optional(),
   output: z.string().max(100_000).optional(),

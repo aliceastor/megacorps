@@ -17,6 +17,7 @@ import { addCardMessage, cascadeParentStatus, completionBlockedByChildren, enque
 import { EXTERNAL_POLL_MAX, formatPollExhaustedMessage, pollDecision } from './external-polling.ts';
 import { publishLiveEvent } from './live.ts';
 import { notify } from './notifications.ts';
+import { applyMergeGatePlan, mergeCompletionStatus, planMergeGate, reconcileMergeWait } from './merge-gate.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type ExternalWaitRow = typeof externalWaits.$inferSelect;
@@ -71,60 +72,46 @@ export function externalEventNextStatus(card: Pick<CardRow, 'columnStatus' | 're
   return card.columnStatus;
 }
 
-export async function applyExternalEvent(args: { card: CardRow; input: ApplyExternalEventInput; actor: CardActionActor }): Promise<ApplyExternalEventResult> {
-  const { card, input, actor } = args;
-  const companyId = input.companyId ?? card.companyId;
+export async function applyExternalEvent(args: { card: CardRow; input: ApplyExternalEventInput; actor: CardActionActor; verifiedMerge?: boolean }): Promise<ApplyExternalEventResult> {
+  const { input, actor } = args;
   const now = new Date();
-  const payload = input.payload ?? {};
-  const [event] = await db.insert(externalEvents).values({
-    companyId,
-    projectId: input.projectId ?? card.projectId,
-    rootCardId: input.rootCardId ?? await rootCardId(card),
-    cardId: card.id,
-    provider: input.provider,
-    eventType: input.eventType,
-    externalId: input.externalId ?? null,
-    externalUrl: input.externalUrl ?? null,
-    status: input.status,
-    payloadHash: hashValue(payload),
-    payloadSummary: input.payloadSummary ?? null,
-    payload,
-    processedAt: now,
-  }).returning();
-  const resolvedAt = input.status === 'waiting' || input.status === 'info' ? undefined : now;
-  await db.update(externalWaits).set({ status: input.status, resolvedAt }).where(input.waitId
-    ? and(eq(externalWaits.id, input.waitId), eq(externalWaits.status, 'waiting'))
-    : and(eq(externalWaits.cardId, card.id), eq(externalWaits.status, 'waiting')));
-  let nextStatus = externalEventNextStatus(card, input.status, input.successStatus);
-  if (nextStatus !== card.columnStatus && nextStatus) {
-    const fromStatus = normalizeCardStatus(card.columnStatus) ?? 'todo';
-    const requestedToStatus = normalizeCardStatus(nextStatus) ?? fromStatus;
-    const childBlock = await completionBlockedByChildren(card, requestedToStatus);
-    const toStatus = childBlock ? 'in_progress' : requestedToStatus;
-    nextStatus = toStatus;
-    await db.update(kanbanCards).set({
-      columnStatus: toStatus,
-      rollupStatus: childBlock ? 'waiting_on_children' : toStatus === 'done' ? 'done' : undefined,
-      lastError: toStatus === 'blocked' ? input.payloadSummary ?? `${input.provider} ${input.eventType} ${input.status}` : null,
-      completedAt: toStatus === 'done' ? now : null,
-      updatedAt: now,
-    }).where(eq(kanbanCards.id, card.id));
-    const action = input.status === 'success'
-      ? 'external_success'
-      : toStatus === 'in_progress'
-        ? 'external_failure'
-        : toStatus === 'blocked'
-          ? 'block'
-          : 'manual_move';
-    await recordStageAction({ cardId: card.id, agentId: card.assigneeId, actor, fromStatus, toStatus, action, detail: childBlock ? `External ${input.provider}/${input.eventType} reported ${input.status}; ${childBlock.message}` : `External ${input.provider}/${input.eventType} reported ${input.status}.`, metadata: { externalEventId: event?.id, requestedToStatus, childBlock } });
-    if (childBlock) await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'children', status: 'queued', message: childBlock.message });
+  const [current] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, args.card.id), isNull(kanbanCards.deletedAt))).limit(1);
+  if (!current || ['done', 'cancelled'].includes(current.columnStatus ?? '')) return { event: null, newStatus: current?.columnStatus ?? null };
+  let requestedStatus = externalEventNextStatus(current, input.status, args.verifiedMerge ? input.successStatus : undefined);
+  const childBlock = await completionBlockedByChildren(current, normalizeCardStatus(requestedStatus) ?? 'todo');
+  const mergePlan = !args.verifiedMerge && !childBlock && requestedStatus === 'done' ? await planMergeGate(current) : null;
+  requestedStatus = childBlock ? 'in_progress' : mergePlan ? mergeCompletionStatus(mergePlan) : requestedStatus;
+  const companyId = input.companyId ?? current.companyId;
+  const committed = await db.transaction(async (tx) => {
+    const [card] = await tx.select().from(kanbanCards).where(and(eq(kanbanCards.id, current.id), isNull(kanbanCards.deletedAt))).for('update').limit(1);
+    if (!card || card.columnStatus !== current.columnStatus || ['done', 'cancelled'].includes(card.columnStatus ?? '')) return null;
+    if (input.waitId) {
+      if (card.columnStatus !== 'waiting_on_external') return null;
+      const [claimed] = await tx.update(externalWaits).set({ status: input.status, resolvedAt: ['waiting', 'info'].includes(input.status) ? null : now }).where(and(eq(externalWaits.id, input.waitId), eq(externalWaits.cardId, card.id), eq(externalWaits.status, 'waiting'))).returning();
+      if (!claimed) return null;
+    } else {
+      // Generic events must not consume a merge authorization before its evidence is verified.
+      const waits = await tx.select().from(externalWaits).where(and(eq(externalWaits.cardId, card.id), eq(externalWaits.status, 'waiting')));
+      for (const wait of waits) if (!wait.authorizedHeadSha) await tx.update(externalWaits).set({ status: input.status, resolvedAt: ['waiting', 'info'].includes(input.status) ? null : now }).where(eq(externalWaits.id, wait.id));
+    }
+    if (requestedStatus && requestedStatus !== card.columnStatus) await tx.update(kanbanCards).set({ columnStatus: requestedStatus, rollupStatus: childBlock ? 'waiting_on_children' : requestedStatus === 'done' ? 'done' : undefined, lastError: requestedStatus === 'blocked' ? input.payloadSummary ?? 'External completion requires correction.' : null, completedAt: requestedStatus === 'done' ? now : null, updatedAt: now }).where(eq(kanbanCards.id, card.id));
+    const [event] = await tx.insert(externalEvents).values({ companyId, projectId: input.projectId ?? card.projectId, rootCardId: input.rootCardId ?? await rootCardId(card), cardId: card.id, provider: input.provider, eventType: input.eventType, externalId: input.externalId ?? null, externalUrl: input.externalUrl ?? null, status: input.status, payloadHash: hashValue(input.payload ?? {}), payloadSummary: input.payloadSummary ?? null, payload: input.payload ?? {}, processedAt: now }).returning();
+    return { card, event };
+  });
+  if (!committed) return { event: null, newStatus: current.columnStatus };
+  const { card, event } = committed;
+  const fromStatus = normalizeCardStatus(card.columnStatus) ?? 'todo';
+  const toStatus = normalizeCardStatus(requestedStatus) ?? fromStatus;
+  if (fromStatus !== toStatus) {
+    await recordStageAction({ cardId: card.id, agentId: card.assigneeId, actor, fromStatus, toStatus, action: input.status === 'success' ? 'external_success' : toStatus === 'in_progress' ? 'external_failure' : toStatus === 'blocked' ? 'block' : 'manual_move', detail: childBlock?.message ?? 'External ' + input.provider + '/' + input.eventType + ' reported ' + input.status + '.', metadata: { externalEventId: event?.id, childBlock } });
     if (toStatus === 'in_review') await enqueueTaskRun(card.id, 'review', 'queue');
     if (toStatus === 'done') await cascadeParentStatus(card.parentCardId);
   }
-  await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'webhook', status: input.status === 'failure' || input.status === 'timeout' ? 'failed' : 'success', message: `External event ${input.provider}/${input.eventType}: ${input.status}`, output: input.payloadSummary ?? undefined });
+  if (mergePlan) await applyMergeGatePlan(card, mergePlan);
+  await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'webhook', status: input.status === 'failure' || input.status === 'timeout' ? 'failed' : 'success', message: 'External event ' + input.provider + '/' + input.eventType + ': ' + input.status, output: input.payloadSummary ?? undefined });
   await db.insert(activityLog).values({ companyId, actorType: actor.type, actorId: actor.id, userId: actor.userId ?? null, agentId: card.assigneeId, action: 'external_event.received', entityType: 'card', entityId: card.id, details: { externalEventId: event?.id, provider: input.provider, eventType: input.eventType, status: input.status } });
   publishLiveEvent({ type: 'card.updated', companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'external_event.received' });
-  return { event: event ?? null, newStatus: nextStatus };
+  return { event: event ?? null, newStatus: requestedStatus };
 }
 
 const TIMEOUT_SWEEP_BATCH = 20;
@@ -204,6 +191,10 @@ export async function sweepExternalWaitPolls(app: FastifyInstance): Promise<numb
   let polled = 0;
   for (const wait of candidates) {
     if (polled >= POLL_SWEEP_BATCH) break;
+    if (wait.provider === 'gitea' && wait.authorizedHeadSha) {
+      if (await reconcileMergeWait(wait.id)) polled += 1;
+      continue;
+    }
     const decision = pollDecision(wait, now);
     if (!decision.poll) {
       if (decision.reason !== 'budget_spent') continue;

@@ -194,15 +194,15 @@ test('giteaPullRequest returns the head SHA and null for a missing pull request'
   assert.equal(await giteaPullRequest(config, 'mega-corps', 'website', 99, missing), null);
 });
 
-test('giteaBranchContainsCommit matches full and short SHAs from the branch history', async () => {
+test('giteaBranchContainsCommit requires exact full SHAs from the branch history', async () => {
   const config = giteaConfigFromEnv({ GITEA_URL: 'http://gitea:3000', GITEA_ADMIN_TOKEN: 'tok' } as NodeJS.ProcessEnv)!;
   let requested = '';
   const fetchImpl = (async (url: string | URL | Request) => {
     requested = String(url);
-    return new Response(JSON.stringify([{ sha: 'aaaabbbbccccdddd' }, { sha: 'eeeeffff00001111' }]), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify([{ sha: 'aaaabbbbccccddddaaaabbbbccccddddaaaabbbb' }, { sha: 'eeeeffff00001111' }]), { status: 200, headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
-  assert.equal(await giteaBranchContainsCommit(config, 'mega-corps', 'website', 'main', 'aaaabbbbccccdddd', { fetchImpl }), true);
+  assert.equal(await giteaBranchContainsCommit(config, 'mega-corps', 'website', 'main', 'aaaabbbbccccddddaaaabbbbccccddddaaaabbbb', { fetchImpl }), true);
   assert.match(requested, /\/repos\/mega-corps\/website\/commits\?sha=main&limit=100$/);
-  assert.equal(await giteaBranchContainsCommit(config, 'mega-corps', 'website', 'main', 'aaaabbb', { fetchImpl }), true);
+  assert.equal(await giteaBranchContainsCommit(config, 'mega-corps', 'website', 'main', 'aaaabbb', { fetchImpl }), false);
   assert.equal(await giteaBranchContainsCommit(config, 'mega-corps', 'website', 'main', '1234567890abcdef', { fetchImpl }), false);
 });

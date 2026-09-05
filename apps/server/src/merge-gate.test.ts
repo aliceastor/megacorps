@@ -60,10 +60,11 @@ test('normalizeBranchRef strips refs/heads and blanks', () => {
   assert.equal(normalizeBranchRef(undefined), null);
 });
 
-test('sameCommit accepts short SHA prefixes but not accidental collisions', () => {
+test('sameCommit requires exact full hexadecimal SHAs', () => {
   assert.equal(sameCommit(AUTHORIZED, AUTHORIZED.toUpperCase()), true);
-  assert.equal(sameCommit(AUTHORIZED, AUTHORIZED.slice(0, 8)), true);
-  assert.equal(sameCommit(AUTHORIZED.slice(0, 7), AUTHORIZED), true);
+  assert.equal(sameCommit(AUTHORIZED, AUTHORIZED.slice(0, 8)), false);
+  assert.equal(sameCommit(AUTHORIZED.slice(0, 7), AUTHORIZED), false);
+  assert.equal(sameCommit('not-a-sha', 'not-a-sha'), false);
   assert.equal(sameCommit(AUTHORIZED.slice(0, 6), AUTHORIZED), false, 'six characters is too short to trust');
   assert.equal(sameCommit(AUTHORIZED, DRIFTED), false);
   assert.equal(sameCommit(null, AUTHORIZED), false);
@@ -103,7 +104,7 @@ test('selectMergeCandidate has nothing to merge for the default branch or an emp
 
 test('mergeVerdict: only the exact authorized head merged into the default branch is success', () => {
   assert.equal(mergeVerdict({ wait: wait(), event: pullEvent() }), 'success');
-  assert.equal(mergeVerdict({ wait: wait(), event: pullEvent({ headSha: AUTHORIZED.slice(0, 10) }) }), 'success');
+  assert.equal(mergeVerdict({ wait: wait(), event: pullEvent({ headSha: AUTHORIZED.slice(0, 10) }) }), 'drift');
   assert.equal(mergeVerdict({ wait: wait(), event: pullEvent({ baseRef: 'refs/heads/main' }) }), 'success');
 });
 
