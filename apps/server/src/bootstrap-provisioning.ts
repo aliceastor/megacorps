@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { generateAgentToken } from './agent-auth.ts';
 import { db } from './db/client.ts';
 import { agents, companies, projects } from './db/schema.ts';
-import { addGiteaCollaborator, ensureGiteaAgentAccount, ensureGiteaOrg, ensureGiteaRepo, ensureGiteaRepoWebhook, ensureGiteaWebhookToken, giteaConfigFromEnv, giteaWebhookCallbackUrl, isGiteaProvisioningRetryable } from './gitea.ts';
+import { addGiteaCollaborator, ensureGiteaAgentAccount, ensureGiteaOrg, ensureGiteaRepo, ensureGiteaRepoWebhook, ensureGiteaWebhookToken, giteaConfigFromEnv, giteaRepoFromUrl, giteaWebhookCallbackUrl, isGiteaProvisioningRetryable } from './gitea.ts';
 
 // Deploy-time reconciliation: identity is not something an operator should
 // hand out by hand. Every boot walks the fleet and fills whatever is missing —
@@ -43,14 +43,22 @@ export async function reconcileGiteaProvisioning(app: FastifyInstance): Promise<
   let repos = 0;
   const orgByCompany = new Map<string, string>();
   for (const project of giteaProjects) {
-    let orgSlug = orgByCompany.get(project.companyId);
+    const storedRepo = project.repoUrl?.trim() ? giteaRepoFromUrl(project.repoUrl) : null;
+    if (project.repoUrl?.trim() && !storedRepo) {
+      throw new Error(`gitea_repo_url_invalid: project ${project.id} has an invalid repoUrl`);
+    }
+    let orgSlug = storedRepo?.orgSlug ?? orgByCompany.get(project.companyId);
     if (!orgSlug) {
       const [company] = await db.select().from(companies).where(eq(companies.id, project.companyId)).limit(1);
       if (!company) continue;
       orgSlug = await ensureGiteaOrg(gitea, company);
       orgByCompany.set(project.companyId, orgSlug);
     }
-    const repo = await ensureGiteaRepo(gitea, orgSlug, { name: project.name }, { defaultBranch: project.defaultBranch ?? 'main' });
+    const repo = await ensureGiteaRepo(gitea, orgSlug, { name: project.name }, {
+      defaultBranch: project.defaultBranch ?? 'main',
+      repoSlug: storedRepo?.repoSlug,
+      ensureOrgWhenMissing: Boolean(storedRepo),
+    });
     // A project created while Gitea was down has no clone URL yet; heal it.
     if (!project.repoUrl) {
       await db.update(projects).set({ repoUrl: repo.cloneUrl, updatedAt: new Date() }).where(eq(projects.id, project.id));

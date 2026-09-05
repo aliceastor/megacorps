@@ -146,6 +146,18 @@ export function giteaCloneUrl(baseUrl: string, orgSlug: string, repoSlug: string
   return `${stripTrailingSlash(baseUrl)}/${orgSlug}/${repoSlug}.git`;
 }
 
+export function giteaRepoFromUrl(repoUrl: string): { orgSlug: string; repoSlug: string } | null {
+  try {
+    const segments = new URL(repoUrl.trim()).pathname.replace(/\.git$/i, '').split('/').filter(Boolean);
+    if (segments.length < 2) return null;
+    const [org, repo] = segments.slice(-2);
+    if (!org || !repo) return null;
+    return { orgSlug: giteaSlug(org), repoSlug: giteaSlug(repo) };
+  } catch {
+    return null;
+  }
+}
+
 function rewriteUrlOrigin(url: string, fromBase: string, toBase: string): string {
   const from = stripTrailingSlash(fromBase);
   const to = stripTrailingSlash(toBase);
@@ -187,10 +199,13 @@ export async function ensureGiteaOrg(config: GiteaConfig, company: { name: strin
   return orgSlug;
 }
 
-export async function ensureGiteaRepo(config: GiteaConfig, orgSlug: string, project: { name: string }, options?: { defaultBranch?: string; fetchImpl?: typeof fetch }): Promise<{ repoSlug: string; cloneUrl: string; htmlUrl: string }> {
-  const repoSlug = giteaSlug(project.name);
+export async function ensureGiteaRepo(config: GiteaConfig, orgSlug: string, project: { name: string }, options?: { defaultBranch?: string; fetchImpl?: typeof fetch; repoSlug?: string; ensureOrgWhenMissing?: boolean }): Promise<{ repoSlug: string; cloneUrl: string; htmlUrl: string }> {
+  const repoSlug = options?.repoSlug ?? giteaSlug(project.name);
   const existing = await giteaFetch(config, `/repos/${orgSlug}/${repoSlug}`, { allow: [404], fetchImpl: options?.fetchImpl });
   if (existing.status === 404) {
+    if (options?.ensureOrgWhenMissing) {
+      await ensureGiteaOrg(config, { name: orgSlug, slug: orgSlug }, options.fetchImpl);
+    }
     await giteaFetch(config, `/orgs/${orgSlug}/repos`, {
       method: 'POST',
       body: { name: repoSlug, private: true, auto_init: true, default_branch: options?.defaultBranch ?? 'main' },
