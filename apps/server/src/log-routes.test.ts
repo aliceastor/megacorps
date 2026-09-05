@@ -74,3 +74,14 @@ test('all bounded log lists reject malformed finite limits with useful 400s', as
     assert.equal(cursor.json().error, 'invalid_cursor');
   }
 });
+
+test('all searchable log lists reject malformed or oversized search with invalid_search', async t => {
+  const { app, headers } = await fixture(t);
+  for (const path of ['/api/prompt-logs', '/api/system-logs', '/api/activity', '/api/admin/activity', '/api/heartbeat-runs', '/api/task-runs', '/api/cron/runs']) {
+    for (const query of [`q=${'x'.repeat(201)}`, 'q=one&q=two']) {
+      const response = await app.inject({ url: `${path}?view=summary&${query}`, headers });
+      assert.equal(response.statusCode, 400, `${path} ${query}: ${response.body}`);
+      assert.equal(response.json().error, 'invalid_search');
+    }
+  }
+});

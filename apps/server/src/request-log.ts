@@ -43,7 +43,16 @@ function isSensitiveTransport(path: string): boolean {
 }
 
 function sanitizePath(path: string): string {
-  return path.replace(/([?&](?:access_token|token|api[_-]?key|password|secret|jwt)=)[^&#]*/gi, '$1[redacted]');
+  const separator = path.indexOf('?');
+  if (separator < 0) return path;
+  const pathname = path.slice(0, separator);
+  const params = new URLSearchParams(path.slice(separator + 1));
+  const sanitized = new URLSearchParams();
+  for (const [key, value] of params) {
+    sanitized.append(key, SENSITIVE_KEY.test(key) ? REDACTED_PAYLOAD : value);
+  }
+  const query = sanitized.toString();
+  return query ? `${pathname}?${query}` : pathname;
 }
 
 function trimText(value: string): string {
@@ -100,6 +109,7 @@ function sanitizePayload(value: unknown): unknown {
 
   const sanitized = visit(value, 0);
   const serialized = JSON.stringify(sanitized);
+  if (serialized === undefined) return null;
   if (Buffer.byteLength(serialized) <= MAX_SERIALIZED_BYTES) return sanitized;
   const marker = '... [payload truncated]';
   return fitJsonPreview(serialized, marker);
@@ -148,7 +158,7 @@ export const requestLogInternals = {
 };
 
 export function registerRequestLogging(app: FastifyInstance): void {
-  const writer = createBoundedWriter(MAX_PENDING_WRITES, (error) => app.log.warn({ error }, 'failed to persist api event log'));
+  const writer = createBoundedWriter(MAX_PENDING_WRITES, () => app.log.warn({ error: 'api_event_persist_failed' }, 'failed to persist api event log'));
 
   app.addHook('onRequest', async (request) => {
     (request as LoggedRequest).startedAt = Date.now();
@@ -156,9 +166,14 @@ export function registerRequestLogging(app: FastifyInstance): void {
 
   app.addHook('preHandler', async (request) => {
     const path = request.routeOptions.url ?? request.url;
-    (request as LoggedRequest).requestBodyForLog = isPayloadSuppressed(path)
-      ? null
-      : isSensitiveTransport(path) ? REDACTED_PAYLOAD : sanitizePayload(request.body);
+    try {
+      (request as LoggedRequest).requestBodyForLog = isPayloadSuppressed(path)
+        ? null
+        : isSensitiveTransport(path) ? REDACTED_PAYLOAD : sanitizePayload(request.body);
+    } catch {
+      (request as LoggedRequest).requestBodyForLog = null;
+      app.log.warn({ error: 'api_event_sanitize_failed' }, 'failed to sanitize api event request');
+    }
   });
 
   app.addHook('onSend', async (request: FastifyRequest, reply, payload) => {
@@ -170,9 +185,15 @@ export function registerRequestLogging(app: FastifyInstance): void {
       loggedRequest.responseErrorForLog = reply.statusCode >= 400 ? 'log_read_failed' : null;
       return payload;
     }
-    const responseBody = isSensitiveTransport(path) ? REDACTED_PAYLOAD : sanitizePayload(parsePayload(payload));
-    loggedRequest.responseBodyForLog = responseBody;
-    loggedRequest.responseErrorForLog = errorFromResponse(reply.statusCode, responseBody);
+    try {
+      const responseBody = isSensitiveTransport(path) ? REDACTED_PAYLOAD : sanitizePayload(parsePayload(payload));
+      loggedRequest.responseBodyForLog = responseBody;
+      loggedRequest.responseErrorForLog = errorFromResponse(reply.statusCode, responseBody);
+    } catch {
+      loggedRequest.responseBodyForLog = null;
+      loggedRequest.responseErrorForLog = reply.statusCode >= 400 ? 'request_failed' : null;
+      app.log.warn({ error: 'api_event_sanitize_failed' }, 'failed to sanitize api event response');
+    }
     return payload;
   });
 
@@ -189,7 +210,7 @@ export function registerRequestLogging(app: FastifyInstance): void {
       error: loggedRequest.responseErrorForLog ?? null,
       durationMs: Date.now() - (loggedRequest.startedAt ?? Date.now()),
     }));
-    if (!accepted) app.log.warn({ path: request.url }, 'api event log dropped because persistence is saturated');
+    if (!accepted) app.log.warn({ path: sanitizePath(request.url) }, 'api event log dropped because persistence is saturated');
     done();
   });
 }

@@ -28,3 +28,28 @@ test('opaque cursors preserve the exact database timestamp and reject malformed 
     assert.throws(() => decode(cursor), /invalid_cursor/);
   }
 });
+
+test('opaque cursors reject impossible calendar and timezone timestamps before SQL', async () => {
+  const { encodeLogCursor, decodeLogCursor } = await import('./log-query.ts');
+  const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  for (const createdAt of [
+    '2026-02-30 12:34:56.123456+00',
+    '2025-02-29 12:34:56+00',
+    '2026-04-31 12:34:56+00',
+    '2026-09-06 24:00:00.000001+00',
+    '2026-09-06 12:60:00+00',
+    '2026-09-06 12:34:60+00',
+    '2026-09-06 12:34:56+14:01',
+    '2026-09-06 12:34:56+15',
+  ]) {
+    assert.throws(() => decodeLogCursor(encodeLogCursor(createdAt, id)), /invalid_cursor/, createdAt);
+  }
+  for (const createdAt of [
+    '2024-02-29 23:59:59.999999+00',
+    '2026-09-06T12:34:56.000001Z',
+    '2026-09-06 12:34:56+14:00',
+    '2026-09-06 12:34:56-0330',
+  ]) {
+    assert.deepEqual(decodeLogCursor(encodeLogCursor(createdAt, id)), { createdAt, id }, createdAt);
+  }
+});

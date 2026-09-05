@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { Activity as ActivityIcon, Clock, Copy, FileText, Loader2, Play, Server } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
@@ -42,6 +43,7 @@ function displayError(error: unknown): string {
 
 export function LogsPage() {
   const { t } = useLocale();
+  const searchParams = useSearchParams();
   const [tab, setTab] = useState<LogTab>('prompts');
   const [filter, setFilter] = useState(() => initialParam('q', ''));
   const [debouncedFilter, setDebouncedFilter] = useState(() => initialParam('q', ''));
@@ -50,7 +52,7 @@ export function LogsPage() {
     const value = initialParam('surface', 'all');
     return value === 'kanban' || value === 'chat' ? value : 'all';
   });
-  const [companyId] = useState(() => initialParam('companyId', ''));
+  const [companyId, setCompanyId] = useState(() => initialParam('companyId', ''));
   const [agentRefs, setAgentRefs] = useState<AgentRef[]>([]);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [datasets, setDatasets] = useState<Record<DatasetKey, Dataset>>(() => Object.fromEntries(DATASET_KEYS.map(key => [key, { ...EMPTY_DATASET }])) as Record<DatasetKey, Dataset>);
@@ -64,6 +66,25 @@ export function LogsPage() {
   const versions = useRef<Record<DatasetKey, number>>(Object.fromEntries(DATASET_KEYS.map(key => [key, 0])) as Record<DatasetKey, number>);
   const controllers = useRef<Partial<Record<DatasetKey, AbortController>>>({});
   const detailVersion = useRef(0);
+  const detailController = useRef<AbortController | null>(null);
+
+  function invalidateDetail() {
+    detailVersion.current += 1;
+    detailController.current?.abort();
+    detailController.current = null;
+    setExpanded(null);
+    setDetail(null);
+    setDetailError(null);
+    setDetailLoading(false);
+  }
+
+  useEffect(() => {
+    setFilter(searchParams.get('q') ?? '');
+    setAgentFilter(searchParams.get('agentId') ?? 'all');
+    const nextSurface = searchParams.get('surface');
+    setSurfaceFilter(nextSurface === 'kanban' || nextSurface === 'chat' ? nextSurface : 'all');
+    setCompanyId(searchParams.get('companyId') ?? '');
+  }, [searchParams]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedFilter(filter.trim()), 250);
@@ -96,16 +117,12 @@ export function LogsPage() {
   }
 
   async function loadDataset(key: DatasetKey, cursor: string | null = null) {
+    invalidateDetail();
     const version = ++versions.current[key];
     controllers.current[key]?.abort();
     const controller = new AbortController();
     controllers.current[key] = controller;
     setDatasets(current => ({ ...current, [key]: { ...current[key], items: cursor ? current[key].items : [], nextCursor: null, loading: true, error: null, requested: true } }));
-    if (!cursor) {
-      setExpanded(null);
-      setDetail(null);
-      setDetailError(null);
-    }
     try {
       const page = await api<SummaryPage>(`${DATASET_PATH[key]}?${queryFor(key, cursor)}`, { signal: controller.signal });
       if (versions.current[key] !== version) return;
@@ -135,14 +152,23 @@ export function LogsPage() {
     if (tab === 'runs') void loadCronStatus();
   }, [tab, debouncedFilter, agentFilter, surfaceFilter, companyId]);
 
+  useEffect(() => () => {
+    for (const key of DATASET_KEYS) controllers.current[key]?.abort();
+    detailVersion.current += 1;
+    detailController.current?.abort();
+  }, []);
+
   async function toggleDetail(key: DatasetKey, id: string, retry = false) {
     if (!retry && expanded?.key === key && expanded.id === id) {
-      setExpanded(null); setDetail(null); setDetailError(null); return;
+      invalidateDetail(); return;
     }
     const version = ++detailVersion.current;
+    detailController.current?.abort();
+    const controller = new AbortController();
+    detailController.current = controller;
     setExpanded({ key, id }); setDetail(null); setDetailError(null); setDetailLoading(true);
     try {
-      const row = await api<any>(`${DETAIL_PATH[key]}/${encodeURIComponent(id)}`);
+      const row = await api<any>(`${DETAIL_PATH[key]}/${encodeURIComponent(id)}`, { signal: controller.signal });
       if (detailVersion.current === version) setDetail(row);
     } catch (error) {
       if (detailVersion.current === version) setDetailError(displayError(error));
@@ -173,10 +199,10 @@ export function LogsPage() {
     { id: 'activity', label: t('logs.activity'), icon: ActivityIcon },
     { id: 'api', label: 'API', icon: Server },
   ];
-  const detailPanel = (key: DatasetKey, id: string, content: unknown) => expanded?.key === key && expanded.id === id ? <div className="log-detail">
+  const detailPanel = (key: DatasetKey, id: string) => expanded?.key === key && expanded.id === id ? <div className="log-detail">
     {detailLoading && <p className="field-hint"><Loader2 size={14} className="spin" /> Loading details…</p>}
     {detailError && <div role="alert" className="form-error">{detailError} <button className="btn" onClick={() => void toggleDetail(key, id, true)}>Retry</button></div>}
-    {detail && <><button className="btn" onClick={() => void navigator.clipboard.writeText(typeof content === 'string' ? content : JSON.stringify(content, null, 2))}><Copy size={13} /> Copy</button><pre className={key === 'prompts' ? 'log-block prompt-log-body' : 'log-block'}>{typeof content === 'string' ? content : JSON.stringify(content, null, 2)}</pre></>}
+    {detail && <><button className="btn" onClick={() => void navigator.clipboard.writeText(JSON.stringify(detail, null, 2))}><Copy size={13} /> Copy</button><pre aria-label={`${key} detail`} className={key === 'prompts' ? 'log-block prompt-log-body' : 'log-block'}>{JSON.stringify(detail, null, 2)}</pre></>}
   </div> : null;
   const stateMessage = (key: DatasetKey, empty: string) => {
     const state = datasets[key];
@@ -212,8 +238,7 @@ export function LogsPage() {
         <p>{row.title}</p><p className="field-hint">{row.preview}</p>
         <div className="log-meta"><span>injection {row.contextMode ?? 'unknown'}</span><span>agent {agentNameById.get(row.agentId) ?? row.agentId ?? 'none'}</span><span>card {row.cardId ?? 'none'}</span><span>hash {String(row.promptHash ?? '').slice(0, 12)}</span></div>
         <button className="btn" onClick={() => void toggleDetail('prompts', row.id)}>{expanded?.key === 'prompts' && expanded.id === row.id ? 'Hide details' : 'Show details'}</button>
-        {detailPanel('prompts', row.id, detail?.prompt ?? '')}
-        {expanded?.key === 'prompts' && expanded.id === row.id && detail && <details><summary>metadata</summary><pre className="log-block">{JSON.stringify(detail.metadata ?? {}, null, 2)}</pre></details>}
+        {detailPanel('prompts', row.id)}
       </article>)}</div>{pager('prompts')}
     </section>}
 
@@ -221,13 +246,13 @@ export function LogsPage() {
       <section className="card section-card"><div className="panel-title"><div><h2>{t('logs.cronHeartbeat')}</h2><span className="status-pill">{cronStatus?.enabled === false ? 'disabled' : cronStatus?.running ? 'running' : cronStatus?.lastStatus ?? 'unknown'}</span></div><button className="btn" onClick={() => void runCronNow()} disabled={cronRunning}>{cronRunning ? <Loader2 size={14} className="spin" /> : <Play size={14} />} {t('common.runNow')}</button></div>
         {cronError && <div role="alert" className="form-error">{cronError} <button className="btn" onClick={() => void loadCronStatus()}>Retry</button></div>}
         <div className="meta-grid"><span>{t('logs.interval')} <b>{cronStatus ? `${Math.round(cronStatus.intervalMs / 1000)}s` : '-'}</b></span><span>{t('logs.lastStarted')} <b>{cronStatus?.lastStartedAt ? new Date(cronStatus.lastStartedAt).toLocaleString() : '-'}</b></span><span>{t('logs.lastCompleted')} <b>{cronStatus?.lastCompletedAt ? new Date(cronStatus.lastCompletedAt).toLocaleString() : '-'}</b></span><span>{t('common.errorLabel')} <b>{cronStatus?.lastError ?? 'none'}</b></span></div>
-        {stateMessage('cron', 'No scheduler runs on this page.')}<div className="table-list">{datasets.cron.items.map(row => <article className="list-row" key={row.id}><b>{row.name} / {row.status}</b><p>{row.source} / {row.durationSeconds ?? 0}s</p><button className="btn" onClick={() => void toggleDetail('cron', row.id)}>Show details</button>{detailPanel('cron', row.id, detail?.details ?? {})}</article>)}</div>{pager('cron')}
+        {stateMessage('cron', 'No scheduler runs on this page.')}<div className="table-list">{datasets.cron.items.map(row => <article className="list-row" key={row.id}><b>{row.name} / {row.status}</b><p>{row.source} / {row.durationSeconds ?? 0}s / {row.createdAt ? new Date(row.createdAt).toLocaleString() : 'time unavailable'}</p>{row.error && <p className="form-error">{row.error}</p>}<button className="btn" onClick={() => void toggleDetail('cron', row.id)}>{expanded?.key === 'cron' && expanded.id === row.id ? 'Hide details' : 'Show details'}</button>{detailPanel('cron', row.id)}</article>)}</div>{pager('cron')}
       </section>
-      <section className="card section-card"><h2>{t('logs.taskRuns')}</h2>{stateMessage('tasks', 'No task runs on this page.')}<div className="table-list">{datasets.tasks.items.map(row => <article className="list-row" key={row.id}><b>{row.kind} / {row.status}</b><p>{row.cardId} / {row.agentId ?? 'no agent'} / attempt {row.attemptNumber ?? 1}</p>{row.error && <p className="form-error">{row.error}</p>}<button className="btn" onClick={() => void toggleDetail('tasks', row.id)}>Show details</button>{detailPanel('tasks', row.id, detail?.output ?? detail)}</article>)}</div>{pager('tasks')}</section>
-      <section className="card section-card"><h2>{t('logs.heartbeatRuns')}</h2>{stateMessage('heartbeats', 'No heartbeat runs on this page.')}<div className="table-list">{datasets.heartbeats.items.map(row => <article className="list-row" key={row.id}><b>{row.source} / {row.status}</b><p>{row.cardId ?? 'no card'} / {row.agentId ?? 'no agent'} / {row.durationSeconds ?? 0}s</p><button className="btn" onClick={() => void toggleDetail('heartbeats', row.id)}>Show details</button>{detailPanel('heartbeats', row.id, detail)}</article>)}</div>{pager('heartbeats')}</section>
+      <section className="card section-card"><h2>{t('logs.taskRuns')}</h2>{stateMessage('tasks', 'No task runs on this page.')}<div className="table-list">{datasets.tasks.items.map(row => <article className="list-row" key={row.id}><b>{row.kind} / {row.status}</b><p>{row.cardId} / {row.agentId ?? 'no agent'} / attempt {row.attemptNumber ?? 1}</p><p className="field-hint">{row.createdAt ? new Date(row.createdAt).toLocaleString() : 'time unavailable'} / {row.durationSeconds ?? 0}s / ${row.costUsd ?? '0'} / session {row.adapterSessionId ?? 'none'}</p>{row.error && <p className="form-error">{row.error}</p>}<button className="btn" onClick={() => void toggleDetail('tasks', row.id)}>{expanded?.key === 'tasks' && expanded.id === row.id ? 'Hide details' : 'Show details'}</button>{detailPanel('tasks', row.id)}</article>)}</div>{pager('tasks')}</section>
+      <section className="card section-card"><h2>{t('logs.heartbeatRuns')}</h2>{stateMessage('heartbeats', 'No heartbeat runs on this page.')}<div className="table-list">{datasets.heartbeats.items.map(row => <article className="list-row" key={row.id}><b>{row.source} / {row.status}</b><p>{row.cardId ?? 'no card'} / {row.agentId ?? 'no agent'} / {row.durationSeconds ?? 0}s / ${row.costUsd ?? '0'}</p><p className="field-hint">{row.createdAt ? new Date(row.createdAt).toLocaleString() : 'time unavailable'}</p>{row.error && <p className="form-error">{row.error}</p>}<button className="btn" onClick={() => void toggleDetail('heartbeats', row.id)}>{expanded?.key === 'heartbeats' && expanded.id === row.id ? 'Hide details' : 'Show details'}</button>{detailPanel('heartbeats', row.id)}</article>)}</div>{pager('heartbeats')}</section>
     </div>}
 
-    {tab === 'activity' && <section className="card section-card"><h2>{t('logs.activity')}</h2>{stateMessage('activity', 'No activity logs on this page.')}<div className="table-list">{datasets.activity.items.map(row => <article className="list-row" key={row.id}><b>{row.action}</b><p>{row.actorType}:{row.actorId} / {row.entityType}:{row.entityId}</p><button className="btn" onClick={() => void toggleDetail('activity', row.id)}>Show details</button>{detailPanel('activity', row.id, detail?.details ?? {})}</article>)}</div>{pager('activity')}</section>}
-    {tab === 'api' && <section className="card section-card"><h2>{t('logs.apiLifecycle')}</h2>{stateMessage('api', 'No API logs on this page.')}<div className="table-list">{datasets.api.items.map(row => <article className="list-row" key={row.id}><b>{row.method} {row.path}</b><p>{row.statusCode ?? '-'} / {row.durationMs ?? 0}ms</p>{row.error && <p className="form-error">{row.error}</p>}<button className="btn" onClick={() => void toggleDetail('api', row.id)}>Show details</button>{detailPanel('api', row.id, { request: detail?.requestBody, response: detail?.responseBody })}</article>)}</div>{pager('api')}</section>}
+    {tab === 'activity' && <section className="card section-card"><h2>{t('logs.activity')}</h2>{stateMessage('activity', 'No activity logs on this page.')}<div className="table-list">{datasets.activity.items.map(row => <article className="list-row" key={row.id}><b>{row.action}</b><p>{row.actorType}:{row.actorId} / {row.entityType}:{row.entityId}</p><p className="field-hint">{row.createdAt ? new Date(row.createdAt).toLocaleString() : 'time unavailable'}</p><button className="btn" onClick={() => void toggleDetail('activity', row.id)}>{expanded?.key === 'activity' && expanded.id === row.id ? 'Hide details' : 'Show details'}</button>{detailPanel('activity', row.id)}</article>)}</div>{pager('activity')}</section>}
+    {tab === 'api' && <section className="card section-card"><h2>{t('logs.apiLifecycle')}</h2>{stateMessage('api', 'No API logs on this page.')}<div className="table-list">{datasets.api.items.map(row => <article className="list-row" key={row.id}><b>{row.method} {row.path}</b><p>{row.statusCode ?? '-'} / {row.durationMs ?? 0}ms / {row.createdAt ? new Date(row.createdAt).toLocaleString() : 'time unavailable'}</p>{row.error && <p className="form-error">{row.error}</p>}<button className="btn" onClick={() => void toggleDetail('api', row.id)}>{expanded?.key === 'api' && expanded.id === row.id ? 'Hide details' : 'Show details'}</button>{detailPanel('api', row.id)}</article>)}</div>{pager('api')}</section>}
   </div>;
 }

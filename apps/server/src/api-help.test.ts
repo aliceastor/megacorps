@@ -210,6 +210,11 @@ test('api help includes response examples and rate-limit notes for every endpoin
     assert.ok(endpoint.rateLimit.length > 0, `${endpoint.method} ${endpoint.path} missing rateLimit`);
     assert.ok(endpoint.requiredRole, `${endpoint.method} ${endpoint.path} missing requiredRole`);
   }
+  for (const path of ['/api/system-logs', '/api/prompt-logs', '/api/activity', '/api/admin/activity', '/api/heartbeat-runs', '/api/task-runs', '/api/cron/runs']) {
+    const endpoint = catalog.endpoints.find((candidate) => candidate.method === 'GET' && candidate.path === path);
+    assert.match(endpoint?.query?.q ?? '', /max 200/i, `${path} must document the search bound`);
+    assert.ok((endpoint?.responseSchema as any)?.errors?.includes('400 invalid_search'), `${path} must document invalid_search`);
+  }
 });
 
 test('api help covers every registered HTTP route', () => {
