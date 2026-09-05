@@ -3760,7 +3760,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       prompt: promptSnapshotForAdapter(executionAgent, reviewTask),
       metadata: { adapterSessionId, reviewMode, megacorpsPromptChars: reviewPrompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
-    const result = await adapter.dispatch(executionAgent, reviewTask);
+    const result = await sanitizeCompanyOutput(card.companyId, await adapter.dispatch(executionAgent, reviewTask));
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && latest.columnStatus !== card.columnStatus && latest.activeHeartbeatRunId !== run.id) {
       if (result.success) await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
@@ -3967,12 +3967,13 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     if (effectiveNextStatus === 'done') { await sealDeliveryAcceptance(updated.id); await cascadeParentStatus(updated.parentCardId); }
     return updated;
   } catch (error) {
+    const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'review_failed');
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
-    await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: error instanceof Error ? error.message : 'review_failed' }).where(eq(heartbeatRuns.id, run.id));
-    await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'failed', message: error instanceof Error ? error.message : 'review_failed' });
-    await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: 'review_error', body: error instanceof Error ? error.message : 'review_failed' });
-    await completeTaskRun(options.taskRunId, { status: 'failed', retryableFailure: true, error: error instanceof Error ? error.message : 'review_failed' });
-    throw error;
+    await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
+    await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'failed', message: message });
+    await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: 'review_error', body: message });
+    await completeTaskRun(options.taskRunId, { status: 'failed', retryableFailure: true, error: message });
+    throw new Error(message);
   }
 }
 

@@ -42,3 +42,22 @@ test('canonical work products redact echoed company credentials recursively whil
   assert.equal(rows.length, 1); assert.equal(rows[0]!.agentId, 'worker'); assert.equal(rows[0]!.taskRunId, 'run');
   assert.ok(!JSON.stringify(rows).includes(sentinel)); assert.ok(!JSON.stringify(rows).includes('synthetic-header-secret'));
 });
+
+for (const mode of ['returned', 'exception'] as const) test(`ordinary review sanitizes ${mode} credentials before persistence and forwarding`, async t => {
+  const sentinel = 'synthetic-review-secret-725184';
+  const card: any = { id: 'review-card', companyId: 'c', title: 'Review', assigneeId: 'worker', reviewerId: 'reviewer', columnStatus: 'in_review', requiresApproval: false, tags: [], dependencyCardIds: [] };
+  const reviewer = { id: 'reviewer', companyId: 'c', name: 'Reviewer', slug: 'reviewer', adapterType: 'webhook', isActive: true, isBusy: false, giteaToken: sentinel };
+  const state = memoryDb(t, [[kanbanCards, [card]], [agents, [reviewer]], [taskRuns, [{ id: 'review-run', companyId: 'c', cardId: card.id, agentId: reviewer.id, kind: 'review', status: 'running' }]]]);
+  const { getAdapter } = await import('./adapters/registry.ts');
+  const { reviewCard } = await import('./dispatch.ts');
+  const { heartbeatRuns, taskLogs } = await import('./db/schema.ts');
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => {
+    if (mode === 'exception') throw new Error(`Review failed while echoing ${sentinel}`);
+    return { success: true, output: `VERDICT: APPROVED\nVerified ${sentinel}`, sessionId: 'safe-session', tokensUsed: 0, costUsd: 0, durationSeconds: 1 };
+  });
+  let forwarded: unknown;
+  try { forwarded = await reviewCard(card.id, { taskRunId: 'review-run' }); } catch (error) { forwarded = String(error); }
+  assert.ok(!JSON.stringify([forwarded, card, state.rows(taskRuns), state.rows(heartbeatRuns), state.rows(taskLogs), state.rows(cardComments)]).includes(sentinel));
+  assert.equal(reviewer.giteaToken, sentinel, 'authorized execution credential remains configured');
+  assert.equal(card.columnStatus === 'done', mode === 'returned');
+});
