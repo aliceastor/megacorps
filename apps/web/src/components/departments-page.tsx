@@ -184,11 +184,11 @@ export function DepartmentsPage() {
               {companyAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
             </select>
           </label>
-          <label className="field-label field-wide">Head role instructions (optional)<textarea className="input" rows={3} maxLength={8000} value={headRolePrompt} onChange={event => setHeadRolePrompt(event.target.value)} /><span className="field-hint">Adds responsibilities to the department head role; expertise stays in the position prompt.</span></label>
           <label className="field-label field-wide">{t('departments.description')}
             <span className="field-hint">{t('departments.descriptionHint')}</span>
             <textarea className="input" rows={2} value={deptDescription} onChange={(event) => setDeptDescription(event.target.value)} disabled={!companyId} />
           </label>
+          <label className="field-label field-wide">Head role instructions (optional)<textarea className="input" rows={3} maxLength={8000} value={headRolePrompt} onChange={event => setHeadRolePrompt(event.target.value)} /><span className="field-hint">Adds responsibilities to the department head role; expertise stays in the position prompt.</span></label>
         </div>
         <div className="action-row" style={{ justifyContent: 'flex-end' }}>
           <button className="btn" onClick={() => setDepartmentCreateOpen(false)}>{t('common.cancel')}</button>

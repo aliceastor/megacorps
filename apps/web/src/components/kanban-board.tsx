@@ -1,4 +1,5 @@
-﻿'use client';
+'use client';
+import { inferWorkProductType } from './kanban/work-product-input';
 import { KanbanListView } from './kanban-list-view';
 import { DndContext, type DragEndEvent, useDraggable, useDroppable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
@@ -327,7 +328,7 @@ export function KanbanBoard() {
   const [newReviewerIds, setNewReviewerIds] = useState<string[]>([]);
   const [newScheduleAt, setNewScheduleAt] = useState('');
   const [newRecurMinutes, setNewRecurMinutes] = useState('');
-  const [workProductType, setWorkProductType] = useState<(typeof workProductTypes)[number]>('external');
+  const [workProductType, setWorkProductType] = useState<(typeof workProductTypes)[number] | 'auto'>('auto');
   const [workProductTitle, setWorkProductTitle] = useState('');
   const [workProductSummary, setWorkProductSummary] = useState('');
   const [workProductUrl, setWorkProductUrl] = useState('');
@@ -784,11 +785,20 @@ export function KanbanBoard() {
   }), [cards, companyNameById, filterAssignee, filterCompany, filterProject, query, sortMode]);
   const boardCards = visibleCards;
 
+  function changeNewCompany(next: string) {
+    setNewCompany(next); setNewDepartment(''); setNewProject(''); setNewGoal('');
+    setNewAssignee(''); setNewReviewer(''); setNewDependencies([]); setNewReviewerIds([]); setBrainstormDepartmentIds([]);
+  }
+
+  function openNewCard() {
+    const next = companies.find(company => company.id === filterCompany)?.id
+      ?? companies.find(company => company.id === newCompany)?.id ?? companies[0]?.id ?? '';
+    if (next !== newCompany) changeNewCompany(next);
+    setModalOpen(true);
+  }
+
   async function create() {
     if (!newTitle.trim()) { setToast({ message: t('kanban.titleRequired'), type: 'error' }); return; }
-    // Every card has exactly one reviewer: an agent, or the human client via
-    // requiresApproval. The server enforces the same rule.
-    if (!newReviewer && !requiresApproval) { setToast({ message: t('kanban.reviewerRequired'), type: 'error' }); return; }
     setBusy(true);
     try {
       const card = await api<Card>('/api/cards', {
@@ -996,7 +1006,7 @@ export function KanbanBoard() {
       const product = await api<WorkProduct>(`/api/cards/${selected.id}/work-products`, {
         method: 'POST',
         body: JSON.stringify({
-          type: workProductType,
+          type: workProductType === 'auto' ? inferWorkProductType(workProductUrl || workProductPullRequestUrl) : workProductType,
           title: workProductTitle.trim(),
           summary: workProductSummary || null,
           url: workProductUrl || null,
@@ -1112,7 +1122,7 @@ export function KanbanBoard() {
         <button className={`tab ${viewMode === 'wall' ? 'active' : ''}`} onClick={() => switchView('wall')}>{t('kanban.viewWall')}</button>
       </div>
       <button className="btn" onClick={() => void refresh()}><RefreshCw size={15} /></button>
-      <button className="btn btn-primary" onClick={() => setModalOpen(true)}><Plus size={15} /> {t('newCard')}</button>
+      <button className="btn btn-primary" onClick={openNewCard}><Plus size={15} /> {t('newCard')}</button>
     </div>
 
     {loading ? <p style={{ textAlign: 'center', opacity: 0.55 }}>{t('common.loading')}</p> : viewMode === 'list' ? (
@@ -1155,20 +1165,39 @@ export function KanbanBoard() {
           >
             <div className="panel-title"><h2>{t('newCard')}</h2><button className="btn" aria-label={t('common.close')} onClick={() => setModalOpen(false)}><X size={16} /></button></div>
             <div className="kanban-create-modal-body">
-              <input className="input" placeholder={t('common.title')} autoFocus value={newTitle} onChange={(e) => setNewTitle(e.target.value)} />
-              <textarea className="input" placeholder={t('common.description')} value={newBody} onChange={(e) => setNewBody(e.target.value)} rows={5} />
+              <label className="field-label">{t('common.title')}<input className="input" maxLength={160} required autoFocus value={newTitle} onChange={(e) => setNewTitle(e.target.value)} /></label>
+              <label className="field-label">{t('forms.request')}<textarea className="input" value={newBody} onChange={(e) => setNewBody(e.target.value)} rows={5} /></label>
+              <div className="form-grid">
+                <label className="field-label">{t('common.company')}
+                <select className="input" value={newCompany} onChange={(e) => changeNewCompany(e.target.value)}><option value="">{t('common.company')}</option>{companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}</select>
+                </label>
+                <label className="field-label">{t('common.project')}
+                <select className="input" value={newProject} onChange={(e) => { setNewProject(e.target.value); setNewGoal(''); setNewDependencies([]); }}><option value="">{t('common.project')}</option>{projects.filter((project) => !newCompany || project.companyId === newCompany).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>
+                </label>
+              </div>
+              <p className="field-hint">{t('forms.routingHelp')}</p>
+              <details className="form-advanced">
+                <summary>{t('forms.advanced')}</summary>
               <div className="action-row brief-template-row">
                 <button type="button" className="btn" onClick={() => setNewBody(insertBriefTemplate(newBody))}><FileText size={14} /> {t('kanban.insertBriefTemplate')}</button>
                 <span className="field-hint">{t('kanban.briefTemplateHint')}</span>
               </div>
               <div className="form-grid">
-                <select className="input" value={newCompany} onChange={(e) => { setNewCompany(e.target.value); setNewDepartment(''); setNewProject(''); setNewGoal(''); setNewAssignee(''); setNewReviewer(''); setNewDependencies([]); setNewReviewerIds([]); }}><option value="">{t('common.company')}</option>{companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}</select>
+                <label className="field-label">{t('common.department')}
                 <select className="input" value={newDepartment} onChange={(e) => { setNewDepartment(e.target.value); setNewGoal(''); }}><option value="">{t('common.department')}</option>{departments.filter((department) => !newCompany || department.companyId === newCompany).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select>
-                <select className="input" value={newProject} onChange={(e) => { setNewProject(e.target.value); setNewGoal(''); setNewDependencies([]); }}><option value="">{t('common.project')}</option>{projects.filter((project) => !newCompany || project.companyId === newCompany).map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>
+                </label>
+                <label className="field-label">{t('kanban.goal')}
                 <select className="input" value={newGoal} onChange={(e) => setNewGoal(e.target.value)}><option value="">{t('kanban.goal')}</option>{scopedGoalOptions(goals, { companyId: newCompany, departmentId: newDepartment, projectId: newProject }).map((goal) => <option value={goal.id} key={goal.id}>{goalScope(goal)} / {goal.title}</option>)}</select>
-                <select className="input" value={newAssignee} onChange={(e) => { setNewAssignee(e.target.value); setNewReviewerIds((current) => current.filter((id) => id !== e.target.value)); }}><option value="">{t('kanban.assignee')}</option>{agents.filter((agent) => !newCompany || agent.companyId === newCompany).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
-                <select className="input" value={newReviewer} onChange={(e) => setNewReviewer(e.target.value)}><option value="">{t('kanban.reviewer')}</option>{agents.filter((agent) => !newCompany || agent.companyId === newCompany).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
+                </label>
+                <label className="field-label">{t('kanban.assignee')}
+                <select className="input" value={newAssignee} onChange={(e) => { setNewAssignee(e.target.value); setNewReviewer(current => current === e.target.value ? '' : current); setNewReviewerIds((current) => current.filter((id) => id !== e.target.value)); }}><option value="">{t('kanban.assignee')}</option>{agents.filter((agent) => !newCompany || agent.companyId === newCompany).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
+                </label>
+                <label className="field-label">{t('kanban.reviewer')}
+                <select className="input" value={newReviewer} onChange={(e) => setNewReviewer(e.target.value)}><option value="">{t('kanban.reviewer')}</option>{agents.filter((agent) => agent.companyId === newCompany && agent.id !== newAssignee).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select>
+                </label>
+                <label className="field-label">{t('kanban.priority')}
                 <select className="input" value={newPriority} onChange={(e) => setNewPriority(e.target.value as (typeof priorities)[number])}>{priorities.map((priority) => <option key={priority} value={priority}>{t(`kanban.priority.${priority}`)}</option>)}</select>
+                </label>
               </div>
               <label className="field-label">{t('kanban.tags')}<input className="input" value={newTags} onChange={(e) => setNewTags(e.target.value)} placeholder="bug, release, research" /></label>
               <label className="field-label">{t('kanban.collaboration')}
@@ -1192,6 +1221,7 @@ export function KanbanBoard() {
               {newReviewMode === 'panel' && <div className="field-label"><span>{t('kanban.panelReviewers')}</span>
                 <PanelReviewerPicker agents={agents.filter((agent) => !newCompany || agent.companyId === newCompany)} excludeId={newAssignee || null} value={newReviewerIds} onChange={setNewReviewerIds} disabled={busy} />
               </div>}
+              <p className="field-hint">{t('forms.dependencyHelp')}</p>
               <div className="field-label"><span>{t('kanban.dependencies')}</span><DependencyPicker cards={cards} companyId={newCompany} projectId={newProject || null} value={newDependencies} onChange={setNewDependencies} /></div>
               <div className="form-grid">
                 <label className="field-label">{t('kanban.scheduleAt')}
@@ -1210,7 +1240,7 @@ export function KanbanBoard() {
                   </select>
                 </label>
               </div>
-              <label className="check-row"><input type="checkbox" checked={requiresApproval} onChange={(e) => setRequiresApproval(e.target.checked)} /> {t('kanban.requiresApproval')}</label>
+              <label className="check-row"><input type="checkbox" checked={requiresApproval} onChange={(e) => setRequiresApproval(e.target.checked)} /> {t('forms.clientApproval')}</label>
               <label className="check-row" title={t('kanban.forceBrainstormHint')}><input type="checkbox" checked={forceBrainstorm} onChange={(e) => setForceBrainstorm(e.target.checked)} /> {t('kanban.forceBrainstorm')}</label>
               {forceBrainstorm && <div className="field-label"><span>{t('kanban.brainstormDepartments')}</span>
                 <div className="action-row" style={{ flexWrap: 'wrap' }}>
@@ -1221,6 +1251,8 @@ export function KanbanBoard() {
                 </div>
                 <span className="field-hint">{t('kanban.brainstormDepartmentsHint')}</span>
               </div>}
+              </details>
+              {toast?.type === 'error' && <p className="form-error" role="alert">{toast.message}</p>}
             </div>
             <div className="kanban-create-modal-footer">
               <button className="btn btn-primary" disabled={busy} onClick={create}><Plus size={15} /> {t('common.create')}</button>

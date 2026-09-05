@@ -5187,11 +5187,11 @@ button.card {
 }
 
 .project-form-grid {
-  grid-template-columns: repeat(2, minmax(min(260px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
 }
 
 .project-toggle-grid {
-  grid-template-columns: repeat(2, minmax(180px, max-content));
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
 }
 
 .project-form-grid .field-label,
@@ -7081,3 +7081,20 @@ button.card:hover {
 .setup-steps li[aria-current="step"] { color: var(--foreground); font-weight: 600; }
 .setup-steps li[aria-current="step"] span { border-color: var(--primary); color: var(--primary); }
 @media (max-width: 600px) { .company-setup .form-grid { grid-template-columns: minmax(0, 1fr); } .company-setup .btn { white-space: normal; } }
+
+/* Forms respond to their actual panel width, including expanded navigation. */
+.form-grid > *, .field-label, .field-label .input { min-width: 0; }
+.form-grid .field-wide { grid-column: 1 / -1; }
+.project-console, .project-advanced, .form-advanced { min-width: 0; }
+.project-company-selector { max-width: 100%; }
+.project-console :is(.list-row, h2, p, .btn), .department-workbench :is(h2, p, .btn) { overflow-wrap: anywhere; }
+.project-console .btn, .department-create-modal .btn { white-space: normal; }
+.project-advanced > .project-section { margin-top: 12px; }
+.project-advanced > summary, .form-advanced > summary { cursor: pointer; padding: 12px 0; }
+.form-advanced > :not(summary) { margin-top: 10px; }
+.dashboard-page, .dashboard-page > *, .dashboard-page .data-grid > *, .dashboard-page .list-row { min-width: 0; overflow-wrap: anywhere; }
+.dashboard-page .stat-grid { grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); }
+/* A dialog in main must cover navigation outside main's stacking context. */
+.app-frame > main:has(.overlay) { z-index: 100; }
+
+.conv-composer-advanced { flex-basis: 100%; }

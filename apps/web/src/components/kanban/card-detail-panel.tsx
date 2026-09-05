@@ -82,8 +82,8 @@ export type CardDetailPanelProps = {
   setCommentDelegateReviewerId: (value: string) => void;
   commentDelegateScope: ReviewerScope;
   setCommentDelegateScope: (value: ReviewerScope) => void;
-  workProductType: WorkProductType;
-  setWorkProductType: (value: WorkProductType) => void;
+  workProductType: WorkProductType | 'auto';
+  setWorkProductType: (value: WorkProductType | 'auto') => void;
   workProductTitle: string;
   setWorkProductTitle: (value: string) => void;
   workProductSummary: string;

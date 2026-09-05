@@ -171,22 +171,6 @@ export function ConversationComposer({
   const agentOptions = companyAgents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}{agent.role ? ` / ${agent.role}` : ''}</option>);
 
   return <div ref={rootRef} className={`conv-composer ${isExpanded ? '' : 'collapsed'}`} onBlur={onRootBlur}>
-    <div className="conv-composer-strip">
-      <select className="input compact" aria-label={t('kanban.author')} value={commentAgentId} onChange={(event) => {
-        setCommentAgentId(event.target.value);
-        if (event.target.value) setCommentAction('agent_note');
-      }}>
-        <option value="">{t('common.you')}</option>
-        {agentOptions}
-      </select>
-      <select className="input compact" aria-label={t('kanban.action')} value={mode} disabled={Boolean(commentAgentId)} onChange={(event) => {
-        const next = event.target.value as CommentActionMode;
-        setCommentAction(next);
-        if (next === 'delegate_to_agent') setCommentAgentId('');
-      }}>
-        {MODES.map((value) => <option key={value} value={value}>{t(MODE_LABEL_KEY[value])}</option>)}
-      </select>
-    </div>
     <div className="conv-composer-editor">
       <textarea
         ref={textareaRef}
@@ -221,7 +205,24 @@ export function ConversationComposer({
         </li>)}
       </ul>}
     </div>
-    {isExpanded && <>
+    <details className="form-advanced conv-composer-advanced">
+      <summary>{t('forms.advanced')}</summary>
+    <div className="conv-composer-strip">
+      <select className="input compact" aria-label={t('kanban.author')} value={commentAgentId} onChange={(event) => {
+        setCommentAgentId(event.target.value);
+        if (event.target.value) setCommentAction('agent_note');
+      }}>
+        <option value="">{t('common.you')}</option>
+        {agentOptions}
+      </select>
+      <select className="input compact" aria-label={t('kanban.action')} value={mode} disabled={Boolean(commentAgentId)} onChange={(event) => {
+        const next = event.target.value as CommentActionMode;
+        setCommentAction(next);
+        if (next === 'delegate_to_agent') setCommentAgentId('');
+      }}>
+        {MODES.map((value) => <option key={value} value={value}>{t(MODE_LABEL_KEY[value])}</option>)}
+      </select>
+    </div>
       {commentAction === 'delegate_to_agent' && !commentAgentId && <div className="form-grid conv-composer-subform">
         <label className="field-label">{t('kanban.delegateAssignee')}
           <select className="input" value={commentDelegateAssigneeId} onChange={(event) => setCommentDelegateAssigneeId(event.target.value)}>
@@ -242,6 +243,8 @@ export function ConversationComposer({
           </select>
         </label>
       </div>}
+    </details>
+    {isExpanded && <>
       {mode === 'pause_agent' && <p className="field-hint danger conv-composer-hint-row">{t('kanban.convPauseHint')}</p>}
       <div className="conv-composer-actions">
         <button type="button" className="btn" title={t('kanban.convMentionButton')} aria-label={t('kanban.convMentionButton')} disabled={busy} onClick={insertAtSign}><AtSign size={14} /></button>

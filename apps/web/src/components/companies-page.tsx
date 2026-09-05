@@ -134,6 +134,7 @@ export function CompaniesPage() {
     setCompanySlug('');
     setMission('');
     setBossRolePrompt('');
+    setNfsShareUrl('');
     setDispatchInterval(10);
     setAutoDispatch(false);
     setPanelReviewDefault('critical_only');
