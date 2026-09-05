@@ -12,13 +12,56 @@ test('PostgreSQL delivery acceptance invalidation and guarded parent completion'
   const [company] = await db.insert(companies).values({ name: 'Acceptance fixture', slug: `accept-${randomUUID()}` }).returning();
   const [worker] = await db.insert(agents).values({ companyId: company!.id, name: 'Worker', slug: 'worker', role: 'worker', adapterType: 'webhook' }).returning();
   const [other] = await db.insert(agents).values({ companyId: company!.id, name: 'Other', slug: 'other', role: 'worker', adapterType: 'webhook' }).returning();
-  async function fixture() {
+  async function fixture(seal = true) {
     const [parent] = await db.insert(kanbanCards).values({ companyId: company!.id, title: 'Goal', body: 'Acceptance: verified report', columnStatus: 'in_progress', assigneeId: worker!.id }).returning();
     const [child] = await db.insert(kanbanCards).values({ companyId: company!.id, parentCardId: parent!.id, title: 'Report', body: 'Acceptance: findings', columnStatus: 'done', assigneeId: worker!.id }).returning();
     const [product] = await db.insert(workProducts).values({ companyId: company!.id, cardId: child!.id, agentId: worker!.id, type: 'report', title: 'Verified findings', summary: 'Durable report evidence' }).returning();
-    await sealDeliveryAcceptance(child!.id);
+    if (seal) await sealDeliveryAcceptance(child!.id);
     return { parent: parent!, child: child!, product: product! };
   }
+  await t.test('pgcrypto lives outside disposable schemas and survives sibling cleanup', async () => {
+    const [extension] = await sql`SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pgcrypto'`;
+    assert.equal(extension!.nspname, 'public');
+    const sibling = `mc_test_${randomUUID().replaceAll('-', '')}`;
+    await sql.begin(async tx => {
+      await tx.unsafe(`CREATE SCHEMA "${sibling}"`);
+      await tx.unsafe(`SET LOCAL search_path = "${sibling}", public`);
+      await tx`CREATE EXTENSION IF NOT EXISTS pgcrypto`;
+      assert.equal((await tx`SELECT octet_length(gen_random_bytes(16)) AS size`)[0]!.size, 16);
+      await tx.unsafe(`DROP SCHEMA "${sibling}" CASCADE`);
+      assert.equal((await tx`SELECT octet_length(public.gen_random_bytes(16)) AS size`)[0]!.size, 16);
+    });
+  });
+  await t.test('receipt writes round-trip without fencing their card or accepted parent; revocation still fences', async () => {
+    const f = await fixture(false);
+    await sql`UPDATE kanban_cards SET updated_at = ${'2026-09-05 12:00:00.000123+00'}::timestamptz WHERE id = ${f.child.id}`;
+    async function versions() {
+      const rows = await db.select().from(kanbanCards).where(eq(kanbanCards.companyId, company!.id));
+      return { parent: rows.find(row => row.id === f.parent.id)!, child: rows.find(row => row.id === f.child.id)! };
+    }
+    const before = await versions();
+    await sealDeliveryAcceptance(f.child.id);
+    let after = await versions();
+    assert.ok(after.child.deliveryAcceptance, 'full-precision timestamp guard must persist its receipt');
+    assert.equal(after.child.mergeGateVersion, before.child.mergeGateVersion);
+    assert.equal(after.parent.mergeGateVersion, before.parent.mergeGateVersion);
+    assert.equal((await acceptedDescendantEvidence(f.parent)).ready, true);
+    await db.update(kanbanCards).set({ columnStatus: 'done' }).where(eq(kanbanCards.id, f.parent.id));
+    await sealDeliveryAcceptance(f.parent.id);
+    const accepted = await versions();
+    assert.ok(accepted.parent.deliveryAcceptance);
+    await sealDeliveryAcceptance(f.child.id);
+    after = await versions();
+    assert.deepEqual(after.parent.deliveryAcceptance, accepted.parent.deliveryAcceptance);
+    assert.equal(after.parent.mergeGateVersion, accepted.parent.mergeGateVersion);
+    assert.equal(after.child.mergeGateVersion, accepted.child.mergeGateVersion);
+    await db.update(workProducts).set({ summary: 'Replacement after receipt' }).where(eq(workProducts.id, f.product.id));
+    after = await versions();
+    assert.equal(after.child.deliveryAcceptance, null);
+    assert.equal(after.parent.deliveryAcceptance, null);
+    assert.ok(after.parent.mergeGateVersion > accepted.parent.mergeGateVersion, 'receipt revocation retains the parent fence');
+    assert.equal((await acceptedDescendantEvidence(f.parent)).ready, false);
+  });
   for (const change of ['authority', 'evidence', 'evidence_delete', 'evidence_move', 'company_policy', 'reopen', 'coordination'] as const) await t.test(`${change} restoration cannot revive an accepted child`, async () => {
     const f = await fixture();
     assert.equal((await acceptedDescendantEvidence(f.parent)).ready, true);

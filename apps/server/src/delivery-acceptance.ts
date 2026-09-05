@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, getTableColumns, isNull, sql } from 'drizzle-orm';
 import { db } from './db/client.ts';
 import { approvals, companies, externalWaits, kanbanCards, mergeIntents, projects, reviewRounds, workProducts } from './db/schema.ts';
 import { panelRequired } from './review-panel.ts';
@@ -78,11 +78,13 @@ export async function acceptedCardProducts(card: Card, reader: Reader = db, inhe
 }
 
 export async function sealDeliveryAcceptance(cardId: string): Promise<void> {
-  const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), eq(kanbanCards.columnStatus, 'done'), isNull(kanbanCards.deletedAt))).limit(1);
+  // Keep PostgreSQL's full timestamp precision; the Date column mapper truncates
+  // microseconds and raw Date parameters bypass Drizzle's timestamp encoder.
+  const [card] = await db.select({ ...getTableColumns(kanbanCards), acceptanceUpdatedAt: sql<string | null>`${kanbanCards.updatedAt}::text` }).from(kanbanCards).where(and(eq(kanbanCards.id, cardId), eq(kanbanCards.columnStatus, 'done'), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) return;
   const deliveryAcceptance = await captureDeliveryAcceptance(card);
   if (!deliveryAcceptance) return;
-  await db.update(kanbanCards).set({ deliveryAcceptance }).where(and(eq(kanbanCards.id, card.id), eq(kanbanCards.columnStatus, 'done'), sql`${kanbanCards.assigneeId} IS NOT DISTINCT FROM ${card.assigneeId}`, sql`${kanbanCards.reviewerId} IS NOT DISTINCT FROM ${card.reviewerId}`, sql`${kanbanCards.projectId} IS NOT DISTINCT FROM ${card.projectId}`, sql`${kanbanCards.body} IS NOT DISTINCT FROM ${card.body}`, sql`${kanbanCards.updatedAt} IS NOT DISTINCT FROM ${card.updatedAt}`));
+  await db.update(kanbanCards).set({ deliveryAcceptance }).where(and(eq(kanbanCards.id, card.id), eq(kanbanCards.columnStatus, 'done'), sql`${kanbanCards.assigneeId} IS NOT DISTINCT FROM ${card.assigneeId}`, sql`${kanbanCards.reviewerId} IS NOT DISTINCT FROM ${card.reviewerId}`, sql`${kanbanCards.projectId} IS NOT DISTINCT FROM ${card.projectId}`, sql`${kanbanCards.body} IS NOT DISTINCT FROM ${card.body}`, sql`${kanbanCards.updatedAt} IS NOT DISTINCT FROM ${card.acceptanceUpdatedAt}`));
 }
 
 function uniqueProducts(products: Product[]) { return [...new Map(products.map(p => [p.id, p])).values()]; }

@@ -1,6 +1,7 @@
 import { sql } from './client.ts';
 import { CEO_POSITION_PROMPT, LEGACY_CEO_POSITION_PROMPT } from '../role-playbooks.ts';
 import { managedMergeMigration, managedMergeRunFenceMigration, managedMergeLockOrderMigration } from './managed-merge-migration.ts';
+import { deliveryAcceptanceReceiptMigration } from './delivery-acceptance-receipt-migration.ts';
 import { deliveryAcceptanceMigration } from './delivery-acceptance-migration.ts';
 
 type Migration = { version: number; name: string; run: () => Promise<void> };
@@ -52,6 +53,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS kanban_cards_split_request_key_unique ON kanba
 CREATE UNIQUE INDEX IF NOT EXISTS card_comments_deduplication_key_unique ON card_comments(deduplication_key);`);
     await sql.unsafe(deliveryAcceptanceMigration);
   } },
+  { version: 26, name: 'delivery-receipt-gate-stability', run: async () => { await sql.unsafe(deliveryAcceptanceReceiptMigration); } },
 ];
 
 // Merge closure (company pipeline §19). external_waits.authorized_head_sha

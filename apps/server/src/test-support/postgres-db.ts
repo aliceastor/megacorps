@@ -31,6 +31,20 @@ export async function isolatedPostgres(t: TestContext) {
   });
   const [version] = await control`SHOW server_version_num`;
   assert.ok(Number(version!.server_version_num) >= 160000 && Number(version!.server_version_num) < 170000, 'The integration harness requires PostgreSQL 16.');
+  // Extensions belong to the dedicated test database, not any disposable schema.
+  // Keep this lock separate from migration locking and release it before suites run.
+  await control.begin(async tx => {
+    await tx`SELECT pg_advisory_xact_lock(727274002)`;
+    await tx`CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public`;
+    const [extension] = await tx`SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pgcrypto'`;
+    if (/^mc_test_[a-f0-9]{32}$/.test(extension!.nspname)) {
+      // Recover a leftover extension owned by a prior interrupted test fixture.
+      await tx`ALTER EXTENSION pgcrypto SET SCHEMA public`;
+    } else {
+      assert.equal(extension!.nspname, 'public', 'Test pgcrypto must live in public, outside disposable fixture schemas.');
+    }
+    assert.equal((await tx`SELECT octet_length(public.gen_random_bytes(16)) AS size`)[0]!.size, 16);
+  });
   await control.unsafe(`CREATE SCHEMA "${schemaName}"`);
   created = true;
   target.searchParams.set('options', `-c search_path=${schemaName},public -c lock_timeout=1200 -c statement_timeout=5000 -c idle_in_transaction_session_timeout=10000`);
