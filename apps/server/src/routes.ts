@@ -19,8 +19,8 @@ import { brainstormFromOutput } from './brainstorm.ts';
 import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointFromOutput } from './client-checkpoints.ts';
 import { registerChatRoutes } from './chat.ts';
 import { runAgentMaintenance } from './agent-maintenance.ts';
-import { agentReportSchema } from '@megacorps/shared';
 import { delegationLineFromReportItem } from './agent-report.ts';
+import { normalizeAgentResult, persistAgentWorkProducts } from './agent-results.ts';
 import { parseA2aPushPayload, verifyA2aPushSignature } from './a2a-client.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
@@ -2759,22 +2759,27 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       costUsd: z.number().nonnegative().optional(),
       pollIntervalSeconds: z.number().int().min(30).max(86_400).nullable().optional(),
       workProducts: z.array(createWorkProductSchema).default([]),
-      report: agentReportSchema.optional(),
+      report: z.unknown().optional(),
     }).safeParse(request.body);
     if (!parsedBody.success) return reply.code(400).send({
       error: 'invalid_body',
       message: 'invalid_body: expected JSON body with cardId, status, and optional taskRunId, summary, output, costUsd, pollIntervalSeconds, workProducts. Example: { "cardId": "<uuid>", "taskRunId": "<task-run uuid>", "status": "done", "summary": "...", "output": "..." }',
       issues: parsedBody.error.issues,
     });
-    const body = parsedBody.data;
+    const normalizedResult = normalizeAgentResult({ output: [parsedBody.data.summary, parsedBody.data.output].filter(Boolean).join('\n\n'), report: parsedBody.data.report, workProducts: parsedBody.data.workProducts });
+    if (normalizedResult.outcome === 'invalid') return reply.code(409).send({ error: 'agent_report_invalid', message: normalizedResult.reason });
+    const body = { ...parsedBody.data, report: normalizedResult.report ?? undefined, workProducts: normalizedResult.workProducts };
     const taskRunId = body.taskRunId ?? body.idempotencyKey;
-    const requestedStatus = normalizeCardStatus(body.status);
+    let requestedStatus = normalizeCardStatus(body.status);
     if (!requestedStatus) return reply.code(400).send({
       error: 'invalid_status',
       message: `invalid_status: "${body.status}" is not allowed. Use one of: ${cardStatuses.join(', ')}. Use status="in_progress" with a DELEGATE block when delegating; use status="needs_review" when you need reviewer guidance.`,
       allowed: cardStatuses,
       legacyAliases: { backlog: 'todo' },
     });
+    if (normalizedResult.outcome === 'permission' || normalizedResult.outcome === 'failed' || normalizedResult.outcome === 'rejected') requestedStatus = 'blocked';
+    else if (normalizedResult.outcome === 'input_required') requestedStatus = 'needs_review';
+    else if (normalizedResult.source === 'report') requestedStatus = normalizedResult.outcome === 'progress' ? 'in_progress' : 'done';
     const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, body.cardId), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
     // An agent token is scoped to its own company; a report against another
@@ -2785,7 +2790,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (callerAgent) {
       await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'agent', actorId: callerAgent.id, agentId: callerAgent.id, action: 'webhook.agent_report', entityType: 'card', entityId: card.id, details: { status: body.status, taskRunId: taskRunId ?? null, viaAgentToken: true } });
     }
-    if (body.workProducts.some((product) => product.projectId && product.projectId !== card.projectId)) return reply.code(400).send({ error: 'work_product_project_mismatch' });
+    if (parsedBody.data.workProducts.some((product) => product.projectId && product.projectId !== card.projectId)) return reply.code(400).send({ error: 'work_product_project_mismatch' });
     if (body.workProducts.some((product) => product.repoUrl) && card.projectId) {
       const [projectForRepo] = await db.select({ repoUrl: projects.repoUrl }).from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1);
       if (projectForRepo?.repoUrl && body.workProducts.some((product) => product.repoUrl && !gitRemoteMatchesProjectRepo(product.repoUrl, projectForRepo.repoUrl))) {
@@ -2795,6 +2800,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [webhookTaskRun] = taskRunId ? await db.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).limit(1) : [];
     if (taskRunId && !webhookTaskRun) return reply.code(404).send({ error: 'task_run_not_found' });
     if (webhookTaskRun && webhookTaskRun.cardId !== card.id) return reply.code(409).send({ error: 'task_run_card_mismatch' });
+    if ((webhookTaskRun && !['queued', 'running'].includes(webhookTaskRun.status)) || (!['message', 'message_review', 'panel_review'].includes(webhookTaskRun?.kind ?? '') && ['done', 'cancelled'].includes(card.columnStatus ?? ''))) return { ok: true, stale: true, cardId: card.id, taskRunId, newStatus: card.columnStatus };
+    const reviewRevisionRequested = webhookTaskRun?.kind === 'review' && normalizedResult.verdict === 'revision_requested';
+    if (webhookTaskRun?.kind === 'review') {
+      if (normalizedResult.verdictError || (normalizedResult.source === 'report' && normalizedResult.outcome === 'completed' && !normalizedResult.verdict)) return reply.code(409).send({ error: 'review_verdict_invalid', message: normalizedResult.verdictError ?? 'review_verdict_missing: return an explicit current verdict in your report.' });
+      if (reviewRevisionRequested && normalizedResult.outcome === 'completed') requestedStatus = 'todo';
+      else if (normalizedResult.verdict === 'escalate' && normalizedResult.outcome === 'completed') requestedStatus = 'needs_review';
+    }
     if (webhookTaskRun && (webhookTaskRun.kind === 'message' || webhookTaskRun.kind === 'message_review')) {
       try {
         return await completeMessageTaskRunFromWebhook(webhookTaskRun.id, {
@@ -2824,8 +2836,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
     }
     const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
-    const actorAgentId = webhookTaskRun?.agentId ?? card.assigneeId;
-    const structuredDelegations = body.report?.delegations ?? null;
+    const actorAgentId = webhookTaskRun?.agentId ?? callerAgent?.id ?? card.assigneeId;
+    const blockedResult = ['permission', 'failed', 'rejected'].includes(normalizedResult.outcome);
+    const structuredDelegations = blockedResult ? [] : body.report?.delegations ?? null;
     const handoffItems = structuredDelegations?.filter((item) => item.mode === 'handoff') ?? [];
     if (handoffItems.length > 0) {
       const [handoffAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
@@ -2849,7 +2862,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const requestedDelegation = structuredDelegations
       ? structuredDelegations.map(delegationLineFromReportItem)
       : delegationItems(executionLog);
-    const escalation = isGuidanceEscalation(requestedStatus, executionLog);
+    const escalation = !blockedResult && isGuidanceEscalation(requestedStatus, executionLog);
     const escalationReviewerId = escalation ? await resolveIndependentReviewerForCard(card, actorAgentId) : null;
     const guidanceDecision = webhookCompletionDecision({
       requestedStatus,
@@ -2869,20 +2882,22 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (existingWebhook) return { ok: true, duplicate: true, cardId: body.cardId, taskRunId, newStatus: card.columnStatus };
     }
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
-    const webhookNotes = actorAgent ? reportNotesFromOutput(executionLog, body.report ?? null) : [];
+    const [productProject] = card.projectId ? await db.select().from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1) : [];
+    await persistAgentWorkProducts(card, actorAgentId, taskRunId ?? null, body.workProducts, productProject);
+    const webhookNotes = actorAgent && !blockedResult ? reportNotesFromOutput(executionLog, body.report ?? null) : [];
     if (actorAgent && webhookNotes.length) {
       try { await processReportNotes(card, actorAgent, webhookNotes); } catch (error) { app.log.warn({ error, cardId: card.id }, 'report note processing failed'); }
     }
-    const webhookPeerMentions = actorAgent ? peerMentionsFromOutput(executionLog, body.report ?? null) : [];
+    const webhookPeerMentions = actorAgent && !blockedResult ? peerMentionsFromOutput(executionLog, body.report ?? null) : [];
     if (actorAgent && webhookPeerMentions.length) {
       try { await processPeerMentions(card, actorAgent, webhookPeerMentions); } catch (error) { app.log.warn({ error, cardId: card.id }, 'peer mention processing failed'); }
     }
-    const webhookChildren = actorAgent ? childrenFromOutput(executionLog, body.report ?? null) : [];
+    const webhookChildren = actorAgent && !blockedResult ? childrenFromOutput(executionLog, body.report ?? null) : [];
     if (actorAgent && webhookChildren.length) {
       try { await processChildSplits(card, actorAgent, webhookChildren); } catch (error) { app.log.warn({ error, cardId: card.id }, 'child split processing failed'); }
     }
     // Client checkpoint: park the card and ask the client instead of completing.
-    const webhookCheckpoint = actorAgent ? await resolveClientCheckpointRequest(card, actorAgent, checkpointFromOutput(executionLog, body.report ?? null), null) : null;
+    const webhookCheckpoint = actorAgent && !blockedResult ? await resolveClientCheckpointRequest(card, actorAgent, checkpointFromOutput(executionLog, body.report ?? null), normalizedResult.question) : null;
     if (webhookCheckpoint && actorAgent) {
       const parked = await finishRunWaitingOnClient(card, actorAgent, webhookCheckpoint, { taskRunId: taskRunId ?? null, heartbeatRunId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId ?? null, output: executionLog, costUsd: body.costUsd });
       await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: actorAgentId, action: 'webhook.client_checkpoint', entityType: 'card', entityId: card.id, details: { taskRunId, requestedStatus, approvalId: parked.approvalId } });
@@ -2891,11 +2906,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     // A reviewer reporting through the webhook: keep the author's score.
     if (actorAgent && webhookTaskRun?.kind === 'review') {
-      const verdict = requestedStatus === 'done' || requestedStatus === 'in_review' ? 'approved' : requestedStatus === 'needs_review' || requestedStatus === 'blocked' ? 'escalate' : 'revision_requested';
+      const verdict = normalizedResult.verdict ?? (requestedStatus === 'done' || requestedStatus === 'in_review' ? 'approved' : requestedStatus === 'needs_review' || requestedStatus === 'blocked' ? 'escalate' : 'revision_requested');
       try { await recordReviewScore(card, actorAgent, verdict, executionLog, body.report?.score ?? null); } catch (error) { app.log.warn({ error, cardId: card.id }, 'review score recording failed'); }
     }
     // Brainstorm broadcast: open the round and park the card.
-    const webhookBrainstorm = actorAgent ? await resolveBrainstormRequest(card, actorAgent, brainstormFromOutput(executionLog, body.report ?? null)) : null;
+    const webhookBrainstorm = actorAgent && !blockedResult ? await resolveBrainstormRequest(card, actorAgent, brainstormFromOutput(executionLog, body.report ?? null)) : null;
     if (webhookBrainstorm && actorAgent) {
       const round = await finishRunWaitingOnBrainstorm(card, actorAgent, webhookBrainstorm, { taskRunId: taskRunId ?? null, heartbeatRunId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId ?? null, output: executionLog, costUsd: body.costUsd });
       await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'system', actorId: 'webhook', agentId: actorAgentId, action: 'webhook.brainstorm', entityType: 'card', entityId: card.id, details: { taskRunId, requestedStatus, round } });
@@ -2995,12 +3010,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       columnStatus: nextStatus,
       rollupStatus: childBlock ? 'waiting_on_children' : nextStatus === 'done' ? 'done' : undefined,
       executionLog,
+      reviewFeedback: reviewRevisionRequested ? body.report?.summary ?? executionLog : undefined,
       reviewerId: escalation ? escalationReviewerId : qualityReviewerId ?? undefined,
       costUsd: completesRun ? body.costUsd?.toString() : undefined,
       completedAt: nextStatus === 'done' ? new Date() : completesRun ? null : undefined,
       retryCount: nextStatus === 'done' || delegatedViaWebhook ? 0 : undefined,
       nextRunAt: completesRun ? null : undefined,
-      lastError: delegationFailed ? delegationFailureReason : nextStatus === 'blocked' || nextStatus === 'cancelled' ? body.summary ?? `webhook_${nextStatus}` : escalation ? null : undefined,
+      lastError: delegationFailed ? delegationFailureReason : nextStatus === 'blocked' || nextStatus === 'cancelled' ? normalizedResult.reason ?? body.summary ?? `webhook_${nextStatus}` : escalation ? null : undefined,
       executionLockId: completesRun ? null : undefined,
       executionLockedByAgentId: completesRun ? null : undefined,
       executionLockedAt: completesRun ? null : undefined,
@@ -3072,30 +3088,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       await db.update(agents).set({ spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${body.costUsd}` }).where(eq(agents.id, actorAgentId));
       await db.insert(costEvents).values({ companyId: card.companyId, agentId: actorAgentId, cardId: card.id, projectId: card.projectId, goalId: card.goalId, provider: 'webhook', model: 'external', costUsd: body.costUsd.toString() });
     }
-    if (body.workProducts.length > 0) {
-      const [project] = card.projectId ? await db.select().from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1) : [];
-      const insertedProducts = await db.insert(workProducts).values(body.workProducts.map((product) => ({
-        companyId: card.companyId,
-        cardId: card.id,
-        projectId: product.projectId ?? card.projectId,
-        agentId: product.agentId ?? actorAgentId,
-        taskRunId: product.taskRunId ?? taskRunId ?? null,
-        type: product.type,
-        title: product.title,
-        summary: product.summary ?? null,
-        url: product.url ?? null,
-        repoProvider: product.repoProvider ?? project?.repoProvider ?? null,
-        repoUrl: product.repoUrl ?? project?.repoUrl ?? null,
-        branch: product.branch ?? null,
-        commitSha: product.commitSha ?? null,
-        pullRequestUrl: product.pullRequestUrl ?? null,
-        metadata: product.metadata,
-      }))).returning();
-      for (const product of insertedProducts) publishLiveEvent({ type: 'work_product.created', companyId: card.companyId, entityType: 'work_product', entityId: product.id, cardId: card.id, projectId: product.projectId });
-    }
     const heartbeatRunId = webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId;
     if (completesRun) {
-      const runStatus = delegationFailed ? 'failed' : webhookRunStatus(nextStatus);
+      const runStatus = delegationFailed || reviewRevisionRequested ? 'failed' : webhookRunStatus(nextStatus);
       const error = delegationFailed ? delegationFailureReason : runStatus === 'failed' || runStatus === 'cancelled' ? body.summary ?? `webhook_${nextStatus}` : null;
       if (heartbeatRunId) await db.update(heartbeatRuns).set({ status: runStatus, completedAt: new Date(), error, costUsd: body.costUsd?.toString() }).where(eq(heartbeatRuns.id, heartbeatRunId));
       if (taskRunId) {
@@ -3117,6 +3112,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       else await enqueueTaskRun(card.id, 'review', 'queue');
     }
     if (nextStatus === 'needs_review') await enqueueTaskRun(card.id, 'review', 'queue');
+    if (nextStatus === 'todo' && reviewRevisionRequested) await enqueueTaskRun(card.id, 'dispatch', 'queue');
     if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
     if (delegationFailed) {
       await enqueueTaskRun(body.cardId, 'dispatch', 'queue');

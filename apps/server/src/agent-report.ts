@@ -55,25 +55,21 @@ export function markedJsonCandidates(output: string | null | undefined, marker: 
 }
 
 export function extractAgentReport(output: string | null | undefined): AgentReportExtraction | null {
-  const candidates = markedJsonCandidates(output, REPORT_MARKER);
-  if (candidates.length === 0) return null;
-
-  let lastError: string | null = null;
-  // Prefer the last candidate: agents that revise mid-output put the final
-  // report at the end.
-  for (const candidate of candidates.reverse()) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(candidate);
-    } catch {
-      lastError = 'report_json_parse_failed';
-      continue;
-    }
-    const result = agentReportSchema.safeParse(parsed);
-    if (result.success) return { report: result.data };
-    lastError = `report_schema_invalid: ${result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ').slice(0, 500)}`;
+  const text = output ?? '';
+  if (!text.includes(REPORT_MARKER)) return null;
+  // Scan the whole response in source order, including bare JSON after fences.
+  // A trailing incomplete report is still present and must request correction.
+  const candidates = balancedJsonCandidates(text, REPORT_MARKER);
+  const candidate = candidates.at(-1);
+  if (!candidate || text.lastIndexOf(REPORT_MARKER) >= text.lastIndexOf(candidate) + candidate.length) {
+    return { error: 'report_json_parse_failed: final report is incomplete' };
   }
-  return lastError ? { error: lastError } : null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(candidate); }
+  catch { return { error: 'report_json_parse_failed' }; }
+  const result = agentReportSchema.safeParse(parsed);
+  if (result.success) return { report: result.data };
+  return { error: `report_schema_invalid: ${result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ').slice(0, 500)}` };
 }
 
 export type StructuredDelegationPlan = {

@@ -420,9 +420,37 @@ export const agentReportMentionSchema = z.object({
   to: z.string().trim().min(1).max(120),
   question: z.string().trim().min(1).max(2000),
 });
+export const workProductTypes = ['report', 'file', 'preview_url', 'pull_request', 'commit', 'screenshot', 'artifact', 'external'] as const;
+export type WorkProductType = (typeof workProductTypes)[number];
+
+// Reported evidence contains content only; ownership is assigned by the server.
+export const reportedWorkProductSchema = z.object({
+  type: z.enum(workProductTypes).default('external'),
+  title: z.string().trim().min(1).max(200),
+  summary: z.string().trim().max(4000).nullable().optional(),
+  url: z.string().trim().max(2000).nullable().optional(),
+  repoProvider: z.string().trim().max(80).nullable().optional(),
+  repoUrl: z.string().trim().max(1000).nullable().optional(),
+  branch: z.string().trim().max(240).nullable().optional(),
+  commitSha: z.string().trim().max(80).nullable().optional(),
+  pullRequestUrl: z.string().trim().max(2000).nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type ReportedWorkProduct = z.infer<typeof reportedWorkProductSchema>;
+export const agentReportRequestSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('permission'), question: agentReportCheckpointSchema.shape.question }),
+  z.object({ kind: z.literal('help'), question: agentReportCheckpointSchema.shape.question }),
+  agentReportCheckpointSchema.omit({ kind: true }).extend({
+    kind: z.literal('checkpoint'),
+    checkpointKind: z.enum(['direction', 'interim']).default('direction'),
+  }),
+]);
 export const agentReportSchema = z.object({
   kind: z.literal('megacorps-report'),
-  status: z.enum(['completed', 'input_required', 'failed', 'rejected']),
+  version: z.literal(1).default(1),
+  status: z.enum(['completed', 'progress', 'in_progress', 'input_required', 'failed', 'rejected']).transform((status) => status === 'in_progress' ? 'progress' as const : status),
+  request: agentReportRequestSchema.optional(),
+  workProducts: z.array(reportedWorkProductSchema).optional(),
   verdict: z.enum(['approved', 'revision_requested', 'escalate']).optional(),
   summary: z.string().trim().min(1).max(4000),
   questions: z.array(z.string().trim().min(1).max(1000)).max(10).optional(),
@@ -588,24 +616,11 @@ export const createGoalSchema = z.object({
   body: z.string().trim().max(4000).optional(),
 });
 
-export const workProductTypes = ['report', 'file', 'preview_url', 'pull_request', 'commit', 'screenshot', 'artifact', 'external'] as const;
-export type WorkProductType = (typeof workProductTypes)[number];
-
-export const createWorkProductSchema = z.object({
+export const createWorkProductSchema = reportedWorkProductSchema.extend({
   cardId: z.string().uuid().optional(),
   projectId: z.string().uuid().nullable().optional(),
   agentId: z.string().uuid().nullable().optional(),
   taskRunId: z.string().uuid().nullable().optional(),
-  type: z.enum(workProductTypes).default('external'),
-  title: z.string().trim().min(1).max(200),
-  summary: z.string().trim().max(4000).nullable().optional(),
-  url: z.string().trim().max(2000).nullable().optional(),
-  repoProvider: z.string().trim().max(80).nullable().optional(),
-  repoUrl: z.string().trim().max(1000).nullable().optional(),
-  branch: z.string().trim().max(240).nullable().optional(),
-  commitSha: z.string().trim().max(80).nullable().optional(),
-  pullRequestUrl: z.string().trim().max(2000).nullable().optional(),
-  metadata: z.record(z.string(), z.unknown()).default({}),
 });
 
 export const createExternalWaitSchema = z.object({

@@ -3,6 +3,13 @@ import test from 'node:test';
 import { buildAgentPrompt, buildHermesCliCommand, extractSessionId, hermesTaskResult, estimateTokens, megacorpsApiUrl, stripHermesSessionMetadata } from './hermes.ts';
 import { buildHermesSshRemoteCommand, resolveHermesSshConnectionConfig } from './hermes-ssh.ts';
 
+test('short report instructions describe accepted progress, requests and report work products', () => {
+  const prompt = buildAgentPrompt({ hermesProfile: 'builder', currentSessionId: null, adapterConfig: {} }, { id: 'card', title: 'Change', body: 'Build it.' });
+  assert.match(prompt, /progress.*input_required.*failed.*rejected/);
+  assert.match(prompt, /"workProducts":\s*\[/);
+  assert.match(prompt, /permission.*help.*checkpoint/);
+});
+
 function withEnv<T>(values: Record<string, string | undefined>, fn: () => T): T {
   const previous: Record<string, string | undefined> = {};
   for (const key of Object.keys(values)) previous[key] = process.env[key];

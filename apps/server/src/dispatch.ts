@@ -1,6 +1,6 @@
 import { and, desc, eq, inArray, isNull, lt, sql as drizzleSql, isNotNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
-import { inferCardTransitionAction, normalizeCardStatus, type CardStatus } from '@megacorps/shared';
+import { inferCardTransitionAction, normalizeCardStatus, type AgentReport, type CardStatus } from '@megacorps/shared';
 import { db, sql as rawSql } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, cardRequiredTools, companies, costEvents, cronRuns, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, toolRegistry, users, workProducts, agentReviewScores } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
@@ -23,6 +23,7 @@ import { agentRuntimeAvailable, createRuntimeAvailabilityCache, type RuntimeAvai
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { extractAgentReport, structuredDelegationPlan } from './agent-report.ts';
+import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
 import type { AgentReportDelegation } from '@megacorps/shared';
 import type { TaskResult } from './adapters/hermes.ts';
 import { notify } from './notifications.ts';
@@ -380,7 +381,11 @@ async function recordA2aArtifacts(card: Pick<CardRow, 'id' | 'companyId' | 'proj
 }
 
 function dispatchCompletionDecision(output: string | null | undefined, effectiveReviewerId: string | null): { needsHelpReview: boolean; nextStatus: CardStatus; topLevelGuidanceAccepted: boolean } {
-  const needsHelpReview = assigneeNeedsReview(output);
+  const result = normalizeAgentResult({ output });
+  if (result.outcome === 'input_required') return needsInputCompletionDecision(effectiveReviewerId);
+  if (result.outcome === 'permission' || result.outcome === 'failed' || result.outcome === 'rejected' || result.outcome === 'invalid') return { needsHelpReview: false, nextStatus: 'blocked', topLevelGuidanceAccepted: false };
+  if (result.outcome === 'progress') return { needsHelpReview: false, nextStatus: 'in_progress', topLevelGuidanceAccepted: false };
+  const needsHelpReview = result.source === 'prose' && assigneeNeedsReview(output);
   const nextStatus = needsHelpReview
     ? effectiveReviewerId ? 'needs_review' : 'in_review'
     : effectiveReviewerId ? 'in_review' : 'done';
@@ -388,6 +393,7 @@ function dispatchCompletionDecision(output: string | null | undefined, effective
 }
 
 export function isGuidanceEscalation(status: string, text: string): boolean {
+  if (normalizeAgentResult({ output: text }).outcome === 'permission') return false;
   if (status === 'needs_review') return true;
   if (status !== 'blocked') return false;
   return /\b(needs[_ -]?review|needs[_ -]?guidance|needs[_ -]?reviewer|escalat(?:e|ed|ion)|cannot[_ -]?complete|unable[_ -]?to[_ -]?complete|stuck)\b/i.test(text);
@@ -495,6 +501,8 @@ export async function completionBlockedByChildren(card: CardRow, targetStatus: C
 type ReviewDecision = 'approved' | 'revision_requested' | 'escalate';
 
 function explicitReviewDecision(output: string | null | undefined): ReviewDecision | null {
+  const normalized = normalizeAgentResult({ output });
+  if (normalized.source !== 'prose' || normalized.outcome !== 'completed' || normalized.verdictError || /^\s*(?:final\s+)?(?:review\s+)?verdict\s*[:=]/im.test(output ?? '')) return normalized.verdict;
   const text = output ?? '';
   if (/\b(?:final\s+)?(?:review\s+)?verdict\s*[:=]\s*(?:reject(?:ed)?|revision[_ -]?requested)\b|\breject(?:ed)?\W{0,30}revision[_ -]?requested\b|\bnot\s+approved\b|\bcannot\s+approve\b/i.test(text)) {
     return 'revision_requested';
@@ -509,23 +517,16 @@ function explicitReviewDecision(output: string | null | undefined): ReviewDecisi
 }
 
 function reviewDecision(output: string, _mode: 'quality' | 'help'): ReviewDecision | null {
-  const explicit = explicitReviewDecision(output);
-  if (explicit) return explicit;
-  if (/\b(escalate|needs[_ -]?higher|needs[_ -]?boss|needs[_ -]?manager|cannot[_ -]?resolve|unable[_ -]?to[_ -]?resolve)\b/i.test(output)) return 'escalate';
-  if (/\b(revision[_ -]?requested|request[_ -]?revision|needs[_ -]?rework|redo|retry|reject|rejected|fail|failed|blocked|not\s+approved|not\s+acceptable|cannot\s+approve)\b/i.test(output)) return 'revision_requested';
-  if (/\b(pass|approve|approved|done|complete|completed|resolved)\b/i.test(output)) return 'approved';
-  // No silent default: an unmatched review is a malformed review, and the
-  // caller must return it to the reviewer instead of guessing a verdict.
-  return null;
+  return normalizeAgentResult({ output }).verdict;
 }
 
 function reportVerdictFromOutput(output: string | null | undefined): ReviewDecision | null {
-  const extraction = extractAgentReport(output);
-  return extraction && 'report' in extraction ? extraction.report.verdict ?? null : null;
+  const normalized = normalizeAgentResult({ output });
+  return normalized.source === 'report' ? normalized.verdict : null;
 }
 
 function resolveReviewVerdict(output: string | null | undefined, mode: 'quality' | 'help'): ReviewDecision | null {
-  return reportVerdictFromOutput(output) ?? reviewDecision(output ?? '', mode);
+  return reviewDecision(output ?? '', mode);
 }
 
 const REVIEW_VERDICT_MISSING_MESSAGE = 'review_verdict_missing: Your review did not contain a decision. Return a JSON megacorps-report with "verdict", or an explicit VERDICT: APPROVED | REVISION_REQUESTED | ESCALATE line.';
@@ -2920,14 +2921,17 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       error: result.success ? null : result.output || 'message_delegation_failed',
       costUsd: result.costUsd.toString(),
     }).where(eq(heartbeatRuns.id, run.id));
-    if (!result.success) {
-      const errorMessage = result.output || 'message_delegation_failed';
+    const normalizedMessage = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    if (!result.success || ['failed', 'rejected', 'invalid', 'permission'].includes(normalizedMessage.outcome)) {
+      const errorMessage = normalizedMessage.reason ?? (result.output || 'message_delegation_failed');
+      await db.update(heartbeatRuns).set({ status: 'failed', error: errorMessage }).where(eq(heartbeatRuns.id, run.id));
       await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: errorMessage, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
-      if (await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message', agentId: agent.id, message: errorMessage })) return card;
+      if (normalizedMessage.outcome !== 'permission' && await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message', agentId: agent.id, message: errorMessage })) return card;
       await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'delegate_failed', body: errorMessage, delegationStatus: 'failed' });
       return card;
     }
+    await persistAgentWorkProducts(card, agent.id, taskRun.id, normalizedMessage.workProducts);
     const messagePlan = structuredDelegationPlan(result.output);
     const messageNotes = reportNotesFromOutput(result.output);
     if (messageNotes.length) { try { await processReportNotes(card, agent, messageNotes); } catch { /* note delivery must never fail the run */ } }
@@ -2960,6 +2964,13 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       if (await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message', agentId: agent.id, message: errorMessage })) return card;
       await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'delegate_failed', body: errorMessage, delegationStatus: 'failed' });
+      return card;
+    }
+    if (normalizedMessage.outcome === 'progress' || normalizedMessage.outcome === 'input_required') {
+      await db.update(cardComments).set({ delegationStatus: 'waiting' }).where(eq(cardComments.id, comment.id));
+      await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: normalizedMessage.question ? 'agent_question' : 'agent_update', body: normalizedMessage.question ?? result.output, delegationStatus: 'waiting' });
+      await completeTaskRun(taskRun.id, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      if (normalizedMessage.outcome === 'progress') await enqueueMessageTaskRun(comment, 'message');
       return card;
     }
     const report = await addCardMessage({
@@ -3107,7 +3118,7 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
   summary?: string | null;
   output?: string | null;
   costUsd?: number;
-  report?: { notes?: string[]; mentions?: PeerMention[] } | null;
+  report?: AgentReport | null;
 }): Promise<{ ok: true; cardId: string; taskRunId: string; kind: string; newStatus: string; delegated: boolean; reviewerId?: string | null }> {
   const [taskRun] = await db.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).limit(1);
   if (!taskRun || (taskRun.kind !== 'message' && taskRun.kind !== 'message_review') || !taskRun.messageCommentId) throw new Error('message_task_run_not_found');
@@ -3117,8 +3128,11 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
   const [comment] = await db.select().from(cardComments).where(and(eq(cardComments.id, taskRun.messageCommentId), eq(cardComments.cardId, card.id))).limit(1);
   if (!comment) throw new Error('message_comment_not_found');
   const actorAgentId = taskRun.agentId;
-  const output = [input.summary, input.output].filter(Boolean).join('\n\n') || `Webhook marked message task ${input.status}`;
-  const terminalFailure = input.status === 'blocked' || input.status === 'cancelled';
+  const output = [input.summary, input.output, input.report ? JSON.stringify(input.report) : null].filter(Boolean).join('\n\n') || `Webhook marked message task ${input.status}`;
+  const normalizedMessage = normalizeAgentResult({ output, report: input.report ?? undefined });
+  if (normalizedMessage.outcome === 'invalid') throw new Error(normalizedMessage.reason!);
+  await persistAgentWorkProducts(card, actorAgentId, taskRun.id, normalizedMessage.workProducts);
+  const terminalFailure = input.status === 'blocked' || input.status === 'cancelled' || ['failed', 'rejected', 'permission'].includes(normalizedMessage.outcome);
   const heartbeatRunId = taskRun.heartbeatRunId;
 
   if (taskRun.kind === 'message') {
@@ -3129,6 +3143,11 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
       if (heartbeatRunId) await db.update(heartbeatRuns).set({ status: input.status === 'cancelled' ? 'cancelled' : 'failed', completedAt: new Date(), error: output, costUsd: input.costUsd?.toString() }).where(eq(heartbeatRuns.id, heartbeatRunId));
       await completeTaskRun(taskRun.id, { status: input.status === 'cancelled' ? 'cancelled' : 'failed', error: output, output, costUsd: input.costUsd });
       return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'failed', delegated: false, reviewerId: comment.reviewerAgentId };
+    }
+    if ((normalizedMessage.outcome === 'progress' || normalizedMessage.outcome === 'input_required') && !(normalizedMessage.report?.delegations?.length)) {
+      await db.update(cardComments).set({ delegationStatus: 'waiting' }).where(eq(cardComments.id, comment.id));
+      await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: actorAgentId, action: normalizedMessage.question ? 'agent_question' : 'agent_update', body: normalizedMessage.question ?? output, delegationStatus: 'waiting' });
+      return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'waiting', delegated: false, reviewerId: comment.reviewerAgentId };
     }
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), isNull(agents.deletedAt))).limit(1) : [];
     const webhookMessageNotes = actorAgent ? reportNotesFromOutput(output, input.report) : [];
@@ -3319,13 +3338,31 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       throw new Error(adapterFailureMessage('dispatch', result.output));
     }
+    const normalizedResult = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    if (normalizedResult.outcome === 'invalid') {
+      await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+      return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: normalizedResult.reason!, runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
+    }
+    await persistAgentWorkProducts(card, agent.id, options.taskRunId ?? null, normalizedResult.workProducts);
+    await recordA2aArtifacts(card, agent.id, options.taskRunId, result.artifacts);
+    if (normalizedResult.outcome === 'permission') {
+      await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+      const blocked = await parkPermissionBlockedResult(card.id, agent.id, run.id, normalizedResult.reason!, result.output);
+      await completeTaskRun(options.taskRunId, { status: 'failed', error: normalizedResult.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      return blocked;
+    }
+    if (normalizedResult.outcome === 'failed' || normalizedResult.outcome === 'rejected') {
+      await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+      throw new Error(normalizedResult.reason!);
+    }
     await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
-    const structuredPlan = structuredDelegationPlan(result.output);
-    const dispatchNotes = reportNotesFromOutput(result.output);
+    const actionableOutput = result.output;
+    const structuredPlan = structuredDelegationPlan(actionableOutput);
+    const dispatchNotes = reportNotesFromOutput(actionableOutput);
     if (dispatchNotes.length) { try { await processReportNotes(card, agent, dispatchNotes); } catch { /* note delivery must never fail the run */ } }
-    const dispatchPeerMentions = peerMentionsFromOutput(result.output);
+    const dispatchPeerMentions = peerMentionsFromOutput(actionableOutput);
     if (dispatchPeerMentions.length) { try { await processPeerMentions(card, agent, dispatchPeerMentions); } catch { /* question delivery must never fail the run */ } }
-    const dispatchChildren = childrenFromOutput(result.output);
+    const dispatchChildren = childrenFromOutput(actionableOutput);
     if (dispatchChildren.length) { try { await processChildSplits(card, agent, dispatchChildren); } catch { /* split failures are reported on the card itself */ } }
     if (structuredPlan?.mixed) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
@@ -3373,7 +3410,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     }
     let delegatedRows: Awaited<ReturnType<typeof createMessageDelegations>>;
     try {
-      delegatedRows = await createMessageDelegations(card, agent, structuredPlan ? structuredPlan.subroutineLines : delegationItems(result.output), { reviewerScope: 'final', sourceTaskRunId: options.taskRunId ?? null, sourceOutput: result.output });
+      delegatedRows = await createMessageDelegations(card, agent, structuredPlan ? structuredPlan.subroutineLines : delegationItems(actionableOutput), { reviewerScope: 'final', sourceTaskRunId: options.taskRunId ?? null, sourceOutput: result.output });
     } catch (error) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       return sendAgentFeedbackAndRequeue({
@@ -3446,7 +3483,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         result,
       });
     }
-    if (asksForConfirmationInsteadOfWorking(result.output)) {
+    if (normalizedResult.source === 'prose' && asksForConfirmationInsteadOfWorking(result.output)) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       return sendAgentFeedbackAndRequeue({
         card: lockedCard,
@@ -3460,21 +3497,21 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       });
     }
     const effectiveReviewerId = resolveEffectiveReviewerId(card, agent);
-    const needsInputQuestion = result.needsInput?.question ?? null;
+    const needsInputQuestion = normalizedResult.outcome === 'input_required' ? normalizedResult.question : null;
     const completionDecision = needsInputQuestion
       ? needsInputCompletionDecision(effectiveReviewerId)
       : dispatchCompletionDecision(result.output, effectiveReviewerId);
     // A client checkpoint overrides the normal completion: the card parks and
     // nothing downstream (review, done, cascade) happens until the client answers.
-    const checkpointRequest = await resolveClientCheckpointRequest(card, agent, checkpointFromOutput(result.output), needsInputQuestion);
-    const brainstormLaunch = checkpointRequest ? null : await resolveBrainstormRequest(card, agent, brainstormFromOutput(result.output));
+    const checkpointRequest = await resolveClientCheckpointRequest(card, agent, checkpointFromOutput(actionableOutput, normalizedResult.report), needsInputQuestion);
+    const brainstormLaunch = checkpointRequest ? null : await resolveBrainstormRequest(card, agent, brainstormFromOutput(actionableOutput));
     const parked = Boolean(checkpointRequest || brainstormLaunch);
     const needsHelpReview = parked ? false : completionDecision.needsHelpReview;
     // Blind review panel (§17): an author answering panel findings must
     // disposition every one of them (or escalate) before the run counts as a
     // fix; a malformed answer bounces like any other malformed report.
     const structuredReport = agentReportFromOutput(result.output);
-    const fixRound = parked || needsHelpReview ? null : await openFixRound(card);
+    const fixRound = parked || needsHelpReview || !['done', 'in_review'].includes(completionDecision.nextStatus) ? null : await openFixRound(card);
     const fixEscalation = fixRound ? structuredReport?.escalation ?? null : null;
     if (fixRound && !fixEscalation) {
       const errors = dispositionErrors(fixRound.findings, structuredReport?.dispositions ?? []);
@@ -3485,7 +3522,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     }
     // Human approval is the last gate (§17.6): guidance with no reviewer, and
     // any requiresApproval card with no reviewer, wait for the client instead of auto-closing.
-    const humanGate = !parked && !fixRound && !effectiveReviewerId && (completionDecision.needsHelpReview || (completionDecision.nextStatus === 'done' && card.requiresApproval === true));
+    const humanGate = !parked && !fixRound && !effectiveReviewerId && ((completionDecision.needsHelpReview && completionDecision.nextStatus !== 'blocked') || (completionDecision.nextStatus === 'done' && card.requiresApproval === true));
     const topLevelGuidanceAccepted = parked || humanGate ? false : completionDecision.topLevelGuidanceAccepted;
     const nextStatus: CardStatus = checkpointRequest ? 'waiting_on_client' : brainstormLaunch ? 'waiting_on_brainstorm' : fixRound || humanGate ? 'in_review' : completionDecision.nextStatus;
     const childBlock = parked ? null : await completionBlockedByChildren(card, nextStatus);
@@ -3506,7 +3543,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         retryCount: 0,
         nextRunAt: null,
         completedAt: effectiveNextStatus === 'done' ? new Date() : null,
-        lastError: needsInputQuestion && effectiveNextStatus === 'blocked' ? `agent_question_unanswerable: ${needsInputQuestion.slice(0, 500)}` : null,
+        lastError: effectiveNextStatus === 'blocked' ? normalizedResult.reason ?? `agent_question_unanswerable: ${needsInputQuestion?.slice(0, 500)}` : null,
         executionLockId: null,
         executionLockedByAgentId: null,
         executionLockedAt: null,
@@ -3529,7 +3566,6 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     }
     if (checkpointRequest) await recordClientCheckpoint(updated ?? card, agent, checkpointRequest);
     if (brainstormLaunch) await openBrainstormRound(updated ?? card, agent, brainstormLaunch);
-    await recordA2aArtifacts(card, agent.id, options.taskRunId, result.artifacts);
     if (effectiveNextStatus === 'needs_review') {
       await notify({ companyId: card.companyId, type: 'needs_review', title: `Help review requested: ${card.title}`, body: `${agent.name} requested reviewer guidance.`, entityType: 'card', entityId: card.id, cardId: card.id, agentId: agent.id });
     }
@@ -3546,7 +3582,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
             : 'Assignee requested guidance but has no reviewer or manager; the card waits for client approval.'
           : nextStatus === 'in_review'
             ? fixRound ? 'Dispatch completed; review findings answered, verification round queued.' : 'Dispatch completed; card moved to quality review.'
-            : 'Dispatch completed; card marked done.',
+            : nextStatus === 'done' ? 'Dispatch completed; card marked done.' : `Dispatch returned ${normalizedResult.outcome}; card remains ${effectiveNextStatus}.`,
       output: result.output,
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
@@ -3573,6 +3609,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await enqueueTaskRun(updated.id, 'review', 'queue');
     }
     if (effectiveNextStatus === 'done') await cascadeParentStatus(updated.parentCardId);
+    if (effectiveNextStatus === 'in_progress' && normalizedResult.outcome === 'progress' && !childBlock) await enqueueTaskRun(updated.id, 'dispatch', 'queue');
     return updated;
   } catch (error) {
     return handleDispatchFailure(lockedCard, agent, error, run.id, options.taskRunId);
@@ -3762,6 +3799,12 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       return latest;
     }
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+    const normalizedReview = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    if (normalizedReview.outcome === 'permission') {
+      const blocked = await parkPermissionBlockedResult(card.id, reviewer.id, run.id, normalizedReview.reason!, result.output);
+      await completeTaskRun(options.taskRunId, { status: 'failed', error: normalizedReview.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      return blocked;
+    }
     const explicitDecision = reportVerdictFromOutput(result.output) ?? explicitReviewDecision(result.output);
     if (!result.success && !explicitDecision) {
       throw new Error(adapterFailureMessage('review', result.output));

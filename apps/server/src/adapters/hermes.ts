@@ -160,7 +160,9 @@ ${webhookAuthLine}
 Body: ${webhookBodyExample}
 
 Prefer including a structured "report" field in the webhook body:
-"report": { "kind": "megacorps-report", "status": "completed", "summary": "...", "delegations": [{ "to": "<direct-report-slug>", "objective": "...", "effort": "small" }] }
+"report": { "kind": "megacorps-report", "version": 1, "status": "completed", "summary": "...", "workProducts": [{ "type": "report", "title": "Deliverable", "url": "<durable URL>" }] }
+Report states: completed | progress (legacy in_progress accepted) | input_required | failed | rejected. The report state controls completion even when the webhook status says done. Report JSON may also be returned directly in your output.
+For input_required, use request.kind permission | help | checkpoint and request.question; checkpoint accepts checkpointKind direction | interim (default direction), options and recommendation. A permission blocker cannot approve work. Keep delegations in report.delegations when needed.
 The legacy DELEGATE block still works but is deprecated.
 
 To ask another agent a question WITHOUT delegating work, add mentions to the report:

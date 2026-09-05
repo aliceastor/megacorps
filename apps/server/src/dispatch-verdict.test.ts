@@ -4,6 +4,27 @@ import { dispatchInternals } from './dispatch.ts';
 
 const { reviewDecision, resolveReviewVerdict } = dispatchInternals;
 
+test('final verdict precedes historical narrative while conflicting final verdicts need repair', () => {
+  assert.equal(reviewDecision('Previous run: REJECTED.\nFinal verdict: APPROVED.', 'quality'), 'approved');
+  assert.equal(reviewDecision('Previously cannot approve.\nFinal verdict: APPROVED.', 'quality'), 'approved');
+  assert.equal(resolveReviewVerdict('Final verdict: APPROVED.\nFinal verdict: REJECTED.', 'quality'), null);
+});
+
+for (const status of ['failed', 'rejected', 'input_required', 'progress']) {
+  test(`structured ${status} cannot complete or approve despite success prose`, () => {
+    const output = 'APPROVED. Work completed.\n' + JSON.stringify({ kind: 'megacorps-report', status, summary: 'Cannot finish', verdict: 'approved' });
+    assert.notEqual(dispatchInternals.dispatchCompletionDecision(output, null).nextStatus, 'done');
+    assert.notEqual(resolveReviewVerdict(output, 'quality'), 'approved');
+  });
+}
+
+test('permission blockers never become product approval', () => {
+  for (const output of ['Clone pending approval', 'Cannot complete: permission denied to clone repository', 'Waiting for approval to execute git clone']) {
+    assert.equal(dispatchInternals.dispatchCompletionDecision(output, null).nextStatus, 'blocked');
+    assert.notEqual(resolveReviewVerdict(output, 'quality'), 'approved');
+  }
+});
+
 test('reviewDecision returns null when no verdict is present in either mode', () => {
   const chatty = 'I looked over the changes and the general direction is quite interesting.';
   assert.equal(reviewDecision(chatty, 'quality'), null);

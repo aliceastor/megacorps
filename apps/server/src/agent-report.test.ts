@@ -38,6 +38,43 @@ test('agentReportSchema caps delegations at 8', () => {
 
 const validReportJson = JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'done the work' });
 
+test('legacy progress reports preserve work products and typed requests', () => {
+  const result = extractAgentReport(JSON.stringify({ kind: 'megacorps-report', status: 'in_progress', summary: 'Working',
+    request: { kind: 'permission', question: 'Allow the clone command?' },
+    workProducts: [{ type: 'pull_request', title: 'Change', url: 'https://github.com/example/repo/pull/1' }],
+  }));
+  assert.ok(result && 'report' in result);
+  assert.equal(result.report.status, 'progress');
+  assert.equal(result.report.version, 1);
+  assert.equal(result.report.request?.kind, 'permission');
+  assert.equal(result.report.workProducts?.[0]?.url, 'https://github.com/example/repo/pull/1');
+});
+
+test('report work products use existing field bounds and discard untrusted ownership fields', () => {
+  const parsed = agentReportSchema.parse({ kind: 'megacorps-report', status: 'completed', summary: 'Done', workProducts: [{ type: 'file', title: 'Deliverable', summary: 'x'.repeat(4000), branch: 'b'.repeat(240), cardId: 'foreign-card', companyId: 'foreign-company', agentId: 'foreign-agent', taskRunId: 'foreign-run' }] });
+  assert.equal(parsed.workProducts?.[0]?.summary?.length, 4000);
+  assert.equal('agentId' in (parsed.workProducts?.[0] ?? {}), false);
+  assert.equal(agentReportSchema.safeParse({ kind: 'megacorps-report', status: 'completed', summary: 'Done', workProducts: [{ title: '' }] }).success, false);
+});
+
+test('typed requests reject unknown kinds and retain checkpoint options', () => {
+  const parsed = agentReportSchema.parse({ kind: 'megacorps-report', status: 'input_required', summary: 'Choose direction', request: { kind: 'checkpoint', checkpointKind: 'interim', question: 'Accept draft direction?', options: ['Keep', 'Revise'], recommendation: 'Keep' } });
+  assert.equal(parsed.request?.kind, 'checkpoint');
+  assert.deepEqual(parsed.request && 'options' in parsed.request ? parsed.request.options : null, ['Keep', 'Revise']);
+  assert.equal(agentReportSchema.safeParse({ kind: 'megacorps-report', status: 'input_required', summary: 'Question', request: { kind: 'magic', question: 'Proceed?' } }).success, false);
+});
+
+for (const final of [
+  '{"kind":"megacorps-report","status":"wrong","summary":"invalid"}',
+  '{"kind":"megacorps-report","status":"completed",}',
+  '{"kind":"megacorps-report","status":"completed"',
+]) {
+  test(`a malformed final report never falls back to an earlier valid report: ${final}`, () => {
+    const result = extractAgentReport(`\`\`\`json\n${validReportJson}\n\`\`\`\n${final}`);
+    assert.ok(result && 'error' in result);
+  });
+}
+
 test('extractAgentReport reads a fenced json block', () => {
   const output = `Here is my report:\n\n\`\`\`json\n${validReportJson}\n\`\`\`\n\nThanks.`;
   const result = extractAgentReport(output);
