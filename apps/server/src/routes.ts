@@ -2779,7 +2779,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     });
     if (normalizedResult.outcome === 'permission' || normalizedResult.outcome === 'failed' || normalizedResult.outcome === 'rejected') requestedStatus = 'blocked';
     else if (normalizedResult.outcome === 'input_required') requestedStatus = 'needs_review';
-    else if (normalizedResult.source === 'report') requestedStatus = normalizedResult.outcome === 'progress' ? 'in_progress' : 'done';
+    else if (normalizedResult.source === 'report' && normalizedResult.outcome === 'progress') requestedStatus = 'in_progress';
+    // A completed report describes the agent's work, not completion of an
+    // explicitly requested external/client/brainstorm wait or other stop.
+    else if (normalizedResult.source === 'report' && ['done', 'in_review', 'in_progress'].includes(requestedStatus)) requestedStatus = requestedStatus === 'in_review' ? 'in_review' : 'done';
     const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, body.cardId), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
     // An agent token is scoped to its own company; a report against another
@@ -3023,7 +3026,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       executionLockExpiresAt: completesRun ? null : undefined,
       activeHeartbeatRunId: completesRun ? null : undefined,
       updatedAt: new Date(),
-    }).where(eq(kanbanCards.id, body.cardId)).returning();
+    }).where(and(
+      eq(kanbanCards.id, body.cardId),
+      ...(normalizedResult.outcome === 'permission' ? [drizzleSql`NOT EXISTS (SELECT 1 FROM ${approvals} WHERE ${approvals.cardId} = ${card.id} AND ${approvals.status} = 'pending' AND ${approvals.type} = 'task_review' AND ${approvals.payload}->>'humanGate' = 'true')`] : []),
+    )).returning();
+    if (!updatedCard && normalizedResult.outcome === 'permission') {
+      // The gate can be created after the initial read. Settle this callback
+      // without clearing or rewriting any current card/approval state.
+      const [parked] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1);
+      if (!parked) return reply.code(404).send({ error: 'card_not_found' });
+      const reason = normalizedResult.reason ?? 'agent_permission_blocked';
+      const heartbeatRunId = webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId;
+      if (actorAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actorAgentId));
+      if (heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: reason }).where(eq(heartbeatRuns.id, heartbeatRunId));
+      await completeTaskRun(taskRunId, { status: 'failed', error: reason, output: executionLog, costUsd: body.costUsd });
+      await db.insert(taskLogs).values({ cardId: card.id, agentId: actorAgentId, type: 'webhook', status: 'warning', message: 'Pending human gate preserved; late permission blocker was not applied to the card.', output: reason });
+      return { ok: true, cardId: card.id, taskRunId, newStatus: parked.columnStatus, preservedHumanGate: true };
+    }
     let externalWaitId: string | null = null;
     if (nextStatus === 'waiting_on_external') {
       const externalProduct = body.workProducts.find((product) => product.pullRequestUrl || product.url || product.commitSha || product.branch);

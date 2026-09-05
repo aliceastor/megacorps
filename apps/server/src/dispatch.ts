@@ -502,27 +502,11 @@ type ReviewDecision = 'approved' | 'revision_requested' | 'escalate';
 
 function explicitReviewDecision(output: string | null | undefined): ReviewDecision | null {
   const normalized = normalizeAgentResult({ output });
-  if (normalized.source !== 'prose' || normalized.outcome !== 'completed' || normalized.verdictError || /^\s*(?:final\s+)?(?:review\s+)?verdict\s*[:=]/im.test(output ?? '')) return normalized.verdict;
-  const text = output ?? '';
-  if (/\b(?:final\s+)?(?:review\s+)?verdict\s*[:=]\s*(?:reject(?:ed)?|revision[_ -]?requested)\b|\breject(?:ed)?\W{0,30}revision[_ -]?requested\b|\bnot\s+approved\b|\bcannot\s+approve\b/i.test(text)) {
-    return 'revision_requested';
-  }
-  if (/\b(?:final\s+)?(?:review\s+)?verdict\s*[:=]\s*escalate\b|\bescalate\b(?:\s*[:=]|\W{1,16}(?:manager|boss|higher|review|decision)\b)/i.test(text)) {
-    return 'escalate';
-  }
-  if (/\b(?:final\s+)?(?:review\s+)?verdict\s*[:=]\s*(?:approved?|pass|done)\b|\bapproved?\W{0,16}(?:done|complete(?:d)?|resolved)\b|["']status["']\s*:\s*["']done["']/i.test(text)) {
-    return 'approved';
-  }
-  return null;
+  return normalized.verdictExplicit ? normalized.verdict : null;
 }
 
 function reviewDecision(output: string, _mode: 'quality' | 'help'): ReviewDecision | null {
   return normalizeAgentResult({ output }).verdict;
-}
-
-function reportVerdictFromOutput(output: string | null | undefined): ReviewDecision | null {
-  const normalized = normalizeAgentResult({ output });
-  return normalized.source === 'report' ? normalized.verdict : null;
 }
 
 function resolveReviewVerdict(output: string | null | undefined, mode: 'quality' | 'help'): ReviewDecision | null {
@@ -3045,7 +3029,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     if (result.success) await rememberTaskAdapterSession(card, reviewer, 'message_review', result, taskRun.id);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
-    const explicitDecision = reportVerdictFromOutput(result.output) ?? explicitReviewDecision(result.output);
+    const explicitDecision = explicitReviewDecision(result.output);
     const decision = explicitDecision ?? reviewDecision(result.output, report.reviewerScope === 'final' ? 'quality' : 'help');
     if (!result.success && !explicitDecision) {
       const errorMessage = result.output || 'message_review_failed';
@@ -3805,7 +3789,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       await completeTaskRun(options.taskRunId, { status: 'failed', error: normalizedReview.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       return blocked;
     }
-    const explicitDecision = reportVerdictFromOutput(result.output) ?? explicitReviewDecision(result.output);
+    const explicitDecision = normalizedReview.verdictExplicit ? normalizedReview.verdict : null;
     if (!result.success && !explicitDecision) {
       throw new Error(adapterFailureMessage('review', result.output));
     }
@@ -3822,13 +3806,13 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
         result,
       });
     }
-    const decision = explicitDecision ?? reviewDecision(result.output, reviewMode);
+    const decision = normalizedReview.verdict;
     if (!decision) {
       return sendAgentFeedbackAndRequeue({
         card,
         agent: reviewer,
         kind: 'review',
-        message: REVIEW_VERDICT_MISSING_MESSAGE,
+        message: normalizedReview.reason ?? normalizedReview.verdictError ?? REVIEW_VERDICT_MISSING_MESSAGE,
         runId: run.id,
         taskRunId: options.taskRunId,
         output: result.output,

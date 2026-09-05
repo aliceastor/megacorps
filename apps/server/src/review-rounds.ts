@@ -18,7 +18,7 @@ import { publishLiveEvent } from './live.ts';
 import { notify } from './notifications.ts';
 import { agentRuntimeAvailable, createRuntimeAvailabilityCache } from './runner-availability.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
-import { extractAgentReport } from './agent-report.ts';
+import { normalizeAgentResult } from './agent-results.ts';
 import { recordCardAction } from './card-actions.ts';
 import { REVIEW_SCORE_RUBRIC } from './agent-cv.ts';
 import { REVIEWER_PLAYBOOK } from './role-playbooks.ts';
@@ -54,11 +54,6 @@ function stringList(value: unknown): string[] {
 
 function stringOf(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
-}
-
-function agentReportOf(output: string | null | undefined): AgentReport | null {
-  const extraction = extractAgentReport(output);
-  return extraction && 'report' in extraction ? extraction.report : null;
 }
 
 function errorCode(message: string): string {
@@ -516,8 +511,14 @@ export async function reviewPanelSlot(cardId: string, options: { taskRunId?: str
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     if (result.success) await rememberTaskAdapterSession(card, reviewer, 'panel_review', result, taskRun.id);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
-    const report = agentReportOf(result.output);
-    const verdict: ReviewVerdict | null = report?.verdict ?? dispatchInternals.resolveReviewVerdict(result.output, 'quality');
+    const normalized = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    if (normalized.outcome !== 'completed') {
+      await requeueSlot({ card, round, slot, reviewer, taskRun, heartbeatRunId: run.id, output: result.output,
+        error: normalized.reason ?? `panel_review_not_complete: reported ${normalized.outcome}; finish the review before submitting its verdict.`, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      return card;
+    }
+    const report = normalized.report;
+    const verdict = normalized.verdict;
     if (!result.success && !verdict) throw new Error(dispatchInternals.adapterFailureMessage('review', result.output));
     const submitted = await submitSlot({ card, round, slot, reviewer, taskRun, heartbeatRunId: run.id, output: result.output, report, verdict, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!submitted.ok) {
@@ -555,10 +556,13 @@ export async function completePanelReviewFromWebhook(taskRunId: string, input: {
   const [reviewer] = taskRun.agentId ? await db.select().from(agents).where(and(eq(agents.id, taskRun.agentId), isNull(agents.deletedAt))).limit(1) : [];
   if (!reviewer) throw new Error('reviewer_not_found');
   const output = [input.summary, input.output].filter(Boolean).join('\n\n') || null;
-  const report = input.report ?? agentReportOf(output);
-  const verdict: ReviewVerdict | null = report?.verdict
-    ?? dispatchInternals.resolveReviewVerdict(output, 'quality')
-    ?? (input.status === 'done' || input.status === 'in_review' ? 'approved' : input.status === 'needs_review' || input.status === 'blocked' ? 'escalate' : 'revision_requested');
+  const normalized = normalizeAgentResult({ output, report: input.report ?? undefined });
+  if (normalized.outcome !== 'completed') throw new Error(normalized.reason ?? `panel_review_not_complete: reported ${normalized.outcome}; finish the review before submitting its verdict.`);
+  if (!['done', 'in_review'].includes(input.status)) throw new Error(`panel_review_not_complete: callback status is ${input.status}.`);
+  const report = normalized.report;
+  // Preserve status-only legacy callbacks, but never let their fallback repair
+  // a malformed/unfinished report or conflicting explicit verdicts.
+  const verdict = normalized.verdict ?? (normalized.source === 'prose' && !normalized.verdictError ? 'approved' : null);
   const submitted = await submitSlot({ card, round, slot, reviewer, taskRun, heartbeatRunId: taskRun.heartbeatRunId, output, report, verdict, costUsd: input.costUsd });
   if (!submitted.ok) throw new Error(submitted.error);
   await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));

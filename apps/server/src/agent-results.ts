@@ -13,6 +13,7 @@ export type AgentResult = {
   reason: string | null;
   question: string | null;
   verdict: Verdict | null;
+  verdictExplicit: boolean;
   verdictError: string | null;
   workProducts: ReportedWorkProduct[];
 };
@@ -21,17 +22,20 @@ function permissionBlocker(text: string): boolean {
   return /\bpermission(?:s)?\s+(?:denied|required|needed)|\b(?:approval|authorization)\s+(?:required|pending|needed)|\b(?:pending|awaiting|waiting\s+for|requires?)\s+(?:tool\s+|command\s+|execution\s+)?(?:approval|permission|authorization)\b|\b(?:sandbox|security policy)\b[^\n]{0,80}\b(?:blocked|denied)\b/i.test(text);
 }
 
-function legacyVerdict(text: string): { verdict: Verdict | null; error: string | null } {
+function legacyVerdict(text: string): { verdict: Verdict | null; error: string | null; explicit: boolean } {
   const lines = [...text.matchAll(/^\s*(?:[-*#]+\s*)?(final\s+)?(?:review\s+)?verdict\s*[:=]\s*(approved?|pass|done|reject(?:ed)?|revision[_ -]?requested|escalate)\b/gim)];
   const finals = lines.filter((line) => line[1]);
   const current = finals.length ? finals : lines;
   const decisions = new Set(current.map((line): Verdict => /^(?:approve|pass|done)/i.test(line[2]!) ? 'approved' : /^escalate/i.test(line[2]!) ? 'escalate' : 'revision_requested'));
-  if (decisions.size > 1) return { verdict: null, error: 'review_verdict_conflicting: return one current final verdict' };
-  if (decisions.size === 1) return { verdict: [...decisions][0]!, error: null };
-  if (/\b(escalate|needs[_ -]?higher|needs[_ -]?boss|needs[_ -]?manager|cannot[_ -]?resolve|unable[_ -]?to[_ -]?resolve)\b/i.test(text)) return { verdict: 'escalate', error: null };
-  if (/\b(revision[_ -]?requested|request[_ -]?revision|needs[_ -]?rework|redo|retry|reject|rejected|fail|failed|blocked|not\s+approved|not\s+acceptable|cannot\s+approve)\b/i.test(text)) return { verdict: 'revision_requested', error: null };
-  if (/\b(pass|approve|approved|done|complete|completed|resolved)\b/i.test(text) || /["']status["']\s*:\s*["']done["']/i.test(text)) return { verdict: 'approved', error: null };
-  return { verdict: null, error: null };
+  if (decisions.size > 1) return { verdict: null, error: 'review_verdict_conflicting: return one current final verdict', explicit: true };
+  if (decisions.size === 1) return { verdict: [...decisions][0]!, error: null, explicit: true };
+  // Explicitness controls whether a valid legacy review can survive a nonzero
+  // adapter exit; it must never select a different verdict from this parser.
+  const explicit = /\breject(?:ed)?\W{0,30}revision[_ -]?requested\b|\bnot\s+approved\b|\bcannot\s+approve\b|\bescalate\b(?:\s*[:=]|\W{1,16}(?:manager|boss|higher|review|decision)\b)|\bapproved?\W{0,16}(?:done|complete(?:d)?|resolved)\b|["']status["']\s*:\s*["']done["']/i.test(text);
+  if (/\b(escalate|needs[_ -]?higher|needs[_ -]?boss|needs[_ -]?manager|cannot[_ -]?resolve|unable[_ -]?to[_ -]?resolve)\b/i.test(text)) return { verdict: 'escalate', error: null, explicit };
+  if (/\b(revision[_ -]?requested|request[_ -]?revision|needs[_ -]?rework|redo|retry|reject|rejected|fail|failed|blocked|not\s+approved|not\s+acceptable|cannot\s+approve)\b/i.test(text)) return { verdict: 'revision_requested', error: null, explicit };
+  if (/\b(pass|approve|approved|done|complete|completed|resolved)\b/i.test(text) || /["']status["']\s*:\s*["']done["']/i.test(text)) return { verdict: 'approved', error: null, explicit };
+  return { verdict: null, error: null, explicit: false };
 }
 
 function productKey(product: ReportedWorkProduct): string {
@@ -46,7 +50,7 @@ export function normalizeAgentResult(input: { output?: string | null; report?: u
   const explicit = input.report === undefined ? null : agentReportSchema.safeParse(input.report);
   const error = embedded && 'error' in embedded ? embedded.error : explicit && !explicit.success ? `report_schema_invalid: ${explicit.error.message.slice(0, 500)}` : null;
   const report = explicit?.success ? explicit.data : embedded && 'report' in embedded ? embedded.report : null;
-  const base: AgentResult = { source: report ? 'report' : 'prose', outcome: 'completed', report, reason: null, question: null, verdict: null, verdictError: null, workProducts: [] };
+  const base: AgentResult = { source: report ? 'report' : 'prose', outcome: 'completed', report, reason: null, question: null, verdict: null, verdictExplicit: false, verdictError: null, workProducts: [] };
   if (error) return { ...base, source: 'invalid', outcome: 'invalid', reason: `agent_report_invalid: ${error}. Return one corrected megacorps-report.` };
   if (explicit?.success && embedded && 'report' in embedded && (explicit.data.status !== embedded.report.status || (explicit.data.verdict && embedded.report.verdict && explicit.data.verdict !== embedded.report.verdict))) {
     return { ...base, source: 'invalid', outcome: 'invalid', reason: 'agent_report_invalid: conflicting current reports. Return one consistent status and verdict.' };
@@ -59,7 +63,7 @@ export function normalizeAgentResult(input: { output?: string | null; report?: u
     report.checkpoint = { ...checkpoint, kind: checkpointKind };
   }
   if (report?.status === 'failed' || report?.status === 'rejected') {
-    return { ...base, outcome: report.status, reason: `agent_report_${report.status}: ${report.summary}`, verdict: 'revision_requested' };
+    return { ...base, outcome: report.status, reason: `agent_report_${report.status}: ${report.summary}`, verdict: 'revision_requested', verdictExplicit: true };
   }
   if (report?.request?.kind === 'permission' || ((!report || report.status === 'input_required') && permissionBlocker(report?.summary ?? text))) {
     return { ...base, outcome: 'permission', reason: `agent_permission_blocked: ${report?.request?.question ?? report?.summary ?? text.trim().slice(0, 2000)}` };
@@ -68,9 +72,9 @@ export function normalizeAgentResult(input: { output?: string | null; report?: u
     return { ...base, outcome: 'input_required', question: report?.request?.question ?? report?.checkpoint?.question ?? input.needsInput?.question ?? report?.questions?.join('\n') ?? report?.summary ?? text, reason: report?.summary ?? null };
   }
   if (report?.status === 'progress') return { ...base, outcome: 'progress' };
-  if (report) return { ...base, verdict: report.verdict ?? null };
+  if (report) return { ...base, verdict: report.verdict ?? null, verdictExplicit: Boolean(report.verdict) };
   const parsedVerdict = legacyVerdict(text);
-  return { ...base, verdict: parsedVerdict.verdict, verdictError: parsedVerdict.error };
+  return { ...base, verdict: parsedVerdict.verdict, verdictExplicit: parsedVerdict.explicit, verdictError: parsedVerdict.error };
 }
 
 /** Persist validated content using only the current server-resolved ownership. */

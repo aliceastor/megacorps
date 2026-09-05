@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
-import { agents, approvals, cardComments, heartbeatRuns, kanbanCards, taskRuns, workProducts } from './db/schema.ts';
+import { agents, approvals, cardComments, externalWaits, heartbeatRuns, kanbanCards, reviewFindings, reviewRounds, taskRuns, workProducts } from './db/schema.ts';
 import { dispatchCard, reviewCard, runMessageDelegation } from './dispatch.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { memoryDb } from './test-support/memory-db.ts';
@@ -10,6 +10,7 @@ import { registerRoutes } from './routes.ts';
 import { db } from './db/client.ts';
 import { normalizeAgentResult } from './agent-results.ts';
 import { apiHelpCatalog } from './api-help.ts';
+import { reviewPanelSlot } from './review-rounds.ts';
 
 function fixture(t: TestContext) {
   const card: any = { id: randomUUID(), companyId: randomUUID(), title: 'Build change', body: 'Implement the requested change.', assigneeId: randomUUID(), reviewerId: null, projectId: null, columnStatus: 'todo', requiresApproval: false, deletedAt: null, tags: [], dependencyCardIds: [], retryCount: 0 };
@@ -34,6 +35,122 @@ function fixture(t: TestContext) {
 
 const report = (status: string, extra = {}) => ({ kind: 'megacorps-report', status, summary: 'Current result', ...extra });
 const product = { type: 'pull_request', title: 'Change', url: 'https://github.com/example/repo/pull/1' };
+
+test('completed implementation report preserves an explicit external wait and its evidence', async (t) => {
+  const { card, run, state } = fixture(t);
+  const send = await webhook(t);
+  const response = await send({ cardId: card.id, taskRunId: run.id, status: 'waiting_on_external', summary: 'CI running', pollIntervalSeconds: 60, report: report('completed', { workProducts: [product] }) });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(card.columnStatus, 'waiting_on_external');
+  assert.equal(card.completedAt, null);
+  assert.equal(state.rows(externalWaits).length, 1);
+  assert.equal(state.rows(externalWaits)[0]?.pollIntervalSeconds, 60);
+  assert.equal(state.rows(externalWaits)[0]?.externalUrl, product.url);
+  assert.equal(state.rows(workProducts).length, 1);
+});
+
+for (const duringWrite of [false, true]) {
+  test(`permission webhook preserves a human gate ${duringWrite ? 'created between read and write' : 'already pending'}`, async (t) => {
+    const { card, run, state } = fixture(t);
+    card.columnStatus = 'in_review'; card.executionLog = 'Human is deciding';
+    const before = structuredClone(card);
+    const approval = { id: randomUUID(), cardId: card.id, type: 'task_review', status: 'pending', payload: { humanGate: true } };
+    if (duringWrite) {
+      const update = db.update.bind(db);
+      t.mock.method(db, 'update', ((table: any) => {
+        const query = update(table);
+        const set = query.set.bind(query);
+        query.set = ((values: any) => {
+          if (table === kanbanCards && values.columnStatus === 'blocked') state.rows(approvals).push(approval);
+          return set(values);
+        }) as typeof query.set;
+        return query;
+      }) as typeof db.update);
+    } else state.rows(approvals).push(approval);
+    const send = await webhook(t);
+    const response = await send({ cardId: card.id, taskRunId: run.id, status: 'done', output: 'Clone pending approval' });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.json().newStatus, 'in_review');
+    assert.deepEqual(card, before);
+    assert.deepEqual(state.rows(approvals), [approval]);
+    assert.notEqual(run.status, 'success');
+  });
+}
+
+for (const prefix of ['- ', '### ']) {
+  test(`actual review honors ${JSON.stringify(prefix)} final verdict over historical rejection`, async (t) => {
+    const { card, agent, run } = fixture(t);
+    card.assigneeId = 'author'; card.reviewerId = agent.id; card.columnStatus = 'in_review'; run.kind = 'review';
+    t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: `Previously cannot approve.\n${prefix}Final verdict: APPROVED.`, sessionId: 's', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
+    await reviewCard(card.id, { taskRunId: run.id });
+    assert.equal(card.columnStatus, 'done');
+  });
+}
+
+test('actual review requests repair for conflicting decorated final verdicts', async (t) => {
+  const { card, agent, run, state } = fixture(t);
+  card.assigneeId = 'author'; card.reviewerId = agent.id; card.columnStatus = 'in_review'; run.kind = 'review';
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: '- Final verdict: APPROVED.\n### Final verdict: REJECTED.', sessionId: 's', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
+  await reviewCard(card.id, { taskRunId: run.id });
+  assert.equal(card.columnStatus, 'in_review');
+  assert.match(card.lastError, /review_verdict/);
+  assert.ok(state.rows(cardComments).some((comment) => /corrected response/.test(comment.body)));
+});
+
+function panelFixture(t: TestContext, roundKind: 'panel' | 'verify') {
+  const data = fixture(t);
+  const { card, agent, run, state } = data;
+  card.assigneeId = 'author'; card.reviewerId = agent.id; card.columnStatus = 'in_review'; run.kind = 'panel_review';
+  const round = { id: randomUUID(), cardId: card.id, companyId: card.companyId, status: 'open', kind: roundKind, round: 1, reviewerIds: [agent.id, 'other-reviewer'], metadata: {} };
+  const slot = { id: randomUUID(), cardId: card.id, action: 'review_slot', metadata: { roundId: round.id, reviewerId: agent.id, done: false } };
+  (run as any).messageCommentId = slot.id;
+  state.rows(reviewRounds).push(round);
+  state.rows(cardComments).push(slot, { id: randomUUID(), cardId: card.id, action: 'review_slot', metadata: { roundId: round.id, reviewerId: 'other-reviewer', done: false } });
+  // This fixture has no prior findings to replace; a second unfinished slot
+  // keeps successful submissions from closing the round during the assertion.
+  t.mock.method(db, 'delete', ((table: any) => ({ where: async () => { assert.equal(table, reviewFindings); assert.equal(state.rows(table).length, 0); return []; } })) as unknown as typeof db.delete);
+  return { ...data, round, slot };
+}
+
+for (const via of ['returned', 'webhook'] as const) for (const roundKind of ['panel', 'verify'] as const) for (const status of ['failed', 'rejected', 'progress', 'input_required', 'permission', 'invalid']) {
+  test(`${via} ${roundKind} review cannot submit ${status} work with an approved verdict`, async (t) => {
+    const { card, agent, run, round, slot } = panelFixture(t, roundKind);
+    const data = report(status === 'permission' ? 'input_required' : status === 'invalid' ? 'bogus' : status, { verdict: 'approved', score: 8, findings: [], verifications: [{ findingKey: 'K1', status: 'verified' }], ...(status === 'permission' ? { request: { kind: 'permission', question: 'Allow clone?' } } : {}) });
+    if (via === 'returned') {
+      let called = false;
+      t.mock.method(getAdapter('webhook'), 'dispatch', async () => { called = true; return { success: true, output: JSON.stringify(data), sessionId: 's', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }; });
+      await reviewPanelSlot(card.id, { taskRunId: run.id });
+      assert.equal(called, true, 'fixture must reach the actual adapter result consumer');
+      assert.equal(run.status, 'failed');
+    } else {
+      const send = await webhook(t);
+      const response = await send({ cardId: card.id, taskRunId: run.id, status: 'done', report: data });
+      assert.ok(response.statusCode >= 400 && response.statusCode < 500, response.body);
+      assert.equal(run.status, 'running');
+    }
+    assert.notEqual((round.metadata as any).verdicts?.[agent.id], 'approved');
+    assert.equal(slot.metadata.done, false);
+    assert.equal(card.columnStatus, 'in_review');
+  });
+}
+
+for (const via of ['returned', 'webhook'] as const) for (const roundKind of ['panel', 'verify'] as const) {
+  test(`${via} ${roundKind} review still submits a valid completed report`, async (t) => {
+    const { card, agent, run, round, slot } = panelFixture(t, roundKind);
+    const data = report('completed', { verdict: 'approved', score: 8, findings: [], verifications: [{ findingKey: 'K1', status: 'verified' }] });
+    if (via === 'returned') {
+      t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: JSON.stringify(data), sessionId: 's', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
+      await reviewPanelSlot(card.id, { taskRunId: run.id });
+    } else {
+      const send = await webhook(t);
+      const response = await send({ cardId: card.id, taskRunId: run.id, status: 'done', report: data });
+      assert.equal(response.statusCode, 200, response.body);
+    }
+    assert.equal((round.metadata as any).verdicts?.[agent.id], 'approved');
+    assert.equal(slot.metadata.done, true);
+    assert.equal(run.status, 'success');
+  });
+}
 const unsafeOutputs = [
   ['failed', JSON.stringify(report('failed')), 'failure'],
   ['permission', 'Cannot complete: clone pending approval', 'blocked'],
