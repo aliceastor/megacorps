@@ -54,3 +54,47 @@ for (const via of ['dispatch', 'webhook', 'runner'] as const) for (const role of
   }
   assert.ok(card.protocolRepairState?.dispatch?.failures || card.runRetryState?.dispatch?.failures, 'structural correction uses a bounded repair budget: ' + JSON.stringify({lastError: card.lastError, retryCount: card.retryCount, repair:card.protocolRepairState, retries:card.runRetryState}));
 });
+
+for (const requiresApproval of [true, false]) test(`ownerless accepted-child cascade routes goal assessment without bypassing client approval (${requiresApproval})`, async t => {
+  const parent: any = { id: 'parent', companyId: 'c', projectId: null, title: 'Goal', assigneeId: null, reviewerId: null, columnStatus: 'in_progress', requiresApproval, requiredChildPolicy: 'all_required_accepted' };
+  const child: any = { id: 'child', parentCardId: parent.id, companyId: 'c', projectId: null, title: 'Findings', assigneeId: 'worker', columnStatus: 'done' };
+  const { workProducts } = await import('./db/schema.ts');
+  const state = memoryDb(t, [[kanbanCards, [parent, child]], [workProducts, [{ id: 'product', cardId: child.id, companyId: 'c', projectId: null, agentId: 'worker', type: 'report', summary: 'Verified findings' }]]]);
+  const { readyCompany } = await import('./test-support/ready-company.ts');
+  const { bossId } = readyCompany(state, 'c');
+  const { captureDeliveryAcceptance } = await import('./delivery-acceptance.ts');
+  const { cascadeParentStatus } = await import('./dispatch.ts');
+  child.deliveryAcceptance = await captureDeliveryAcceptance(child); assert.ok(child.deliveryAcceptance);
+  await cascadeParentStatus(parent.id);
+  assert.notEqual(parent.columnStatus, 'done');
+  assert.equal(parent.assigneeId, bossId, 'normal structural Boss routing supplies goal assessment');
+  assert.equal(parent.requiresApproval, requiresApproval);
+  assert.equal(state.rows(taskRuns).filter(row => row.cardId === parent.id && row.kind === 'dispatch' && row.status === 'queued').length, 1);
+  assert.equal(state.rows(approvals).length, 0, 'owner routing does not invent an early client gate');
+});
+
+for (const interruption of ['unavailable_boss', 'concurrent_human_gate'] as const) test(`ownerless cascade preserves ${interruption}`, async t => {
+  const parent: any = { id: 'parent', companyId: 'c', projectId: null, title: 'Goal', assigneeId: null, reviewerId: null, columnStatus: 'in_progress', requiresApproval: true, requiredChildPolicy: 'all_required_accepted' };
+  const child: any = { id: 'child', parentCardId: parent.id, companyId: 'c', projectId: null, title: 'Report', assigneeId: 'worker', columnStatus: 'done' };
+  const { workProducts } = await import('./db/schema.ts');
+  const state = memoryDb(t, [[kanbanCards, [parent, child]], [workProducts, [{ id: 'p', companyId: 'c', projectId: null, cardId: child.id, agentId: 'worker', type: 'report', summary: 'Accepted findings' }]]]);
+  const { readyCompany } = await import('./test-support/ready-company.ts');
+  const { bossId } = readyCompany(state, 'c');
+  const { captureDeliveryAcceptance } = await import('./delivery-acceptance.ts');
+  child.deliveryAcceptance = await captureDeliveryAcceptance(child); assert.ok(child.deliveryAcceptance);
+  if (interruption === 'unavailable_boss') state.rows(agents).find(row => row.id === bossId)!.isBusy = true;
+  else {
+    const { db } = await import('./db/client.ts');
+    const update = db.update.bind(db);
+    t.mock.method(db, 'update', ((table: any) => ({ set(values: any) {
+      if (table === kanbanCards && (values.assigneeId || values.columnStatus === 'done')) state.rows(approvals).push({ id: 'human', cardId: parent.id, type: 'task_review', status: 'pending', payload: { humanGate: true } });
+      return update(table).set(values);
+    } })) as any);
+  }
+  const { cascadeParentStatus } = await import('./dispatch.ts');
+  await cascadeParentStatus(parent.id);
+  assert.notEqual(parent.columnStatus, 'done'); assert.equal(parent.assigneeId, null);
+  assert.equal(state.rows(taskRuns).filter(row => row.cardId === parent.id && row.status === 'queued').length, 0);
+  if (interruption === 'unavailable_boss') { assert.equal(parent.columnStatus, 'blocked'); assert.match(parent.lastError, /Boss|owner/); }
+  else { assert.equal(parent.columnStatus, 'in_progress'); assert.equal(state.rows(approvals)[0]?.status, 'pending'); }
+});

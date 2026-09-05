@@ -2539,40 +2539,31 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
   if (!ready) return;
   const evidence = await acceptedDescendantEvidence(parent);
   if (!evidence.ready) return;
-  // Integration first (company pipeline design §7): the children's output goes
-  // back to the parent's owner, who integrates it into the parent's own
-  // deliverable; only that deliverable goes to the reviewer. Without an owner
-  // there is nobody to integrate, so the card goes straight to review/done.
-  const integratorId = parent.assigneeId ?? null;
+  // Accepted children return to an owner for goal assessment. Missing ownership
+  // never grants completion authority; use the same structural routing as dispatch.
+  const integratorId = parent.assigneeId ?? (await selectBestAgent(parent))?.id ?? null;
   if (!integratorId) {
-    const fallbackReviewerId = parent.reviewerId ?? null;
-    const nextStatus = fallbackReviewerId ? 'in_review' : 'done';
-    const [updated] = await db.update(kanbanCards).set({
-      columnStatus: nextStatus,
-      rollupStatus: nextStatus === 'in_review' ? 'ready_for_review' : 'done',
-      completedAt: nextStatus === 'done' ? new Date() : null,
-      updatedAt: new Date(),
-    }).where(eq(kanbanCards.id, parentCardId)).returning();
-    if (parent.columnStatus !== nextStatus) await addStageLog(parentCardId, fallbackReviewerId, parent.columnStatus ?? null, nextStatus, 'cascade');
-    await addTaskLog({ cardId: parentCardId, agentId: fallbackReviewerId, type: 'cascade', status: 'success', message: `Child completion policy ${policy} satisfied; parent has no owner to integrate, so it moved to ${nextStatus}.` });
-    if (!updated) throw new Error('parent_update_failed');
-    if (fallbackReviewerId) {
-      await createPendingApproval(updated, null, 'Child work is complete and ready for review.');
-      await enqueueTaskRun(parentCardId, 'review', 'queue');
-    } else {
-      await sealDeliveryAcceptance(updated.id);
-    await cascadeParentStatus(updated.parentCardId);
+    const reason = parent.parentCardId
+      ? 'Accepted child work awaits an available owner in the parent structural delegation scope. Restore its department/employee availability or assign an authorized owner.'
+      : 'Accepted child work awaits the company Boss for goal assessment. Restore Boss availability/runtime/budget or assign an authorized owner.';
+    const updated = await guardedCompletionUpdate(parent, { columnStatus: 'blocked', rollupStatus: 'blocked', completedAt: null, lastError: reason, updatedAt: new Date() });
+    if (updated) {
+      await addTaskLog({ cardId: parentCardId, type: 'cascade', status: 'queued', message: reason });
+      await addCardMessage({ cardId: parentCardId, authorType: 'system', action: 'parent_awaiting_owner', body: reason });
     }
     return;
   }
   const [integrator] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, integratorId)).limit(1);
-  const [updated] = await db.update(kanbanCards).set({
+  const updated = await guardedCompletionUpdate(parent, {
+    assigneeId: integratorId,
     columnStatus: 'in_progress',
+    lastError: null,
     rollupStatus: 'integrating',
     nextRunAt: null,
     completedAt: null,
     updatedAt: new Date(),
-  }).where(eq(kanbanCards.id, parentCardId)).returning();
+  });
+  if (!updated) return;
   if (parent.columnStatus !== 'in_progress') await addStageLog(parentCardId, integratorId, parent.columnStatus ?? null, 'in_progress', 'cascade');
   await addTaskLog({ cardId: parentCardId, agentId: integratorId, type: 'cascade', status: 'success', message: `Child completion policy ${policy} satisfied; parent returned to ${integrator?.name ?? 'its owner'} for integration before review.` });
   await addCardMessage({
@@ -2592,7 +2583,6 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
     entityId: parentCardId,
     details: { policy, childCount: children.length, round: parent.splitRound },
   });
-  if (!updated) throw new Error('parent_update_failed');
   publishLiveEvent({ type: 'card.updated', companyId: parent.companyId, entityType: 'card', entityId: parentCardId, cardId: parentCardId, projectId: parent.projectId, action: 'parent.ready_for_integration' });
   await enqueueTaskRun(parentCardId, 'dispatch', 'queue');
 }
