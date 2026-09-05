@@ -49,6 +49,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Install browser for responsive UI tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Responsive UI tests
+        run: npm run test:e2e -w @megacorps/web
+
   build:
     runs-on: ubuntu-latest
     needs: test

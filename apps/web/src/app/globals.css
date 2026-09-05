@@ -5661,15 +5661,28 @@ button.agent-node-card {
   .app-frame > main { margin-left: 0; height: auto; overflow: visible; }
   .sidebar {
     position: relative;
+    inset: auto;
     width: 100%;
     height: auto;
     overflow: visible;
     border-right: 0;
     border-bottom: 1px solid var(--border);
-    grid-template-rows: auto auto auto;
+    grid-template-rows: auto;
   }
-  .sidebar-head { justify-content: space-between; }
-  .sidebar-compact .brand-lockup { display: flex; }
+  .sidebar-head,
+  .sidebar-compact .sidebar-head {
+    grid-template-columns: minmax(0, 1fr) auto;
+    justify-items: stretch;
+  }
+  .sidebar-compact .brand-lockup {
+    display: flex;
+    width: auto;
+    justify-content: flex-start;
+  }
+  .sidebar-toggle,
+  .sidebar-compact .sidebar-toggle { width: 44px; height: 44px; }
+  .mobile-menu-closed .sidebar-body,
+  .mobile-menu-closed .sidebar-footer { display: none; }
   .sidebar-compact .nav-link { justify-content: flex-start; }
   .nav-link.sub-nav-link,
   .sidebar-compact .nav-link.sub-nav-link {
@@ -5949,7 +5962,6 @@ body {
 }
 
 .sidebar {
-  position: fixed;
   border-right-color: var(--border);
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--card) 90%, transparent), color-mix(in srgb, var(--background) 82%, transparent));

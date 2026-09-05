@@ -70,9 +70,9 @@ function DropdownItem({ onClick, children, active }: { onClick: () => void; chil
   </button>;
 }
 
-function SidebarLink({ item, label, open, pathname }: { item: NavItem; label: string; open: boolean; pathname: string }) {
+function SidebarLink({ item, label, open, pathname, onSelect }: { item: NavItem; label: string; open: boolean; pathname: string; onSelect: () => void }) {
   const active = item.exact ? pathname === item.href : pathname === item.href || pathname.startsWith(`${item.href}/`);
-  return <Link className={`nav-link ${item.level ? 'sub-nav-link' : ''} ${active ? 'active' : ''}`} href={item.href} title={label} aria-label={label}>
+  return <Link className={`nav-link ${item.level ? 'sub-nav-link' : ''} ${active ? 'active' : ''}`} href={item.href} title={label} aria-label={label} onClick={onSelect}>
     <item.icon size={18} />
     {open && <span>{label}</span>}
   </Link>;
@@ -83,12 +83,16 @@ function titleKey(title: string): string {
 }
 
 export function AppShell({ title, children }: { title: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(readSidebarOpen);
+  const [desktopOpen, setDesktopOpen] = useState(true);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [isNarrow, setIsNarrow] = useState(false);
+  const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+  const open = isNarrow ? mobileOpen : desktopOpen;
   const [userOpen, setUserOpen] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const [isDark, setIsDark] = useState(true);
-  const [userEmail, setUserEmail] = useState(() => readBrowserStorage(USER_EMAIL_STORAGE_KEY));
-  const [userRole, setUserRole] = useState(() => readBrowserStorage(USER_ROLE_STORAGE_KEY));
+  const [userEmail, setUserEmail] = useState('');
+  const [userRole, setUserRole] = useState('');
   const pathname = usePathname();
   const { locale, setLocale, t } = useLocale();
   const translatedTitle = t(titleKey(title));
@@ -96,6 +100,20 @@ export function AppShell({ title, children }: { title: string; children: React.R
 
   useEffect(() => { setIsDark(document.documentElement.dataset.theme === 'dark'); }, []);
   useEffect(() => {
+    setDesktopOpen(readSidebarOpen());
+    const query = window.matchMedia('(max-width: 900px)');
+    function updateViewport() {
+      setIsNarrow(query.matches);
+      setMobileOpen(false);
+    }
+    updateViewport();
+    query.addEventListener('change', updateViewport);
+    return () => query.removeEventListener('change', updateViewport);
+  }, []);
+  useEffect(() => { setMobileOpen(false); }, [pathname]);
+  useEffect(() => {
+    setUserEmail(readBrowserStorage(USER_EMAIL_STORAGE_KEY));
+    setUserRole(readBrowserStorage(USER_ROLE_STORAGE_KEY));
     api<{ user: { email: string; role?: string } }>('/api/me')
       .then((result) => {
         const nextRole = result.user.role ?? '';
@@ -115,11 +133,19 @@ export function AppShell({ title, children }: { title: string; children: React.R
   }
 
   function toggleSidebar() {
-    setOpen((current) => {
+    if (isNarrow) {
+      setMobileOpen((current) => !current);
+      return;
+    }
+    setDesktopOpen((current) => {
       const next = !current;
       window.localStorage.setItem(SIDEBAR_OPEN_STORAGE_KEY, String(next));
       return next;
     });
+  }
+
+  function closeMobileSidebar() {
+    if (isNarrow) setMobileOpen(false);
   }
 
   async function handleLogout() {
@@ -129,26 +155,34 @@ export function AppShell({ title, children }: { title: string; children: React.R
     window.location.href = '/login';
   }
 
-  return <div className={`app-frame ${open ? 'sidebar-open' : 'sidebar-compact'}`}>
+  return <div className={`app-frame ${open ? 'sidebar-open' : 'sidebar-compact'} ${mobileOpen ? 'mobile-menu-open' : 'mobile-menu-closed'}`} onKeyDown={(event) => {
+      // A descendant dialog owns its Escape key (the command palette listens on window).
+      if (event.defaultPrevented || (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"], dialog'))) return;
+      if (event.key === 'Escape' && isNarrow && mobileOpen) {
+        event.preventDefault();
+        setMobileOpen(false);
+        sidebarToggleRef.current?.focus();
+      }
+    }}>
     <AppMouseMotion />
     <CommandPalette />
     <aside className="sidebar">
       <div className="sidebar-head">
-        <Link href="/dashboard" className="brand-lockup" title="MegaCorps Dashboard">
+        <Link href="/dashboard" className="brand-lockup" title="MegaCorps Dashboard" onClick={closeMobileSidebar}>
           <span className="brand-mark">MC</span>
-          {open && <div><b>MegaCorps</b><span>Agent Company OS</span></div>}
+          {(open || isNarrow) && <div><b>MegaCorps</b><span>Agent Company OS</span></div>}
         </Link>
-        <button className="btn icon-btn sidebar-toggle" aria-label="Toggle sidebar" title={open ? 'Collapse sidebar' : 'Expand sidebar'} onClick={toggleSidebar}>{open ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}</button>
+        <button ref={sidebarToggleRef} className="btn icon-btn sidebar-toggle" aria-label="Toggle sidebar" aria-expanded={open} aria-controls="sidebar-primary sidebar-utility" title={open ? 'Collapse sidebar' : 'Expand sidebar'} onClick={toggleSidebar}>{open ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}</button>
       </div>
-      <div className="sidebar-body">
+      <div className="sidebar-body" id="sidebar-primary">
         <nav className="nav-list" aria-label="Primary">
-          {nav.map((item) => <SidebarLink item={item} label={t(item.labelKey) === item.labelKey ? item.fallback : t(item.labelKey)} open={open} pathname={pathname} key={item.href} />)}
+          {nav.map((item) => <SidebarLink item={item} label={t(item.labelKey) === item.labelKey ? item.fallback : t(item.labelKey)} open={open} pathname={pathname} onSelect={closeMobileSidebar} key={item.href} />)}
         </nav>
       </div>
-      <div className="sidebar-footer">
+      <div className="sidebar-footer" id="sidebar-utility">
         <nav className="nav-list nav-list-utility" aria-label="Utility">
-          {utilityNav.map((item) => <SidebarLink item={item} label={t(item.labelKey) === item.labelKey ? item.fallback : t(item.labelKey)} open={open} pathname={pathname} key={item.href} />)}
-          {userRole === 'admin' && <SidebarLink item={adminNav} label={t(adminNav.labelKey) === adminNav.labelKey ? adminNav.fallback : t(adminNav.labelKey)} open={open} pathname={pathname} />}
+          {utilityNav.map((item) => <SidebarLink item={item} label={t(item.labelKey) === item.labelKey ? item.fallback : t(item.labelKey)} open={open} pathname={pathname} onSelect={closeMobileSidebar} key={item.href} />)}
+          {userRole === 'admin' && <SidebarLink item={adminNav} label={t(adminNav.labelKey) === adminNav.labelKey ? adminNav.fallback : t(adminNav.labelKey)} open={open} pathname={pathname} onSelect={closeMobileSidebar} />}
         </nav>
         {open && <div className="sidebar-status">
           <span>{t('common.heartbeat')}</span>
