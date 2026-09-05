@@ -1204,7 +1204,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         await tx.unsafe('DELETE FROM positions WHERE company_id=$1', [id]);
         await tx.unsafe('DELETE FROM company_memberships WHERE company_id=$1', [id]);
         await tx.unsafe('DELETE FROM companies WHERE id=$1', [id]);
-        await tx.unsafe("INSERT INTO activity_log (company_id, actor_type, actor_id, user_id, action, entity_type, entity_id, details) VALUES (NULL,'user',$1,$1::uuid,'company.deleted','company',$2,$3::jsonb)", [user.id, id, JSON.stringify({ formerCompany: company })]);
+        await tx.unsafe("INSERT INTO activity_log (company_id, actor_type, actor_id, user_id, action, entity_type, entity_id, details) VALUES (NULL,'user',$1,$2::uuid,'company.deleted','company',$3,$4::jsonb)", [user.id, user.id, id, JSON.stringify({ formerCompany: company })]);
         return { ok: true as const };
       });
       if ('error' in result) return reply.code(result.error === 'company_role_required' ? 403 : result.error === 'company_not_found' ? 404 : 409).send(result);
