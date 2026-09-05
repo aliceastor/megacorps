@@ -3820,7 +3820,21 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
         lastError: reason,
         completedAt: null,
         updatedAt: new Date(),
-      }).where(eq(kanbanCards.id, card.id)).returning();
+      }).where(and(
+        eq(kanbanCards.id, card.id),
+        // Check at the write, after the adapter returned: the original card
+        // snapshot may predate a webhook that parked it for the client.
+        drizzleSql`NOT EXISTS (SELECT 1 FROM ${approvals} WHERE ${approvals.cardId} = ${card.id} AND ${approvals.status} = 'pending' AND ${approvals.type} = 'task_review' AND ${approvals.payload}->>'humanGate' = 'true')`,
+      )).returning();
+      if (!updated) {
+        const [parked] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1);
+        if (!parked) throw new Error('card_not_found');
+        const message = 'humanGate already pending; late review escalation ignored';
+        await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'warning', message, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+        await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), error: null, durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
+        await completeTaskRun(options.taskRunId, { status: 'success', output: message, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+        return parked;
+      }
       await addStageLog(card.id, reviewer.id, card.columnStatus, 'blocked', 'review');
       await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'failed', message: reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: 'review_blocked', body: result.output });
