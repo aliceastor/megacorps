@@ -40,6 +40,7 @@ export function memoryDb(t: TestContext, fixtures: Array<[Table, Row[]]>) {
   function query(table: Table, mode: 'select' | 'update' | 'insert', values?: Row | Row[]) {
     let condition: SQL | undefined;
     let limit = Infinity;
+    let offset = 0;
     let executed: Row[] | undefined;
     const orders: Array<{ key: string; descending: boolean }> = [];
     const execute = () => {
@@ -59,7 +60,7 @@ export function memoryDb(t: TestContext, fixtures: Array<[Table, Row[]]>) {
           if (delta) return order.descending ? -delta : delta;
         }
         return 0;
-      }).slice(0, limit);
+      }).slice(offset, offset + limit);
       return executed = selected.map((row) => ({ ...row }));
     };
     const chain: any = {
@@ -73,6 +74,7 @@ export function memoryDb(t: TestContext, fixtures: Array<[Table, Row[]]>) {
         return chain;
       },
       limit: (value: number) => { limit = value; return chain; },
+      offset: (value: number) => { offset = value; return chain; },
       innerJoin: () => { if (rows(table).length) throw new Error('nonempty joins need an explicit fixture'); return chain; },
       for: () => chain,
       onConflictDoNothing: () => chain,

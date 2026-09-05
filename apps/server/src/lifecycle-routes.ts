@@ -33,7 +33,7 @@ import {
   toolRegistry,
   workProducts,
 } from './db/schema.ts';
-import { buildCompanyKanbanContext } from './dispatch.ts';
+import { buildCompanyKanbanContext, completeTaskRun } from './dispatch.ts';
 import { applyExternalEvent, rootCardId } from './external-events.ts';
 import { publishLiveEvent } from './live.ts';
 
@@ -328,7 +328,8 @@ export async function registerLifecycleRoutes(app: FastifyInstance): Promise<voi
       activeHeartbeatRunId: null,
       updatedAt: now,
     }).where(eq(kanbanCards.id, access.card.id)).returning();
-    await db.update(taskRuns).set({ status: 'success', completedAt: now, lockedBy: null, lockedAt: null, output: `Waiting on external ${input.provider}: ${input.waitingFor}`, updatedAt: now }).where(and(eq(taskRuns.cardId, access.card.id), eq(taskRuns.status, 'running')));
+    const runningRuns = await db.select({ id: taskRuns.id }).from(taskRuns).where(and(eq(taskRuns.cardId, access.card.id), eq(taskRuns.status, 'running')));
+    for (const run of runningRuns) await completeTaskRun(run.id, { status: 'success', releaseLock: true, output: `Waiting on external ${input.provider}: ${input.waitingFor}` });
     if (access.card.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, access.card.assigneeId));
     await recordStageAction({ cardId: access.card.id, agentId: access.card.assigneeId, actor: { type: 'user', id: access.user.id, userId: access.user.id }, fromStatus, toStatus: 'waiting_on_external', action: 'wait_external', detail: `Waiting on ${input.provider}: ${input.waitingFor}.`, metadata: { externalWaitId: wait?.id, pollIntervalSeconds: input.pollIntervalSeconds ?? null } });
     await db.insert(taskLogs).values({ cardId: access.card.id, agentId: access.card.assigneeId, type: 'webhook', status: 'queued', message: `Waiting on external ${input.provider}: ${input.waitingFor}` });

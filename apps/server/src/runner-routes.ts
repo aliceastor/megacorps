@@ -8,9 +8,10 @@ import { assertCardTransition, recordCardAction, recordStageAction } from './car
 import { db } from './db/client.ts';
 import { activityLog, agentRuntimes, agentSessions, agents, cardComments, companies, externalWaits, heartbeatRuns, kanbanCards, machineRunners, projects, taskLogs, taskRuns, workProducts } from './db/schema.ts';
 import { publishLiveEvent } from './live.ts';
+import { runRetryReady } from './run-retry.ts';
 import { generateRunnerApiKey, hashRunnerApiKey, requireAgentSessionAuth, requireRunnerAuth } from './runner-auth.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
-import { cascadeParentStatus, completionBlockedByChildren, completionStatusForQualityGate, createPendingApproval, enqueueTaskRun } from './dispatch.ts';
+import { cascadeParentStatus, completeTaskRun, completionBlockedByChildren, completionStatusForQualityGate, createPendingApproval, enqueueTaskRun } from './dispatch.ts';
 
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
@@ -125,16 +126,14 @@ async function createRunnerTaskCompletion(input: {
   const fromStatus = cardStatus(card.columnStatus);
   assertStatusMove(fromStatus, nextStatus, 'machine');
   const now = new Date();
-  await db.update(taskRuns).set({
+  await completeTaskRun(input.run.id, {
     status: runStatus,
-    completedAt: now,
-    lockedBy: null,
-    lockedAt: null,
+    releaseLock: true,
+    retryableFailure: runStatus === 'failed',
     output,
     error: input.body.error ?? (runStatus === 'failed' ? input.body.summary ?? 'runner_task_failed' : null),
-    costUsd: input.body.costUsd?.toString(),
-    updatedAt: now,
-  }).where(eq(taskRuns.id, input.run.id));
+    costUsd: input.body.costUsd,
+  });
   if (input.run.heartbeatRunId) {
     await db.update(heartbeatRuns).set({
       status: runStatus,
@@ -391,83 +390,90 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
     const input = runnerTaskClaimSchema.parse(request.body ?? {});
     if (input.companyId && input.companyId !== runner.companyId) return reply.code(403).send({ error: 'runner_company_mismatch' });
     const kindFilter = input.kinds?.length ? inArray(taskRuns.kind, input.kinds) : undefined;
-    const candidates = await db.select().from(taskRuns).where(and(
-      eq(taskRuns.companyId, runner.companyId),
-      eq(taskRuns.status, 'queued'),
-      kindFilter,
-    )).orderBy(desc(taskRuns.priority), asc(taskRuns.createdAt)).limit(25);
-    for (const run of candidates) {
-      const payload = await taskRunPayload(run);
-      if (!payload?.agent) continue;
-      const fromStatus = cardStatus(payload.card.columnStatus);
-      if (run.kind === 'dispatch') {
-        if (!(await cardDependenciesMet(payload.card.id))) continue;
-        try {
-          assertStatusMove(fromStatus, 'in_progress', 'machine');
-        } catch {
-          continue;
+    const pageSize = 25;
+    let offset = 0;
+    while (true) {
+      const candidates = await db.select().from(taskRuns).where(and(
+        eq(taskRuns.companyId, runner.companyId),
+        eq(taskRuns.status, 'queued'),
+        kindFilter,
+      )).orderBy(desc(taskRuns.priority), asc(taskRuns.createdAt)).limit(pageSize).offset(offset);
+      if (candidates.length === 0) return { taskRun: null };
+      for (const run of candidates) {
+        const payload = await taskRunPayload(run);
+        if (!payload?.agent) continue;
+        if (!runRetryReady(payload.card, run.kind)) continue;
+        const fromStatus = cardStatus(payload.card.columnStatus);
+        if (run.kind === 'dispatch') {
+          if (!(await cardDependenciesMet(payload.card.id))) continue;
+          try {
+            assertStatusMove(fromStatus, 'in_progress', 'machine');
+          } catch {
+            continue;
+          }
         }
-      }
-      if (run.kind === 'review' && !reviewCanRun(fromStatus)) continue;
-      if (!runnerSupports(runner, payload.runtime, payload.agent.adapterType ?? 'hermes-ssh')) continue;
-      const now = new Date();
-      const [claimed] = await db.update(taskRuns).set({
-        status: 'running',
-        lockedBy: runner.id,
-        lockedAt: now,
-        startedAt: now,
-        updatedAt: now,
-      }).where(and(eq(taskRuns.id, run.id), eq(taskRuns.status, 'queued'))).returning();
-      if (!claimed) continue;
-      let claimedPayload = { ...payload, taskRun: claimed };
-      if (claimed.kind === 'dispatch') {
-        const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
-        const [lockedCard] = await db.update(kanbanCards).set({
-          columnStatus: 'in_progress',
-          executionLockId: claimed.id,
-          executionLockedByAgentId: payload.agent.id,
-          executionLockedAt: now,
-          executionLockExpiresAt: expiresAt,
-          startedAt: payload.card.startedAt ?? now,
-          lastError: null,
+        if (run.kind === 'review' && !reviewCanRun(fromStatus)) continue;
+        if (!runnerSupports(runner, payload.runtime, payload.agent.adapterType ?? 'hermes-ssh')) continue;
+        const now = new Date();
+        const [claimed] = await db.update(taskRuns).set({
+          status: 'running',
+          lockedBy: runner.id,
+          lockedAt: now,
+          startedAt: now,
           updatedAt: now,
-        }).where(and(
-          eq(kanbanCards.id, payload.card.id),
-          isNull(kanbanCards.deletedAt),
-          drizzleSql`(${kanbanCards.executionLockId} IS NULL OR ${kanbanCards.executionLockExpiresAt} < now())`,
-        )).returning();
-        if (!lockedCard) {
-          await db.update(taskRuns).set({ status: 'queued', lockedBy: null, lockedAt: null, startedAt: null, updatedAt: new Date(), error: 'card_execution_locked' }).where(eq(taskRuns.id, claimed.id));
-          continue;
+        }).where(and(eq(taskRuns.id, run.id), eq(taskRuns.status, 'queued'))).returning();
+        if (!claimed) continue;
+        let claimedPayload = { ...payload, taskRun: claimed };
+        if (claimed.kind === 'dispatch') {
+          const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
+          const [lockedCard] = await db.update(kanbanCards).set({
+            columnStatus: 'in_progress',
+            executionLockId: claimed.id,
+            executionLockedByAgentId: payload.agent.id,
+            executionLockedAt: now,
+            executionLockExpiresAt: expiresAt,
+            startedAt: payload.card.startedAt ?? now,
+            lastError: null,
+            updatedAt: now,
+          }).where(and(
+            eq(kanbanCards.id, payload.card.id),
+            isNull(kanbanCards.deletedAt),
+            drizzleSql`(${kanbanCards.executionLockId} IS NULL OR ${kanbanCards.executionLockExpiresAt} < now())`,
+          )).returning();
+          if (!lockedCard) {
+            await db.update(taskRuns).set({ status: 'queued', lockedBy: null, lockedAt: null, startedAt: null, updatedAt: new Date(), error: 'card_execution_locked' }).where(eq(taskRuns.id, claimed.id));
+            continue;
+          }
+          claimedPayload = { ...claimedPayload, card: lockedCard };
+          if (fromStatus !== 'in_progress') {
+            await recordStageAction({
+              cardId: payload.card.id,
+              agentId: payload.agent.id,
+              actor: { type: 'machine', id: runner.id, machineRunnerId: runner.id },
+              fromStatus,
+              toStatus: 'in_progress',
+              action: 'claim',
+              detail: `Runner ${runner.name} claimed dispatch and moved the card to in_progress.`,
+              metadata: { taskRunId: claimed.id, runnerId: runner.id },
+            });
+          }
         }
-        claimedPayload = { ...claimedPayload, card: lockedCard };
-        if (fromStatus !== 'in_progress') {
-          await recordStageAction({
-            cardId: payload.card.id,
-            agentId: payload.agent.id,
-            actor: { type: 'machine', id: runner.id, machineRunnerId: runner.id },
-            fromStatus,
-            toStatus: 'in_progress',
-            action: 'claim',
-            detail: `Runner ${runner.name} claimed dispatch and moved the card to in_progress.`,
-            metadata: { taskRunId: claimed.id, runnerId: runner.id },
-          });
-        }
+        await db.update(agents).set({ isBusy: true }).where(eq(agents.id, payload.agent.id));
+        await recordCardAction({
+          companyId: runner.companyId,
+          cardId: payload.card.id,
+          actor: { type: 'machine', id: runner.id, machineRunnerId: runner.id },
+          action: 'task_run.claimed',
+          fromStatus,
+          toStatus: claimedPayload.card.columnStatus,
+          detail: `Runner ${runner.name} claimed ${claimed.kind} task run.`,
+          metadata: { taskRunId: claimed.id, agentId: payload.agent.id },
+        });
+        return claimedPayload;
       }
-      await db.update(agents).set({ isBusy: true }).where(eq(agents.id, payload.agent.id));
-      await recordCardAction({
-        companyId: runner.companyId,
-        cardId: payload.card.id,
-        actor: { type: 'machine', id: runner.id, machineRunnerId: runner.id },
-        action: 'task_run.claimed',
-        fromStatus,
-        toStatus: claimedPayload.card.columnStatus,
-        detail: `Runner ${runner.name} claimed ${claimed.kind} task run.`,
-        metadata: { taskRunId: claimed.id, agentId: payload.agent.id },
-      });
-      return claimedPayload;
+      if (candidates.length < pageSize) return { taskRun: null };
+      offset += candidates.length;
     }
-    return { taskRun: null };
   });
 
   app.post('/api/runner/task-runs/:id/complete', async (request, reply) => {

@@ -8,7 +8,7 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "next lint || true",
-    "test": "node --test --import tsx src/**/*.test.ts",
+    "test": "node --test --import tsx \"src/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

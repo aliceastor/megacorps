@@ -30,6 +30,9 @@ const migrations: Migration[] = [
   { version: 17, name: 'review-panel', run: runReviewPanel },
   { version: 18, name: 'merge-closure', run: runMergeClosure },
   { version: 19, name: 'external-wait-polling', run: runExternalWaitPolling },
+  { version: 20, name: 'review-message-retry-state', run: async () => {
+    await sql.unsafe(`ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS run_retry_state JSONB NOT NULL DEFAULT '{}';`);
+  } },
 ];
 
 // Merge closure (company pipeline §19). external_waits.authorized_head_sha

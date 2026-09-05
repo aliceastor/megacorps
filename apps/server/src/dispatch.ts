@@ -36,6 +36,7 @@ import { afterAuthorFix, cardIdsAwaitingPanelOrHuman, ensureHumanGate, fixSectio
 import { noteMergeGateSkipped, parkForMerge, planMergeGate, repoFullNameFromUrl } from './merge-gate.ts';
 import { sweepExternalWaitPolls, sweepExternalWaitTimeouts } from './external-events.ts';
 import { EXTERNAL_POLL_MAX, formatPollPrompt } from './external-polling.ts';
+import { assertRunRetryNotExhausted, completeRetryableRun, resetRunRetries, runRetryReady, RUN_FAILURE_LIMIT, type RunCompletion } from './run-retry.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -740,7 +741,8 @@ export async function enqueueMessageTaskRun(comment: CardCommentRow, kind: Extra
   const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, comment.cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
   if (card.recurEveryMinutes) throw new Error('recurring_template_cannot_run');
-  const maxAttempts = Math.min(10, Math.max(1, card.maxRetries ?? 3));
+  assertRunRetryNotExhausted(card, kind);
+  const maxAttempts = RUN_FAILURE_LIMIT;
   const agentId = kind === 'message_review' ? comment.reviewerAgentId : comment.assigneeAgentId;
   if (!agentId) throw new Error(kind === 'message_review' ? 'message_review_has_no_reviewer' : 'message_delegation_has_no_assignee');
   const terminalCard = isTerminalCardStatus(card.columnStatus);
@@ -1676,7 +1678,7 @@ export async function performWebhookHandoff(card: CardRow, fromAgent: AgentRow, 
   }).where(eq(kanbanCards.id, card.id)).returning();
   await db.update(agents).set({ isBusy: false }).where(eq(agents.id, fromAgent.id));
   if (input.heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), error: null, costUsd: input.costUsd?.toString() }).where(eq(heartbeatRuns.id, input.heartbeatRunId));
-  if (input.taskRunId) await db.update(taskRuns).set({ status: 'success', completedAt: new Date(), lockedBy: null, lockedAt: null, output: input.sourceOutput, costUsd: input.costUsd?.toString(), updatedAt: new Date() }).where(eq(taskRuns.id, input.taskRunId));
+  await completeTaskRun(input.taskRunId, { status: 'success', releaseLock: true, output: input.sourceOutput, costUsd: input.costUsd });
   await addStageLog(card.id, fromAgent.id, card.columnStatus ?? 'in_progress', 'todo', 'handoff');
   await addCardMessage({ cardId: card.id, agentId: fromAgent.id, action: 'handoff', body: handoffMessageBody(fromAgent, target, item) });
   await addTaskLog({ cardId: card.id, agentId: fromAgent.id, type: 'handoff', status: 'success', message: `Card handed off to ${target.name} (${target.slug}).`, output: input.sourceOutput });
@@ -1838,20 +1840,16 @@ async function addTaskRunLog(run: TaskRunRow, status: LogStatus, message: string
   });
 }
 
-export async function completeTaskRun(runId: string | null | undefined, input: {
-  status: 'success' | 'failed' | 'cancelled';
-  error?: string | null;
-  output?: string | null;
-  costUsd?: number;
-  durationSeconds?: number;
-}) {
+export async function completeTaskRun(runId: string | null | undefined, input: RunCompletion) {
   if (!runId) return;
+  if (await completeRetryableRun(runId, input)) return;
   await db.update(taskRuns).set({
     status: input.status,
     error: input.error ?? null,
     output: input.output ?? null,
     costUsd: input.costUsd === undefined ? undefined : input.costUsd.toString(),
     durationSeconds: input.durationSeconds,
+    ...(input.releaseLock ? { lockedBy: null, lockedAt: null } : {}),
     completedAt: new Date(),
     updatedAt: new Date(),
   }).where(and(eq(taskRuns.id, runId), inArray(taskRuns.status, ['queued', 'running'])));
@@ -1979,6 +1977,11 @@ async function recordUncaughtDispatchFailure(run: TaskRunRow, message: string): 
 export async function enqueueTaskRun(cardId: string, kind: Extract<TaskRunKind, 'dispatch' | 'review'> = 'dispatch', source: TaskRunSource = 'manual', requestedByUserId?: string | null): Promise<TaskRunRow> {
   const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
+  if (source === 'manual' && requestedByUserId) {
+    await resetRunRetries(card.id);
+    card.runRetryState = {};
+  }
+  if (kind === 'review') assertRunRetryNotExhausted(card, kind);
   // Recurring templates never execute themselves: the scheduler clones them into
   // normal cards on each occurrence.
   if (card.recurEveryMinutes) throw new Error('recurring_template_cannot_run');
@@ -2028,49 +2031,56 @@ export async function enqueueTaskRun(cardId: string, kind: Extract<TaskRunKind, 
 }
 
 async function claimNextTaskRun(): Promise<TaskRunRow | null> {
-  const candidates = await db.select().from(taskRuns).where(eq(taskRuns.status, 'queued')).orderBy(desc(taskRuns.priority), taskRuns.createdAt).limit(Math.max(25, TASK_RUN_CANDIDATE_SCAN_LIMIT));
+  const pageSize = Math.max(25, TASK_RUN_CANDIDATE_SCAN_LIMIT);
   const now = new Date();
   const availabilityCache = createRuntimeAvailabilityCache();
-  for (const queued of candidates) {
-    const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, queued.cardId), isNull(kanbanCards.deletedAt))).limit(1);
-    if (!card) continue;
-    if (queued.kind === 'review') {
-      if (!reviewCanRun(card?.columnStatus)) continue;
-    } else if (queued.kind === 'dispatch') {
-      if (card.nextRunAt && card.nextRunAt > now) continue;
-      if (!(await cardDependenciesMet(card.id))) continue;
-    } else if (!queued.messageCommentId) {
-      continue;
-    } else if (queued.kind === 'panel_review' && card.columnStatus !== 'in_review') {
-      // A sealed panel slot only runs while the card is in review; the round
-      // sweep cancels the slots of a card that left review.
-      continue;
-    } else if (isTerminalCardStatus(card.columnStatus)) {
-      const [comment] = await db.select().from(cardComments).where(and(eq(cardComments.id, queued.messageCommentId), eq(cardComments.cardId, card.id))).limit(1);
-      if (!terminalMessageTaskCanRun(queued, card, comment)) {
-        await cancelTerminalMessageTaskRun(queued, card);
+  let offset = 0;
+  while (true) {
+    const candidates = await db.select().from(taskRuns).where(eq(taskRuns.status, 'queued')).orderBy(desc(taskRuns.priority), taskRuns.createdAt).limit(pageSize).offset(offset);
+    if (candidates.length === 0) return null;
+    for (const queued of candidates) {
+      const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, queued.cardId), isNull(kanbanCards.deletedAt))).limit(1);
+      if (!card) continue;
+      if (!runRetryReady(card, queued.kind, now)) continue;
+      if (queued.kind === 'review') {
+        if (!reviewCanRun(card?.columnStatus)) continue;
+      } else if (queued.kind === 'dispatch') {
+        if (card.nextRunAt && card.nextRunAt > now) continue;
+        if (!(await cardDependenciesMet(card.id))) continue;
+      } else if (!queued.messageCommentId) {
         continue;
+      } else if (queued.kind === 'panel_review' && card.columnStatus !== 'in_review') {
+        // A sealed panel slot only runs while the card is in review; the round
+        // sweep cancels the slots of a card that left review.
+        continue;
+      } else if (isTerminalCardStatus(card.columnStatus)) {
+        const [comment] = await db.select().from(cardComments).where(and(eq(cardComments.id, queued.messageCommentId), eq(cardComments.cardId, card.id))).limit(1);
+        if (!terminalMessageTaskCanRun(queued, card, comment)) {
+          await cancelTerminalMessageTaskRun(queued, card);
+          continue;
+        }
       }
+      const targetAgentId = queued.kind === 'review'
+        ? card.reviewerId
+        : queued.kind === 'message' || queued.kind === 'message_review' || queued.kind === 'panel_review'
+          ? queued.agentId
+          : card.assigneeId;
+      if (!targetAgentId) continue;
+      const [targetAgent] = await db.select().from(agents).where(and(eq(agents.id, targetAgentId), isNull(agents.deletedAt))).limit(1);
+      if (!targetAgent || !targetAgent.isActive || targetAgent.isBusy) continue;
+      if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: targetAgent.runtimeId, adapterType: targetAgent.adapterType ?? 'hermes-ssh' }, availabilityCache))) continue;
+      const [claimed] = await db.update(taskRuns).set({
+        status: 'running',
+        lockedBy: TASK_RUN_WORKER_ID,
+        lockedAt: now,
+        startedAt: now,
+        updatedAt: now,
+      }).where(and(eq(taskRuns.id, queued.id), eq(taskRuns.status, 'queued'))).returning();
+      if (claimed) return claimed;
     }
-    const targetAgentId = queued.kind === 'review'
-      ? card.reviewerId
-      : queued.kind === 'message' || queued.kind === 'message_review' || queued.kind === 'panel_review'
-        ? queued.agentId
-        : card.assigneeId;
-    if (!targetAgentId) continue;
-    const [targetAgent] = await db.select().from(agents).where(and(eq(agents.id, targetAgentId), isNull(agents.deletedAt))).limit(1);
-    if (!targetAgent || !targetAgent.isActive || targetAgent.isBusy) continue;
-    if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: targetAgent.runtimeId, adapterType: targetAgent.adapterType ?? 'hermes-ssh' }, availabilityCache))) continue;
-    const [claimed] = await db.update(taskRuns).set({
-      status: 'running',
-      lockedBy: TASK_RUN_WORKER_ID,
-      lockedAt: now,
-      startedAt: now,
-      updatedAt: now,
-    }).where(and(eq(taskRuns.id, queued.id), eq(taskRuns.status, 'queued'))).returning();
-    if (claimed) return claimed;
+    if (candidates.length < pageSize) return null;
+    offset += candidates.length;
   }
-  return null;
 }
 
 async function recoverStaleTaskRuns(app: FastifyInstance): Promise<number> {
@@ -2110,7 +2120,7 @@ async function finishWorkerTaskRun(run: TaskRunRow, work: () => Promise<CardRow>
   } catch (error) {
     const message = error instanceof Error ? error.message : 'task_run_failed';
     if (await requeueBackpressuredTaskRun(run, message)) return;
-    await completeTaskRun(run.id, { status: 'failed', error: message, durationSeconds: Math.round((Date.now() - started) / 1000) });
+    await completeTaskRun(run.id, { status: 'failed', retryableFailure: true, error: message, durationSeconds: Math.round((Date.now() - started) / 1000) });
     await recordUncaughtDispatchFailure(run, message);
     await addTaskRunLog(run, 'failed', `${run.kind} task run failed.`, message);
     await addActivity({ companyId: run.companyId, actorType: 'system', actorId: TASK_RUN_WORKER_ID, agentId: run.agentId, action: 'task_run.failed', entityType: 'task_run', entityId: run.id, details: { cardId: run.cardId, kind: run.kind, error: message } });
@@ -2736,12 +2746,14 @@ async function sendAgentFeedbackAndRequeue(input: {
   });
   await completeTaskRun(input.taskRunId, {
     status: 'failed',
+    retryableFailure: input.kind === 'review',
     error: input.message,
     output: feedback,
     costUsd: input.result?.costUsd,
     durationSeconds: input.result?.durationSeconds,
   });
-  await enqueueTaskRun(input.card.id, input.kind, 'queue');
+  const [retryCard] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, input.card.id)).limit(1);
+  if (input.kind !== 'review' || (retryCard && retryCard.columnStatus !== 'blocked' && (retryCard.runRetryState.review?.failures ?? 0) < RUN_FAILURE_LIMIT)) await enqueueTaskRun(input.card.id, input.kind, 'queue');
   if (!updated) throw new Error('card_update_failed');
   return updated;
 }
@@ -2803,10 +2815,11 @@ async function requeueMessageTaskAfterFailure(input: {
   agentId: string | null;
   message: string;
 }): Promise<boolean> {
-  const maxAttempts = Math.min(10, Math.max(1, input.taskRun.maxAttempts ?? input.card.maxRetries ?? 3));
-  const attemptNumber = Math.max(1, input.taskRun.attemptNumber ?? 1);
-  if (attemptNumber >= maxAttempts) return false;
-  const nextAttempt = attemptNumber + 1;
+  const [current] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, input.card.id)).limit(1);
+  const failures = current?.runRetryState?.[input.kind]?.failures ?? 0;
+  if (!current || current.columnStatus === 'blocked' || failures >= RUN_FAILURE_LIMIT) return false;
+  const maxAttempts = RUN_FAILURE_LIMIT;
+  const nextAttempt = failures + 1;
   const nextStatus = input.kind === 'message_review' ? 'submitted' : 'queued';
   await db.update(cardComments).set({ delegationStatus: nextStatus }).where(eq(cardComments.id, input.comment.id));
   const retryMessage = [
@@ -2909,7 +2922,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
     }).where(eq(heartbeatRuns.id, run.id));
     if (!result.success) {
       const errorMessage = result.output || 'message_delegation_failed';
-      await completeTaskRun(taskRun.id, { status: 'failed', error: errorMessage, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: errorMessage, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       if (await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message', agentId: agent.id, message: errorMessage })) return card;
       await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'delegate_failed', body: errorMessage, delegationStatus: 'failed' });
@@ -2926,7 +2939,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       const handoffError = messagePlan.mixed
         ? HANDOFF_MIXED_MESSAGE
         : 'handoff_not_allowed_in_delegation: You are working a Message Board delegation and do not own this card. Use "mode":"subroutine" delegations, or report your result and let the card owner decide.';
-      await completeTaskRun(taskRun.id, { status: 'failed', error: handoffError, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: handoffError, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       if (await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message', agentId: agent.id, message: handoffError })) return card;
       await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'delegate_failed', body: handoffError, delegationStatus: 'failed' });
@@ -2943,7 +2956,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
     if (nestedDelegationRequirement.required) {
       const errorMessage = messageDelegationRequirementFeedback(nestedDelegationRequirement.reports);
       await db.update(heartbeatRuns).set({ status: 'failed', error: errorMessage }).where(eq(heartbeatRuns.id, run.id));
-      await completeTaskRun(taskRun.id, { status: 'failed', error: errorMessage, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: errorMessage, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       if (await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message', agentId: agent.id, message: errorMessage })) return card;
       await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
       await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'delegate_failed', body: errorMessage, delegationStatus: 'failed' });
@@ -2976,7 +2989,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
     const message = error instanceof Error ? error.message : 'message_delegation_failed';
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
     await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
-    await completeTaskRun(taskRun.id, { status: 'failed', error: message });
+    await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: message });
     if (await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message', agentId: agent.id, message })) return card;
     await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
     await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: agent.id, action: 'delegate_failed', body: message, delegationStatus: 'failed' });
@@ -3026,7 +3039,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
     if (!result.success && !explicitDecision) {
       const errorMessage = result.output || 'message_review_failed';
       await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: errorMessage, durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
-      await completeTaskRun(taskRun.id, { status: 'failed', error: errorMessage, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: errorMessage, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       if (await requeueMessageTaskAfterFailure({ card, comment: report, taskRun, kind: 'message_review', agentId: reviewer.id, message: errorMessage })) return card;
       await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, report.id));
       await addCardMessage({ cardId: card.id, parentCommentId: report.id, agentId: reviewer.id, action: 'delegate_review_failed', body: errorMessage, delegationStatus: 'failed' });
@@ -3034,7 +3047,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
     }
     if (!decision) {
       await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: REVIEW_VERDICT_MISSING_MESSAGE, durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
-      await completeTaskRun(taskRun.id, { status: 'failed', error: REVIEW_VERDICT_MISSING_MESSAGE, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+      await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: REVIEW_VERDICT_MISSING_MESSAGE, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       if (await requeueMessageTaskAfterFailure({ card, comment: report, taskRun, kind: 'message_review', agentId: reviewer.id, message: REVIEW_VERDICT_MISSING_MESSAGE })) return card;
       await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, report.id));
       await addCardMessage({ cardId: card.id, parentCommentId: report.id, agentId: reviewer.id, action: 'delegate_review_failed', body: REVIEW_VERDICT_MISSING_MESSAGE, delegationStatus: 'failed' });
@@ -3082,7 +3095,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
       return card;
     }
     await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
-    await completeTaskRun(taskRun.id, { status: 'failed', error: message });
+    await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: message });
     if (await requeueMessageTaskAfterFailure({ card, comment: report, taskRun, kind: 'message_review', agentId: reviewer.id, message })) return card;
     await addCardMessage({ cardId: card.id, parentCommentId: report.id, agentId: reviewer.id, action: 'delegate_review_failed', body: message, delegationStatus: 'failed' });
     return card;
@@ -3142,7 +3155,7 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
       const errorMessage = messageDelegationRequirementFeedback(nestedDelegationRequirement.reports);
       if (actorAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actorAgentId));
       if (heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: errorMessage, costUsd: input.costUsd?.toString() }).where(eq(heartbeatRuns.id, heartbeatRunId));
-      await completeTaskRun(taskRun.id, { status: 'failed', error: errorMessage, output, costUsd: input.costUsd });
+      await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: errorMessage, output, costUsd: input.costUsd });
       if (await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message', agentId: actorAgentId, message: errorMessage })) {
         return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'queued', delegated: false, reviewerId: comment.reviewerAgentId };
       }
@@ -3180,7 +3193,7 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
   if (!decision) {
     if (actorAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actorAgentId));
     if (heartbeatRunId) await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: REVIEW_VERDICT_MISSING_MESSAGE, costUsd: input.costUsd?.toString() }).where(eq(heartbeatRuns.id, heartbeatRunId));
-    await completeTaskRun(taskRun.id, { status: 'failed', error: REVIEW_VERDICT_MISSING_MESSAGE, output, costUsd: input.costUsd });
+    await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: REVIEW_VERDICT_MISSING_MESSAGE, output, costUsd: input.costUsd });
     if (await requeueMessageTaskAfterFailure({ card, comment, taskRun, kind: 'message_review', agentId: actorAgentId, message: REVIEW_VERDICT_MISSING_MESSAGE })) {
       return { ok: true, cardId: card.id, taskRunId, kind: taskRun.kind, newStatus: 'submitted', delegated: false, reviewerId: comment.reviewerAgentId };
     }
@@ -3896,7 +3909,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: error instanceof Error ? error.message : 'review_failed' }).where(eq(heartbeatRuns.id, run.id));
     await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'failed', message: error instanceof Error ? error.message : 'review_failed' });
     await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: 'review_error', body: error instanceof Error ? error.message : 'review_failed' });
-    await completeTaskRun(options.taskRunId, { status: 'failed', error: error instanceof Error ? error.message : 'review_failed' });
+    await completeTaskRun(options.taskRunId, { status: 'failed', retryableFailure: true, error: error instanceof Error ? error.message : 'review_failed' });
     throw error;
   }
 }
@@ -4283,6 +4296,7 @@ export function startDispatchLoop(app: FastifyInstance): void {
 }
 
 export const dispatchInternals = {
+  claimNextTaskRun,
   adapterFailureMessage,
   asksForConfirmationInsteadOfWorking,
   cardChangedOutsideCurrentRun,
