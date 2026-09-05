@@ -62,9 +62,12 @@ test('PostgreSQL 16 completion transactions', { skip: !process.env.TEST_DATABASE
   for (const outcome of ['success', 'timeout'] as const) await t.test(`${outcome} on a moved wait preserves the entire card and wait`, async () => {
     const { card } = await fixture('in_progress');
     const [wait] = await db.insert(externalWaits).values({ cardId: card.id, companyId: card.companyId, waitingFor: 'External result', provider: 'test', status: 'waiting' }).returning();
+    // Wait creation is a gate mutation from migration 22 onward. Capture the
+    // complete committed fixture after all writes; the event must preserve it.
+    const [baseline] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id));
     const result = await applyExternalEvent({ card, input: { provider: 'test', eventType: outcome, status: outcome, waitId: wait!.id }, actor: { type: 'system', id: 'postgres-test' } });
     assert.equal(result.event, null);
-    assert.deepEqual((await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)))[0], card);
+    assert.deepEqual((await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)))[0], baseline);
     assert.deepEqual((await db.select().from(externalWaits).where(eq(externalWaits.id, wait!.id)))[0], wait);
   });
 

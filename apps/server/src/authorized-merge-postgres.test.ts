@@ -6,7 +6,8 @@ import { isolatedPostgres } from './test-support/postgres-db.ts';
 
 test('PostgreSQL 16 durable authorized merge fence', { skip: !process.env.TEST_DATABASE_URL && !process.env.CI ? 'TEST_DATABASE_URL absent; real merge transaction tests run in CI' : false, timeout: 60_000 }, async (t) => {
   const { db, sql } = await isolatedPostgres(t);
-  const { companies, projects, kanbanCards, approvals, externalWaits, mergeIntents, reviewRounds } = await import('./db/schema.ts');
+  const { companies, projects, kanbanCards, approvals, externalWaits, mergeIntents, reviewRounds, taskRuns, workProducts } = await import('./db/schema.ts');
+  const { reviewCard } = await import('./dispatch.ts');
   const { executeAuthorizedMerge } = await import('./authorized-merge.ts');
   const { ensureHumanGate } = await import('./review-rounds.ts');
   const { reconcileMergeWait, parkForMerge } = await import('./merge-gate.ts');
@@ -43,6 +44,7 @@ test('PostgreSQL 16 durable authorized merge fence', { skip: !process.env.TEST_D
     try {
       await assert.rejects(ensureHumanGate(f.card, null, 'New human gate'), conflict);
       await assert.rejects(db.insert(reviewRounds).values({ cardId: f.card.id, companyId: f.card.companyId, round: 1, status: 'open' }), conflict);
+      await assert.rejects(db.insert(taskRuns).values({ cardId: f.card.id, companyId: f.card.companyId, kind: 'review', status: 'queued' }), conflict);
       await assert.rejects(db.insert(kanbanCards).values({ companyId: f.card.companyId, parentCardId: f.card.id, title: 'Required child', body: 'Gate' }), conflict);
       await assert.rejects(db.update(kanbanCards).set({ columnStatus: 'cancelled' }).where(eq(kanbanCards.id, f.card.id)), conflict);
       await assert.rejects(db.update(externalWaits).set({ status: 'superseded' }).where(eq(externalWaits.id, f.wait.id)), conflict);
@@ -85,5 +87,19 @@ test('PostgreSQL 16 durable authorized merge fence', { skip: !process.env.TEST_D
       await parkForMerge(card!, { disposition: 'wait', project: f.project, candidate: { kind: 'pull_request', pullRequestNumber: 12, pullRequestUrl: f.wait.externalUrl, branch: 'feature', headSha: head, workProductId: null }, headSha: head, defaultBranch: 'main', waitingFor: 'merge into main', externalId: '12', externalUrl: f.wait.externalUrl }, { fetchImpl });
       assert.equal((await db.select().from(kanbanCards).where(eq(kanbanCards.id, card!.id)))[0]!.columnStatus, 'done');
     } finally { onPost = undefined; merged = false; }
+  });
+  await t.test('review entrypoint settles its original running task and old retry streak while provider acceptance awaits verification', async (t) => {
+    const f = await fixture();
+    await db.update(externalWaits).set({ status: 'superseded' }).where(eq(externalWaits.id, f.wait.id));
+    await db.update(kanbanCards).set({ columnStatus: 'in_review', runRetryState: { review: { failures: 1, nextRunAt: null } } }).where(eq(kanbanCards.id, f.card.id));
+    await db.insert(workProducts).values({ companyId: f.card.companyId, cardId: f.card.id, projectId: f.project.id, type: 'pull_request', title: 'Reviewed PR', pullRequestUrl: f.wait.externalUrl, commitSha: head });
+    const [run] = await db.insert(taskRuns).values({ cardId: f.card.id, companyId: f.card.companyId, kind: 'review', status: 'running' }).returning();
+    t.mock.method(globalThis, 'fetch', fetchImpl);
+    await reviewCard(f.card.id, { taskRunId: run!.id });
+    assert.equal((await db.select().from(taskRuns).where(eq(taskRuns.id, run!.id)))[0]!.status, 'success');
+    const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, f.card.id));
+    assert.equal(card!.columnStatus, 'waiting_on_external'); assert.equal(card!.executionLockId, null); assert.equal(card!.activeHeartbeatRunId, null);
+    const intents = await db.select().from(mergeIntents).where(eq(mergeIntents.cardId, f.card.id));
+    assert.ok(intents.some((intent) => intent.state === 'accepted'));
   });
 });

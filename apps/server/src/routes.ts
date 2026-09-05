@@ -2477,7 +2477,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
     const policy = { ...existing, ...input };
     const managedRepoFullName = input.autoMergeAfterApproval === true ? optInManagedBinding(policy) : existing.managedRepoFullName;
-    const mergeReadiness = policy.autoMergeAfterApproval ? await inspectManagedProject({ ...policy, managedRepoFullName }, { establish: input.autoMergeAfterApproval === true && existing.autoMergeAfterApproval !== true }) : null;
+    const mergeReadiness = policy.autoMergeAfterApproval ? await inspectManagedProject({ ...policy, managedRepoFullName }, { establish: input.autoMergeAfterApproval === true }) : null;
     const [row] = await db.update(projects).set({
       name: input.name,
       description: input.description,

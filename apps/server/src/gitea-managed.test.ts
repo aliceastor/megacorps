@@ -48,3 +48,30 @@ test('unsafe existing rules, admin agents, dropped allowlist and unsupported/pro
   }
   assert.equal((await (provider as any).giteaManagedReadiness(config, 'org', 'repo', 'main', { fetchImpl: async () => { throw new Error('offline'); } })).ready, false);
 });
+test('protection read-back detects service identity silently dropped by Gitea', async () => {
+  const base = fake(); let reads = 0;
+  const fetchImpl: typeof fetch = async (url, init) => {
+    if (String(url).endsWith('/branch_protections') && (!init?.method || init.method === 'GET')) {
+      reads++;
+      return new Response(JSON.stringify(reads === 1 ? [] : [{ ...safe, merge_whitelist_usernames: [] }]));
+    }
+    return base.fetchImpl(url, init);
+  };
+  const result = await provider.giteaManagedReadiness(config, 'org', 'repo', 'main', { establish: true, fetchImpl });
+  assert.equal(result.ready, false); assert.equal(reads, 2); assert.equal(base.requests.filter((r) => r.method === 'POST').length, 1);
+});
+test('pagination and inherited effective agent privileges cannot hide an ordinary admin', async () => {
+  const base = fake([safe]); let pages = 0;
+  const fetchImpl: typeof fetch = async (url, init) => {
+    const parsed = new URL(String(url));
+    if (parsed.pathname.endsWith('/collaborators')) {
+      pages++; return new Response(JSON.stringify(pages === 1 ? Array.from({ length: 50 }, (_, i) => ({ login: `agent${i}`, is_admin: false })) : [{ login: 'hidden-admin', is_admin: true }]));
+    }
+    return base.fetchImpl(url, init);
+  };
+  assert.equal((await provider.giteaManagedReadiness(config, 'org', 'repo', 'main', { fetchImpl })).ready, false);
+  assert.equal(pages, 2);
+  const inherited = fake([safe], { '/repos/org/repo/collaborators/inherited/permission': { permission: 'admin', user: { is_admin: false } } });
+  assert.equal((await provider.giteaManagedReadiness(config, 'org', 'repo', 'main', { agentUsernames: ['inherited'], fetchImpl: inherited.fetchImpl })).ready, false);
+  assert.ok(inherited.requests.every((r) => r.method === 'GET'));
+});

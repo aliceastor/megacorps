@@ -79,3 +79,25 @@ END $$;
 DROP TRIGGER IF EXISTS mc_merge_project_gate ON projects;
 CREATE TRIGGER mc_merge_project_gate BEFORE UPDATE OR DELETE ON projects FOR EACH ROW EXECUTE FUNCTION mc_merge_project_gate();
 `;
+
+// Additive: migration 22 was already published and executed by the PG CI.
+export const managedMergeRunFenceMigration = `
+ALTER TABLE merge_intents ADD COLUMN IF NOT EXISTS originating_task_run_id UUID;
+CREATE OR REPLACE FUNCTION mc_merge_task_run_gate() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE before_row JSONB; after_row JSONB; target UUID;
+BEGIN
+ before_row := CASE WHEN TG_OP = 'INSERT' THEN '{}'::jsonb ELSE to_jsonb(OLD) END;
+ after_row := CASE WHEN TG_OP = 'DELETE' THEN '{}'::jsonb ELSE to_jsonb(NEW) END;
+ IF TG_OP <> 'DELETE' AND NEW.kind IN ('dispatch','review','panel_review') AND NEW.status IN ('queued','running') AND
+   (TG_OP = 'INSERT' OR before_row->>'status' NOT IN ('queued','running') OR
+    before_row->>'card_id' IS DISTINCT FROM after_row->>'card_id' OR before_row->>'kind' IS DISTINCT FROM after_row->>'kind' OR before_row->>'agent_id' IS DISTINCT FROM after_row->>'agent_id') THEN
+   FOR target IN SELECT DISTINCT value::uuid FROM jsonb_array_elements_text(jsonb_build_array(before_row->>'card_id', after_row->>'card_id')) WHERE value IS NOT NULL ORDER BY value::uuid LOOP
+     PERFORM mc_merge_gate_fence(target);
+   END LOOP;
+ END IF;
+ IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS mc_merge_task_run_gate ON task_runs;
+CREATE TRIGGER mc_merge_task_run_gate BEFORE INSERT OR UPDATE ON task_runs FOR EACH ROW EXECUTE FUNCTION mc_merge_task_run_gate();
+`;

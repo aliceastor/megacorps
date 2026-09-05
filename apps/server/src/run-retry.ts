@@ -1,6 +1,6 @@
 import { and, eq, inArray, sql as drizzleSql } from 'drizzle-orm';
 import { db } from './db/client.ts';
-import { approvals, kanbanCards, taskLogs, taskRuns } from './db/schema.ts';
+import { approvals, kanbanCards, mergeIntents, taskLogs, taskRuns } from './db/schema.ts';
 import { recordStageAction } from './card-actions.ts';
 import { notify } from './notifications.ts';
 import { publishLiveEvent } from './live.ts';
@@ -63,6 +63,11 @@ export async function completeRetryableRun(runId: string, input: RunCompletion):
       ...(input.releaseLock ? { lockedBy: null, lockedAt: null } : {}),
     }).where(and(eq(taskRuns.id, runId), inArray(taskRuns.status, ['queued', 'running']))).returning();
     if (!finished || input.status === 'cancelled' || input.preserveCard) return null;
+    const [mergeInFlight] = await tx.select().from(mergeIntents).where(and(eq(mergeIntents.cardId, card.id), inArray(mergeIntents.state, ['in_flight', 'accepted', 'uncertain']))).limit(1);
+    // parkForMerge may accept the external request before the original review
+    // run settles. Finish that run, preserving the fenced card until provider
+    // reconciliation; retry metadata cannot roll back an accepted merge.
+    if (mergeInFlight) return null;
     const state: RunRetryState = { ...card.runRetryState };
     const failed = input.status === 'failed' && input.retryableFailure === true;
     const failures = failed ? Math.min(RUN_FAILURE_LIMIT, (state[kind]?.failures ?? 0) + 1) : 0;

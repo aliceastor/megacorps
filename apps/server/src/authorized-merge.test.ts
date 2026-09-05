@@ -7,7 +7,7 @@ import * as schema from './db/schema.ts';
 const head = 'a'.repeat(40);
 test('durable merge claim rechecks every gate and policy before one exact-head attempt', async (t) => {
   assert.equal(typeof (executor as any).executeAuthorizedMerge, 'function');
-  const { kanbanCards, projects, externalWaits, approvals, reviewRounds, mergeIntents } = schema as any;
+  const { kanbanCards, projects, externalWaits, approvals, reviewRounds, mergeIntents, taskRuns } = schema as any;
   const old = process.env.GITEA_URL, token = process.env.GITEA_ADMIN_TOKEN;
   process.env.GITEA_URL = 'https://gitea.test'; process.env.GITEA_ADMIN_TOKEN = 'synthetic';
   t.after(() => { if (old === undefined) delete process.env.GITEA_URL; else process.env.GITEA_URL = old; if (token === undefined) delete process.env.GITEA_ADMIN_TOKEN; else process.env.GITEA_ADMIN_TOKEN = token; });
@@ -31,6 +31,11 @@ test('durable merge claim rechecks every gate and policy before one exact-head a
   await (executor as any).executeAuthorizedMerge('w', { fetchImpl });
   assert.equal(mutations, 0, 'required client approval needs a durable approved human gate');
   card.requiresApproval = false;
+  const newReview = { id: 'new-review', cardId: 'c', kind: 'review', status: 'queued' };
+  state.rows(taskRuns).push(newReview);
+  await (executor as any).executeAuthorizedMerge('w', { fetchImpl });
+  assert.equal(mutations, 0, 'a newly queued review is a new gate');
+  state.rows(taskRuns).pop();
   await (executor as any).executeAuthorizedMerge('w', { fetchImpl });
   await (executor as any).executeAuthorizedMerge('w', { fetchImpl });
   assert.equal(mutations, 1); assert.equal(intent.state, 'accepted'); assert.equal(intent.attemptCount, 1); assert.equal(card.columnStatus, 'waiting_on_external', 'HTTP acceptance is not completion proof');

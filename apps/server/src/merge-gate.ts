@@ -348,6 +348,7 @@ export async function planMergeGate(card: CardRow, options: { fetchImpl?: typeof
     if (urls.length === 1) candidate = selectMergeCandidate([{ type: 'pull_request', url: urls[0] }], project);
   }
   if (!candidate) return blocked('no_candidate', 'Report one project pull request or a non-default branch/commit work product with reviewed evidence. Foreign repository URLs cannot authorize completion.');
+  if (project.autoMergeAfterApproval && candidate.kind !== 'pull_request') return blocked('no_candidate', 'Automatic authorized merge requires a project pull request. Open a pull request and report its URL and exact head as evidence before requesting approval.');
 
   const defaultBranch = normalizeBranchRef(project.defaultBranch) ?? 'main';
   let headSha: string | null = null;
@@ -412,7 +413,14 @@ async function parkForMergeLocked(card: CardRow, plan: Extract<MergeGatePlan, { 
     if (!authorized) return null;
     const waits = await tx.select().from(externalWaits).where(and(eq(externalWaits.cardId, card.id), eq(externalWaits.provider, MERGE_WAIT_PROVIDER), eq(externalWaits.status, 'waiting'))).orderBy(desc(externalWaits.createdAt));
     const existing = waits.find((wait) => sameCommit(wait.authorizedHeadSha, plan.headSha) && wait.externalId === plan.externalId);
-    if (existing) return { wait: existing, created: false };
+    if (existing) {
+      const [intent] = await tx.select().from(mergeIntents).where(eq(mergeIntents.waitId, existing.id)).limit(1);
+      if (!intent || intent.gateVersion === (fresh.mergeGateVersion ?? 0)) return { wait: existing, created: false };
+      if (!['prepared', 'retryable'].includes(intent.state)) return null;
+      // A later completed review can authorize the same SHA, but never reuse
+      // a permission decision invalidated by an intervening gate mutation.
+      await tx.update(mergeIntents).set({ state: 'superseded', lastResult: 'A new review authorized a fresh wait after gate changes.' }).where(eq(mergeIntents.id, intent.id));
+    }
     const [parked] = await tx.update(kanbanCards).set({ columnStatus: 'waiting_on_external', completedAt: null, lastError: null, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: now }).where(completionCondition(card, options.taskRunId)).returning();
     if (!parked) return null;
     for (const wait of waits) await tx.update(externalWaits).set({ status: 'superseded', resolvedAt: now }).where(eq(externalWaits.id, wait.id));
@@ -421,7 +429,7 @@ async function parkForMergeLocked(card: CardRow, plan: Extract<MergeGatePlan, { 
     const target = managedMergeTarget(plan.project, giteaConfigFromEnv());
     if (target && plan.candidate.pullRequestNumber) {
       const [version] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1);
-      await tx.insert(mergeIntents).values({ cardId: card.id, projectId: plan.project.id, waitId: wait.id, headSha: plan.headSha, repoFullName: `${target.org}/${target.repo}`, defaultBranch: plan.defaultBranch, gateVersion: version!.mergeGateVersion ?? 0, state: 'prepared', attemptCount: 0 });
+      await tx.insert(mergeIntents).values({ cardId: card.id, projectId: plan.project.id, waitId: wait.id, originatingTaskRunId: options.taskRunId ?? null, headSha: plan.headSha, repoFullName: `${target.org}/${target.repo}`, defaultBranch: plan.defaultBranch, gateVersion: version!.mergeGateVersion ?? 0, state: 'prepared', attemptCount: 0 });
     }
     return { wait, created: true };
   });
@@ -664,6 +672,12 @@ async function handlePullRequestEvent(match: MergeWaitMatch, payload: GiteaPullR
   const number = pull?.number ?? payload.number ?? null;
   const headSha = pull?.head?.sha ?? null;
   const defaultBranch = normalizeBranchRef(project.defaultBranch) ?? 'main';
+  if (project.autoMergeAfterApproval && pull?.base?.ref && normalizeBranchRef(pull.base.ref) !== defaultBranch) {
+    const message = `Pull request retargeted from authorized ${defaultBranch} to ${pull.base.ref}. Gitea 1.22 cannot atomically bind the merge request to a base branch. ${pull.merged ? 'The provider reports an external merge; MegaCorps cannot undo or cancel that effect.' : 'No further merge will be initiated for this changed target.'} Completion remains unverified; inspect the provider state and target branch.`;
+    await db.update(mergeIntents).set({ lastResult: message }).where(eq(mergeIntents.waitId, wait.id));
+    await db.update(kanbanCards).set({ lastError: message, updatedAt: new Date() }).where(completionCondition(card));
+    return { verdict: 'ignore', cardId: card.id, waitId: wait.id };
+  }
   const verdict = mergeVerdict({
     wait: { provider: wait.provider, status: wait.status, externalId: wait.externalId, authorizedHeadSha: wait.authorizedHeadSha },
     event: {

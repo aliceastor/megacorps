@@ -1,6 +1,6 @@
 import { sql } from './client.ts';
 import { CEO_POSITION_PROMPT, LEGACY_CEO_POSITION_PROMPT } from '../role-playbooks.ts';
-import { managedMergeMigration } from './managed-merge-migration.ts';
+import { managedMergeMigration, managedMergeRunFenceMigration } from './managed-merge-migration.ts';
 
 type Migration = { version: number; name: string; run: () => Promise<void> };
 
@@ -38,6 +38,7 @@ const migrations: Migration[] = [
     await sql.unsafe(`ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS protocol_repair_state JSONB NOT NULL DEFAULT '{}';`);
   } },
   { version: 22, name: 'managed-authorized-merge', run: async () => { await sql.unsafe(managedMergeMigration); } },
+  { version: 23, name: 'managed-merge-run-fence', run: async () => { await sql.unsafe(managedMergeRunFenceMigration); } },
 ];
 
 // Merge closure (company pipeline §19). external_waits.authorized_head_sha

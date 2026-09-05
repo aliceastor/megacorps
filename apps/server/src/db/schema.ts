@@ -526,6 +526,7 @@ export const mergeIntents = pgTable('merge_intents', {
   // Intentionally no wait FK: gate writers lock their row then the card;
   // claiming must never acquire a wait-row lock while holding the card.
   waitId: uuid('wait_id').notNull().unique(),
+  originatingTaskRunId: uuid('originating_task_run_id'),
   headSha: text('head_sha').notNull(),
   repoFullName: text('repo_full_name').notNull(),
   defaultBranch: text('default_branch').notNull(),

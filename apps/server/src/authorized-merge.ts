@@ -1,6 +1,6 @@
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { db } from './db/client.ts';
-import { approvals, externalWaits, kanbanCards, mergeIntents, projects, reviewRounds } from './db/schema.ts';
+import { approvals, externalWaits, kanbanCards, mergeIntents, projects, reviewRounds, taskRuns } from './db/schema.ts';
 import { childCompletionPolicySatisfied } from './dispatch.ts';
 import { giteaConfigFromEnv, giteaMergePullRequest, giteaPullRequest } from './gitea.ts';
 import { inspectManagedProject, managedMergeTarget } from './managed-project-policy.ts';
@@ -44,6 +44,8 @@ export async function executeAuthorizedMerge(waitId: string, options: { fetchImp
     const human = decisions.find((approval) => (approval.payload as { humanGate?: boolean } | null)?.humanGate === true);
     const rounds = await tx.select().from(reviewRounds).where(eq(reviewRounds.cardId, card.id));
     const children = await tx.select().from(kanbanCards).where(and(eq(kanbanCards.parentCardId, card.id), isNull(kanbanCards.deletedAt)));
+    const runs = await tx.select().from(taskRuns).where(eq(taskRuns.cardId, card.id));
+    if (runs.some((run) => run.id !== intent.originatingTaskRunId && ['dispatch', 'review', 'panel_review'].includes(run.kind) && ['queued', 'running'].includes(run.status))) return null;
     if (decisions.some((approval) => approval.status === 'pending') || (card.requiresApproval && human?.status !== 'approved') || rounds.some((round) => ['open', 'closing'].includes(round.status)) || !childCompletionPolicySatisfied(card, children)) return null;
     const [row] = await tx.update(mergeIntents).set({ state: 'in_flight', attemptCount: intent.attemptCount + 1, lastAttemptAt: new Date(), lastResult: 'Exact-head merge request may be in flight; gate changes cannot guarantee cancellation.' }).where(eq(mergeIntents.id, intent.id)).returning();
     return row;
