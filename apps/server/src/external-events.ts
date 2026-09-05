@@ -89,12 +89,14 @@ export async function applyExternalEvent(args: { card: CardRow; input: ApplyExte
     if (!card || card.columnStatus !== current.columnStatus || ['done', 'cancelled'].includes(card.columnStatus ?? '')) return null;
     const [authorized] = await tx.select().from(kanbanCards).where(completionCondition(current)).limit(1);
     if (!authorized) return null;
+    // A supplied wait belongs only to a card that is still parked on it.
+    // Reject before the first mutation; returning null commits a transaction.
+    if (input.waitId && card.columnStatus !== 'waiting_on_external') return null;
     if (requestedStatus && requestedStatus !== card.columnStatus) {
       const [updated] = await tx.update(kanbanCards).set({ columnStatus: requestedStatus, rollupStatus: childBlock ? 'waiting_on_children' : requestedStatus === 'done' ? 'done' : undefined, lastError: requestedStatus === 'blocked' ? input.payloadSummary ?? 'External completion requires correction.' : null, completedAt: requestedStatus === 'done' ? now : null, updatedAt: now }).where(completionCondition(current)).returning();
       if (!updated) return null;
     }
     if (input.waitId) {
-      if (card.columnStatus !== 'waiting_on_external') return null;
       const [claimed] = await tx.update(externalWaits).set({ status: input.status, resolvedAt: ['waiting', 'info'].includes(input.status) ? null : now }).where(and(eq(externalWaits.id, input.waitId), eq(externalWaits.cardId, card.id), eq(externalWaits.status, 'waiting'))).returning();
       if (!claimed) throw superseded; // Roll back the card write with the lost wait claim.
     } else {
@@ -140,7 +142,7 @@ export async function sweepExternalWaitTimeouts(app: FastifyInstance): Promise<n
         continue;
       }
       const summary = `Timed out waiting for ${wait.provider}: ${wait.waitingFor}.`;
-      await applyExternalEvent({
+      const applied = await applyExternalEvent({
         card,
         actor: { type: 'system', id: 'external-wait-timeout' },
         input: {
@@ -154,6 +156,7 @@ export async function sweepExternalWaitTimeouts(app: FastifyInstance): Promise<n
           waitId: wait.id,
         },
       });
+      if (!applied.event) continue;
       await notify({
         companyId: card.companyId,
         type: 'external_timeout',

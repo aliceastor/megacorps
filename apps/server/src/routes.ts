@@ -22,7 +22,7 @@ import { runAgentMaintenance } from './agent-maintenance.ts';
 import { delegationLineFromReportItem } from './agent-report.ts';
 import { agentResultExecutionLog, normalizeAgentResult, persistAgentWorkProducts } from './agent-results.ts';
 import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
-import { finishProtocolHelp, resetProtocolRepair } from './protocol-repair.ts';
+import { finishProtocolHelp, protocolHelpOrigin, resetProtocolRepair } from './protocol-repair.ts';
 import { completionCondition, guardedCompletionUpdate } from './completion-guard.ts';
 import { parseA2aPushPayload, verifyA2aPushSignature } from './a2a-client.ts';
 import { registerCronRoutes } from './cron-routes.ts';
@@ -2810,7 +2810,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (taskRunId && !webhookTaskRun) return reply.code(404).send({ error: 'task_run_not_found' });
     if (webhookTaskRun && webhookTaskRun.cardId !== card.id) return reply.code(409).send({ error: 'task_run_card_mismatch' });
     if ((webhookTaskRun && !['queued', 'running'].includes(webhookTaskRun.status)) || (!['message', 'message_review', 'panel_review'].includes(webhookTaskRun?.kind ?? '') && ['done', 'cancelled'].includes(card.columnStatus ?? ''))) return { ok: true, stale: true, cardId: card.id, taskRunId, newStatus: card.columnStatus };
-    if (normalizedResult.outcome === 'invalid' || (webhookTaskRun?.kind === 'review' && (normalizedResult.verdictError || (normalizedResult.source === 'report' && normalizedResult.outcome === 'completed' && !normalizedResult.verdict)))) {
+    const protocolGuidance = webhookTaskRun?.kind === 'review' && Boolean(protocolHelpOrigin(card, webhookTaskRun.agentId ?? ''));
+    if (normalizedResult.outcome === 'invalid' || (webhookTaskRun?.kind === 'review' && (normalizedResult.verdictError || (!protocolGuidance && normalizedResult.source === 'report' && normalizedResult.outcome === 'completed' && !normalizedResult.verdict)))) {
       const reason = normalizedResult.reason ?? normalizedResult.verdictError ?? 'review_verdict_missing: return one evidence-supported current verdict.';
       const actorId = webhookTaskRun?.agentId ?? callerAgent?.id ?? card.assigneeId;
       const [actor] = actorId ? await db.select().from(agents).where(and(eq(agents.id, actorId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
@@ -2818,7 +2819,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(409).send({ error: 'agent_report_invalid', message: reason });
     }
     const reviewRevisionRequested = webhookTaskRun?.kind === 'review' && normalizedResult.verdict === 'revision_requested';
-    if (webhookTaskRun?.kind === 'review') {
+    if (webhookTaskRun?.kind === 'review' && !protocolGuidance) {
       if (normalizedResult.verdictError || (normalizedResult.source === 'report' && normalizedResult.outcome === 'completed' && !normalizedResult.verdict)) return reply.code(409).send({ error: 'review_verdict_invalid', message: normalizedResult.verdictError ?? 'review_verdict_missing: return an explicit current verdict in your report.' });
       if (reviewRevisionRequested && normalizedResult.outcome === 'completed') requestedStatus = 'todo';
       else if (normalizedResult.verdict === 'escalate' && normalizedResult.outcome === 'completed') requestedStatus = 'needs_review';

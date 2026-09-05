@@ -24,7 +24,7 @@ import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { extractAgentReport, structuredDelegationPlan } from './agent-report.ts';
 import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
-import { finishProtocolHelp, protocolRepairSession, recordProtocolFailure, resetProtocolRepair } from './protocol-repair.ts';
+import { finishProtocolHelp, protocolHelpOrigin, protocolRepairSession, recordProtocolFailure, resetProtocolRepair } from './protocol-repair.ts';
 import { completionCondition, completionStillCurrent, guardedCompletionUpdate } from './completion-guard.ts';
 import type { AgentReportDelegation } from '@megacorps/shared';
 import type { TaskResult } from './adapters/hermes.ts';
@@ -656,6 +656,13 @@ function applicableGoals(goalsRows: GoalRow[], input: { departmentId?: string | 
   return rows;
 }
 
+// The transaction owner drains these effects only after a successful commit.
+// Required writes use its connection; rolled-back writes publish nothing.
+type TransactionEffects = {
+  executor: Pick<typeof db, 'select' | 'insert'>;
+  afterCommit: Array<() => void | Promise<void>>;
+};
+
 export async function addTaskLog(input: {
   cardId: string;
   agentId?: string | null;
@@ -665,8 +672,9 @@ export async function addTaskLog(input: {
   output?: string;
   costUsd?: number;
   durationSeconds?: number;
-}) {
-  const [log] = await db.insert(taskLogs).values({
+}, transaction?: TransactionEffects) {
+  const executor = transaction?.executor ?? db;
+  const [log] = await executor.insert(taskLogs).values({
     cardId: input.cardId,
     agentId: input.agentId ?? null,
     type: input.type,
@@ -676,8 +684,12 @@ export async function addTaskLog(input: {
     costUsd: input.costUsd?.toString(),
     durationSeconds: input.durationSeconds,
   }).returning();
-  const [card] = await db.select({ companyId: kanbanCards.companyId, projectId: kanbanCards.projectId }).from(kanbanCards).where(eq(kanbanCards.id, input.cardId)).limit(1);
-  if (card && log) publishLiveEvent({ type: 'task_log.created', companyId: card.companyId, entityType: 'task_log', entityId: log.id, cardId: input.cardId, projectId: card.projectId, action: input.type });
+  const [card] = await executor.select({ companyId: kanbanCards.companyId, projectId: kanbanCards.projectId }).from(kanbanCards).where(eq(kanbanCards.id, input.cardId)).limit(1);
+  if (card && log) {
+    const publish = () => publishLiveEvent({ type: 'task_log.created', companyId: card.companyId, entityType: 'task_log', entityId: log.id, cardId: input.cardId, projectId: card.projectId, action: input.type });
+    if (transaction) transaction.afterCommit.push(publish);
+    else publish();
+  }
 }
 
 export async function addCardMessage(input: {
@@ -1768,8 +1780,8 @@ export async function addActivity(input: {
   entityType: string;
   entityId: string;
   details?: Record<string, unknown>;
-}) {
-  const [event] = await db.insert(activityLog).values({
+}, transaction?: TransactionEffects) {
+  const [event] = await (transaction?.executor ?? db).insert(activityLog).values({
     companyId: input.companyId,
     actorType: input.actorType ?? 'system',
     actorId: input.actorId ?? input.agentId ?? 'system',
@@ -1779,7 +1791,11 @@ export async function addActivity(input: {
     entityId: input.entityId,
     details: input.details ?? {},
   }).returning();
-  if (event) publishLiveEvent({ type: 'activity.created', companyId: input.companyId, entityType: input.entityType, entityId: input.entityId, action: input.action, data: { activityId: event.id } });
+  if (event) {
+    const publish = () => publishLiveEvent({ type: 'activity.created', companyId: input.companyId, entityType: input.entityType, entityId: input.entityId, action: input.action, data: { activityId: event.id } });
+    if (transaction) transaction.afterCommit.push(publish);
+    else publish();
+  }
 }
 
 export async function ensureParentWaitingOnChildren(parentCardId: string | null | undefined, input: {
@@ -2447,7 +2463,8 @@ async function releaseExecutionLock(cardId: string, runId: string | null, status
   }
 }
 
-export async function createPendingApproval(card: CardRow, agentId: string | null, reason: string, executor: Pick<typeof db, 'select' | 'insert'> = db) {
+export async function createPendingApproval(card: CardRow, agentId: string | null, reason: string, transaction?: TransactionEffects) {
+  const executor = transaction?.executor ?? db;
   const existing = await executor.select().from(approvals).where(and(eq(approvals.cardId, card.id), eq(approvals.status, 'pending'))).limit(1);
   if (existing[0]) return existing[0];
   const [approval] = await executor.insert(approvals).values({
@@ -2458,9 +2475,11 @@ export async function createPendingApproval(card: CardRow, agentId: string | nul
     status: 'pending',
     payload: { reason, title: card.title, stage: card.columnStatus },
   }).returning();
-  await addTaskLog({ cardId: card.id, agentId, type: 'approval', status: 'queued', message: `Approval requested: ${reason}.` });
-  await addActivity({ companyId: card.companyId, actorType: agentId ? 'agent' : 'system', actorId: agentId ?? 'system', agentId, action: 'approval.requested', entityType: 'card', entityId: card.id, details: { approvalId: approval?.id, reason } });
-  await notify({ companyId: card.companyId, type: 'approval_pending', title: `Approval needed: ${card.title}`, body: reason, entityType: 'approval', entityId: approval?.id ?? card.id, cardId: card.id, agentId });
+  await addTaskLog({ cardId: card.id, agentId, type: 'approval', status: 'queued', message: `Approval requested: ${reason}.` }, transaction);
+  await addActivity({ companyId: card.companyId, actorType: agentId ? 'agent' : 'system', actorId: agentId ?? 'system', agentId, action: 'approval.requested', entityType: 'card', entityId: card.id, details: { approvalId: approval?.id, reason } }, transaction);
+  const notification = async () => { await notify({ companyId: card.companyId, type: 'approval_pending', title: `Approval needed: ${card.title}`, body: reason, entityType: 'approval', entityId: approval?.id ?? card.id, cardId: card.id, agentId }); };
+  if (transaction) transaction.afterCommit.push(notification);
+  else await notification();
   return approval;
 }
 
@@ -3774,6 +3793,16 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       throw new Error(adapterFailureMessage('review', result.output));
     }
     await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
+    // Protocol help is guidance for the original actor, not artifact review.
+    // Validate it before asking for an ordinary product verdict.
+    const protocolHelp = await finishProtocolHelp(card, reviewer.id, result.output, options.taskRunId);
+    if (protocolHelp) {
+      await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
+      await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+      await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: result.output });
+      if (protocolHelp.continueKind) await enqueueTaskRun(card.id, protocolHelp.continueKind, 'queue');
+      return protocolHelp.card;
+    }
     if (asksForConfirmationInsteadOfWorking(result.output)) {
       return sendAgentFeedbackAndRequeue({
         card,
@@ -3800,14 +3829,6 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       });
     }
     const acceptedReviewOutput = result.success || Boolean(explicitDecision);
-    const protocolHelp = await finishProtocolHelp(card, reviewer.id, result.output, options.taskRunId);
-    if (protocolHelp) {
-      await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
-      await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
-      await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: result.output });
-      if (protocolHelp.continueKind) await enqueueTaskRun(card.id, protocolHelp.continueKind, 'queue');
-      return protocolHelp.card;
-    }
     await resetProtocolRepair(card.id, 'review', normalizedReview, result.success, card, options.taskRunId);
     if (acceptedReviewOutput && decision) {
       try { await recordReviewScore(card, reviewer, decision, result.output); } catch { /* scoring must never fail a review */ }
@@ -4998,6 +5019,13 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
 }
 
 export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+  const origin = protocolHelpOrigin(card, card.reviewerId ?? '');
+  if (origin) return [
+    `Provide protocol repair guidance for card ${card.id}: ${card.title}.`,
+    'The original actor exhausted its report repair budget. Explain the concrete report correction in a megacorps-report with status progress or completed and a meaningful summary. A product verdict is not required. This guidance only resumes the original actor once; it does not approve the deliverable.',
+    `Original reporting failure: ${card.reviewFeedback ?? card.executionLog ?? 'See the current task logs.'}`,
+    options.continuation ? await buildKanbanDeltaContext(card, options) : await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.reviewerId }),
+  ].join('\n\n');
   if (options.continuation) {
     const helpReview = card.columnStatus === 'needs_review';
     return [

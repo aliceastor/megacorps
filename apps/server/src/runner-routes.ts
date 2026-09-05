@@ -15,7 +15,7 @@ import { cascadeParentStatus, completeTaskRun, completionBlockedByChildren, comp
 import { agentResultExecutionLog, normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
 import { applyMergeGatePlan, mergeCompletionStatus, planMergeGate } from './merge-gate.ts';
 import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
-import { finishProtocolHelp, resetProtocolRepair } from './protocol-repair.ts';
+import { finishProtocolHelp, protocolHelpOrigin, resetProtocolRepair } from './protocol-repair.ts';
 import { guardedCompletionUpdate, completionStillCurrent } from './completion-guard.ts';
 import { ensureHumanGate } from './review-rounds.ts';
 import { childrenFromOutput, processChildSplits, createMessageDelegations, performWebhookHandoff, resolveClientCheckpointRequest, finishRunWaitingOnClient, resolveBrainstormRequest, finishRunWaitingOnBrainstorm, delegationItems } from './dispatch.ts';
@@ -124,7 +124,8 @@ async function createRunnerTaskCompletion(input: {
   const runAgentId = input.run.agentId ?? card.assigneeId;
   let output = [input.body.summary, input.body.output].filter(Boolean).join('\n\n');
   const normalized = normalizeAgentResult({ output, report: input.body.report, workProducts: input.body.workProducts });
-  if (normalized.outcome === 'invalid' || (input.run.kind === 'review' && normalized.outcome === 'completed' && (normalized.verdictError || (normalized.source === 'report' && !normalized.verdict)))) {
+  const protocolGuidance = input.run.kind === 'review' && Boolean(protocolHelpOrigin(card, runAgentId ?? ''));
+  if (normalized.outcome === 'invalid' || (input.run.kind === 'review' && normalized.outcome === 'completed' && (normalized.verdictError || (!protocolGuidance && normalized.source === 'report' && !normalized.verdict)))) {
     const [actor] = runAgentId ? await db.select().from(agents).where(eq(agents.id, runAgentId)).limit(1) : [];
     const reason = normalized.reason ?? normalized.verdictError ?? 'Return one evidence-supported current review verdict.';
     if (!actor || !['dispatch', 'review'].includes(input.run.kind)) throw httpError(409, reason, 'agent_report_invalid');

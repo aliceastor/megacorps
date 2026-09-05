@@ -156,12 +156,13 @@ export async function cardIdsAwaitingPanelOrHuman(cardIds: string[]): Promise<Se
 // Human approval is the last gate (§17.6): a pending task_review approval
 // flagged humanGate parks the card until PUT /api/approvals/:id decides.
 export async function ensureHumanGate(card: CardRow, agentId: string | null, reason: string, extra: Record<string, unknown> = {}) {
+  const afterCommit: Array<() => void | Promise<void>> = [];
   const result = await db.transaction(async (tx) => {
     // The same card lock is used by completion writers. Once this commits,
     // a delayed result must observe the durable human decision boundary.
     const [fresh] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).for('update').limit(1);
     if (!fresh || fresh.deletedAt || ['done', 'cancelled'].includes(fresh.columnStatus ?? '')) return null;
-    const approval = await createPendingApproval(fresh, agentId, reason, tx);
+    const approval = await createPendingApproval(fresh, agentId, reason, { executor: tx, afterCommit });
     if (!approval) return null;
     const payload = metadataOf(approval.payload);
     const alreadyGated = payload[HUMAN_GATE_FLAG] === true;
@@ -169,6 +170,7 @@ export async function ensureHumanGate(card: CardRow, agentId: string | null, rea
     return { approval, alreadyGated };
   });
   if (!result) return null;
+  for (const effect of afterCommit) await effect();
   const { approval, alreadyGated } = result;
   if (!alreadyGated) {
     await notify({ companyId: card.companyId, type: 'approval_pending', title: `Your decision is needed: ${card.title}`, body: reason, entityType: 'approval', entityId: approval.id, cardId: card.id, agentId });

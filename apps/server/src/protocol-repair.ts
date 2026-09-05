@@ -19,7 +19,7 @@ export async function finishProtocolHelp(card: Card, actorId: string, output: st
   if (!kind) return null;
   const old = card.protocolRepairState![kind]!;
   const result = normalizeAgentResult({ output });
-  const valid = ['completed', 'progress'].includes(result.outcome) && !result.verdictError && (result.report?.summary ?? output).trim().length >= 24;
+  const valid = (result.source === 'report' || result.verdictExplicit) && ['completed', 'progress'].includes(result.outcome) && !result.verdictError && (result.report?.summary ?? output).trim().length >= 24;
   const message = valid ? 'Department protocol guidance received. The original actor gets one correction using this guidance; another malformed reply stops automatic repair.' : 'Department help did not resolve the reporting blocker. Automatic repair has stopped; resolve the existing help request.';
   const updated = await guardedCompletionUpdate(card, { protocolRepairState: { ...card.protocolRepairState, [kind]: { ...old, mode: valid ? 'helped' : 'blocked', helpAttempted: true } }, columnStatus: valid ? kind === 'dispatch' ? 'todo' : 'in_review' : 'blocked', reviewerId: kind === 'review' ? old.actorId : old.originalReviewerId ?? null, completedAt: null, lastError: message, reviewFeedback: output, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() }, taskRunId);
   if (updated) await db.insert(cardComments).values({ cardId: card.id, agentId: actorId, authorType: 'agent', action: 'protocol_help_response', body: output, metadata: { kind, originalActorId: old.actorId, failures: old.failures } });
