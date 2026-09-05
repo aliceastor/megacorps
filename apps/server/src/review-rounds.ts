@@ -26,6 +26,7 @@ import { acceptanceOf } from './card-brief.ts';
 import { composeReviewPanel, dispositionWarnings, findingIsOpen, formatDispositionRules, formatFindingsForPrompt, formatRoundClosedMessage, formatVerifyInstructions, mergeFindings, nextFixOwner, normalizeFindingKey, normalizeSeverity, panelRequired, roundDecision, takeoverTrigger, verificationDecision, type FindingRow, type MergedFinding, type ReviewVerdict, type TakeoverTrigger, type VerificationInput } from './review-panel.ts';
 import { addActivity, addCardMessage, addStageLog, addTaskLog, budgetOk, buildExecutionAgent, buildReviewPrompt, cardTaskTimeoutSeconds, cascadeParentStatus, claimAgentCapacity, clipText, completeTaskRun, completionBlockedByChildren, createPendingApproval, dispatchInternals, enqueuePanelReviewRun, enqueueTaskRun, openHeartbeatRun, recordCostAndEnforceBudget, recordReviewScore, rememberTaskAdapterSession, resolvePendingApproval, scopedAdapterSession } from './dispatch.ts';
 import { applyMergeGatePlan, noteMergeEvidenceRequired, parkForMerge, planMergeGate } from './merge-gate.ts';
+import { guardedCompletionUpdate } from './completion-guard.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -155,13 +156,20 @@ export async function cardIdsAwaitingPanelOrHuman(cardIds: string[]): Promise<Se
 // Human approval is the last gate (§17.6): a pending task_review approval
 // flagged humanGate parks the card until PUT /api/approvals/:id decides.
 export async function ensureHumanGate(card: CardRow, agentId: string | null, reason: string, extra: Record<string, unknown> = {}) {
-  const approval = await createPendingApproval(card, agentId, reason);
-  if (!approval) return null;
-  const payload = metadataOf(approval.payload);
-  const alreadyGated = payload[HUMAN_GATE_FLAG] === true;
-  if (!alreadyGated || payload.reason !== reason) {
-    await db.update(approvals).set({ payload: { ...payload, reason, [HUMAN_GATE_FLAG]: true, ...extra }, updatedAt: new Date() }).where(eq(approvals.id, approval.id));
-  }
+  const result = await db.transaction(async (tx) => {
+    // The same card lock is used by completion writers. Once this commits,
+    // a delayed result must observe the durable human decision boundary.
+    const [fresh] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).for('update').limit(1);
+    if (!fresh || fresh.deletedAt || ['done', 'cancelled'].includes(fresh.columnStatus ?? '')) return null;
+    const approval = await createPendingApproval(fresh, agentId, reason, tx);
+    if (!approval) return null;
+    const payload = metadataOf(approval.payload);
+    const alreadyGated = payload[HUMAN_GATE_FLAG] === true;
+    if (!alreadyGated || payload.reason !== reason) await tx.update(approvals).set({ payload: { ...payload, reason, ...extra, [HUMAN_GATE_FLAG]: true }, updatedAt: new Date() }).where(eq(approvals.id, approval.id));
+    return { approval, alreadyGated };
+  });
+  if (!result) return null;
+  const { approval, alreadyGated } = result;
   if (!alreadyGated) {
     await notify({ companyId: card.companyId, type: 'approval_pending', title: `Your decision is needed: ${card.title}`, body: reason, entityType: 'approval', entityId: approval.id, cardId: card.id, agentId });
   }
@@ -740,14 +748,14 @@ async function approveAfterRound(card: CardRow, round: ReviewRoundRow): Promise<
     return;
   }
   if (mergePlan.disposition === 'wait') {
-    await parkForMerge(card, mergePlan, { approvedBy: round.authorAgentId, fromStatus: card.columnStatus });
+    if (!(await parkForMerge(card, mergePlan, { approvedBy: round.authorAgentId, fromStatus: card.columnStatus }))) return;
     await addTaskLog({ cardId: card.id, agentId: round.authorAgentId, type: 'review', status: 'success', message: `Blind ${round.kind} review round ${round.round} approved; waiting for head ${mergePlan.headSha} to be merged into ${mergePlan.defaultBranch}.` });
     await resolvePendingApproval(card, 'approved', `Blind review round ${round.round} approved the card.`);
     await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'review-panel', agentId: round.authorAgentId, action: 'review.approved', entityType: 'card', entityId: card.id, details: { roundId: round.id, round: round.round, kind: round.kind, panel: true, mergeGate: true, authorizedHeadSha: mergePlan.headSha } });
     return;
   }
   await noteMergeEvidenceRequired(card, mergePlan);
-  const [updated] = await db.update(kanbanCards).set({
+  const updated = await guardedCompletionUpdate(card, {
     columnStatus: 'done',
     rollupStatus: 'done',
     lastError: null,
@@ -758,7 +766,8 @@ async function approveAfterRound(card: CardRow, round: ReviewRoundRow): Promise<
     executionLockExpiresAt: null,
     activeHeartbeatRunId: null,
     updatedAt: new Date(),
-  }).where(eq(kanbanCards.id, card.id)).returning();
+  });
+  if (!updated) return;
   await addStageLog(card.id, null, card.columnStatus, 'done', 'review');
   await addTaskLog({ cardId: card.id, agentId: round.authorAgentId, type: 'review', status: 'success', message: `Blind ${round.kind} review round ${round.round} approved; card marked done.` });
   await resolvePendingApproval(card, 'approved', `Blind review round ${round.round} approved the card.`);

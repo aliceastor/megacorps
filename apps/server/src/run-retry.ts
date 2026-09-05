@@ -4,6 +4,7 @@ import { approvals, kanbanCards, taskLogs, taskRuns } from './db/schema.ts';
 import { recordStageAction } from './card-actions.ts';
 import { notify } from './notifications.ts';
 import { publishLiveEvent } from './live.ts';
+import { completionCondition } from './completion-guard.ts';
 
 export type RetryKind = 'review' | 'message' | 'message_review';
 export type RunRetryState = Partial<Record<RetryKind, { failures: number; nextRunAt: string | null }>>;
@@ -71,17 +72,18 @@ export async function completeRetryableRun(runId: string, input: RunCompletion):
       nextRunAt: exhausted ? null : new Date(now.getTime() + RETRY_MINUTES[failures - 1]! * 60_000).toISOString(),
     };
     else delete state[kind];
-    const [humanGate] = exhausted ? await tx.select({ id: approvals.id }).from(approvals).where(and(
+    const [humanGate] = await tx.select({ id: approvals.id }).from(approvals).where(and(
       eq(approvals.cardId, card.id), eq(approvals.type, 'task_review'), eq(approvals.status, 'pending'),
       drizzleSql`${approvals.payload}->>'humanGate' = 'true'`,
-    )).limit(1) : [];
+    )).limit(1);
+    if (humanGate || ['cancelled', 'waiting_on_client'].includes(card.columnStatus ?? '')) return null;
     const block = exhausted && !humanGate && !['done', 'cancelled', 'blocked', 'waiting_on_client'].includes(card.columnStatus ?? '');
     const reason = `${kind} failed ${failures} consecutive time(s): ${input.error ?? 'adapter failure'}`;
     await tx.update(kanbanCards).set({
       runRetryState: state,
       ...(block ? { columnStatus: 'blocked', lastError: reason, nextRunAt: null, completedAt: null } : {}),
       updatedAt: now,
-    }).where(eq(kanbanCards.id, card.id));
+    }).where(completionCondition(card));
     if (failed) await tx.insert(taskLogs).values({
       cardId: card.id, agentId: run.agentId, type: 'retry', status: exhausted ? 'failed' : 'warning',
       message: exhausted ? `${reason}; automatic retries stopped; operator action required.` : `${reason}; next ${kind} attempt no earlier than ${state[kind]!.nextRunAt}.`,

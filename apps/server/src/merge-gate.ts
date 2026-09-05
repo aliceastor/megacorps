@@ -24,6 +24,7 @@ import { pollDecision, EXTERNAL_POLL_MAX } from './external-polling.ts';
 import { applyExternalEvent, rootCardId } from './external-events.ts';
 import { enqueueTaskRun } from './dispatch.ts';
 import { openPanelRound, panelRequiredForCard } from './review-rounds.ts';
+import { completionCondition, completionStillCurrent, guardedCompletionUpdate } from './completion-guard.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type ProjectRow = typeof projects.$inferSelect;
@@ -335,7 +336,11 @@ export async function planMergeGate(card: CardRow, options: { fetchImpl?: typeof
   const products = await db.select().from(workProducts).where(eq(workProducts.cardId, card.id)).orderBy(desc(workProducts.createdAt)).limit(50);
   let candidate = selectMergeCandidate(products, project);
   if (!candidate) {
-    const report = normalizeAgentResult({ output: card.executionLog ?? '' });
+    const evidence = products.filter((product) => product.projectId === card.projectId).map((product) => {
+      const metadata = product.metadata;
+      return metadata && typeof metadata === 'object' && 'evidenceReport' in metadata ? metadata.evidenceReport : null;
+    }).find(Boolean);
+    const report = evidence ? normalizeAgentResult({ report: evidence }) : normalizeAgentResult({ output: card.executionLog ?? '' });
     const refs = report.source === 'report' && report.outcome === 'completed' ? report.report?.artifactRefs ?? [] : [];
     const urls = [...new Set(refs.filter((url) => parsePullRequestNumber(url) && mergeRepositoryMatches(url, project.repoUrl)))];
     if (urls.length === 1) candidate = selectMergeCandidate([{ type: 'pull_request', url: urls[0] }], project);
@@ -399,14 +404,17 @@ async function parkForMergeLocked(card: CardRow, plan: Extract<MergeGatePlan, { 
   const committed = await db.transaction(async (tx) => {
     // The card row serializes wait creation across server processes.
     const [fresh] = await tx.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).for('update').limit(1);
-    if (!fresh || !['in_review', 'waiting_on_external', 'in_progress'].includes(fresh.columnStatus ?? '')) return null;
+    if (!fresh || !['in_review', 'needs_review', 'waiting_on_external', 'in_progress'].includes(fresh.columnStatus ?? '')) return null;
+    const [authorized] = await tx.select().from(kanbanCards).where(completionCondition(card)).limit(1);
+    if (!authorized) return null;
     const waits = await tx.select().from(externalWaits).where(and(eq(externalWaits.cardId, card.id), eq(externalWaits.provider, MERGE_WAIT_PROVIDER), eq(externalWaits.status, 'waiting'))).orderBy(desc(externalWaits.createdAt));
     const existing = waits.find((wait) => sameCommit(wait.authorizedHeadSha, plan.headSha) && wait.externalId === plan.externalId);
     if (existing) return { wait: existing, created: false };
+    const [parked] = await tx.update(kanbanCards).set({ columnStatus: 'waiting_on_external', completedAt: null, lastError: null, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: now }).where(completionCondition(card)).returning();
+    if (!parked) return null;
     for (const wait of waits) await tx.update(externalWaits).set({ status: 'superseded', resolvedAt: now }).where(eq(externalWaits.id, wait.id));
     const [wait] = await tx.insert(externalWaits).values({ companyId: card.companyId, cardId: card.id, waitingFor: plan.waitingFor, provider: MERGE_WAIT_PROVIDER, externalId: plan.externalId, externalUrl: plan.externalUrl, status: 'waiting', authorizedHeadSha: plan.headSha, pollIntervalSeconds: 30, pollCount: 0 }).returning();
     if (!wait) throw new Error('merge_wait_create_failed');
-    await tx.update(kanbanCards).set({ columnStatus: 'waiting_on_external', completedAt: null, lastError: null, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: now }).where(eq(kanbanCards.id, card.id));
     return { wait, created: true };
   });
   if (!committed || !committed.created) return committed;
@@ -444,7 +452,8 @@ export function mergeCompletionStatus(plan: MergeGatePlan): 'done' | 'blocked' |
 export async function noteMergeEvidenceRequired(card: CardRow, plan: Extract<MergeGatePlan, { disposition: 'not_required' | 'blocked' }>): Promise<void> {
   if (plan.reason === 'not_required') return;
   const body = `Completion blocked: ${plan.detail}`;
-  await db.update(kanbanCards).set({ columnStatus: 'blocked', completedAt: null, rollupStatus: null, lastError: body, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() }).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt)));
+  const updated = await guardedCompletionUpdate(card, { columnStatus: 'blocked', completedAt: null, rollupStatus: null, lastError: body, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() });
+  if (!updated) return;
   await postMergeComment(card, 'merge_evidence_required', body, { reason: plan.reason });
   await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'webhook', status: 'warning', message: body });
   await mergeActivity(card, 'merge_gate.blocked', { reason: plan.reason, detail: plan.detail }, { type: 'system', id: 'merge-gate' });
@@ -509,15 +518,19 @@ async function recordDrift(match: MergeWaitMatch, input: { observed: string | nu
   const { wait, card, project } = match;
   const now = new Date();
   const summary = `head drifted from ${wait.authorizedHeadSha ?? 'unknown'} to ${input.observed ?? 'unknown'}`;
+  const superseded = new Error('merge_drift_superseded');
   const updated = await db.transaction(async (tx) => {
     const [fresh] = await tx.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).for('update').limit(1);
     if (!fresh || fresh.columnStatus !== 'waiting_on_external') return null;
+    const [authorized] = await tx.select().from(kanbanCards).where(completionCondition(card)).limit(1);
+    if (!authorized) return null;
+    const [row] = await tx.update(kanbanCards).set({ columnStatus: 'in_review', completedAt: null, rollupStatus: null, updatedAt: now }).where(completionCondition(card)).returning();
+    if (!row) return null;
     const [claimed] = await tx.update(externalWaits).set({ status: 'superseded', resolvedAt: now }).where(and(eq(externalWaits.id, wait.id), eq(externalWaits.status, 'waiting'), eq(externalWaits.authorizedHeadSha, wait.authorizedHeadSha!))).returning();
-    if (!claimed) return null;
-    const [row] = await tx.update(kanbanCards).set({ columnStatus: 'in_review', completedAt: null, rollupStatus: null, updatedAt: now }).where(eq(kanbanCards.id, card.id)).returning();
+    if (!claimed) throw superseded;
     await tx.insert(externalEvents).values({ companyId: card.companyId, projectId: card.projectId, rootCardId: await rootCardId(card), cardId: card.id, provider: MERGE_WAIT_PROVIDER, eventType: input.eventType, externalId: wait.externalId, externalUrl: wait.externalUrl, status: 'info', payloadSummary: summary, payload: input.payload, processedAt: now });
     return row;
-  });
+  }).catch((error) => { if (error === superseded) return null; throw error; });
   if (!updated) return;
   const fromStatus = card.columnStatus ?? 'waiting_on_external';
   const body = mergeDriftMessage({ authorized: wait.authorizedHeadSha, observed: input.observed, reason: input.reason });
@@ -555,7 +568,7 @@ export async function reconcileMergeWait(waitId: string, options: { immediate?: 
     const [wait] = await db.select().from(externalWaits).where(eq(externalWaits.id, waitId)).limit(1);
     if (!wait || wait.status !== 'waiting' || !wait.authorizedHeadSha || wait.provider !== MERGE_WAIT_PROVIDER) return false;
     const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, wait.cardId), isNull(kanbanCards.deletedAt))).limit(1);
-    if (!card || card.columnStatus !== 'waiting_on_external') return false;
+    if (!card || card.columnStatus !== 'waiting_on_external' || !(await completionStillCurrent(card))) return false;
     const count = wait.pollCount ?? 0;
     if (count >= EXTERNAL_POLL_MAX || (!(options.immediate && count === 0) && !pollDecision({ ...wait, pollIntervalSeconds: wait.pollIntervalSeconds ?? 30 }, Date.now()).poll)) return false;
     const [claimed] = await db.update(externalWaits).set({ pollCount: count + 1, lastPolledAt: new Date(), pollIntervalSeconds: count + 1 >= EXTERNAL_POLL_MAX ? null : 30 }).where(and(eq(externalWaits.id, wait.id), eq(externalWaits.status, 'waiting'), eq(externalWaits.pollCount, count))).returning();
@@ -583,7 +596,7 @@ export async function reconcileMergeWait(waitId: string, options: { immediate?: 
       }
     } catch { /* A provider/transport error is pending evidence, never completion. */ }
     if (count + 1 >= EXTERNAL_POLL_MAX) reason += ' The 24 automatic checks are exhausted. Restore the missing evidence or provide the verified merge event.';
-    await db.update(kanbanCards).set({ lastError: reason, updatedAt: new Date() }).where(and(eq(kanbanCards.id, card.id), eq(kanbanCards.columnStatus, 'waiting_on_external'), isNull(kanbanCards.deletedAt)));
+    await db.update(kanbanCards).set({ lastError: reason, updatedAt: new Date() }).where(completionCondition(card));
     await db.insert(taskLogs).values({ cardId: card.id, type: 'webhook', status: 'warning', message: reason });
     return true;
   });

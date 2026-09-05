@@ -6,6 +6,10 @@ import { agents, approvals, cardComments, heartbeatRuns, kanbanCards, taskLogs, 
 import { publishLiveEvent } from './live.ts';
 
 type Verdict = 'approved' | 'revision_requested' | 'escalate';
+/** Retain canonical evidence when the report arrived separately from prose. */
+export function agentResultExecutionLog(output: string, result: AgentResult): string {
+  return result.report ? `${output}\n\n${JSON.stringify(result.report)}`.trim() : output;
+}
 export type AgentResult = {
   source: 'report' | 'prose' | 'invalid';
   outcome: 'completed' | 'progress' | 'input_required' | 'permission' | 'failed' | 'rejected' | 'invalid';
@@ -81,7 +85,9 @@ export function normalizeAgentResult(input: { output?: string | null; report?: u
 export async function persistAgentWorkProducts(
   card: { id: string; companyId: string; projectId?: string | null }, agentId: string | null, taskRunId: string | null,
   products: ReportedWorkProduct[], project?: { repoProvider?: string | null; repoUrl?: string | null } | null,
+  report?: AgentReport | null,
 ): Promise<void> {
+  if (report?.artifactRefs?.length) products = [...products, { type: 'report', title: 'Agent report evidence references', metadata: { evidenceReport: report } }];
   if (!products.length) return;
   const prior = taskRunId ? await db.select().from(workProducts).where(and(eq(workProducts.cardId, card.id), eq(workProducts.taskRunId, taskRunId))) : [];
   const keys = new Set(prior.map((product) => productKey(product as ReportedWorkProduct)));

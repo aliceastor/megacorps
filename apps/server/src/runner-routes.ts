@@ -12,10 +12,16 @@ import { runRetryReady } from './run-retry.ts';
 import { generateRunnerApiKey, hashRunnerApiKey, requireAgentSessionAuth, requireRunnerAuth } from './runner-auth.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
 import { cascadeParentStatus, completeTaskRun, completionBlockedByChildren, completionStatusForQualityGate, createPendingApproval, enqueueTaskRun } from './dispatch.ts';
-import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
+import { agentResultExecutionLog, normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
 import { applyMergeGatePlan, mergeCompletionStatus, planMergeGate } from './merge-gate.ts';
 import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
-import { resetProtocolRepair } from './protocol-repair.ts';
+import { finishProtocolHelp, resetProtocolRepair } from './protocol-repair.ts';
+import { guardedCompletionUpdate, completionStillCurrent } from './completion-guard.ts';
+import { ensureHumanGate } from './review-rounds.ts';
+import { childrenFromOutput, processChildSplits, createMessageDelegations, performWebhookHandoff, resolveClientCheckpointRequest, finishRunWaitingOnClient, resolveBrainstormRequest, finishRunWaitingOnBrainstorm, delegationItems } from './dispatch.ts';
+import { delegationLineFromReportItem } from './agent-report.ts';
+import { checkpointFromOutput } from './client-checkpoints.ts';
+import { brainstormFromOutput } from './brainstorm.ts';
 
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
@@ -108,26 +114,75 @@ async function createRunnerTaskCompletion(input: {
   run: typeof taskRuns.$inferSelect;
   body: z.infer<typeof runnerTaskCompleteSchema>;
 }) {
-  const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, input.run.cardId), isNull(kanbanCards.deletedAt))).limit(1);
+  let [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, input.run.cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) throw new Error('card_not_found');
-  if (['done', 'cancelled'].includes(card.columnStatus ?? '') || (card.executionLockId && card.executionLockId !== input.run.id)) {
+  const expectedActorId = input.run.kind === 'dispatch' ? card.assigneeId : input.run.kind === 'review' ? card.reviewerId : null;
+  if (!(await completionStillCurrent(card)) || (card.executionLockId && ![input.run.id, input.run.heartbeatRunId].includes(card.executionLockId)) || (card.activeHeartbeatRunId && card.activeHeartbeatRunId !== input.run.heartbeatRunId) || (expectedActorId && input.run.agentId && expectedActorId !== input.run.agentId)) {
     await completeTaskRun(input.run.id, { status: 'cancelled', preserveCard: true, error: 'stale_runner_completion' });
     return card;
   }
   const runAgentId = input.run.agentId ?? card.assigneeId;
-  const output = [input.body.summary, input.body.output].filter(Boolean).join('\n\n');
+  let output = [input.body.summary, input.body.output].filter(Boolean).join('\n\n');
   const normalized = normalizeAgentResult({ output, report: input.body.report, workProducts: input.body.workProducts });
-  if (normalized.outcome === 'invalid' || (input.run.kind === 'review' && normalized.source === 'report' && normalized.outcome === 'completed' && (!normalized.verdict || normalized.verdictError))) {
+  if (normalized.outcome === 'invalid' || (input.run.kind === 'review' && normalized.outcome === 'completed' && (normalized.verdictError || (normalized.source === 'report' && !normalized.verdict)))) {
     const [actor] = runAgentId ? await db.select().from(agents).where(eq(agents.id, runAgentId)).limit(1) : [];
     const reason = normalized.reason ?? normalized.verdictError ?? 'Return one evidence-supported current review verdict.';
     if (!actor || !['dispatch', 'review'].includes(input.run.kind)) throw httpError(409, reason, 'agent_report_invalid');
     return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: input.run.kind === 'review' ? 'review' : 'dispatch', message: reason, taskRunId: input.run.id, runId: input.run.heartbeatRunId, result: { sessionId: actor.currentSessionId ?? '' } });
   }
-  await persistAgentWorkProducts(card, runAgentId, input.run.id, normalized.workProducts);
+  output = agentResultExecutionLog(output, normalized);
+  await persistAgentWorkProducts(card, runAgentId, input.run.id, normalized.workProducts, null, normalized.report);
   if (normalized.outcome === 'permission') {
     const parked = await parkPermissionBlockedResult(card.id, runAgentId ?? '', input.run.heartbeatRunId ?? '', normalized.reason!, output);
     await completeTaskRun(input.run.id, { status: 'failed', preserveCard: true, error: normalized.reason, output });
     return parked.card;
+  }
+  const [actor] = runAgentId ? await db.select().from(agents).where(eq(agents.id, runAgentId)).limit(1) : [];
+  const protocolHelp = actor && input.run.kind === 'review' ? await finishProtocolHelp(card, actor.id, output) : null;
+  if (protocolHelp) {
+    await completeTaskRun(input.run.id, { status: 'success', preserveCard: true, output });
+    await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actor!.id));
+    if (protocolHelp.continueKind) await enqueueTaskRun(card.id, protocolHelp.continueKind, 'queue');
+    return protocolHelp.card;
+  }
+  const actionable = !['failed', 'rejected'].includes(normalized.outcome);
+  let delegated = false;
+  const children = actionable ? childrenFromOutput(output, normalized.report) : [];
+  const delegations = actionable ? normalized.report?.delegations ?? [] : [];
+  const checkpoint = actionable ? checkpointFromOutput(output, normalized.report) : null;
+  const broadcast = actionable ? brainstormFromOutput(output, normalized.report) : null;
+  if ((children.length || delegations.length || checkpoint || broadcast) && !actor) throw httpError(409, 'Report actor is required for orchestration.', 'report_actor_required');
+  if (actor && actionable) {
+    const handoffs = delegations.filter((item) => item.mode === 'handoff');
+    if ((handoffs.length && (children.length || checkpoint || broadcast)) || (checkpoint && (children.length || delegations.length || broadcast)) || (broadcast && (children.length || delegations.length))) throw httpError(409, 'Send one ownership transfer, checkpoint, or brainstorm request at a time; do not combine it with other work requests.', 'report_requests_conflicting');
+    if (handoffs.length) {
+      if (delegations.length !== 1) throw httpError(409, 'A handoff must be the sole delegation.', 'handoff_must_be_sole_delegation');
+      try { return await performWebhookHandoff(card, actor, handoffs[0]!, { taskRunId: input.run.id, heartbeatRunId: input.run.heartbeatRunId, sourceOutput: output, costUsd: input.body.costUsd }); }
+      catch (error) { throw httpError(409, String(error), 'handoff_failed'); }
+    }
+    if (checkpoint) {
+      const request = await resolveClientCheckpointRequest(card, actor, checkpoint, normalized.question);
+      if (!request) throw httpError(409, 'This actor cannot open the requested checkpoint.', 'checkpoint_rejected');
+      await finishRunWaitingOnClient(card, actor, request, { taskRunId: input.run.id, heartbeatRunId: input.run.heartbeatRunId, output, costUsd: input.body.costUsd });
+      return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+    }
+    if (broadcast) {
+      const launch = await resolveBrainstormRequest(card, actor, broadcast);
+      if (!launch) throw httpError(409, 'This actor cannot open the requested brainstorm.', 'broadcast_rejected');
+      await finishRunWaitingOnBrainstorm(card, actor, launch, { taskRunId: input.run.id, heartbeatRunId: input.run.heartbeatRunId, output, costUsd: input.body.costUsd });
+      return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+    }
+    if (children.length) {
+      const split = await processChildSplits(card, actor, children);
+      if (split.errors.length || !split.created.length) throw httpError(409, split.errors.join('\n') || 'No children created.', 'child_split_rejected');
+      card = (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+    }
+    const lines = normalized.report?.delegations ? delegations.map(delegationLineFromReportItem) : delegationItems(output);
+    if (lines.length) {
+      try { delegated = (await createMessageDelegations(card, actor, lines, { reviewerScope: 'final', sourceTaskRunId: input.run.id, sourceOutput: output })).length > 0; }
+      catch (error) { throw httpError(409, String(error), 'delegation_rejected'); }
+      if (!delegated) throw httpError(409, 'No eligible delegate for the requested work.', 'delegation_rejected');
+    }
   }
   const runStatus = input.body.status === 'failed' || input.body.status === 'blocked'
     ? 'failed'
@@ -144,9 +199,10 @@ async function createRunnerTaskCompletion(input: {
       : completionStatusForQualityGate(input.body.status, qualityReviewerId);
   if (normalized.outcome === 'failed' || normalized.outcome === 'rejected') requestedNextStatus = 'blocked';
   if (normalized.outcome === 'progress') requestedNextStatus = 'in_progress';
-  if (normalized.outcome === 'input_required') requestedNextStatus = 'needs_review';
-  if (input.run.kind === 'review' && normalized.source === 'report' && normalized.outcome === 'completed') {
-    if (!normalized.verdict || normalized.verdictError) throw httpError(409, 'Return an explicit current review verdict.', 'review_verdict_invalid');
+  const helpReviewerId = normalized.outcome === 'input_required' ? (card.reviewerId && card.reviewerId !== runAgentId ? card.reviewerId : actor?.bossId && actor.bossId !== runAgentId ? actor.bossId : null) : null;
+  if (normalized.outcome === 'input_required') requestedNextStatus = helpReviewerId ? 'needs_review' : 'blocked';
+  if (delegated) requestedNextStatus = 'in_progress';
+  if (input.run.kind === 'review' && normalized.outcome === 'completed' && normalized.verdict) {
     if (normalized.verdict !== 'approved') requestedNextStatus = normalized.verdict === 'escalate' ? 'needs_review' : 'todo';
   }
   const humanGate = requestedNextStatus === 'done' && card.requiresApproval === true;
@@ -155,10 +211,10 @@ async function createRunnerTaskCompletion(input: {
   const mergePlan = !childBlock && requestedNextStatus === 'done' ? await planMergeGate({ ...card, executionLog: normalized.report ? JSON.stringify(normalized.report) : output }) : null;
   const nextStatus: CardStatus = childBlock ? 'in_progress' : mergePlan ? mergeCompletionStatus(mergePlan) : requestedNextStatus;
   const fromStatus = cardStatus(card.columnStatus);
-  if (['dispatch', 'review'].includes(input.run.kind)) await resetProtocolRepair(card.id, input.run.kind === 'review' ? 'review' : 'dispatch', normalized, input.body.status !== 'failed');
+  if (['dispatch', 'review'].includes(input.run.kind)) await resetProtocolRepair(card.id, input.run.kind === 'review' ? 'review' : 'dispatch', normalized, input.body.status !== 'failed', card);
   assertStatusMove(fromStatus, nextStatus, 'machine');
   const now = new Date();
-  await completeTaskRun(input.run.id, {
+  const settleRun = () => completeTaskRun(input.run.id, {
     status: runStatus,
     releaseLock: true,
     retryableFailure: runStatus === 'failed',
@@ -174,20 +230,27 @@ async function createRunnerTaskCompletion(input: {
       costUsd: input.body.costUsd?.toString(),
     }).where(eq(heartbeatRuns.id, input.run.heartbeatRunId));
   }
-  const [updated] = await db.update(kanbanCards).set({
+  const updated = await guardedCompletionUpdate(card, {
     columnStatus: nextStatus,
     rollupStatus: childBlock ? 'waiting_on_children' : nextStatus === 'done' ? 'done' : undefined,
     executionLog: output || undefined,
     costUsd: input.body.costUsd?.toString(),
     completedAt: nextStatus === 'done' ? now : nextStatus === 'blocked' || nextStatus === 'cancelled' ? null : undefined,
-    lastError: nextStatus === 'blocked' || nextStatus === 'cancelled' ? input.body.error ?? input.body.summary ?? `runner_${nextStatus}` : null,
+    reviewerId: helpReviewerId ?? undefined,
+    reviewFeedback: normalized.question ?? undefined,
+    lastError: nextStatus === 'blocked' || nextStatus === 'cancelled' ? normalized.question ?? input.body.error ?? input.body.summary ?? `runner_${nextStatus}` : null,
     executionLockId: null,
     executionLockedByAgentId: null,
     executionLockedAt: null,
     executionLockExpiresAt: null,
     activeHeartbeatRunId: null,
     updatedAt: now,
-  }).where(eq(kanbanCards.id, card.id)).returning();
+  });
+  if (!updated) {
+    await completeTaskRun(input.run.id, { status: 'success', preserveCard: true, output: 'Late runner result ignored.' });
+    return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0] ?? card;
+  }
+  await settleRun();
   if (runAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, runAgentId));
   let externalWaitId: string | null = null;
   if (nextStatus === 'waiting_on_external' && !mergePlan) {
@@ -247,8 +310,12 @@ async function createRunnerTaskCompletion(input: {
     await createPendingApproval(updated, runAgentId, 'Runner completion requires quality review.');
     await enqueueTaskRun(card.id, 'review', 'queue');
   }
-  if (humanGate && updated) await createPendingApproval(updated, runAgentId, 'Runner completion requires human approval.');
-  if (mergePlan) await applyMergeGatePlan(card, mergePlan);
+  if (nextStatus === 'needs_review' && helpReviewerId) {
+    await createPendingApproval(updated, runAgentId, normalized.question ?? 'Runner requested help.');
+    await enqueueTaskRun(card.id, 'review', 'queue');
+  }
+  if (humanGate && updated) await ensureHumanGate(updated, runAgentId, 'Runner completion requires human approval.');
+  if (mergePlan) await applyMergeGatePlan(updated, mergePlan);
   if (nextStatus === 'done') await cascadeParentStatus(card.parentCardId);
   return updated ?? card;
 }

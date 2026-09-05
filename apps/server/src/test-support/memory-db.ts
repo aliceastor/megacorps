@@ -18,9 +18,18 @@ export function memoryDb(t: TestContext, fixtures: Array<[Table, Row[]]>) {
   function matches(table: Table, row: Row, condition?: SQL): boolean {
     if (!condition) return true;
     const query = dialect.sqlToQuery(condition);
+    if (query.sql.includes('CASE WHEN "external_waits"."provider"')) {
+      const bound = /"poll_count" < \$(\d+)/.exec(query.sql);
+      if (row.provider === 'gitea' && row.authorizedHeadSha && row.pollCount >= Number(query.params[Number(bound?.[1]) - 1])) return false;
+    }
+    if (query.sql.includes('EXISTS (SELECT 1 FROM "kanban_cards"')) {
+      const cardTable = [...tables.keys()].find((item) => getTableName(item) === 'kanban_cards');
+      if (!cardTable || !rows(cardTable).some((card) => card.id === row.cardId && card.columnStatus === 'waiting_on_external' && !card.deletedAt)) return false;
+    }
     if (query.sql.includes('NOT EXISTS (SELECT 1 FROM "approvals"')) {
       const approvalTable = [...tables.keys()].find((item) => getTableName(item) === 'approvals');
-      if (approvalTable && rows(approvalTable).some((approval) => approval.cardId === row.id && approval.status === 'pending' && approval.type === 'task_review' && approval.payload?.humanGate === true)) return false;
+      const cardId = getTableName(table) === 'external_waits' ? row.cardId : row.id;
+      if (approvalTable && rows(approvalTable).some((approval) => approval.cardId === cardId && approval.status === 'pending' && approval.type === 'task_review' && approval.payload?.humanGate === true)) return false;
       // The subquery's approval columns do not describe the outer card row.
       query.sql = query.sql.slice(0, query.sql.indexOf('NOT EXISTS'));
     }
@@ -76,6 +85,7 @@ export function memoryDb(t: TestContext, fixtures: Array<[Table, Row[]]>) {
       limit: (value: number) => { limit = value; return chain; },
       offset: (value: number) => { offset = value; return chain; },
       innerJoin: () => { if (rows(table).length) throw new Error('nonempty joins need an explicit fixture'); return chain; },
+      leftJoin: (joined: Table) => { if (rows(joined).length) throw new Error('nonempty left joins need an explicit fixture'); return chain; },
       for: () => chain,
       onConflictDoNothing: () => chain,
       returning: () => chain,

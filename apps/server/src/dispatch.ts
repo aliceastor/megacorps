@@ -24,7 +24,8 @@ import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { extractAgentReport, structuredDelegationPlan } from './agent-report.ts';
 import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
-import { protocolRepairSession, recordProtocolFailure, resetProtocolRepair } from './protocol-repair.ts';
+import { finishProtocolHelp, protocolRepairSession, recordProtocolFailure, resetProtocolRepair } from './protocol-repair.ts';
+import { completionCondition, completionStillCurrent, guardedCompletionUpdate } from './completion-guard.ts';
 import type { AgentReportDelegation } from '@megacorps/shared';
 import type { TaskResult } from './adapters/hermes.ts';
 import { notify } from './notifications.ts';
@@ -2446,10 +2447,10 @@ async function releaseExecutionLock(cardId: string, runId: string | null, status
   }
 }
 
-export async function createPendingApproval(card: CardRow, agentId: string | null, reason: string) {
-  const existing = await db.select().from(approvals).where(and(eq(approvals.cardId, card.id), eq(approvals.status, 'pending'))).limit(1);
+export async function createPendingApproval(card: CardRow, agentId: string | null, reason: string, executor: Pick<typeof db, 'select' | 'insert'> = db) {
+  const existing = await executor.select().from(approvals).where(and(eq(approvals.cardId, card.id), eq(approvals.status, 'pending'))).limit(1);
   if (existing[0]) return existing[0];
-  const [approval] = await db.insert(approvals).values({
+  const [approval] = await executor.insert(approvals).values({
     companyId: card.companyId,
     cardId: card.id,
     requestedByAgentId: agentId,
@@ -3235,9 +3236,10 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       if (result.success) await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
       const status = isTerminalCardStatus(latest.columnStatus) ? terminalRunStatus(latest.columnStatus) : 'success';
       await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
-      await releaseExecutionLock(card.id, run.id, status);
+      await db.update(heartbeatRuns).set({ status, completedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
       await completeTaskRun(options.taskRunId, {
         status,
+        preserveCard: true,
         output: `Card moved to ${latest.columnStatus} before dispatch returned; preserving the current stage.`,
         durationSeconds: result.durationSeconds,
       });
@@ -3268,7 +3270,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: normalizedResult.reason!, runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
     }
-    await persistAgentWorkProducts(card, agent.id, options.taskRunId ?? null, normalizedResult.workProducts);
+    await persistAgentWorkProducts(card, agent.id, options.taskRunId ?? null, normalizedResult.workProducts, null, normalizedResult.report);
     await recordA2aArtifacts(card, agent.id, options.taskRunId, result.artifacts);
     if (normalizedResult.outcome === 'failed' || normalizedResult.outcome === 'rejected') {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
@@ -3282,7 +3284,14 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const dispatchPeerMentions = peerMentionsFromOutput(actionableOutput);
     if (dispatchPeerMentions.length) { try { await processPeerMentions(card, agent, dispatchPeerMentions); } catch { /* question delivery must never fail the run */ } }
     const dispatchChildren = childrenFromOutput(actionableOutput);
-    if (dispatchChildren.length) { try { await processChildSplits(card, agent, dispatchChildren); } catch { /* split failures are reported on the card itself */ } }
+    if (dispatchChildren.length) {
+      try {
+        const split = await processChildSplits(card, agent, dispatchChildren);
+        if (split.errors.length) return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: split.errors.join('\n'), runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
+      } catch (error) {
+        return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: String(error), runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
+      }
+    }
     if (structuredPlan?.mixed) {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: HANDOFF_MIXED_MESSAGE, runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
@@ -3449,11 +3458,12 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const dispatchMergePlan = !childBlock && nextStatus === 'done' ? await planMergeGate({ ...card, executionLog: result.output }) : null;
     const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : dispatchMergePlan ? mergeCompletionStatus(dispatchMergePlan) : nextStatus;
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-    await resetProtocolRepair(card.id, 'dispatch', normalizedResult, result.success);
+    await resetProtocolRepair(card.id, 'dispatch', normalizedResult, result.success, lockedCard);
     // Agent release + card stage move + heartbeat completion commit atomically, so a
     // crash mid-completion cannot leave the agent free while the card looks running.
     const updated = await db.transaction(async (tx) => {
       await tx.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
+      await tx.select({ id: kanbanCards.id }).from(kanbanCards).where(eq(kanbanCards.id, card.id)).for('update').limit(1);
       const [row] = await tx.update(kanbanCards).set({
         columnStatus: effectiveNextStatus,
         rollupStatus: childBlock ? 'waiting_on_children' : effectiveNextStatus === 'done' ? 'done' : undefined,
@@ -3472,7 +3482,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         executionLockExpiresAt: null,
         activeHeartbeatRunId: null,
         updatedAt: new Date(),
-      }).where(eq(kanbanCards.id, card.id)).returning();
+      }).where(completionCondition(lockedCard)).returning();
       await tx.update(heartbeatRuns).set({
         status: 'success',
         completedAt: new Date(),
@@ -3482,6 +3492,10 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       }).where(eq(heartbeatRuns.id, run.id));
       return row;
     });
+    if (!updated) {
+      await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: 'Late dispatch result ignored.' });
+      return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+    }
     if (effectiveNextStatus !== 'in_progress') await addStageLog(card.id, agent.id, 'in_progress', effectiveNextStatus, 'dispatch');
     if (needsInputQuestion && !checkpointRequest) {
       await addCardMessage({ cardId: card.id, agentId: agent.id, action: 'agent_question', body: needsInputQuestion });
@@ -3640,7 +3654,11 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       return blocked!;
     }
     if (autoMergePlan.disposition === 'wait') {
-      await parkForMerge(card, autoMergePlan, { fromStatus: card.columnStatus });
+      const wait = await parkForMerge(card, autoMergePlan, { fromStatus: card.columnStatus });
+      if (!wait) {
+        await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: 'Late merge authorization ignored.' });
+        return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+      }
       await addTaskLog({ cardId: card.id, type: 'review', status: 'success', message: `${reason} The card waits for head ${autoMergePlan.headSha} to be merged into ${autoMergePlan.defaultBranch}.` });
       await addCardMessage({ cardId: card.id, authorType: 'system', action: 'review_auto_approved', body: reason });
       await resolvePendingApproval(card, 'approved', reason);
@@ -3651,7 +3669,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       return parked;
     }
     await noteMergeEvidenceRequired(card, autoMergePlan);
-    const [updated] = await db.update(kanbanCards).set({
+    const updated = await guardedCompletionUpdate(card, {
       columnStatus: 'done',
       rollupStatus: 'done',
       lastError: null,
@@ -3662,7 +3680,11 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       executionLockExpiresAt: null,
       activeHeartbeatRunId: null,
       updatedAt: new Date(),
-    }).where(eq(kanbanCards.id, card.id)).returning();
+    });
+    if (!updated) {
+      await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: 'Late auto review ignored.' });
+      return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+    }
     await addStageLog(card.id, null, card.columnStatus, 'done', 'review');
     await addTaskLog({ cardId: card.id, type: 'review', status: 'success', message: reason });
     await addCardMessage({ cardId: card.id, authorType: 'system', action: 'review_auto_approved', body: reason });
@@ -3713,6 +3735,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       await db.update(heartbeatRuns).set({ status, completedAt: new Date(), durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
       await completeTaskRun(options.taskRunId, {
         status,
+        preserveCard: true,
         output: `Card was already ${latest.columnStatus} before review returned.`,
         durationSeconds: result.durationSeconds,
       });
@@ -3727,8 +3750,19 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       });
       return latest;
     }
+    if (!(await completionStillCurrent(card))) {
+      const message = /escalate/i.test(result.output) ? 'humanGate already pending; late review escalation ignored' : 'Late review ignored because completion authority changed.';
+      const ignored = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+      const status = !result.success || ['permission', 'failed', 'rejected'].includes(ignored.outcome) ? 'failed' : 'success';
+      await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
+      await db.update(heartbeatRuns).set({ status, completedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+      await completeTaskRun(options.taskRunId, { status, preserveCard: true, output: message });
+      await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'warning', message });
+      return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+    }
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     const normalizedReview = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    await persistAgentWorkProducts(card, reviewer.id, options.taskRunId ?? null, normalizedReview.workProducts, null, normalizedReview.report);
     if (normalizedReview.outcome === 'permission') {
       const blocked = await parkPermissionBlockedResult(card.id, reviewer.id, run.id, normalizedReview.reason!, result.output);
       await completeTaskRun(options.taskRunId, { status: 'failed', preserveCard: blocked.preservedHumanGate, error: normalizedReview.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
@@ -3765,7 +3799,15 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       });
     }
     const acceptedReviewOutput = result.success || Boolean(explicitDecision);
-    await resetProtocolRepair(card.id, 'review', normalizedReview, result.success);
+    const protocolHelp = await finishProtocolHelp(card, reviewer.id, result.output);
+    if (protocolHelp) {
+      await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
+      await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+      await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: result.output });
+      if (protocolHelp.continueKind) await enqueueTaskRun(card.id, protocolHelp.continueKind, 'queue');
+      return protocolHelp.card;
+    }
+    await resetProtocolRepair(card.id, 'review', normalizedReview, result.success, card);
     if (acceptedReviewOutput && decision) {
       try { await recordReviewScore(card, reviewer, decision, result.output); } catch { /* scoring must never fail a review */ }
     }
@@ -3774,13 +3816,17 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     if (decision === 'escalate') {
       const nextReviewerId = reviewer.bossId && reviewer.bossId !== reviewer.id && reviewer.bossId !== card.assigneeId ? reviewer.bossId : null;
       if (nextReviewerId) {
-        const [updated] = await db.update(kanbanCards).set({
+        const updated = await guardedCompletionUpdate(card, {
           columnStatus: 'needs_review',
           reviewerId: nextReviewerId,
           reviewFeedback: result.output,
           completedAt: null,
           updatedAt: new Date(),
-        }).where(eq(kanbanCards.id, card.id)).returning();
+        });
+        if (!updated) {
+          await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: 'Late review ignored.' });
+          return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+        }
         await addTaskLog({
           cardId: card.id,
           agentId: reviewer.id,
@@ -3807,7 +3853,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
         completedAt: null,
         updatedAt: new Date(),
       }).where(and(
-        eq(kanbanCards.id, card.id),
+        completionCondition(card),
         // Check at the write, after the adapter returned: the original card
         // snapshot may predate a webhook that parked it for the client.
         drizzleSql`NOT EXISTS (SELECT 1 FROM ${approvals} WHERE ${approvals.cardId} = ${card.id} AND ${approvals.status} = 'pending' AND ${approvals.type} = 'task_review' AND ${approvals.payload}->>'humanGate' = 'true')`,
@@ -3818,7 +3864,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
         const message = 'humanGate already pending; late review escalation ignored';
         await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'warning', message, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
         await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), error: null, durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
-        await completeTaskRun(options.taskRunId, { status: 'success', output: message, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
+        await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: message, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
         return parked;
       }
       await addStageLog(card.id, reviewer.id, card.columnStatus, 'blocked', 'review');
@@ -3844,13 +3890,18 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     const mergeParked = mergePlan?.disposition === 'wait';
     const targetStatus: CardStatus = rejected ? 'todo' : humanGate ? 'in_review' : mergePlan ? mergeCompletionStatus(mergePlan) : 'done';
     const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : targetStatus;
-    const [updated] = await db.update(kanbanCards).set({
+    const updated = await guardedCompletionUpdate(card, {
       columnStatus: effectiveNextStatus,
       rollupStatus: childBlock ? 'waiting_on_children' : effectiveNextStatus === 'done' ? 'done' : undefined,
       reviewFeedback: result.output,
       completedAt: effectiveNextStatus === 'done' ? new Date() : null,
       updatedAt: new Date(),
-    }).where(eq(kanbanCards.id, card.id)).returning();
+    });
+    if (!updated) {
+      await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: 'Late review ignored.' });
+      await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+      return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+    }
     // parkForMerge writes its own stage record, so the merge park does not log
     // the transition twice.
     if (!mergeParked) await addStageLog(card.id, reviewer.id, card.columnStatus, effectiveNextStatus, 'review');

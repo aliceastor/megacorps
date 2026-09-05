@@ -20,9 +20,10 @@ import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointFromOutput } from './client-
 import { registerChatRoutes } from './chat.ts';
 import { runAgentMaintenance } from './agent-maintenance.ts';
 import { delegationLineFromReportItem } from './agent-report.ts';
-import { normalizeAgentResult, persistAgentWorkProducts } from './agent-results.ts';
+import { agentResultExecutionLog, normalizeAgentResult, persistAgentWorkProducts } from './agent-results.ts';
 import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
-import { resetProtocolRepair } from './protocol-repair.ts';
+import { finishProtocolHelp, resetProtocolRepair } from './protocol-repair.ts';
+import { completionCondition, guardedCompletionUpdate } from './completion-guard.ts';
 import { parseA2aPushPayload, verifyA2aPushSignature } from './a2a-client.ts';
 import { registerCronRoutes } from './cron-routes.ts';
 import { registerLifecycleRoutes } from './lifecycle-routes.ts';
@@ -854,10 +855,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         // parks on its authorized head instead of going straight to done.
         const mergePlan = input.status === 'approved' ? await planMergeGate(card) : null;
         const nextStatus = input.status === 'approved' && mergePlan ? mergeCompletionStatus(mergePlan) : 'todo';
-        await db.update(kanbanCards).set({ columnStatus: nextStatus, completedAt: nextStatus === 'done' ? new Date() : null, reviewFeedback: input.decisionNote ?? card.reviewFeedback, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
+        const completed = await guardedCompletionUpdate(card, { columnStatus: nextStatus, completedAt: nextStatus === 'done' ? new Date() : null, reviewFeedback: input.decisionNote ?? card.reviewFeedback, updatedAt: new Date() });
+        if (!completed) return reply.code(409).send({ error: 'approval_completion_superseded' });
         await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'approval', status: input.status === 'approved' ? 'success' : 'failed', message: `Approval ${input.status} by ${actorLabel(user)}.`, output: input.decisionNote });
         if (mergePlan) {
-          await applyMergeGatePlan(card, mergePlan, { approvedBy: user.id, actor: { type: 'user', id: user.id, userId: user.id }, fromStatus: card.columnStatus });
+          await applyMergeGatePlan(completed, mergePlan, { approvedBy: user.id, actor: { type: 'user', id: user.id, userId: user.id }, fromStatus: card.columnStatus });
         } else {
           await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'stage', status: 'success', message: `Stage changed from ${card.columnStatus ?? 'todo'} to ${nextStatus} by approval.` });
         }
@@ -1642,7 +1644,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           : null,
       completedAt: input.columnStatus === 'done' ? new Date() : input.columnStatus ? null : undefined,
       updatedAt: new Date(),
-    }).where(eq(kanbanCards.id, id)).returning();
+    }).where(manualMergePlan ? completionCondition(existing) : eq(kanbanCards.id, id)).returning();
+    if (!card && manualMergePlan) return reply.code(409).send({ error: 'manual_completion_superseded' });
     if (card && nextAssigneeId !== existing.assigneeId) {
       await db.insert(activityLog).values({
         companyId: card.companyId,
@@ -2848,7 +2851,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({ error: error instanceof Error ? error.message : 'panel_review_webhook_failed' });
       }
     }
-    const executionLog = body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || '');
+    const executionLog = agentResultExecutionLog(body.summary ? `${body.summary}\n\n${body.output || ''}` : (body.output || ''), normalizedResult);
     const actorAgentId = webhookTaskRun?.agentId ?? callerAgent?.id ?? card.assigneeId;
     const blockedResult = ['permission', 'failed', 'rejected'].includes(normalizedResult.outcome);
     const structuredDelegations = blockedResult ? [] : body.report?.delegations ?? null;
@@ -2896,8 +2899,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
     const [productProject] = card.projectId ? await db.select().from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1) : [];
-    await persistAgentWorkProducts(card, actorAgentId, taskRunId ?? null, body.workProducts, productProject);
-    if (!webhookTaskRun || ['dispatch', 'review'].includes(webhookTaskRun.kind)) await resetProtocolRepair(card.id, webhookTaskRun?.kind === 'review' ? 'review' : 'dispatch', normalizedResult, true);
+    await persistAgentWorkProducts(card, actorAgentId, taskRunId ?? null, body.workProducts, productProject, normalizedResult.report);
+    const protocolHelp = actorAgent && webhookTaskRun?.kind === 'review' ? await finishProtocolHelp(card, actorAgent.id, executionLog) : null;
+    if (protocolHelp) {
+      await completeTaskRun(taskRunId, { status: 'success', preserveCard: true, output: executionLog });
+      if (protocolHelp.continueKind) await enqueueTaskRun(card.id, protocolHelp.continueKind, 'queue');
+      return { ok: true, cardId: card.id, taskRunId, newStatus: protocolHelp.card.columnStatus };
+    }
+    if (!webhookTaskRun || ['dispatch', 'review'].includes(webhookTaskRun.kind)) await resetProtocolRepair(card.id, webhookTaskRun?.kind === 'review' ? 'review' : 'dispatch', normalizedResult, true, card);
     const webhookNotes = actorAgent && !blockedResult ? reportNotesFromOutput(executionLog, body.report ?? null) : [];
     if (actorAgent && webhookNotes.length) {
       try { await processReportNotes(card, actorAgent, webhookNotes); } catch (error) { app.log.warn({ error, cardId: card.id }, 'report note processing failed'); }
@@ -2908,7 +2917,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     const webhookChildren = actorAgent && !blockedResult ? childrenFromOutput(executionLog, body.report ?? null) : [];
     if (actorAgent && webhookChildren.length) {
-      try { await processChildSplits(card, actorAgent, webhookChildren); } catch (error) { app.log.warn({ error, cardId: card.id }, 'child split processing failed'); }
+      try {
+        const split = await processChildSplits(card, actorAgent, webhookChildren);
+        if (split.errors.length) return reply.code(409).send({ error: 'child_split_rejected', message: split.errors.join('\n') });
+      } catch (error) { return reply.code(409).send({ error: 'child_split_rejected', message: String(error) }); }
     }
     // Client checkpoint: park the card and ask the client instead of completing.
     const webhookCheckpoint = actorAgent && !blockedResult ? await resolveClientCheckpointRequest(card, actorAgent, checkpointFromOutput(executionLog, body.report ?? null), normalizedResult.question) : null;
@@ -3021,7 +3033,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const nextStatus = childBlock ? 'in_progress' : mergePlan ? mergeCompletionStatus(mergePlan) : requestedNextStatus;
     const completesRun = delegatedViaWebhook || delegationFailed || Boolean(childBlock) || nextStatus !== 'in_progress';
     const webhookAction = childBlock ? 'webhook.waiting_on_children' : delegatedViaWebhook ? 'webhook.message_delegated' : delegationFailed ? 'webhook.delegation_failed' : `webhook.task_${nextStatus}`;
-    const [updatedCard] = await db.update(kanbanCards).set({
+    const updatedCard = await guardedCompletionUpdate(card, {
       columnStatus: nextStatus,
       rollupStatus: childBlock ? 'waiting_on_children' : nextStatus === 'done' ? 'done' : undefined,
       executionLog,
@@ -3038,11 +3050,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       executionLockExpiresAt: completesRun ? null : undefined,
       activeHeartbeatRunId: completesRun ? null : undefined,
       updatedAt: new Date(),
-    }).where(and(
-      eq(kanbanCards.id, body.cardId),
-      ...(normalizedResult.outcome === 'permission' ? [drizzleSql`NOT EXISTS (SELECT 1 FROM ${approvals} WHERE ${approvals.cardId} = ${card.id} AND ${approvals.status} = 'pending' AND ${approvals.type} = 'task_review' AND ${approvals.payload}->>'humanGate' = 'true')`] : []),
-    )).returning();
-    if (!updatedCard && normalizedResult.outcome === 'permission') {
+    });
+    if (!updatedCard) {
       // The gate can be created after the initial read. Settle this callback
       // without clearing or rewriting any current card/approval state.
       const [parked] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1);
@@ -3163,7 +3172,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         })),
       });
     }
-    if (mergePlan) await applyMergeGatePlan({ ...card, executionLog }, mergePlan);
+    if (mergePlan) await applyMergeGatePlan(updatedCard, mergePlan);
     return { ok: true, cardId: body.cardId, taskRunId, requestedStatus, requestedNextStatus, newStatus: nextStatus, reviewerId: escalationReviewerId ?? qualityReviewerId, delegated: delegatedViaWebhook, delegationFailed, messageDelegationCount: delegatedRows.length, childBlock };
   });
 }

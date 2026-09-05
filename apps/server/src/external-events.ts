@@ -7,17 +7,18 @@
 // for the shared lifecycle primitives the same way review-rounds.ts does.
 
 import { createHash } from 'node:crypto';
-import { and, desc, eq, isNotNull, isNull, lte, or } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { normalizeCardStatus } from '@megacorps/shared';
 import { recordStageAction, type CardActionActor } from './card-actions.ts';
 import { db } from './db/client.ts';
-import { activityLog, externalEvents, externalWaits, kanbanCards, taskLogs } from './db/schema.ts';
+import { activityLog, approvals, externalEvents, externalWaits, kanbanCards, taskLogs } from './db/schema.ts';
 import { addCardMessage, cascadeParentStatus, completionBlockedByChildren, enqueueTaskRun } from './dispatch.ts';
 import { EXTERNAL_POLL_MAX, formatPollExhaustedMessage, pollDecision } from './external-polling.ts';
 import { publishLiveEvent } from './live.ts';
 import { notify } from './notifications.ts';
 import { applyMergeGatePlan, mergeCompletionStatus, planMergeGate, reconcileMergeWait } from './merge-gate.ts';
+import { completionCondition } from './completion-guard.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
 type ExternalWaitRow = typeof externalWaits.$inferSelect;
@@ -82,22 +83,28 @@ export async function applyExternalEvent(args: { card: CardRow; input: ApplyExte
   const mergePlan = !args.verifiedMerge && !childBlock && requestedStatus === 'done' ? await planMergeGate(current) : null;
   requestedStatus = childBlock ? 'in_progress' : mergePlan ? mergeCompletionStatus(mergePlan) : requestedStatus;
   const companyId = input.companyId ?? current.companyId;
+  const superseded = new Error('external_completion_superseded');
   const committed = await db.transaction(async (tx) => {
     const [card] = await tx.select().from(kanbanCards).where(and(eq(kanbanCards.id, current.id), isNull(kanbanCards.deletedAt))).for('update').limit(1);
     if (!card || card.columnStatus !== current.columnStatus || ['done', 'cancelled'].includes(card.columnStatus ?? '')) return null;
+    const [authorized] = await tx.select().from(kanbanCards).where(completionCondition(current)).limit(1);
+    if (!authorized) return null;
+    if (requestedStatus && requestedStatus !== card.columnStatus) {
+      const [updated] = await tx.update(kanbanCards).set({ columnStatus: requestedStatus, rollupStatus: childBlock ? 'waiting_on_children' : requestedStatus === 'done' ? 'done' : undefined, lastError: requestedStatus === 'blocked' ? input.payloadSummary ?? 'External completion requires correction.' : null, completedAt: requestedStatus === 'done' ? now : null, updatedAt: now }).where(completionCondition(current)).returning();
+      if (!updated) return null;
+    }
     if (input.waitId) {
       if (card.columnStatus !== 'waiting_on_external') return null;
       const [claimed] = await tx.update(externalWaits).set({ status: input.status, resolvedAt: ['waiting', 'info'].includes(input.status) ? null : now }).where(and(eq(externalWaits.id, input.waitId), eq(externalWaits.cardId, card.id), eq(externalWaits.status, 'waiting'))).returning();
-      if (!claimed) return null;
+      if (!claimed) throw superseded; // Roll back the card write with the lost wait claim.
     } else {
       // Generic events must not consume a merge authorization before its evidence is verified.
       const waits = await tx.select().from(externalWaits).where(and(eq(externalWaits.cardId, card.id), eq(externalWaits.status, 'waiting')));
       for (const wait of waits) if (!wait.authorizedHeadSha) await tx.update(externalWaits).set({ status: input.status, resolvedAt: ['waiting', 'info'].includes(input.status) ? null : now }).where(eq(externalWaits.id, wait.id));
     }
-    if (requestedStatus && requestedStatus !== card.columnStatus) await tx.update(kanbanCards).set({ columnStatus: requestedStatus, rollupStatus: childBlock ? 'waiting_on_children' : requestedStatus === 'done' ? 'done' : undefined, lastError: requestedStatus === 'blocked' ? input.payloadSummary ?? 'External completion requires correction.' : null, completedAt: requestedStatus === 'done' ? now : null, updatedAt: now }).where(eq(kanbanCards.id, card.id));
     const [event] = await tx.insert(externalEvents).values({ companyId, projectId: input.projectId ?? card.projectId, rootCardId: input.rootCardId ?? await rootCardId(card), cardId: card.id, provider: input.provider, eventType: input.eventType, externalId: input.externalId ?? null, externalUrl: input.externalUrl ?? null, status: input.status, payloadHash: hashValue(input.payload ?? {}), payloadSummary: input.payloadSummary ?? null, payload: input.payload ?? {}, processedAt: now }).returning();
     return { card, event };
-  });
+  }).catch((error) => { if (error === superseded) return null; throw error; });
   if (!committed) return { event: null, newStatus: current.columnStatus };
   const { card, event } = committed;
   const fromStatus = normalizeCardStatus(card.columnStatus) ?? 'todo';
@@ -107,7 +114,7 @@ export async function applyExternalEvent(args: { card: CardRow; input: ApplyExte
     if (toStatus === 'in_review') await enqueueTaskRun(card.id, 'review', 'queue');
     if (toStatus === 'done') await cascadeParentStatus(card.parentCardId);
   }
-  if (mergePlan) await applyMergeGatePlan(card, mergePlan);
+  if (mergePlan) await applyMergeGatePlan({ ...card, columnStatus: requestedStatus }, mergePlan);
   await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'webhook', status: input.status === 'failure' || input.status === 'timeout' ? 'failed' : 'success', message: 'External event ' + input.provider + '/' + input.eventType + ': ' + input.status, output: input.payloadSummary ?? undefined });
   await db.insert(activityLog).values({ companyId, actorType: actor.type, actorId: actor.id, userId: actor.userId ?? null, agentId: card.assigneeId, action: 'external_event.received', entityType: 'card', entityId: card.id, details: { externalEventId: event?.id, provider: input.provider, eventType: input.eventType, status: input.status } });
   publishLiveEvent({ type: 'card.updated', companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'external_event.received' });
@@ -184,7 +191,10 @@ const POLL_SWEEP_BATCH = 10;
 // receiver) never get here, because their waits carry no interval.
 export async function sweepExternalWaitPolls(app: FastifyInstance): Promise<number> {
   const candidates: ExternalWaitRow[] = await db.select().from(externalWaits)
-    .where(and(eq(externalWaits.status, 'waiting'), or(isNotNull(externalWaits.pollIntervalSeconds), and(eq(externalWaits.provider, 'gitea'), isNotNull(externalWaits.authorizedHeadSha)))))
+    .where(and(eq(externalWaits.status, 'waiting'), or(isNotNull(externalWaits.pollIntervalSeconds), and(eq(externalWaits.provider, 'gitea'), isNotNull(externalWaits.authorizedHeadSha))),
+      sql`CASE WHEN ${externalWaits.provider} = 'gitea' AND ${externalWaits.authorizedHeadSha} IS NOT NULL THEN ${externalWaits.pollCount} < ${EXTERNAL_POLL_MAX} ELSE true END`,
+      sql`EXISTS (SELECT 1 FROM ${kanbanCards} WHERE ${kanbanCards.id} = ${externalWaits.cardId} AND ${kanbanCards.columnStatus} = 'waiting_on_external' AND ${kanbanCards.deletedAt} IS NULL)`,
+      sql`NOT EXISTS (SELECT 1 FROM ${approvals} WHERE ${approvals.cardId} = ${externalWaits.cardId} AND ${approvals.status} = 'pending' AND ${approvals.type} = 'task_review' AND ${approvals.payload}->>'humanGate' = 'true')`))
     .orderBy(externalWaits.lastPolledAt, externalWaits.createdAt)
     .limit(POLL_SWEEP_BATCH * 3);
   const now = Date.now();
