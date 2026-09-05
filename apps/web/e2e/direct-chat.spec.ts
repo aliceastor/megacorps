@@ -347,6 +347,17 @@ async function setSidebar(page: Page, open: boolean) {
   const toggle = page.getByRole('button', { name: 'Toggle sidebar' });
   if ((await toggle.getAttribute('aria-expanded')) !== String(open)) await toggle.click();
   await expect(toggle).toHaveAttribute('aria-expanded', String(open));
+  let previous = '';
+  let stableSamples = 0;
+  await expect.poll(async () => {
+    const bounds = await page.locator('.sidebar, main, .chat-workspace').evaluateAll((nodes) => JSON.stringify(nodes.map((node) => {
+      const box = node.getBoundingClientRect();
+      return [box.x, box.y, box.width, box.height].map((value) => Math.round(value * 100) / 100);
+    })));
+    stableSamples = bounds === previous ? stableSamples + 1 : 0;
+    previous = bounds;
+    return stableSamples;
+  }, { intervals: [100], message: 'sidebar and chat geometry must settle after each transition' }).toBeGreaterThanOrEqual(3);
 }
 
 for (const width of [320, 390, 768, 900, 1158, 1440]) {
