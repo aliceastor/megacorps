@@ -423,11 +423,23 @@ type CompanyReferenceInput = {
   bossId?: string | null;
   parentCardId?: string | null;
   dependencyCardIds?: string[];
+  reviewerIds?: string[];
+  brainstormDepartmentIds?: string[];
   runtimeId?: string | null;
   adapterType?: string | null;
 };
 
 async function ensureCompanyReferences(companyId: string, input: CompanyReferenceInput) {
+  if (input.reviewerIds?.length) {
+    const ids = [...new Set(input.reviewerIds)];
+    const rows = await db.select({ id: agents.id }).from(agents).where(and(inArray(agents.id, ids), eq(agents.companyId, companyId), isNull(agents.deletedAt)));
+    if (rows.length !== ids.length) throw new Error('reviewer_company_mismatch');
+  }
+  if (input.brainstormDepartmentIds?.length) {
+    const ids = [...new Set(input.brainstormDepartmentIds)];
+    const rows = await db.select({ id: departments.id }).from(departments).where(and(inArray(departments.id, ids), eq(departments.companyId, companyId)));
+    if (rows.length !== ids.length) throw new Error('department_company_mismatch');
+  }
   if (input.departmentId) {
     const [row] = await db.select({ id: departments.id }).from(departments).where(and(eq(departments.id, input.departmentId), eq(departments.companyId, companyId))).limit(1);
     if (!row) throw new Error('department_company_mismatch');
@@ -1553,6 +1565,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         goalId: input.goalId,
         assigneeId: input.assigneeId,
         reviewerId: input.reviewerId,
+        parentCardId: input.parentCardId,
+        reviewerIds: input.reviewerIds,
+        brainstormDepartmentIds: input.brainstormDepartmentIds,
         dependencyCardIds: input.dependencyCardIds,
       });
     } catch (error) {
@@ -1655,6 +1670,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         assigneeId: nextAssigneeId,
         reviewerId: nextReviewerId,
         parentCardId: nextParentCardId,
+        reviewerIds: input.reviewerIds,
+        brainstormDepartmentIds: input.brainstormDepartmentIds,
         dependencyCardIds: nextDependencyCardIds,
       });
     } catch (error) {

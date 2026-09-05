@@ -178,12 +178,9 @@ const createCardBaseSchema = z.object({
   recurEveryMinutes: z.number().int().min(5).max(43_200).nullable().optional(),
 });
 
-// Every card has exactly one reviewer and it is never the assignee. The
-// reviewer is either an agent (reviewerId) or the human client
-// (requiresApproval = true). No card is exempt: the review is the cheapest
-// insurance in the pipeline and the only source of CV scores.
+// Omitted owner/reviewer use the structural dispatch and review policy.
+// Client approval is a separate explicit gate; a named reviewer cannot be the executor.
 export const createCardSchema = createCardBaseSchema
-  .refine((card) => Boolean(card.reviewerId) || card.requiresApproval === true, { message: 'A reviewer is required: set reviewerId (an agent) or requiresApproval (the human client reviews).', path: ['reviewerId'] })
   .refine((card) => !card.reviewerId || !card.assigneeId || card.reviewerId !== card.assigneeId, { message: 'The reviewer must not be the assignee.', path: ['reviewerId'] });
 
 export const createMachineRunnerSchema = z.object({
