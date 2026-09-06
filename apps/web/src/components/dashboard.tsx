@@ -5,8 +5,12 @@ import { CircleHelp, ExternalLink } from 'lucide-react';
 import { Bar, CartesianGrid, ComposedChart, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { api, API_URL } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
+import { budgetCopy } from '@/lib/budget-copy';
+import { formatUsd, type UsageSummary as Summary } from '@/lib/usage';
+import { UsageSummary } from './usage-summary';
 
 type DashboardData = {
+  usage?: Summary;
   stats: Record<string, number>;
   stages: Record<string, number>;
   recentTaskLogs: Array<{ id: string; type: string; status: string; message: string; createdAt?: string }>;
@@ -19,7 +23,8 @@ type TimeseriesData = { days: number; points: TimeseriesPoint[] };
 const chartAxisStyle = { fontSize: 11, fill: 'currentColor', opacity: 0.7 };
 
 export function Dashboard() {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
+  const budgetText = budgetCopy[locale];
   const { data, error } = useQuery({
     queryKey: ['dashboard'],
     queryFn: () => api<DashboardData>('/api/dashboard'),
@@ -44,7 +49,7 @@ export function Dashboard() {
     [t('dashboard.activeRuns'), data.stats.activeRuns ?? 0],
     [t('dashboard.pendingApprovals'), data.stats.pendingApprovals ?? 0],
     [t('dashboard.budgetPolicies'), data.stats.budgetPolicies ?? 0],
-    [t('dashboard.monthlyCost'), `$${data.stats.monthlyCost ?? 0}`],
+    [budgetText.monthlyKnown, data.usage ? formatUsd(data.usage.totalUsd) : budgetText.unavailable],
   ];
 
   const points = series?.points ?? [];
@@ -58,6 +63,7 @@ export function Dashboard() {
     <div className="stat-grid">
       {stats.map(([label, value]) => <section className="card stat-card" key={label}><span>{label}</span><b>{value}</b></section>)}
     </div>
+    {data.usage && <UsageSummary usage={data.usage} includeTotal={false} />}
     {points.length > 0 && <div className="dashboard-charts">
       <section className="card section-card dashboard-chart-card">
         <h3>{t('dashboard.costTrend')}</h3>

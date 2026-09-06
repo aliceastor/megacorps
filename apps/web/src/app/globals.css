@@ -7123,6 +7123,20 @@ button.card:hover {
 .form-advanced > :not(summary) { margin-top: 10px; }
 .dashboard-page, .dashboard-page > *, .dashboard-page .data-grid > *, .dashboard-page .list-row { min-width: 0; overflow-wrap: anywhere; }
 .dashboard-page .stat-grid { grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); }
+.budget-page { display: grid; gap: 16px; }
+.budget-page, .budget-page > *, .budget-page .data-grid > *, .budget-page .list-row, .usage-summary { min-width: 0; overflow-wrap: anywhere; }
+.budget-page .stat-grid { grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); }
+.budget-filters { grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); align-items: end; }
+.budget-page .form-grid { grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); }
+.budget-page .input { min-width: 0; width: 100%; max-width: 100%; box-sizing: border-box; }
+.budget-page .panel-title { flex-wrap: wrap; gap: 10px; }
+.budget-page .btn { white-space: normal; }
+.budget-page .check-row { align-items: center; }
+.budget-attempt-list { max-height: 28rem; overflow: auto; overscroll-behavior: contain; }
+.usage-summary { display: grid; gap: 10px; }
+.usage-summary p { margin: 0; }
+.usage-note { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.stat-card .usage-money { font-variant-numeric: tabular-nums; font-size: clamp(20px, 2.1vw, 28px); }
 /* A dialog in main must cover navigation outside main's stacking context. */
 .app-frame > main:has(.overlay) { z-index: 100; }
 
