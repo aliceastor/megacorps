@@ -1920,7 +1920,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return getCardSubtreeRows(card, boundedQueryInt(query.limit, 1000, 1, 5000));
   });
   app.get('/api/cards/:id/actions', async (request, reply) => {
-    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const card = await ensureVisibleCard(request, reply, id);
     if (!card) return reply;
     const query = z.object({ limit: readLimit(200, 500) }).parse(request.query);
     return getCardActions(card.id, query.limit);
@@ -2228,7 +2230,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     });
   });
   app.get('/api/cards/:id/assignment-history', async (request, reply) => {
-    const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const card = await ensureVisibleCard(request, reply, id);
     if (!card) return reply;
     const query = z.object({ limit: readLimit(100, 500) }).parse(request.query);
     const limit = query.limit;

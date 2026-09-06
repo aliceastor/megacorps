@@ -14,10 +14,28 @@ test('authenticated startup rejects malformed read inputs before SQL', async t =
   const company = { id: randomUUID(), name: 'Synthetic', slug: 'synthetic' };
   const card = { id: randomUUID(), companyId: company.id, title: 'Synthetic', columnStatus: 'todo', day: '2026-09-06', completed: 0 };
   const session = { id: randomUUID(), companyId: company.id };
-  const state = memoryDb(t, [[users, [user]], [companies, [company]], [companyMemberships, [{ companyId: company.id, userId: user.id, role: 'viewer', status: 'active' }]], [kanbanCards, [card]], [chatSessions, [session]]]);
+  const foreign = { id: randomUUID(), name: 'Foreign', slug: 'foreign' };
+  const foreignCard = { ...card, id: randomUUID(), companyId: foreign.id };
+  const deletedCard = { ...card, id: randomUUID(), deletedAt: new Date() };
+  const state = memoryDb(t, [[users, [user]], [companies, [company, foreign]], [companyMemberships, [{ companyId: company.id, userId: user.id, role: 'viewer', status: 'active' }]], [kanbanCards, [card, foreignCard, deletedCard]], [chatSessions, [session]]]);
   const { buildServer } = await import('./index.ts');
   const app = await buildServer(); t.after(() => app.close());
   const headers = { cookie: `session=${await signSession(user)}` };
+  for (const suffix of ['actions', 'assignment-history']) {
+    for (const authenticated of [false, true]) await t.test(`${suffix}: malformed path ${authenticated ? 'authenticated' : 'anonymous'}`, async () => {
+      const response = await app.inject({ url: `/api/cards/not-a-uuid/${suffix}`, ...(authenticated ? { headers } : {}) });
+      assert.equal(response.statusCode, authenticated ? 400 : 401, response.body);
+      if (authenticated) {
+        assert.equal(response.json().error, 'validation_failed');
+        assert.deepEqual(response.json().issues[0].path, ['id']);
+      }
+    });
+    for (const [id, status] of [[randomUUID(), 404], [foreignCard.id, 403], [deletedCard.id, 404], [card.id, 200]] as const) await t.test(`${suffix}: card visibility ${status} ${id}`, async () => {
+      const response = await app.inject({ url: `/api/cards/${id}/${suffix}`, headers });
+      assert.equal(response.statusCode, status, response.body);
+      if (status === 200) assert.deepEqual(response.json(), []);
+    });
+  }
   const routes = ['/api/search?q=synthetic&limit=', '/api/dashboard/timeseries?days=', '/api/approvals?limit=', '/api/notifications?limit=', '/api/chat/sessions?limit=', `/api/chat/sessions/${session.id}/messages?limit=`, '/api/cards?limit=', `/api/cards/${card.id}/actions?limit=`, `/api/cards/${card.id}/assignment-history?limit=`, '/api/cards?offset='];
   for (const route of routes) for (const value of ['NaN', '1.5', 'Infinity']) await t.test(`${route}${value}`, async () => {
     const response = await app.inject({ url: route + value, headers });

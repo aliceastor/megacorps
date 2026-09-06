@@ -19,6 +19,20 @@ test('PostgreSQL authenticated read contracts include production hooks and usefu
   const [card] = await sql`INSERT INTO kanban_cards(company_id,title,body,column_status) VALUES(${company!.id},'Synthetic goal','Natural language deliverable','todo') RETURNING *`;
   const headers = { cookie: `session=${await signSession(user as any)}` };
   const call = (url: string) => app.inject({ url, headers });
+  const [foreignCard] = await sql`INSERT INTO kanban_cards(company_id,title,body,column_status) VALUES(${foreign!.id},'Foreign goal','Out of scope','todo') RETURNING *`;
+  for (const suffix of ['actions', 'assignment-history']) {
+    const malformed = `/api/cards/not-a-uuid/${suffix}`;
+    assert.equal((await app.inject({ url: malformed })).statusCode, 401);
+    const invalid = await call(malformed);
+    assert.equal(invalid.statusCode, 400, invalid.body);
+    assert.equal(invalid.json().error, 'validation_failed');
+    assert.deepEqual(invalid.json().issues[0].path, ['id']);
+    assert.equal((await call(`/api/cards/${randomUUID()}/${suffix}`)).statusCode, 404);
+    assert.equal((await call(`/api/cards/${foreignCard!.id}/${suffix}`)).statusCode, 403);
+    const visible = await call(`/api/cards/${card!.id}/${suffix}`);
+    assert.equal(visible.statusCode, 200, visible.body);
+    assert.deepEqual(visible.json(), []);
+  }
   for (const url of ['/api/search?q=Synthetic&limit=NaN', '/api/dashboard/timeseries?days=NaN', '/api/chat/sessions?agentId=bad', '/api/chat/sessions/bad/messages', `/api/chat/sessions/${session!.id}/messages?limit=1.5`, '/api/approvals?limit=NaN', '/api/notifications?limit=Infinity', '/api/cards?offset=-1', `/api/cards/${card!.id}/actions?limit=NaN`, `/api/cards/${card!.id}/assignment-history?limit=1.5`, '/api/usage-summary?period=2026-13', '/api/prompt-logs/bad', '/api/system-logs/bad', '/api/task-runs?agentId=bad', '/api/cron/runs/bad']) {
     const response = await call(url); assert.equal(response.statusCode, 400, `${url}: ${response.body}`); assert.equal(response.json().error, 'validation_failed');
   }
