@@ -423,8 +423,8 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
 
   if (endpoint.path === '/api/dashboard') {
     return {
-      responseSchema: { stats: 'object; monthlyCost is current UTC known ledger subtotal', usage: 'exact usage summary with explicit UTC period', stages: 'Record<CardStatus, number>', recentTaskLogs: 'TaskLog[]', recentApiEvents: 'ApiEvent[]' },
-      responseExample: { stats: { tasks: 12, agents: 5, activeAgents: 4, monthlyCost: 0.25000019 }, usage: usageExample, stages: { todo: 3, in_progress: 2, in_review: 1, needs_review: 1, done: 7, blocked: 1, cancelled: 0 }, recentTaskLogs: [], recentApiEvents: [] },
+      responseSchema: { stats: 'object; monthlyCost is current UTC known ledger subtotal', usage: 'exact usage summary with explicit UTC period', stages: 'Record<CardStatus, number>', recentTaskLogs: 'TaskLog[]', recentApiEvents: 'ApiEvent[]', recentActivity: 'ActivityLog[]', recentRuns: 'HeartbeatRun[]', pendingApprovals: 'Approval[]' },
+      responseExample: { stats: { tasks: 12, agents: 5, activeAgents: 4, monthlyCost: 0.25000019 }, usage: usageExample, stages: { todo: 3, in_progress: 2, in_review: 1, needs_review: 1, done: 7, blocked: 1, cancelled: 0 }, recentTaskLogs: [], recentApiEvents: [], recentActivity: [], recentRuns: [], pendingApprovals: [] },
       rateLimit: endpoint.rateLimit ?? defaultRateLimit,
       requiredRole: roleDefault(endpoint),
     };
@@ -664,8 +664,14 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
     return { responseSchema: { userMessage: message, agentMessage: message }, responseExample: { userMessage: { ...message, role: 'user' }, agentMessage: { ...message, role: 'agent', body: 'Agent reply' } }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
+  if (endpoint.path === '/api/search') {
+    return { responseSchema: { query: 'string', cards: 'Card search matches[]', agents: 'Agent search matches[]', projects: 'Project search matches[]', companies: 'Company search matches[]', chatSessions: 'Chat search matches[]', knowledgeDocs: 'Knowledge search matches[]' }, responseExample: { query: '', cards: [], agents: [], projects: [], companies: [], chatSessions: [], knowledgeDocs: [] }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
+  if (endpoint.path === '/api/dashboard/timeseries') {
+    return { responseSchema: { days: 'integer, default 30, bounded to 7..180', points: 'Array<{day: YYYY-MM-DD, costUsd: number, completed: number, runs: number, failedRuns: number}>' }, responseExample: { days: 30, points: [{ day: '2026-09-06', costUsd: 0, completed: 0, runs: 0, failedRuns: 0 }] }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  }
   if (endpoint.path.includes('/cron/status')) {
-    return { responseSchema: { enabled: 'boolean', running: 'boolean', intervalMs: 'number', lastRunAt: 'string | null', companyTicks: 'Array<{ companyId, lastTickMs }>' }, responseExample: { enabled: true, running: false, intervalMs: 30000, lastRunAt: '2026-06-06T00:00:00.000Z', companyTicks: [] }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: { enabled: 'boolean', running: 'boolean', intervalMs: 'number', lastStartedAt: 'string | null', lastCompletedAt: 'string | null', lastStatus: 'string | null', lastError: 'string | null', recentRuns: 'CronRun metadata[] without details', companyTicks: 'Array<{ companyId, lastTickMs }>' }, responseExample: { enabled: true, running: false, intervalMs: 30000, lastStartedAt: null, lastCompletedAt: null, lastStatus: null, lastError: null, recentRuns: [], companyTicks: [] }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path === '/api/cron/runs/:id') {
@@ -685,7 +691,7 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
     return { responseSchema: { legacy: { type: 'array', items: entity }, summary: { items: `${entity} metadata[] without body/details`, nextCursor: 'opaque string | null' }, errors: ['400 invalid_limit', '400 invalid_cursor', '400 invalid_search'] }, responseExample: { items: [], nextCursor: null }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
   if (endpoint.method === 'GET' && !endpoint.path.includes(':id')) {
-    return { responseSchema: { type: 'array', items: { type: entity, id: 'uuid', createdAt: 'ISO datetime' } }, responseExample: [], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+    return { responseSchema: { description: 'Response shape is not yet specified; consult the endpoint summary and actual response.' }, responseExample: null, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
 
   if (endpoint.path.includes('/webhook/task-complete')) {
@@ -693,8 +699,8 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
   }
 
   return {
-    responseSchema: { type: entity, id: 'uuid', createdAt: 'ISO datetime', updatedAt: 'ISO datetime optional' },
-    responseExample: { id: `${entity}-uuid`, createdAt: '2026-06-06T00:00:00.000Z' },
+    responseSchema: { description: 'Response shape is not yet specified; consult the endpoint summary and actual response.' },
+    responseExample: null,
     rateLimit: endpoint.rateLimit ?? defaultRateLimit,
     requiredRole: roleDefault(endpoint),
   };
