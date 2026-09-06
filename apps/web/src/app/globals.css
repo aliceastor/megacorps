@@ -3449,8 +3449,13 @@ select option {
 
 .page-stack {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  overflow-wrap: anywhere;
   gap: 16px;
 }
+
+.page-stack > * { min-width: 0; }
 
 .split-layout {
   display: grid;
@@ -3509,6 +3514,8 @@ select option {
 
 .agent-name-button {
   display: grid;
+  max-width: 220px;
+  overflow-wrap: anywhere;
   gap: 2px;
 }
 
@@ -4780,7 +4787,10 @@ button.card {
 
 .chat-page {
   min-height: 0;
+  min-width: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  overflow-wrap: anywhere;
   gap: 16px;
 }
 
@@ -5283,7 +5293,9 @@ button.card {
 }
 
 .org-assignment-table .input {
-  min-width: 180px;
+  width: 220px;
+  min-width: 0;
+  max-width: 220px;
 }
 
 .org-canvas {
