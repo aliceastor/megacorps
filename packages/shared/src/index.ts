@@ -332,6 +332,9 @@ export const createAgentSchema = z.object({
 export const updateAgentSchema = partialWithoutDefaults(createAgentSchema.omit({ adapterType: true, capabilities: true })).extend({
   adapterType: z.enum(agentAdapterTypes).optional(),
   capabilities: z.array(z.string().trim().min(1).max(80)).optional(),
+  hermesProfile: createAgentSchema.shape.hermesProfile.unwrap().nullable().optional(),
+  budgetPerTask: createAgentSchema.shape.budgetPerTask.unwrap().nullable().optional(),
+  budgetMonthly: createAgentSchema.shape.budgetMonthly.unwrap().nullable().optional(),
 });
 
 // A2A-aligned structured agent report (docs/a2a-adapter-design.md §3.2).

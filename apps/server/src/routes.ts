@@ -430,31 +430,31 @@ type CompanyReferenceInput = {
   adapterType?: string | null;
 };
 
-async function ensureCompanyReferences(companyId: string, input: CompanyReferenceInput) {
+async function ensureCompanyReferences(companyId: string, input: CompanyReferenceInput, reader: Pick<typeof db, 'select'> = db) {
   if (input.reviewerIds?.length) {
     const ids = [...new Set(input.reviewerIds)];
-    const rows = await db.select({ id: agents.id }).from(agents).where(and(inArray(agents.id, ids), eq(agents.companyId, companyId), isNull(agents.deletedAt)));
+    const rows = await reader.select({ id: agents.id }).from(agents).where(and(inArray(agents.id, ids), eq(agents.companyId, companyId), isNull(agents.deletedAt)));
     if (rows.length !== ids.length) throw new Error('reviewer_company_mismatch');
   }
   if (input.brainstormDepartmentIds?.length) {
     const ids = [...new Set(input.brainstormDepartmentIds)];
-    const rows = await db.select({ id: departments.id }).from(departments).where(and(inArray(departments.id, ids), eq(departments.companyId, companyId)));
+    const rows = await reader.select({ id: departments.id }).from(departments).where(and(inArray(departments.id, ids), eq(departments.companyId, companyId)));
     if (rows.length !== ids.length) throw new Error('department_company_mismatch');
   }
   if (input.departmentId) {
-    const [row] = await db.select({ id: departments.id }).from(departments).where(and(eq(departments.id, input.departmentId), eq(departments.companyId, companyId))).limit(1);
+    const [row] = await reader.select({ id: departments.id }).from(departments).where(and(eq(departments.id, input.departmentId), eq(departments.companyId, companyId))).limit(1);
     if (!row) throw new Error('department_company_mismatch');
   }
   if (input.positionId) {
-    const [row] = await db.select({ id: positions.id }).from(positions).where(and(eq(positions.id, input.positionId), eq(positions.companyId, companyId))).limit(1);
+    const [row] = await reader.select({ id: positions.id }).from(positions).where(and(eq(positions.id, input.positionId), eq(positions.companyId, companyId))).limit(1);
     if (!row) throw new Error('position_company_mismatch');
   }
   if (input.projectId) {
-    const [row] = await db.select({ id: projects.id }).from(projects).where(and(eq(projects.id, input.projectId), eq(projects.companyId, companyId), isNull(projects.deletedAt))).limit(1);
+    const [row] = await reader.select({ id: projects.id }).from(projects).where(and(eq(projects.id, input.projectId), eq(projects.companyId, companyId), isNull(projects.deletedAt))).limit(1);
     if (!row) throw new Error('project_company_mismatch');
   }
   if (input.goalId) {
-    const [row] = await db.select({ id: goals.id, departmentId: goals.departmentId, projectId: goals.projectId }).from(goals).where(and(eq(goals.id, input.goalId), eq(goals.companyId, companyId))).limit(1);
+    const [row] = await reader.select({ id: goals.id, departmentId: goals.departmentId, projectId: goals.projectId }).from(goals).where(and(eq(goals.id, input.goalId), eq(goals.companyId, companyId))).limit(1);
     if (!row) throw new Error('goal_company_mismatch');
     if (row.departmentId && input.departmentId !== row.departmentId) throw new Error('goal_department_mismatch');
     if (row.projectId && input.projectId !== row.projectId) throw new Error('goal_project_mismatch');
@@ -469,12 +469,12 @@ async function ensureCompanyReferences(companyId: string, input: CompanyReferenc
     if (company !== companyId) throw new Error('parent_card_company_mismatch');
   }
   if (input.dependencyCardIds?.length) {
-    const rows = await db.select({ id: kanbanCards.id }).from(kanbanCards).where(and(inArray(kanbanCards.id, input.dependencyCardIds), eq(kanbanCards.companyId, companyId)));
+    const rows = await reader.select({ id: kanbanCards.id }).from(kanbanCards).where(and(inArray(kanbanCards.id, input.dependencyCardIds), eq(kanbanCards.companyId, companyId)));
     if (rows.length !== input.dependencyCardIds.length) throw new Error('dependency_card_company_mismatch');
   }
   if (input.adapterType && adapterRequiresRuntime(input.adapterType) && !input.runtimeId) throw new Error('agent_runtime_required');
   if (input.runtimeId) {
-    const [runtime] = await db.select({ companyId: agentRuntimes.companyId, adapterType: agentRuntimes.adapterType }).from(agentRuntimes).where(eq(agentRuntimes.id, input.runtimeId)).limit(1);
+    const [runtime] = await reader.select({ companyId: agentRuntimes.companyId, adapterType: agentRuntimes.adapterType }).from(agentRuntimes).where(eq(agentRuntimes.id, input.runtimeId)).limit(1);
     if (!runtime || runtime.companyId !== companyId) throw new Error('runtime_company_mismatch');
     if (input.adapterType && runtime.adapterType !== input.adapterType) throw new Error('runtime_adapter_mismatch');
   }
@@ -2343,37 +2343,58 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [existing] = await db.select().from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
     if (!existing) return reply.code(404).send({ error: 'agent_not_found' });
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
-    const referenceInput: CompanyReferenceInput = { departmentId: input.departmentId, positionId: input.positionId, bossId: input.bossId };
-    if (input.adapterType !== undefined || input.runtimeId !== undefined) {
-      referenceInput.adapterType = input.adapterType ?? existing.adapterType;
-      referenceInput.runtimeId = input.runtimeId === undefined ? existing.runtimeId : input.runtimeId;
+    try {
+      const agent = await retryMergeGateWrite(() => db.transaction(async tx => {
+        // Same company-first order as setup. Keep the fresh graph read and
+        // relationship write in this boundary so inverse edits cannot race.
+        await tx.select().from(companies).where(eq(companies.id, existing.companyId)).for('update');
+        const [current] = await tx.select().from(agents).where(and(eq(agents.id, id), eq(agents.companyId, existing.companyId), isNull(agents.deletedAt))).limit(1);
+        if (!current) throw Object.assign(new Error('agent_not_found'), { statusCode: 404 });
+        const referenceInput: CompanyReferenceInput = { departmentId: input.departmentId, positionId: input.positionId, bossId: input.bossId };
+        if (input.adapterType !== undefined || input.runtimeId !== undefined) {
+          referenceInput.adapterType = input.adapterType ?? current.adapterType;
+          referenceInput.runtimeId = input.runtimeId === undefined ? current.runtimeId : input.runtimeId;
+        }
+        await ensureCompanyReferences(current.companyId, referenceInput, tx);
+        if (input.bossId && input.bossId !== current.bossId) {
+          const members = await tx.select({ id: agents.id, bossId: agents.bossId }).from(agents).where(and(eq(agents.companyId, current.companyId), isNull(agents.deletedAt)));
+          const bosses = new Map(members.map(member => [member.id, member.bossId]));
+          const visited = new Set([id]);
+          let cursor: string | null | undefined = input.bossId;
+          while (cursor) {
+            if (visited.has(cursor)) throw new Error(cursor === id && cursor === input.bossId ? 'agent_self_manager' : 'agent_reporting_cycle');
+            visited.add(cursor); cursor = bosses.get(cursor);
+          }
+        }
+        const [saved] = await tx.update(agents).set({
+          name: input.name,
+          slug: input.slug,
+          role: input.role,
+          title: input.title,
+          soul: input.soul,
+          departmentId: input.departmentId,
+          positionId: input.positionId,
+          adapterType: input.adapterType,
+          adapterConfig: input.adapterConfig === undefined ? undefined : preserveRedactedSecrets(input.adapterConfig, current.adapterConfig),
+          runtimeId: input.runtimeId,
+          hermesProfile: input.hermesProfile,
+          bossId: input.bossId,
+          capabilities: input.capabilities,
+          memoryConfig: input.memoryConfig,
+          maxConcurrent: input.maxConcurrent,
+          defaultTimeoutSeconds: input.defaultTimeoutSeconds,
+          budgetPerTask: input.budgetPerTask === null ? null : input.budgetPerTask?.toString(),
+          budgetMonthly: input.budgetMonthly === null ? null : input.budgetMonthly?.toString(),
+        }).where(eq(agents.id, id)).returning();
+        if (!saved) throw Object.assign(new Error('agent_not_found'), { statusCode: 404 });
+        await tx.insert(activityLog).values({ companyId: saved.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: saved.id, action: 'agent.updated', entityType: 'agent', entityId: saved.id, details: { name: saved.name, adapterType: saved.adapterType } });
+        return saved;
+      }));
+      return redactAgent(agent);
+    } catch (error) {
+      if (error instanceof Error && /^(agent_self_manager|agent_reporting_cycle|.*_company_mismatch|runtime_adapter_mismatch)$/.test(error.message)) return reply.code(400).send({ error: error.message });
+      throw error;
     }
-    try { await ensureCompanyReferences(existing.companyId, referenceInput); }
-    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
-    const nextAdapterConfig = input.adapterConfig === undefined ? undefined : preserveRedactedSecrets(input.adapterConfig, existing.adapterConfig);
-    const [agent] = await db.update(agents).set({
-      name: input.name,
-      slug: input.slug,
-      role: input.role,
-      title: input.title,
-      soul: input.soul,
-      departmentId: input.departmentId,
-      positionId: input.positionId,
-      adapterType: input.adapterType,
-      adapterConfig: nextAdapterConfig,
-      runtimeId: input.runtimeId,
-      hermesProfile: input.hermesProfile,
-      bossId: input.bossId,
-      capabilities: input.capabilities,
-      memoryConfig: input.memoryConfig,
-      maxConcurrent: input.maxConcurrent,
-      defaultTimeoutSeconds: input.defaultTimeoutSeconds,
-      budgetPerTask: input.budgetPerTask?.toString(),
-      budgetMonthly: input.budgetMonthly?.toString(),
-    }).where(eq(agents.id, id)).returning();
-    if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
-    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.updated', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
-    return redactAgent(agent);
   });
 
   app.get('/api/agent-runtimes', async (request, reply) => {
