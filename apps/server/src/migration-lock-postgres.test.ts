@@ -79,6 +79,8 @@ test('PostgreSQL migrator retains and releases its own session lock under pool a
     let entered!: () => void;
     const reached = new Promise<void>(resolve => { entered = resolve; });
     let executions = 0;
+    let reservations = 0;
+    st.mock.method(sql, 'reserve', async () => { reservations++; return originalReserve(); });
     st.mock.method(sql, 'unsafe', ((statement: string, ...args: any[]) => {
       const query = (originalUnsafe as any)(statement, ...args);
       if (!statement.startsWith('CREATE INDEX IF NOT EXISTS api_events_user_created_id_idx')) return query;
@@ -88,18 +90,32 @@ test('PostgreSQL migrator retains and releases its own session lock under pool a
     await reached;
     const second = migrate();
     try {
-      const deadline = Date.now() + 3000;
+      await Promise.resolve();
+      assert.equal(reservations, 1, 'The queued same-process migrator must not occupy a pool slot');
+      assert.equal(Number((await sql`SELECT 1 AS usable`)[0]!.usable), 1);
+    } finally { release(); await Promise.all([first, second]); }
+    assert.equal(executions, 1, 'Concurrent migrators must not run an unapplied body twice');
+    assert.equal((await sql`SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND objid = 727274001 AND granted AND pid = ANY(${pids})`).length, 0);
+  });
+
+  await t.test('an independent session still blocks the process queue through the database advisory lock', async () => {
+    const independent = await originalReserve();
+    await independent`SELECT pg_advisory_lock(727274001)`;
+    const pending = migrate();
+    try {
+      const deadline = Date.now() + 1000;
       let waiting = false;
       while (Date.now() < deadline) {
         const rows = await sql`SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND objid = 727274001 AND NOT granted AND pid = ANY(${pids})`;
         if (rows.length) { waiting = true; break; }
         await new Promise(resolve => setTimeout(resolve, 10));
       }
-      assert.ok(waiting, 'The second real migrator must wait on the first migration session lock');
-      assert.equal(Number((await sql`SELECT 1 AS usable`)[0]!.usable), 1);
-    } finally { release(); await Promise.all([first, second]); }
-    assert.equal(executions, 1, 'Concurrent migrators must not run an unapplied body twice');
-    assert.equal((await sql`SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND objid = 727274001 AND granted AND pid = ANY(${pids})`).length, 0);
+      assert.ok(waiting, 'The real migrator must wait on an independent PostgreSQL session holder');
+    } finally {
+      await independent`SELECT pg_advisory_unlock(727274001)`;
+      independent.release();
+      await pending;
+    }
   });
 
   await t.test('more same-process migrators than pool slots cannot starve migration bodies', async () => {

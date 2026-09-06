@@ -309,7 +309,18 @@ CREATE INDEX IF NOT EXISTS card_comments_parent_comment_idx ON card_comments(par
 CREATE INDEX IF NOT EXISTS card_comments_delegation_status_idx ON card_comments(card_id, delegation_status, created_at DESC);`);
 }
 
-export async function migrate(): Promise<void> {
+let migrationQueue: Promise<void> = Promise.resolve();
+
+export function migrate(): Promise<void> {
+  // Only one holder per process: waiting callers must not consume every pool
+  // slot needed by the active migration body. PostgreSQL still serializes
+  // independent processes, whose queues and connection pools are separate.
+  const pending = migrationQueue.then(migrateOnce);
+  migrationQueue = pending.catch(() => {});
+  return pending;
+}
+
+async function migrateOnce(): Promise<void> {
   // Session advisory locks must stay on a reserved connection for the entire
   // migration lifetime. The existing migration bodies may safely use the pool
   // while this dedicated holder prevents every competing migrator from entering.
