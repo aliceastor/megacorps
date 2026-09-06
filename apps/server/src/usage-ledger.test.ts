@@ -73,6 +73,37 @@ test('same provider event cannot rebind to a different attempt or agent', async 
   await assert.rejects(settleUsage({ ...scope, companyId: randomUUID() }, usage), /usage_company_not_found/);
   assert.equal(state.rows(costEvents).length, 1);
 });
+for (const provider of ['provider-a', null]) for (const repeatEventId of [false, true]) {
+  test(`bound ${provider ?? 'unknown'} provider rejects namespace correction with event ID ${repeatEventId ? 'repeated' : 'omitted'}`, async t => {
+    const { scope, state, agent, card } = fixture(t);
+    await settleUsage(scope, { ...facts('1'), provider, providerEventId: 'event-1' });
+    const before = structuredClone({ rows: state.rows(costEvents), agent, card });
+    const correction = transportUsage({ version: 1, costStatus: 'actual', costUsd: '2', tokenStatus: 'actual', cacheReadTokens: 2,
+      provider: 'provider-b', ...(repeatEventId ? { providerEventId: 'event-1' } : {}) }, 'correction')!;
+    await assert.rejects(settleUsage(scope, correction), /usage_attempt_identity_conflict/);
+    assert.deepEqual({ rows: state.rows(costEvents), agent, card }, before);
+    await assert.rejects(settleUsage({ ...scope, attemptKey: randomUUID() }, { ...facts('1'), provider, providerEventId: 'event-1' }), /usage_provider_event_already_bound/);
+    assert.equal(summarizeUsage(state.rows(costEvents) as any).totalUsd, '1.00000000');
+  });
+}
+test('original provider event replay stays deduplicated after an omitted-ID namespace correction', async t => {
+  const { scope, state } = fixture(t);
+  const original = { ...facts('1'), provider: 'provider-a', providerEventId: 'event-1' };
+  await settleUsage(scope, original);
+  await settleUsage(scope, { ...unknownUsage('correction'), provider: 'provider-b', tokenStatus: 'actual', cacheReadTokens: 2 }).catch(() => {});
+  await assert.rejects(settleUsage({ ...scope, attemptKey: randomUUID() }, original), /usage_provider_event_already_bound/);
+  assert.equal(state.rows(costEvents).length, 1);
+  assert.equal(summarizeUsage(state.rows(costEvents) as any).totalUsd, '1.00000000');
+});
+test('bound event survives provider-omitted correction and rejects a different explicit event', async t => {
+  const { scope, state } = fixture(t);
+  await settleUsage(scope, { ...facts('1'), provider: 'provider-a', providerEventId: 'event-1' });
+  await settleUsage(scope, facts('2'));
+  assert.equal(state.rows(costEvents)[0]!.providerEventId, 'event-1');
+  assert.equal(state.rows(costEvents)[0]!.usage.providerEventId, 'event-1');
+  await assert.rejects(settleUsage(scope, { ...facts('3'), providerEventId: 'event-2' }), /usage_attempt_provider_event_conflict/);
+  assert.equal(summarizeUsage(state.rows(costEvents) as any).totalUsd, '2.00000000');
+});
 test('card retries use cumulative direct cost and child cards do not double count parent totals', async t => {
   const { scope, card, state } = fixture(t);
   card.taskBudgetLimit = '2';

@@ -160,11 +160,13 @@ export async function settleUsage(scope: AttemptScope, facts: UsageFacts, option
     let [entry] = await tx.select().from(costEvents).where(eq(costEvents.attemptKey, scope.attemptKey)).limit(1);
     if (entry) assertIdentity(entry, scope);
     const reportingSource = scope.reportingSource!;
+    // Once an event is bound, even the unknown-provider namespace is immutable.
+    // Corrections may omit the event ID; they must not relocate its dedupe key.
+    if (entry?.providerEventId && facts.provider != null && entry.provider !== facts.provider) fail('usage_attempt_identity_conflict');
     if (facts.providerEventId) {
       const [bound] = await tx.select().from(costEvents).where(and(eq(costEvents.reportingSource, reportingSource), eq(costEvents.provider, facts.provider ?? entry?.provider ?? 'unknown'), eq(costEvents.providerEventId, facts.providerEventId))).limit(1);
       if (bound && bound.attemptKey !== scope.attemptKey) fail('usage_provider_event_already_bound');
       if (entry?.providerEventId && entry.providerEventId !== facts.providerEventId) fail('usage_attempt_provider_event_conflict');
-      if (entry?.providerEventId && facts.provider != null && entry.provider !== facts.provider) fail('usage_attempt_identity_conflict');
     }
     const rank = { unknown: 0, estimated: 1, actual: 2 };
     const previous = entry?.usage;
@@ -173,6 +175,7 @@ export async function settleUsage(scope: AttemptScope, facts: UsageFacts, option
     const accepted: UsageFacts = { ...facts, costStatus: cost.costStatus, costUsd: cost.costUsd, costSource: cost.costSource ?? cost.source,
       tokenStatus: tokens.tokenStatus, tokenSource: tokens.tokenSource ?? tokens.source,
       provider: facts.provider ?? previous?.provider ?? null, model: facts.model ?? previous?.model ?? null,
+      providerEventId: facts.providerEventId ?? entry?.providerEventId ?? null,
       inputTokens: tokens.inputTokens, outputTokens: tokens.outputTokens, cacheReadTokens: tokens.cacheReadTokens, cacheWriteTokens: tokens.cacheWriteTokens,
       reasoningTokens: tokens.reasoningTokens, totalTokens: tokens.totalTokens, occurredAt: facts.occurredAt ?? previous?.occurredAt };
     // A terminal attempt may receive a factual correction. Identity is immutable;
