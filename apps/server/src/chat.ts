@@ -1,3 +1,5 @@
+import { z } from 'zod';
+import { readLimit, optionalReadId, optionalReadProject } from './read-query.ts';
 import { buildCommonCompanyContext } from './company-context.ts';
 import { companyOutputSanitizer, sanitizeCompanyOutput } from './output-secrets.ts';
 import { createHash } from 'node:crypto';
@@ -226,7 +228,7 @@ async function addChatActivity(input: {
 export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/chat/sessions', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { companyId?: string; agentId?: string; projectId?: string; limit?: string };
+    const query = z.object({ companyId: optionalReadId, agentId: optionalReadId, projectId: optionalReadProject, limit: readLimit(100, 300) }).parse(request.query);
     if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
     const filters = [
       query.companyId ? eq(chatSessions.companyId, query.companyId) : inArray(chatSessions.companyId, access.companyIds),
@@ -236,7 +238,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     return db.select().from(chatSessions)
       .where(filters.length ? and(...filters) : undefined)
       .orderBy(desc(chatSessions.updatedAt))
-      .limit(Math.min(Math.max(Number(query.limit ?? 100), 1), 300));
+      .limit(query.limit);
   });
 
   app.post('/api/chat/sessions', async (request, reply) => {
@@ -262,15 +264,16 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/api/chat/sessions/:id/messages', async (request, reply) => {
-    const id = (request.params as { id: string }).id;
-    const query = request.query as { limit?: string };
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    const id = z.string().uuid().parse((request.params as { id: string }).id);
+    const query = z.object({ limit: readLimit(200, 500) }).parse(request.query);
     const [session] = await db.select().from(chatSessions).where(eq(chatSessions.id, id)).limit(1);
     if (!session) return reply.code(404).send({ error: 'chat_session_not_found' });
     const user = await requireCompanyRole(request, reply, session.companyId, 'viewer'); if (!user) return reply;
     const rows = await db.select().from(chatMessages)
       .where(eq(chatMessages.sessionId, id))
       .orderBy(desc(chatMessages.createdAt))
-      .limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+      .limit(query.limit);
     return rows.reverse();
   });
 

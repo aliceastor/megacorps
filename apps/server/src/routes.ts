@@ -1,3 +1,4 @@
+import { readLimit, readOffset, optionalReadId, optionalReadProject } from './read-query.ts';
 import { registerCompanySetupRoutes, setupConnectionFingerprint, recordSetupConnectionCheck } from './company-setup.ts';
 import { registerCompanyRetirementRoutes } from './company-retirement.ts';
 import { companyDeletionInventory, deletionBlockers, lockCompanyInventory } from './company-inventory.ts';
@@ -916,7 +917,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.get('/api/approvals', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { companyId?: string; status?: string; cardId?: string; type?: string; limit?: string };
+    const query = z.object({ companyId: optionalReadId, status: z.string().optional(), cardId: optionalReadId, type: z.string().optional(), limit: readLimit(200, 500) }).parse(request.query);
     if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
     const filters = [
       query.companyId ? eq(approvals.companyId, query.companyId) : inArray(approvals.companyId, access.companyIds),
@@ -924,7 +925,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       query.cardId ? eq(approvals.cardId, query.cardId) : undefined,
       query.type ? eq(approvals.type, query.type) : undefined,
     ].filter(Boolean);
-    return db.select().from(approvals).where(filters.length ? and(...filters) : undefined).orderBy(desc(approvals.createdAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+    return db.select().from(approvals).where(filters.length ? and(...filters) : undefined).orderBy(desc(approvals.createdAt)).limit(query.limit);
   });
   app.put('/api/approvals/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
@@ -1120,14 +1121,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/search', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { q?: string; companyId?: string; limit?: string };
+    const query = z.object({ q: z.string().optional(), companyId: optionalReadId, limit: readLimit(8, 25) }).parse(request.query);
     const q = (query.q ?? '').trim();
     if (q.length < 2) return { query: q, cards: [], agents: [], projects: [], companies: [], chatSessions: [], knowledgeDocs: [] };
     const companyIds = query.companyId
       ? access.companyIds.filter((id) => id === query.companyId)
       : access.companyIds;
     if (companyIds.length === 0) return { query: q, cards: [], agents: [], projects: [], companies: [], chatSessions: [], knowledgeDocs: [] };
-    const limit = Math.min(Math.max(Number(query.limit ?? 8), 1), 25);
+    const limit = query.limit;
     const pattern = `%${q.replace(/([\\%_])/g, '\\$1')}%`;
     const [cardRows, agentRows, projectRows, companyRows, sessionRows, docRows] = await Promise.all([
       db.select({ id: kanbanCards.id, title: kanbanCards.title, columnStatus: kanbanCards.columnStatus, companyId: kanbanCards.companyId, projectId: kanbanCards.projectId })
@@ -1160,11 +1161,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/dashboard/timeseries', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { days?: string; companyId?: string };
+    const query = z.object({ days: readLimit(30, 180, 7), companyId: optionalReadId }).parse(request.query);
     const companyIds = query.companyId
       ? access.companyIds.filter((id) => id === query.companyId)
       : access.companyIds;
-    const days = Math.min(Math.max(Number(query.days ?? 30), 7), 180);
+    const days = query.days;
     if (companyIds.length === 0) return { days, points: [] };
     const [costRows, doneRows, runRows] = await Promise.all([
       db.select({
@@ -1208,11 +1209,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/notifications', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { companyId?: string; limit?: string };
+    const query = z.object({ companyId: optionalReadId, limit: readLimit(50, 200) }).parse(request.query);
     const companyIds = query.companyId
       ? access.companyIds.filter((id) => id === query.companyId)
       : access.companyIds;
-    const limit = Math.min(Math.max(Number(query.limit ?? 50), 1), 200);
+    const limit = query.limit;
     const [rows, unread] = await Promise.all([
       listNotifications(access.user.id, companyIds, limit),
       unreadNotificationCount(access.user.id, companyIds),
@@ -1551,7 +1552,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/cards', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     if (access.companyIds.length === 0) return [];
-    const query = request.query as { companyId?: string; status?: string; assigneeId?: string; projectId?: string; tag?: string; priority?: string; limit?: string; offset?: string };
+    const query = z.object({ companyId: optionalReadId, status: z.string().optional(), assigneeId: optionalReadId, projectId: optionalReadProject, tag: z.string().optional(), priority: z.string().optional(), limit: readLimit(100, 500), offset: readOffset }).parse(request.query);
     if (query.companyId && !access.companyIds.includes(query.companyId)) return [];
     const status = normalizeCardStatus(query.status);
     const filters = [
@@ -1564,7 +1565,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       query.tag ? drizzleSql`${query.tag} = ANY(${kanbanCards.tags})` : undefined,
     ].filter(Boolean);
     const where = filters.length ? and(...filters) : undefined;
-    const rows = await db.select().from(kanbanCards).where(where).orderBy(desc(kanbanCards.updatedAt)).limit(Number(query.limit ?? 100)).offset(Number(query.offset ?? 0));
+    const rows = await db.select().from(kanbanCards).where(where).orderBy(desc(kanbanCards.updatedAt)).limit(query.limit).offset(query.offset);
     return hydrateCardWorkflowActors(await hydrateCardDependencyState(rows));
   });
 
@@ -1920,8 +1921,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/cards/:id/actions', async (request, reply) => {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
     if (!card) return reply;
-    const query = request.query as { limit?: string };
-    return getCardActions(card.id, Number(query.limit ?? 200));
+    const query = z.object({ limit: readLimit(200, 500) }).parse(request.query);
+    return getCardActions(card.id, query.limit);
   });
   app.get('/api/cards/:id/delegation-summary', async (request, reply) => {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
@@ -2228,8 +2229,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/cards/:id/assignment-history', async (request, reply) => {
     const card = await ensureVisibleCard(request, reply, (request.params as { id: string }).id);
     if (!card) return reply;
-    const query = request.query as { limit?: string };
-    const limit = Math.min(Math.max(Number(query.limit ?? 100), 1), 500);
+    const query = z.object({ limit: readLimit(100, 500) }).parse(request.query);
+    const limit = query.limit;
     return db.select().from(activityLog).where(and(
       eq(activityLog.entityType, 'card'),
       eq(activityLog.entityId, card.id),

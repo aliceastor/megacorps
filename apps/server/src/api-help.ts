@@ -707,6 +707,19 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
 }
 
 function endpointWithDefaults(endpoint: ApiEndpoint): ApiHelpEndpoint {
+  const readBounds: Record<string, string> = {
+    '/api/search': 'limit defaults to 8, capped at 25.',
+    '/api/dashboard/timeseries': 'days defaults to 30, clamped to 7..180.',
+    '/api/approvals': 'limit defaults to 200, capped at 500.',
+    '/api/notifications': 'limit defaults to 50, capped at 200.',
+    '/api/chat/sessions': 'limit defaults to 100, capped at 300. projectId=none selects unbound sessions.',
+    '/api/chat/sessions/:id/messages': 'limit defaults to 200, capped at 500. Missing sessions return 404; foreign company access returns 403.',
+    '/api/cards': 'limit defaults to 100, capped at 500; offset defaults to 0, range 0..1000000. projectId=none selects unbound cards.',
+    '/api/cards/:id/actions': 'limit defaults to 200, capped at 500.',
+    '/api/cards/:id/assignment-history': 'limit defaults to 100, capped at 500.',
+  };
+  if (endpoint.method === 'GET' && readBounds[endpoint.path]) endpoint = { ...endpoint, notes: [...(endpoint.notes ?? []), readBounds[endpoint.path]!, 'Numeric limits must be finite positive safe integers; offset must be a nonnegative integer. Malformed values and supported UUID filters return 400 validation_failed with field issues. Session authentication is required (401). Company filters retain endpoint visibility rules.'] };
+
   if (endpoint.path === '/api/cost-events') endpoint = { ...endpoint, notes: [...(endpoint.notes ?? []),
     'usage.tokenProvenance optionally maps each populated inputTokens/outputTokens/cacheReadTokens/cacheWriteTokens/reasoningTokens/totalTokens field to { status: actual|estimated|unknown, source: string }. Older rows without the map use usage.tokenStatus and usage.tokenSource (or usage.source) for their populated fields. The compatibility tokenStatus/tokenSource pair describes totalTokens when present; without a total it uses the least certain populated status and mixed_token_provenance when sources differ. Missing fields remain null; totals are never inferred from components.',
     'Partial corrections preserve absent/null token fields. Supplied zero is a fact; equal-status corrections replace that field, and lower-status facts cannot replace higher-status facts. Cost reconciles independently. An established reportingSource/provider/providerEventId binding cannot move, including an initially unknown provider namespace. Conflicting provider or event corrections return 409 without changing stored facts or amounts.',
