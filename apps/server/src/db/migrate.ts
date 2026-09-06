@@ -310,9 +310,15 @@ CREATE INDEX IF NOT EXISTS card_comments_delegation_status_idx ON card_comments(
 }
 
 export async function migrate(): Promise<void> {
-  await sql.unsafe(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMPTZ DEFAULT now());`);
-  await sql`SELECT pg_advisory_lock(${MIGRATION_LOCK_KEY})`;
+  // Session advisory locks must stay on a reserved connection for the entire
+  // migration lifetime. The existing migration bodies may safely use the pool
+  // while this dedicated holder prevents every competing migrator from entering.
+  const lockSession = await sql.reserve();
+  let locked = false;
   try {
+    await lockSession`SELECT pg_advisory_lock(${MIGRATION_LOCK_KEY})`;
+    locked = true;
+    await sql.unsafe(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMPTZ DEFAULT now());`);
     const appliedRows = await sql`SELECT version FROM schema_migrations`;
     const applied = new Set(appliedRows.map((row) => Number(row.version)));
     for (const migration of [...migrations].sort((a, b) => a.version - b.version)) {
@@ -321,7 +327,9 @@ export async function migrate(): Promise<void> {
       await sql`INSERT INTO schema_migrations (version, name) VALUES (${migration.version}, ${migration.name}) ON CONFLICT (version) DO NOTHING`;
     }
   } finally {
-    await sql`SELECT pg_advisory_unlock(${MIGRATION_LOCK_KEY})`;
+    try {
+      if (locked) await lockSession`SELECT pg_advisory_unlock(${MIGRATION_LOCK_KEY})`;
+    } finally { lockSession.release(); }
   }
 }
 
