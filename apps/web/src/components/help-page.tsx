@@ -4,7 +4,7 @@ import { BookOpen, Copy, ExternalLink, FileCode2, Search, Terminal } from 'lucid
 import { api, API_URL } from '@/lib/api';
 
 type HelpTab = 'api' | 'cli';
-type ApiAuth = 'none' | 'session' | 'runner' | 'agent-session';
+type ApiAuth = 'none' | 'session' | 'runner' | 'agent-session' | 'webhook' | 'gitea-token' | 'a2a-signature';
 
 type ApiEndpoint = {
   method: string;
