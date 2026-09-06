@@ -70,3 +70,10 @@ test('Help labels callback authentication that the actual routes enforce', async
   });
 });
 
+
+test('cron run reads are documented with the viewer role that the route accepts', async t => {
+  const { app, headers } = await fixture(t);
+  const response = await app.inject({ url: '/api/cron/runs', headers }); assert.equal(response.statusCode, 200, response.body);
+  const entry = (await app.inject({ url: '/api/help' })).json().endpoints.find((entry: any) => entry.path === '/api/cron/runs');
+  assert.equal(entry.requiredRole, 'viewer');
+});

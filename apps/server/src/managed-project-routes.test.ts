@@ -36,6 +36,10 @@ test('managed setup defaults protect new repo, opt-out remains read-only, failed
   assert.equal(optout.autoMergeAfterApproval, false); assert.equal(writes, 2);
   const unconfigured = await create('external', { repoProvider: 'gitea-local', repoUrl: 'https://foreign.test/org/repo', autoMergeAfterApproval: true });
   assert.equal(unconfigured.mergeReadiness.ready, false); assert.equal(writes, 2);
+  const readiness = await app.inject({ method: 'GET', url: `/api/projects/${ready.id}/merge-readiness`, headers });
+  assert.equal(readiness.statusCode, 200, readiness.body);
+  const readinessHelp = (await app.inject({ url: '/api/help' })).json().endpoints.find((entry: any) => entry.path === '/api/projects/:id/merge-readiness');
+  assert.deepEqual(Object.keys(readinessHelp.responseExample).sort(), Object.keys(readiness.json()).sort());
   const before = JSON.stringify(state.rows(projects));
   await app.inject({ method: 'GET', url: `/api/projects/${optout.id}/merge-readiness`, headers });
   await app.inject({ method: 'GET', url: '/api/projects', headers });
