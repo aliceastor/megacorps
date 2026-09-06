@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { writeFileSync } from 'node:fs';
-import { productFixture, settlePage } from './product-fixture';
+import { productFixture, settlePage, waitForProductPage } from './product-fixture';
 
 const pages = ['/dashboard', '/companies', '/departments', '/departments/o-chart', '/positions', '/agents', '/projects', '/knowledge', '/kanban', '/chat', '/logs', '/budget', '/cron', '/settings', '/trash', '/admin', '/help'];
 
@@ -13,9 +13,7 @@ for (const width of [390, 1158, 1440]) for (const populated of [false, true]) te
     await test.step(path, async () => {
       const readOffset = state.reads.length;
       await page.goto(path);
-      await settlePage(page);
-      await expect(page.locator('.content-area h1,.content-area h2').first()).toBeVisible();
-      await expect.poll(() => state.reads.length).toBeGreaterThan(readOffset);
+      await waitForProductPage(page, state, path, populated, readOffset);
       for (const open of [false, true]) {
         const toggle = page.getByRole('button', { name: 'Toggle sidebar', exact: true });
         if (await toggle.getAttribute('aria-expanded') !== String(open)) await toggle.click();

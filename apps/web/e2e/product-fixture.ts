@@ -1,4 +1,4 @@
-import { expect, type Page, type Route } from '@playwright/test';
+import { expect, type Page, type Request, type Route } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
@@ -22,11 +22,18 @@ export const longText = 'LongContent' + 'withoutBreaks'.repeat(7);
 /** Exact known routes only. Unknown requests and writes fail visibly, never become empty success. */
 export async function productFixture(page: Page, populated: boolean) {
   const unexpected: string[] = [], errors: string[] = [], reads: string[] = [], failed: string[] = [];
+  const completedReads: string[] = [];
+  const readIndexes = new WeakMap<Request, number>();
   let failPath = '';
   let failWrite = false, heldCompany = '';
   const held: Route[] = [], writes: { method: string; body: any }[] = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('requestfailed', request => { if (!request.failure()?.errorText.includes('ERR_ABORTED')) failed.push(request.url()); });
+  page.on('requestfinished', async request => {
+    const index = readIndexes.get(request);
+    const response = await request.response();
+    if (index !== undefined && response?.ok()) completedReads[index] = reads[index]!;
+  });
   await page.addInitScript(() => { localStorage.setItem('locale', 'en'); localStorage.setItem('megacorps.sidebarOpen', 'true'); });
   const companies = populated ? [{ id: companyId, name: 'Company Alpha ' + longText, slug: 'alpha', mission: longText, autoDispatchEnabled: false, dispatchIntervalSeconds: 10 }, { id: secondCompanyId, name: 'Company Beta', slug: 'beta' }] : [];
   const agents = populated ? [
@@ -61,6 +68,7 @@ export async function productFixture(page: Page, populated: boolean) {
       }
       unexpected.push(`${request.method()} ${path}`); return route.fulfill({ status: 405, json: { error: 'unexpected_fixture_write' } });
     }
+    readIndexes.set(request, reads.length);
     reads.push(path + url.search);
     if (path === failPath) return route.fulfill({ status: 503, json: { error: 'synthetic_read_unavailable' } });
     if (path === '/api/knowledge-docs' && url.searchParams.get('companyId') === heldCompany) { held.push(route); return; }
@@ -84,7 +92,7 @@ export async function productFixture(page: Page, populated: boolean) {
     unexpected.push(`GET ${path}${url.search}`);
     return route.fulfill({ status: 404, json: { error: 'unexpected_fixture_read' } });
   });
-  return { unexpected, errors, failed, reads, writes, fail: (path: string) => { failPath = path; }, failWrite: (value: boolean) => { failWrite = value; }, holdDocs: (company: string) => { heldCompany = company; }, hasHeld: () => held.length > 0, releaseDocs: async () => { heldCompany = ''; for (const route of held.splice(0)) { const company = new URL(route.request().url()).searchParams.get('companyId'); await route.fulfill({ json: docs.filter(doc => doc.companyId === company) }).catch(() => {}); } } };
+  return { unexpected, errors, failed, reads, completedReads, writes, fail: (path: string) => { failPath = path; }, failWrite: (value: boolean) => { failWrite = value; }, holdDocs: (company: string) => { heldCompany = company; }, hasHeld: () => held.length > 0, releaseDocs: async () => { heldCompany = ''; for (const route of held.splice(0)) { const company = new URL(route.request().url()).searchParams.get('companyId'); await route.fulfill({ json: docs.filter(doc => doc.companyId === company) }).catch(() => {}); } } };
 }
 
 export async function settlePage(page: Page) {
@@ -94,4 +102,64 @@ export async function settlePage(page: Page) {
     await Promise.all(document.getAnimations().filter(animation => animation.effect?.getComputedTiming().iterations !== Infinity).map(animation => animation.finished.catch(() => {})));
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
   });
+}
+
+export async function waitForProductPage(page: Page, state: Awaited<ReturnType<typeof productFixture>>, path: string, populated: boolean, readOffset: number, timeout = 5000) {
+  const check = expect.configure({ timeout });
+  // Include deferred queries as well as the initial catalogs. Every navigation
+  // must finish its own successful reads; a previous page's data cannot qualify.
+  const catalogs: Record<string, string[]> = {
+    '/dashboard': ['dashboard', 'dashboard/timeseries'],
+    '/companies': ['companies', 'departments', 'agents', 'projects', 'cards', 'goals'],
+    '/departments': ['companies', 'departments', 'agents', 'goals'],
+    '/departments/o-chart': ['companies', 'departments', 'positions', 'agent-runtimes', 'agents'],
+    '/positions': ['companies', 'positions', 'positions/templates', 'agents', 'departments'],
+    '/agents': ['companies', 'agents', 'departments', 'positions', 'agent-runtimes', 'cards', 'approvals'],
+    '/projects': ['companies', ...(populated ? ['projects', 'goals'] : [])],
+    '/knowledge': ['companies', ...(populated ? ['knowledge-docs'] : [])],
+    '/kanban': ['cards', 'agents', 'companies', 'departments', 'projects', 'goals'],
+    '/chat': ['companies', 'agents', 'projects', ...(populated ? ['chat/sessions'] : [])],
+    '/logs': ['prompt-logs'],
+    '/budget': ['companies', 'agents', ...(populated ? ['usage-summary', 'cost-events', 'budget-policies', 'approvals', 'cards'] : [])],
+    '/cron': ['cron/status', 'companies', 'agents', 'cron/runs'],
+    '/settings': ['agent-runtimes', 'agent-runtimes/health', 'companies', 'departments', 'company-memberships'],
+    '/trash': ['companies', 'trash'],
+    '/admin': ['admin/settings', 'admin/users', 'companies'],
+    '/help': ['help'],
+  };
+  const required = catalogs[path];
+  if (!required) throw new Error(`No product readiness contract for ${path}`);
+  await check.poll(() => {
+    const completed = state.completedReads.slice(readOffset).map(url => url.split('?')[0]);
+    return required.filter(route => !completed.includes('/api/' + route));
+  }, { message: `${path} completed page-data requests` }).toEqual([]);
+  await check.poll(() => state.reads.slice(readOffset).filter((url, index) => state.completedReads[readOffset + index] !== url), { message: `${path} unfinished reads` }).toEqual([]);
+  const content = page.locator('.content-area');
+  const text = (value: string) => check(content.getByText(value, { exact: true }).filter({ visible: true }).first()).toBeVisible();
+  // Successful transport alone is insufficient: assert the fixture's intended
+  // rows or empty state reached the DOM before measuring long content.
+  switch (path) {
+    case '/dashboard': await check(content.locator('.stat-card').first().locator('b')).toHaveText(populated ? '2' : '0'); break;
+    case '/companies': await text(populated ? 'Company Alpha ' + longText : 'Set up your company'); break;
+    case '/departments': await text(populated ? 'Engineering ' + longText : 'No departments yet.'); break;
+    case '/departments/o-chart': await text(populated ? 'Boss Alpha' : 'No agents in this company'); break;
+    case '/positions': if (populated) await check(content.locator('.selectable-row').filter({ hasText: 'Strategy Boss' })).toBeVisible(); else await text('No positions yet.'); break;
+    case '/agents': await text(populated ? 'Head Alpha ' + longText : 'No agents match this filter.'); break;
+    case '/projects': await text(populated ? 'Project Alpha ' + longText : 'Create a company before adding projects.'); break;
+    case '/knowledge':
+      if (populated) { await check(content.locator('.knowledge-doc-row b')).toHaveText('Guidance Alpha ' + longText); await check(content.locator('.knowledge-page select')).toHaveValue(companyId); }
+      else await text('Create a company to add shared guidance.');
+      await check(content.getByRole('status')).toHaveCount(0); break;
+    case '/kanban': await text(populated ? 'Task Alpha ' + longText : 'No cards in this scope'); break;
+    case '/chat': await text('No sessions'); if (populated) await text('Boss Alpha'); break;
+    case '/logs': await text(populated ? 'Prompt Alpha' : 'No prompt logs yet.'); break;
+    case '/budget': await text(populated ? 'Head Alpha ' + longText : 'Create a company to start tracking usage and setting limits.'); break;
+    case '/cron': await check(content.locator('.stat-card').nth(1).locator('b')).toHaveText('10s'); if (populated) await text('Company Alpha ' + longText); break;
+    case '/settings': await text(populated ? 'Runtime Alpha' : 'No runtime presets yet.'); break;
+    case '/trash': await text(populated ? 'Archived ' + longText : 'Nothing archived in this scope.'); break;
+    case '/admin': await check(content.locator('section').filter({ has: page.getByRole('heading', { name: 'Account summary', exact: true }) }).getByText('Total accounts', { exact: false }).locator('b')).toHaveText('1'); break;
+    case '/help': await check(content.locator('.help-endpoint')).toHaveCount(help.endpoints.length); break;
+  }
+  await check(content.locator('h1,h2').first()).toBeVisible();
+  await settlePage(page);
 }
