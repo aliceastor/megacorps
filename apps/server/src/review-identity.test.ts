@@ -13,7 +13,8 @@ import { ensureHumanGate, openPanelRound, reviewPanelSlot } from './review-round
 import { registerRunnerRoutes } from './runner-routes.ts';
 import { registerRoutes } from './routes.ts';
 import { hashRunnerApiKey } from './runner-auth.ts';
-import { beginReviewIdentity } from './review-identity.ts';
+import { beginReviewIdentity, reviewIdentityMatches } from './review-identity.ts';
+import { resolveMergeEvidence } from './merge-gate.ts';
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40), repo = 'https://gitea.test/org/repo';
 function fixture(t: TestContext, candidate: 'url' | 'short' | 'branch' = 'url') {
@@ -107,4 +108,46 @@ test('a resumed attempt retains A even when provider now reports B; a new URL-on
   const next = { ...f.run, id: randomUUID(), reviewIdentity: null }; f.state.rows(taskRuns).push(next);
   assert.equal((await beginReviewIdentity(f.card, next.id, { taskRunId: next.id }))?.headSha, B);
   assert.equal(f.run.reviewIdentity.headSha, A);
+});
+
+for (const via of ['adapter', 'webhook'] as const) for (const drift of [false, true]) test(`${via} review persists a duplicate aliased PR before consuming its identity, drift=${drift}`, async t => {
+  const f = fixture(t);
+  const previous = process.env.GITEA_INTERNAL_URL; process.env.GITEA_INTERNAL_URL = 'https://inside.gitea.test';
+  t.after(() => { if (previous === undefined) delete process.env.GITEA_INTERNAL_URL; else process.env.GITEA_INTERNAL_URL = previous; });
+  const report = { kind: 'megacorps-report', version: 1, status: 'completed', summary: 'Approved the exact reviewed change.', verdict: 'approved', workProducts: [{ type: 'pull_request', title: 'Reviewed PR again', url: 'https://inside.gitea.test/org/repo/pulls/12' }] };
+  if (via === 'adapter') {
+    t.mock.method(getAdapter('webhook'), 'dispatch', async () => { if (drift) f.drift(); return { ...f.approve, output: JSON.stringify(report) }; });
+    await reviewCard(f.card.id, { taskRunId: f.run.id });
+  } else {
+    await beginReviewIdentity(f.card, f.run.id, { taskRunId: f.run.id });
+    if (drift) f.drift();
+    const secret = process.env.WEBHOOK_SHARED_SECRET; process.env.WEBHOOK_SHARED_SECRET = 'synthetic-review-callback';
+    t.after(() => { if (secret === undefined) delete process.env.WEBHOOK_SHARED_SECRET; else process.env.WEBHOOK_SHARED_SECRET = secret; });
+    const app = Fastify(); t.after(() => app.close()); await registerRoutes(app);
+    const response = await app.inject({ method: 'POST', url: '/api/webhook/task-complete', headers: { 'x-megacorps-webhook-secret': 'synthetic-review-callback' }, payload: { cardId: f.card.id, taskRunId: f.run.id, status: 'done', report } });
+    assert.equal(response.statusCode, 200, response.body);
+  }
+  assert.equal(f.state.rows(workProducts).length, 2, 'The actual reporting entrypoint persisted another evidence row.');
+  assert.equal(f.run.reviewIdentity.headSha, A);
+  f.assertOutcome(drift);
+});
+
+test('semantic and stored legacy identities ignore representation changes but reject authority changes', async t => {
+  const f = fixture(t);
+  const original = await resolveMergeEvidence(f.card); assert.equal(original.disposition, 'wait'); if (original.disposition !== 'wait') return;
+  const identity = await beginReviewIdentity(f.card, f.run.id, { taskRunId: f.run.id }); assert.ok(identity);
+  const legacy = { ...identity, candidateKey: JSON.stringify(['pull_request', 'old-row', 12, `${repo}/pulls/12`, 'feature', A.slice(0, 8)]) };
+  const duplicate = { ...original, candidate: { ...original.candidate, workProductId: 'duplicate-row', branch: null, headSha: null } };
+  for (const captured of [identity, legacy]) {
+    assert.equal(reviewIdentityMatches(captured, duplicate), true);
+    for (const changed of [
+      { ...duplicate, headSha: B },
+      { ...duplicate, defaultBranch: 'MAIN' },
+      { ...duplicate, project: { ...duplicate.project, id: 'other-project' } },
+      { ...duplicate, project: { ...duplicate.project, repoUrl: 'https://foreign.test/org/repo' } },
+      { ...duplicate, externalId: '13', candidate: { ...duplicate.candidate, pullRequestNumber: 13 } },
+      { ...duplicate, candidate: { ...duplicate.candidate, kind: 'branch' as const, branch: 'feature', pullRequestNumber: null } },
+    ]) assert.equal(reviewIdentityMatches(captured, changed), false);
+  }
+  assert.equal(reviewIdentityMatches({ ...identity, candidateKey: 'malformed' }, duplicate), false);
 });
