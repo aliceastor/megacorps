@@ -1,11 +1,17 @@
 /** Transport accounting facts. Never parse generated answer prose as billing. */
 export type UsageStatus = 'actual' | 'estimated' | 'unknown';
+export const tokenFields = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'totalTokens'] as const;
+export type TokenField = typeof tokenFields[number];
 export type UsageFacts = {
   costStatus: UsageStatus;
   tokenStatus: UsageStatus;
   source: string;
   costSource?: string;
   tokenSource?: string;
+  /** Per-field facts may come from different reports. Legacy rows fall back to
+   * tokenStatus/tokenSource; the compatibility pair describes totalTokens when
+   * present, otherwise the least certain populated token field(s). */
+  tokenProvenance?: Partial<Record<TokenField, { status: UsageStatus; source: string }>>;
   costUsd: string | null;
   provider: string | null;
   model: string | null;
@@ -59,7 +65,7 @@ export function transportUsage(raw: unknown, source: string): UsageFacts | undef
       result.costUsd = moneyString(moneyUnits(value.costUsd));
       result.costStatus = value.costStatus as UsageStatus;
     }
-    for (const key of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'totalTokens'] as const) {
+    for (const key of tokenFields) {
       const token = value[key];
       if (token !== undefined && token !== null) {
         if (!Number.isSafeInteger(token) || Number(token) < 0) return undefined;

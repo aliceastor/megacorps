@@ -3,7 +3,7 @@ import { and, eq } from 'drizzle-orm';
 import { db } from './db/client.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import { activityLog, agents, agentRuntimes, budgetPolicies, budgetThresholds, companies, costEvents, heartbeatRuns, kanbanCards, projects, taskRuns } from './db/schema.ts';
-import { moneyString, moneyUnits, unknownUsage, type UsageFacts } from './usage-facts.ts';
+import { moneyString, moneyUnits, tokenFields, unknownUsage, type TokenField, type UsageFacts } from './usage-facts.ts';
 import type { TaskResult } from './adapters/hermes.ts';
 import { withUsageAttempt } from './usage-context.ts';
 
@@ -152,6 +152,31 @@ export function resultUsage(result: Pick<TaskResult, 'usage' | 'costUsd' | 'toke
   return usage;
 }
 
+const usageRank = { unknown: 0, estimated: 1, actual: 2 };
+function reconcileTokens(previous: UsageFacts | null | undefined, incoming: UsageFacts) {
+  const tokens = {} as Pick<UsageFacts, TokenField | 'tokenStatus' | 'tokenSource'>;
+  const tokenProvenance: NonNullable<UsageFacts['tokenProvenance']> = {};
+  for (const field of tokenFields) {
+    const old = previous?.[field] == null ? undefined : previous.tokenProvenance?.[field]
+      ?? { status: previous.tokenStatus, source: previous.tokenSource ?? previous.source };
+    const next = incoming[field] == null ? undefined : incoming.tokenProvenance?.[field]
+      ?? { status: incoming.tokenStatus, source: incoming.tokenSource ?? incoming.source };
+    const accept = next && (!old || usageRank[next.status] >= usageRank[old.status]);
+    tokens[field] = accept ? incoming[field] : previous?.[field] ?? null;
+    const provenance = accept ? next : old;
+    if (provenance) tokenProvenance[field] = provenance;
+  }
+  // Existing clients render totalTokens with this pair. A partial actual cache
+  // report must not turn an untouched estimated total into an actual total.
+  const populated = Object.values(tokenProvenance);
+  const summary = tokenProvenance.totalTokens ?? populated.reduce<typeof populated[number] | undefined>(
+    (least, fact) => !least || usageRank[fact.status] < usageRank[least.status] ? fact : least, undefined);
+  tokens.tokenStatus = summary?.status ?? 'unknown';
+  tokens.tokenSource = tokenProvenance.totalTokens?.source ?? (populated.every(fact => fact.source === summary?.source)
+    ? summary?.source ?? incoming.tokenSource ?? incoming.source : 'mixed_token_provenance');
+  return { ...tokens, tokenProvenance };
+}
+
 export async function settleUsage(scope: AttemptScope, facts: UsageFacts, options: { now?: Date } = {}) {
   scope = canonicalScope(scope);
   const now = options.now ?? new Date();
@@ -168,16 +193,13 @@ export async function settleUsage(scope: AttemptScope, facts: UsageFacts, option
       if (bound && bound.attemptKey !== scope.attemptKey) fail('usage_provider_event_already_bound');
       if (entry?.providerEventId && entry.providerEventId !== facts.providerEventId) fail('usage_attempt_provider_event_conflict');
     }
-    const rank = { unknown: 0, estimated: 1, actual: 2 };
     const previous = entry?.usage;
-    const cost = previous && rank[previous.costStatus] > rank[facts.costStatus] ? previous : facts;
-    const tokens = previous && rank[previous.tokenStatus] > rank[facts.tokenStatus] ? previous : facts;
+    const cost = previous && usageRank[previous.costStatus] > usageRank[facts.costStatus] ? previous : facts;
     const accepted: UsageFacts = { ...facts, costStatus: cost.costStatus, costUsd: cost.costUsd, costSource: cost.costSource ?? cost.source,
-      tokenStatus: tokens.tokenStatus, tokenSource: tokens.tokenSource ?? tokens.source,
+      ...reconcileTokens(previous, facts),
       provider: facts.provider ?? previous?.provider ?? null, model: facts.model ?? previous?.model ?? null,
       providerEventId: facts.providerEventId ?? entry?.providerEventId ?? null,
-      inputTokens: tokens.inputTokens, outputTokens: tokens.outputTokens, cacheReadTokens: tokens.cacheReadTokens, cacheWriteTokens: tokens.cacheWriteTokens,
-      reasoningTokens: tokens.reasoningTokens, totalTokens: tokens.totalTokens, occurredAt: facts.occurredAt ?? previous?.occurredAt };
+      occurredAt: facts.occurredAt ?? previous?.occurredAt };
     // A terminal attempt may receive a factual correction. Identity is immutable;
     // neither admission eligibility nor current orchestration ownership is tested.
     const occurredAt = accepted.occurredAt ? new Date(accepted.occurredAt) : entry?.occurredAt ?? now;

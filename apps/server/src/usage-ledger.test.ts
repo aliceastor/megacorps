@@ -154,6 +154,63 @@ test('cost and token provenance reconcile independently across late corrections'
   assert.equal(state.rows(costEvents)[0]!.usage.totalTokens, 12);
   assert.equal(state.rows(costEvents)[0]!.usage.tokenStatus, 'actual');
 });
+test('partial actual transport correction retains absent token facts and accepts explicit zero corrections', async t => {
+  const { scope, state } = fixture(t);
+  const report = (tokens: Record<string, number>) => transportUsage({ version: 1, costStatus: 'unknown', tokenStatus: 'actual', ...tokens }, 'runtime_tokens')!;
+  await settleUsage(scope, report({ inputTokens: 9, outputTokens: 3, totalTokens: 12 }));
+  await settleUsage(scope, report({ cacheReadTokens: 2 }));
+  const usage = () => state.rows(costEvents)[0]!.usage;
+  assert.deepEqual([usage().inputTokens, usage().outputTokens, usage().totalTokens, usage().cacheReadTokens], [9, 3, 12, 2]);
+  await settleUsage(scope, report({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, totalTokens: 0 }));
+  assert.deepEqual([usage().inputTokens, usage().outputTokens, usage().cacheReadTokens, usage().cacheWriteTokens, usage().reasoningTokens, usage().totalTokens], [0, 0, 0, 0, 0, 0]);
+  assert.equal(usage().tokenStatus, 'actual');
+});
+test('mixed partial transport reports retain per-field provenance without upgrading old estimates', async t => {
+  const { scope, state } = fixture(t);
+  const report = (status: string, tokens: Record<string, number>, source: string) => transportUsage({ version: 1, costStatus: 'unknown', tokenStatus: status, ...tokens }, source)!;
+  await settleUsage(scope, report('estimated', { inputTokens: 9, outputTokens: 3, totalTokens: 12 }, 'legacy_estimate'));
+  // Simulate an existing persisted row predating per-field provenance.
+  delete state.rows(costEvents)[0]!.usage.tokenProvenance;
+  await settleUsage(scope, report('actual', { cacheReadTokens: 2 }, 'actual_cache'));
+  const usage = () => state.rows(costEvents)[0]!.usage;
+  assert.equal(usage().tokenStatus, 'estimated');
+  assert.deepEqual([usage().inputTokens, usage().outputTokens, usage().totalTokens, usage().cacheReadTokens], [9, 3, 12, 2]);
+  assert.equal(usage().tokenSource, 'legacy_estimate');
+  assert.deepEqual(usage().tokenProvenance.inputTokens, { status: 'estimated', source: 'legacy_estimate' });
+  assert.deepEqual(usage().tokenProvenance.cacheReadTokens, { status: 'actual', source: 'actual_cache' });
+  await settleUsage(scope, report('estimated', { inputTokens: 8, totalTokens: 11, cacheReadTokens: 99 }, 'corrected_estimate'));
+  assert.deepEqual([usage().inputTokens, usage().totalTokens, usage().cacheReadTokens], [8, 11, 2]);
+  await settleUsage(scope, report('actual', { outputTokens: 4, totalTokens: 14 }, 'actual_total'));
+  assert.deepEqual([usage().inputTokens, usage().outputTokens, usage().totalTokens, usage().cacheReadTokens], [8, 4, 14, 2]);
+  assert.equal(usage().tokenStatus, 'actual');
+  assert.equal(usage().tokenSource, 'actual_total');
+  assert.deepEqual(usage().tokenProvenance.inputTokens, { status: 'estimated', source: 'corrected_estimate' });
+});
+test('cost-only transport correction cannot wipe tokens or upgrade their status from an empty token declaration', async t => {
+  const { scope, state } = fixture(t);
+  await settleUsage(scope, transportUsage({ version: 1, costStatus: 'unknown', tokenStatus: 'estimated', totalTokens: 12 }, 'estimated_tokens')!);
+  const before = structuredClone(state.rows(costEvents)[0]!.usage);
+  await settleUsage(scope, transportUsage({ version: 1, costStatus: 'actual', costUsd: '0.25', tokenStatus: 'actual' }, 'cost_only')!);
+  const usage = state.rows(costEvents)[0]!.usage;
+  assert.equal(usage.totalTokens, 12);
+  assert.equal(usage.tokenStatus, 'estimated');
+  assert.equal(usage.tokenSource, 'estimated_tokens');
+  assert.deepEqual(usage.tokenProvenance, before.tokenProvenance);
+  assert.equal(usage.costUsd, '0.25000000');
+  assert.equal(usage.costSource, 'cost_only');
+});
+test('token reports without a total expose conservative mixed provenance and ignore client provenance overrides', async t => {
+  const { scope, state } = fixture(t);
+  await settleUsage(scope, transportUsage({ version: 1, costStatus: 'unknown', tokenStatus: 'actual', inputTokens: 9 }, 'actual_input')!);
+  await settleUsage(scope, transportUsage({ version: 1, costStatus: 'unknown', tokenStatus: 'estimated', inputTokens: null, outputTokens: 3,
+    tokenProvenance: { outputTokens: { status: 'actual', source: 'untrusted_override' } } }, 'estimated_output')!);
+  const usage = state.rows(costEvents)[0]!.usage;
+  assert.deepEqual([usage.inputTokens, usage.outputTokens, usage.totalTokens], [9, 3, null]);
+  assert.equal(usage.tokenStatus, 'estimated');
+  assert.equal(usage.tokenSource, 'mixed_token_provenance');
+  assert.deepEqual(usage.tokenProvenance.inputTokens, { status: 'actual', source: 'actual_input' });
+  assert.deepEqual(usage.tokenProvenance.outputTokens, { status: 'estimated', source: 'estimated_output' });
+});
 test('active previous-month reservation still consumes new-month allowance', async t => {
   const { scope, agent } = fixture(t); agent.budgetMonthly = '1';
   await admitUsage(scope, { now: august, timeoutSeconds: 600 });
