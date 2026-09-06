@@ -24,15 +24,20 @@ export async function productFixture(page: Page, populated: boolean) {
   const unexpected: string[] = [], errors: string[] = [], reads: string[] = [], failed: string[] = [];
   const completedReads: string[] = [];
   const readIndexes = new WeakMap<Request, number>();
+  const successfulResponses = new WeakSet<Request>();
   let failPath = '';
   let failWrite = false, heldCompany = '';
   const held: Route[] = [], writes: { method: string; body: any }[] = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('requestfailed', request => { if (!request.failure()?.errorText.includes('ERR_ABORTED')) failed.push(request.url()); });
-  page.on('requestfinished', async request => {
+  // Response status is already available before requestfinished. Keep both
+  // listeners synchronous so teardown cannot strand a response RPC promise.
+  page.on('response', response => {
+    if (response.ok()) successfulResponses.add(response.request());
+  });
+  page.on('requestfinished', request => {
     const index = readIndexes.get(request);
-    const response = await request.response();
-    if (index !== undefined && response?.ok()) completedReads[index] = reads[index]!;
+    if (index !== undefined && successfulResponses.has(request)) completedReads[index] = reads[index]!;
   });
   await page.addInitScript(() => { localStorage.setItem('locale', 'en'); localStorage.setItem('megacorps.sidebarOpen', 'true'); });
   const companies = populated ? [{ id: companyId, name: 'Company Alpha ' + longText, slug: 'alpha', mission: longText, autoDispatchEnabled: false, dispatchIntervalSeconds: 10 }, { id: secondCompanyId, name: 'Company Beta', slug: 'beta' }] : [];
