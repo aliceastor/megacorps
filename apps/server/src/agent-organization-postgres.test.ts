@@ -63,6 +63,7 @@ test('PostgreSQL concurrent organization edits cannot create a reporting cycle',
     release.resolve(); await barrier;
     const responses = await Promise.all([first, second]);
     assert.deepEqual(responses.map(r => r.statusCode).sort(), [200, 400], 'Only one inverse relationship update may commit');
+    assert.equal(responses.find(r => r.statusCode === 400)!.json().error, 'agent_reporting_cycle');
     const rows = await sql`SELECT id, boss_id FROM agents WHERE company_id = ${company!.id}`;
     assert.equal(rows.filter(r => r.boss_id != null).length, 1, 'The committed company graph must remain acyclic');
   } finally {
