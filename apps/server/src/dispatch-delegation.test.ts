@@ -108,9 +108,14 @@ test('dispatch preserves webhook-updated card status after adapter returns', () 
   ), true);
   assert.equal(dispatchInternals.cardChangedOutsideCurrentRun(
     { columnStatus: 'in_progress', activeHeartbeatRunId: 'run-1', executionLockId: 'lock-1' } as any,
-    { columnStatus: 'in_progress' } as any,
+    { columnStatus: 'in_progress', activeHeartbeatRunId: 'run-1', executionLockId: 'lock-1' } as any,
     'run-1',
   ), false);
+  assert.equal(dispatchInternals.cardChangedOutsideCurrentRun(
+    { columnStatus: 'in_progress', activeHeartbeatRunId: 'run-2', executionLockId: 'lock-2' } as any,
+    { columnStatus: 'in_progress', activeHeartbeatRunId: 'run-1', executionLockId: 'lock-1' } as any,
+    'run-1',
+  ), true);
   assert.equal(dispatchInternals.cardChangedOutsideCurrentRun(
     { columnStatus: 'done', activeHeartbeatRunId: null, executionLockId: null } as any,
     { columnStatus: 'in_progress' } as any,

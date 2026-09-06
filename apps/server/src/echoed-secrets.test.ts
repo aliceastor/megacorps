@@ -37,7 +37,10 @@ for (const via of ['webhook', 'runner', 'message'] as const) test(`${via} never 
 test('canonical work products redact echoed company credentials recursively while retaining provenance', async (t) => {
   const sentinel = 'synthetic-work-secret-847129';
   const state = memoryDb(t, [[agents, [{ id: 'worker', companyId: 'company', giteaToken: sentinel }]], [projects, [{ id: 'project', companyId: 'company', publishToken: 'synthetic-publish-secret' }]], [agentRuntimes, []]]);
-  await persistAgentWorkProducts({ id: 'card', companyId: 'company', projectId: 'project' }, 'worker', 'run', [{ type: 'report', title: `Results ${sentinel}`, metadata: { evidence: `Observed ${sentinel}`, nested: { Authorization: 'Bearer synthetic-header-secret', token: sentinel } } }]);
+  const card: any = { id: 'card', companyId: 'company', projectId: 'project', columnStatus: 'in_progress', assigneeId: 'worker' };
+  state.rows(kanbanCards).push(card);
+  state.rows(taskRuns).push({ id: 'run', cardId: card.id, companyId: card.companyId, agentId: 'worker', status: 'running' });
+  await persistAgentWorkProducts(card, 'worker', 'run', [{ type: 'report', title: `Results ${sentinel}`, metadata: { evidence: `Observed ${sentinel}`, nested: { Authorization: 'Bearer synthetic-header-secret', token: sentinel } } }]);
   const rows = state.rows(workProducts);
   assert.equal(rows.length, 1); assert.equal(rows[0]!.agentId, 'worker'); assert.equal(rows[0]!.taskRunId, 'run');
   assert.ok(!JSON.stringify(rows).includes(sentinel)); assert.ok(!JSON.stringify(rows).includes('synthetic-header-secret'));

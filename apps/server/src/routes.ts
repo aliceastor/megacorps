@@ -979,7 +979,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         // Merge closure (§19): human approval is the last review gate, and the
         // merge gate sits after it. An approved card on a merge-gated project
         // parks on its authorized head instead of going straight to done.
-        const mergePlan = input.status === 'approved' ? await planMergeGate(card) : null;
+        const mergePlan = input.status === 'approved' ? await planMergeGate(card, { reviewIdentity: (approval.payload as { reviewIdentity?: import('./review-identity.ts').ReviewIdentity } | null)?.reviewIdentity ?? null }) : null;
         const nextStatus = input.status === 'approved' && mergePlan ? mergeCompletionStatus(mergePlan) : 'todo';
         const completed = await guardedCompletionUpdate(card, { columnStatus: nextStatus, completedAt: nextStatus === 'done' ? new Date() : null, reviewFeedback: input.decisionNote ?? card.reviewFeedback, updatedAt: new Date() });
         if (!completed) return reply.code(409).send({ error: 'approval_completion_superseded' });
@@ -3125,7 +3125,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
     const [productProject] = card.projectId ? await db.select().from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1) : [];
-    await persistAgentWorkProducts(card, actorAgentId, taskRunId ?? null, body.workProducts, productProject, normalizedResult.report);
+    if (!(await persistAgentWorkProducts(card, actorAgentId, taskRunId ?? null, body.workProducts, productProject, normalizedResult.report))) {
+      await completeTaskRun(taskRunId, { status: normalizedResult.outcome === 'permission' ? 'failed' : 'success', preserveCard: true, output: executionLog });
+      const [current] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1);
+      return reply.send({ ok: true, cardId: card.id, taskRunId, newStatus: current?.columnStatus, ignored: true, reason: 'stale_completion' });
+    }
     const protocolHelp = actorAgent && webhookTaskRun?.kind === 'review' ? await finishProtocolHelp(card, actorAgent.id, executionLog, taskRunId) : null;
     if (protocolHelp) {
       await completeTaskRun(taskRunId, { status: 'success', preserveCard: true, output: executionLog });
@@ -3144,7 +3148,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const webhookChildren = actorAgent && !blockedResult ? childrenFromOutput(executionLog, body.report ?? null) : [];
     if (actorAgent && webhookChildren.length) {
       try {
-        const split = await processChildSplits(card, actorAgent, webhookChildren);
+        const split = await processChildSplits(card, actorAgent, webhookChildren, taskRunId);
         if (split.errors.length) { await sendAgentFeedbackAndRequeue({ card, agent: actorAgent, kind: 'dispatch', message: split.errors.join('\n'), taskRunId, runId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId, output: executionLog }); return reply.code(409).send({ error: 'child_split_rejected', message: split.errors.join('\n') }); }
       } catch (error) { await sendAgentFeedbackAndRequeue({ card, agent: actorAgent, kind: 'dispatch', message: String(error), taskRunId, runId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId, output: executionLog }); return reply.code(409).send({ error: 'child_split_rejected', message: String(error) }); }
     }

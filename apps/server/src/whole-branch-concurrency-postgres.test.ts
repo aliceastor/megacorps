@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
 import { isolatedPostgres } from './test-support/postgres-db.ts';
 
@@ -12,6 +14,7 @@ test('PostgreSQL whole-branch completion authority and review provenance', { ski
   const { sealDeliveryAcceptance } = await import('./delivery-acceptance.ts');
   const { registerRunnerRoutes } = await import('./runner-routes.ts');
   const { hashRunnerApiKey } = await import('./runner-auth.ts');
+  const { registerLiveRoutes } = await import('./live.ts');
   const { default: Fastify } = await import('fastify');
   const answer = (extra: object = {}) => ({ kind: 'megacorps-report', status: 'completed', summary: 'Accepted department evidence satisfies the goal.', ...extra });
   const result = (report: object) => ({ success: true, output: JSON.stringify(report), sessionId: 'whole-branch-result', tokensUsed: 0, costUsd: 0, durationSeconds: 1 });
@@ -55,6 +58,12 @@ test('PostgreSQL whole-branch completion authority and review provenance', { ski
 
   for (const reopen of [true, false]) await t.test(`direct Done rechecks required child at final transaction: reopen=${reopen}`, async ctx => {
     const f = await fixture();
+    const [observer] = await db.insert(s.users).values({ email: `${randomUUID()}@example.test`, name: 'Completion observer' }).returning();
+    await db.insert(s.companyMemberships).values({ companyId: f.company.id, userId: observer!.id, role: 'viewer' });
+    const publications: any[] = []; let connect: any; const handlers = new Map<string, () => void>();
+    await registerLiveRoutes({ register: async () => {}, get(_url: string, _options: any, handler: any) { connect = handler; } } as any);
+    await connect({ readyState: 1, close() {}, on(name: string, handler: () => void) { handlers.set(name, handler); }, send(payload: string) { publications.push(JSON.parse(payload)); } }, { authUser: { id: observer!.id, email: observer!.email, role: 'viewer' } });
+    ctx.after(() => handlers.get('close')?.());
     const [child] = await db.insert(s.kanbanCards).values({ companyId: f.company.id, parentCardId: f.card.id, assigneeId: f.head.id, title: 'Accepted report', body: 'Verified findings', columnStatus: 'done' }).returning();
     await db.insert(s.workProducts).values({ companyId: f.company.id, cardId: child!.id, agentId: f.head.id, type: 'report', title: 'Verified findings', summary: 'Evidence for the goal' });
     await sealDeliveryAcceptance(child!.id);
@@ -97,11 +106,12 @@ test('PostgreSQL whole-branch completion authority and review provenance', { ski
       assert.equal(logs.filter(log => /marked done|→ done/.test(log.message ?? '')).length, 0);
       const activity = await db.select().from(s.activityLog).where(eq(s.activityLog.entityId, f.card.id));
       assert.equal(activity.filter(row => row.action === 'dispatch.completed').length, 0);
+      assert.equal(publications.filter(event => event.cardId === f.card.id && ['complete', 'dispatch.completed'].includes(event.action)).length, 0, 'no completion publication is permitted');
     } else { assert.equal(current!.columnStatus, 'done'); assert.ok(current!.deliveryAcceptance); }
   });
 
-  for (const via of ['direct', 'runner'] as const) for (const effect of ['permission', 'split'] as const) for (const change of ['cancelled', 'reassigned', 'new_lock'] as const) await t.test(`${via} ${effect} preserves ${change} after initial authority read`, async ctx => {
-    const f = await fixture(); let armed = via === 'runner'; let winning: any;
+  for (const via of ['direct', 'runner'] as const) for (const effect of ['permission', 'split'] as const) for (const change of ['cancelled', 'reassigned', 'new_lock', 'unchanged'] as const) await t.test(`${via} ${effect} preserves ${change} after initial authority read`, async ctx => {
+    const f = await fixture(); let armed = via === 'runner'; let winning: any; let response: any;
     const newerLock = randomUUID();
     const reached = afterCardRead(ctx, () => armed, async () => {
       await sql.begin(async writer => {
@@ -109,7 +119,11 @@ test('PostgreSQL whole-branch completion authority and review provenance', { ski
           await writer`UPDATE kanban_cards SET column_status='cancelled', execution_lock_id=NULL, active_heartbeat_run_id=NULL WHERE id=${f.card.id}`;
           await writer`UPDATE task_runs SET status='cancelled' WHERE id=${f.run.id}`;
         } else if (change === 'reassigned') await writer`UPDATE kanban_cards SET assignee_id=${f.head.id} WHERE id=${f.card.id}`;
-        else await writer`UPDATE kanban_cards SET execution_lock_id=${newerLock}, execution_locked_by_agent_id=${f.boss.id} WHERE id=${f.card.id}`;
+        else if (change === 'new_lock') {
+          await writer`INSERT INTO heartbeat_runs(id,company_id,card_id,agent_id,source,status) VALUES (${newerLock},${f.company.id},${f.card.id},${f.boss.id},'manual','running')`;
+          await writer`UPDATE kanban_cards SET execution_lock_id=${newerLock}, active_heartbeat_run_id=${newerLock}, execution_locked_by_agent_id=${f.boss.id} WHERE id=${f.card.id}`;
+          await writer`UPDATE agents SET is_busy=true WHERE id=${f.boss.id}`;
+        }
       });
       winning = (await sql`SELECT column_status,assignee_id,execution_lock_id,active_heartbeat_run_id FROM kanban_cards WHERE id=${f.card.id}`)[0];
     }, via === 'runner' ? 1 : 0);
@@ -122,13 +136,18 @@ test('PostgreSQL whole-branch completion authority and review provenance', { ski
       const [runner] = await db.insert(s.machineRunners).values({ companyId: f.company.id, name: 'Synthetic runner', slug: 'runner', apiKeyHash: hashRunnerApiKey(runnerKey) }).returning();
       await db.update(s.taskRuns).set({ lockedBy: runner!.id }).where(eq(s.taskRuns.id, f.run.id));
       const app = Fastify(); ctx.after(() => app.close()); await registerRunnerRoutes(app);
-      const response = await app.inject({ method: 'POST', url: `/api/runner/task-runs/${f.run.id}/complete`, headers: { 'x-megacorps-runner-key': runnerKey }, payload: { status: 'success', report } });
-      assert.ok(response.statusCode < 500, response.body);
+      response = await app.inject({ method: 'POST', url: `/api/runner/task-runs/${f.run.id}/complete`, headers: { 'x-megacorps-runner-key': runnerKey }, payload: { status: 'success', report } });
     }
     assert.ok(reached(), 'initial production card snapshot must be returned before winning commit');
-    assert.deepEqual((await sql`SELECT column_status,assignee_id,execution_lock_id,active_heartbeat_run_id FROM kanban_cards WHERE id=${f.card.id}`)[0], winning);
-    assert.equal((await db.select().from(s.workProducts).where(eq(s.workProducts.cardId, f.card.id))).length, 0);
-    assert.equal((await db.select().from(s.kanbanCards).where(eq(s.kanbanCards.parentCardId, f.card.id))).length, 0);
+    if (change !== 'unchanged') assert.deepEqual((await sql`SELECT column_status,assignee_id,execution_lock_id,active_heartbeat_run_id FROM kanban_cards WHERE id=${f.card.id}`)[0], winning);
+    else if (effect === 'permission') assert.equal((await db.select().from(s.kanbanCards).where(eq(s.kanbanCards.id, f.card.id)))[0]!.columnStatus, 'blocked');
+    assert.equal((await db.select().from(s.workProducts).where(eq(s.workProducts.cardId, f.card.id))).length, change === 'unchanged' && effect === 'permission' ? 1 : 0);
+    assert.equal((await db.select().from(s.kanbanCards).where(eq(s.kanbanCards.parentCardId, f.card.id))).length, change === 'unchanged' && effect === 'split' ? 1 : 0);
+    if (change === 'new_lock') assert.equal((await db.select().from(s.agents).where(eq(s.agents.id, f.boss.id)))[0]!.isBusy, true, 'new execution keeps its agent capacity');
+    if (change === 'new_lock') assert.equal((await db.select().from(s.heartbeatRuns).where(eq(s.heartbeatRuns.id, newerLock)))[0]!.status, 'running', 'new heartbeat remains owned and running');
+    const usage = await db.select().from(s.costEvents).where(eq(s.costEvents.taskRunId, f.run.id));
+    assert.equal(usage.length, 1); assert.equal(usage[0]!.agentId, f.boss.id, 'original accounting survives ignored result effects');
+    if (response) assert.ok(response.statusCode < 500, response.body);
   });
 
   for (const drift of [true, false]) await t.test(`URL-only review binds durable identity before reviewer starts: drift=${drift}`, async ctx => {
@@ -152,6 +171,21 @@ test('PostgreSQL whole-branch completion authority and review provenance', { ski
       // Independent connection sees the committed identity while review is held.
       persisted = JSON.stringify((await sql`SELECT row_to_json(c) AS card FROM kanban_cards c WHERE id=${f.card.id}`)[0]) + JSON.stringify(await sql`SELECT row_to_json(r) AS run FROM task_runs r WHERE card_id=${f.card.id}`) + JSON.stringify(await sql`SELECT row_to_json(w) AS product FROM work_products w WHERE card_id=${f.card.id}`);
       if (drift) head = headB;
+      const childScript = `
+        import { eq } from 'drizzle-orm';
+        import { db, sql } from './src/db/client.ts';
+        import { kanbanCards } from './src/db/schema.ts';
+        import { beginReviewIdentity } from './src/review-identity.ts';
+        import { planMergeGate } from './src/merge-gate.ts';
+        globalThis.fetch = async () => new Response(JSON.stringify({state:'open',merged:false,head:{sha:'${drift ? headB : headA}'},base:{ref:'main'}}));
+        const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id,'${f.card.id}'));
+        const identity = await beginReviewIdentity(card,'${f.run.id}',{taskRunId:'${f.run.id}'});
+        const plan = await planMergeGate(card,{taskRunId:'${f.run.id}'});
+        process.stdout.write(JSON.stringify({head:identity?.headSha,disposition:plan.disposition}));
+        await sql.end({timeout:2});
+      `;
+      const restarted = await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', childScript], { timeout: 15_000, env: process.env });
+      assert.deepEqual(JSON.parse(restarted.stdout), { head: headA, disposition: drift ? 'blocked' : 'wait' }, 'a separate application process must consume the same durable review identity');
       return result(answer({ verdict: 'approved' }));
     });
     await reviewCard(f.card.id, { taskRunId: f.run.id });

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { kanbanCards, projects, workProducts } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
-import { planMergeGate, selectMergeCandidate } from './merge-gate.ts';
+import { resolveMergeEvidence, selectMergeCandidate } from './merge-gate.ts';
 
 const head = 'a'.repeat(40);
 const repo = 'https://gitea.test/org/repo';
@@ -30,7 +30,7 @@ for (const scenario of ['not_required', 'no_repo', 'no_candidate', 'no_head', 'm
       if (scenario === 'unavailable') throw new Error('offline');
       return new Response(JSON.stringify(String(input).includes('/git/commits/') ? { sha: head } : { number: 12, state: scenario === 'missing_state' ? undefined : 'open', merged: false, html_url: url, head: { sha: scenario === 'no_head' ? null : head, ref: 'feature' }, base: { ref: scenario === 'wrong_base' ? 'release' : 'main' } }), { status: 200 });
     };
-    const plan = await planMergeGate(card, { fetchImpl });
+    const plan = await resolveMergeEvidence(card, { fetchImpl });
     assert.equal((plan as any).disposition, scenario === 'not_required' ? 'not_required' : ['valid', 'short', 'artifact_refs', 'branch'].includes(scenario) ? 'wait' : 'blocked');
     if (scenario === 'valid' || scenario === 'short') {
       assert.ok(calls > 0, 'reported SHA never skips provider verification');

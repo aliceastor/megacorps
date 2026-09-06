@@ -7,6 +7,12 @@ const NOW = Date.parse('2026-09-03T12:00:00.000Z');
 const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
 const HOUR = 3_600_000;
 
+test('human approval view retains the exact review snapshot in its displayed reason', () => {
+  const reason = 'Review this change.\nRepository: https://git.example.test/org/repo\nPR / ref: 12\nBase: main\nFull reviewed head: ' + 'a'.repeat(40);
+  const view = humanGateOf({ type: 'task_review', status: 'pending', payload: { humanGate: true, reason } });
+  assert.equal(view?.reason, reason);
+});
+
 function round(overrides: Partial<ReviewRound> = {}): ReviewRound {
   return {
     id: 'r-1', cardId: 'card-1', round: 1, kind: 'panel', level: 0,

@@ -1,4 +1,5 @@
 import { sealDeliveryAcceptance } from './delivery-acceptance.ts';
+import { beginReviewIdentity, reviewIdentityContext } from './review-identity.ts';
 import { structuralCompletionIssue, structuralReviewer, companyExecutionReadiness, structuralAssignment } from './company-workflow.ts';
 import { workerRepositoryReadiness } from './worker-readiness.ts';
 import { buildCommonCompanyContext } from './company-context.ts';
@@ -138,9 +139,12 @@ async function createRunnerTaskCompletion(input: {
     return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: input.run.kind === 'review' ? 'review' : 'dispatch', message: reason, taskRunId: input.run.id, runId: input.run.heartbeatRunId, result: { sessionId: actor.currentSessionId ?? '' } });
   }
   output = agentResultExecutionLog(output, normalized);
-  await persistAgentWorkProducts(card, runAgentId, input.run.id, normalized.workProducts, null, normalized.report);
+  if (!(await persistAgentWorkProducts(card, runAgentId, input.run.id, normalized.workProducts, null, normalized.report))) {
+    await completeTaskRun(input.run.id, { status: 'success', preserveCard: true, output });
+    return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+  }
   if (normalized.outcome === 'permission') {
-    const parked = await parkPermissionBlockedResult(card.id, runAgentId ?? '', input.run.heartbeatRunId ?? '', normalized.reason!, output);
+    const parked = await parkPermissionBlockedResult(card, runAgentId, input.run.heartbeatRunId, normalized.reason!, output, input.run.id);
     await completeTaskRun(input.run.id, { status: 'failed', preserveCard: true, error: normalized.reason, output });
     return parked.card;
   }
@@ -180,9 +184,10 @@ async function createRunnerTaskCompletion(input: {
       return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
     }
     if (children.length) {
-      const split = await processChildSplits(card, actor, children);
+      const split = await processChildSplits(card, actor, children, input.run.id);
       if (split.errors.length || !split.created.length) return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: 'dispatch', message: split.errors.join('\n') || 'child_split_rejected: No children created.', taskRunId: input.run.id, runId: input.run.heartbeatRunId, output, result: { sessionId: actor.currentSessionId ?? '' } });
-      card = (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+      // Keep the original authority after the split; a later read must never
+      // rebase this result onto a new owner or execution lock.
     }
     const lines = normalized.report?.delegations ? delegations.map(delegationLineFromReportItem) : delegationItems(output);
     if (lines.length) {
@@ -220,7 +225,7 @@ async function createRunnerTaskCompletion(input: {
   const humanGate = requestedNextStatus === 'done' && card.requiresApproval === true;
   if (humanGate) requestedNextStatus = 'in_review';
   const childBlock = await completionBlockedByChildren(card, requestedNextStatus);
-  const mergePlan = !childBlock && requestedNextStatus === 'done' ? await planMergeGate({ ...card, executionLog: normalized.report ? JSON.stringify(normalized.report) : output }) : null;
+  const mergePlan = !childBlock && requestedNextStatus === 'done' ? await planMergeGate({ ...card, executionLog: normalized.report ? JSON.stringify(normalized.report) : output }, { taskRunId: input.run.id }) : null;
   const nextStatus: CardStatus = childBlock ? 'in_progress' : mergePlan ? mergeCompletionStatus(mergePlan) : requestedNextStatus;
   const fromStatus = cardStatus(card.columnStatus);
   if (['dispatch', 'review'].includes(input.run.kind)) await resetProtocolRepair(card.id, input.run.kind === 'review' ? 'review' : 'dispatch', normalized, input.body.status !== 'failed', card, input.run.id);
@@ -558,7 +563,9 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
           detail: `Runner ${runner.name} claimed ${claimed.kind} task run.`,
           metadata: { taskRunId: claimed.id, agentId: payload.agent.id },
         });
-        return { ...claimedPayload, companyContext: await buildCommonCompanyContext(payload.card.companyId, payload.agent.id, payload.card.tags ?? []) };
+        const reviewScope = claimed.kind === 'panel_review' ? claim.card.reviewIdentity?.scope : claimed.id;
+        const reviewIdentity = reviewScope && ['dispatch', 'review', 'panel_review'].includes(claimed.kind) ? await beginReviewIdentity(claim.card, reviewScope, { taskRunId: claimed.id }) : null;
+        return { ...claimedPayload, taskRun: { ...claimed, reviewIdentity }, reviewIdentity, companyContext: await buildCommonCompanyContext(payload.card.companyId, payload.agent.id, payload.card.tags ?? []) + reviewIdentityContext(reviewIdentity) };
       }
       if (candidates.length < pageSize) return { taskRun: null };
       offset += candidates.length;

@@ -8,6 +8,7 @@ import { memoryDb } from './test-support/memory-db.ts';
 import { registerRoutes } from './routes.ts';
 import { signSession } from './auth.ts';
 import { planMergeGate, selectMergeCandidate } from './merge-gate.ts';
+import { beginReviewIdentity } from './review-identity.ts';
 
 const head = 'a'.repeat(40);
 const repo = 'https://gitea.test/org/repo';
@@ -93,6 +94,7 @@ test('configured provider aliases remain compatible and a stored SHA still requi
   const response = await f.post({ url: `https://public-gitea.test/org/repo/commit/${head}` });
   assert.equal(response.statusCode, 201, response.body);
   assert.equal(selectMergeCandidate(f.state.rows(workProducts), f.project)?.headSha, head);
+  await beginReviewIdentity(f.card as any, 'alias-review', { fetchImpl: async () => new Response(JSON.stringify({ sha: head }), { status: 200 }) });
   for (const scenario of ['offline', 'drift', 'verified'] as const) {
     let calls = 0;
     const plan = await planMergeGate(f.card as any, { fetchImpl: async () => {

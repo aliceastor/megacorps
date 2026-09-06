@@ -16,6 +16,8 @@ const MIGRATION_LOCK_KEY = 727274001;
 // created before the version table will re-run v1 exactly once to get recorded.
 // Never edit an applied migration's statements — add the change as a new version.
 const migrations: Migration[] = [
+  { version: 31, name: 'pre-review-evidence-identity', run: async () => { await sql.unsafe(`ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS review_identity JSONB;
+ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS review_identity JSONB;`); } },
   { version: 30, name: 'truthful-usage-ledger', run: async () => { await sql.unsafe(usageLedgerMigration); } },
   { version: 29, name: 'bounded-log-paging', run: async () => { await sql.unsafe(`CREATE INDEX IF NOT EXISTS api_events_user_created_id_idx ON api_events(user_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS prompt_logs_company_created_id_idx ON prompt_logs(company_id, created_at DESC, id DESC);

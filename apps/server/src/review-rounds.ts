@@ -29,6 +29,7 @@ import { composeReviewPanel, dispositionWarnings, findingIsOpen, formatDispositi
 import { addActivity, addCardMessage, addStageLog, addTaskLog, budgetOk, buildExecutionAgent, buildReviewPrompt, cardTaskTimeoutSeconds, cascadeParentStatus, claimAgentCapacity, clipText, completeTaskRun, completionBlockedByChildren, createPendingApproval, dispatchInternals, enqueuePanelReviewRun, enqueueTaskRun, openHeartbeatRun, recordCostAndEnforceBudget, recordReviewScore, rememberTaskAdapterSession, resolvePendingApproval, scopedAdapterSession } from './dispatch.ts';
 import { cardUsageScope, deferDeniedUsage, executeUsage } from './usage-ledger.ts';
 import { applyMergeGatePlan, noteMergeEvidenceRequired, parkForMerge, planMergeGate } from './merge-gate.ts';
+import { beginReviewIdentity, reviewIdentityContext, type ReviewIdentity } from './review-identity.ts';
 import { guardedCompletionUpdate } from './completion-guard.ts';
 
 type CardRow = typeof kanbanCards.$inferSelect;
@@ -175,6 +176,12 @@ export async function ensureHumanGate(card: CardRow, agentId: string | null, rea
   if (!result) return null;
   for (const effect of afterCommit) await effect();
   const { approval, alreadyGated } = result;
+  const reviewIdentity = await beginReviewIdentity(card, `human:${approval.id}`, { humanGate: true });
+  if (reviewIdentity) await db.transaction(async tx => {
+    const [fresh] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).for('update').limit(1);
+    const [gate] = await tx.select().from(approvals).where(eq(approvals.id, approval.id)).for('update').limit(1);
+    if (fresh?.reviewIdentity?.id === reviewIdentity.id && gate?.status === 'pending') await tx.update(approvals).set({ payload: { ...metadataOf(gate.payload), reviewIdentity, reason: reason + reviewIdentityContext(reviewIdentity) } }).where(eq(approvals.id, gate.id));
+  });
   if (!alreadyGated) {
     await notify({ companyId: card.companyId, type: 'approval_pending', title: `Your decision is needed: ${card.title}`, body: reason, entityType: 'approval', entityId: approval.id, cardId: card.id, agentId });
   }
@@ -276,6 +283,8 @@ export async function openPanelRound(card: CardRow, options: { kind: RoundKind }
   }).returning();
   if (!round) throw new Error('review_round_create_failed');
   await db.update(kanbanCards).set({ reviewRound: roundNumber, reviewerIds: panel.reviewerIds, updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
+  const reviewIdentity = await beginReviewIdentity(card, `panel:${round.id}`);
+  if (reviewIdentity) await db.update(reviewRounds).set({ metadata: { ...metadataOf(round.metadata), reviewIdentity } }).where(eq(reviewRounds.id, round.id));
   for (const reviewerId of panel.reviewerIds) {
     const slot = await addCardMessage({
       cardId: card.id,
@@ -496,7 +505,8 @@ export async function reviewPanelSlot(cardId: string, options: { taskRunId?: str
     const adapterSession = await scopedAdapterSession(card, reviewer, 'panel_review');
     const adapterSessionId = adapterSession?.adapterSessionId ?? null;
     const executionAgent = await buildExecutionAgent(reviewer, adapterSessionId);
-    const prompt = await buildPanelReviewPrompt(card, round, reviewer, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, lastError: stringOf(slotMeta.lastError) });
+    const reviewIdentity = await beginReviewIdentity(card, `panel:${round.id}`, { taskRunId: taskRun.id });
+    const prompt = await buildPanelReviewPrompt(card, round, reviewer, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, lastError: stringOf(slotMeta.lastError) }) + reviewIdentityContext(reviewIdentity);
     const task = { id: card.id, title: `Blind ${round.kind} review: ${card.title}`, body: prompt, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent: reviewer, kind: 'panel_review' }), taskRunId: taskRun.id };
     await recordPromptLog({
       companyId: card.companyId,
@@ -748,7 +758,7 @@ async function approveAfterRound(card: CardRow, round: ReviewRoundRow): Promise<
   }
   // Merge closure (§19): the panel's approval authorizes one exact head; the
   // card parks on that merge instead of finishing.
-  const mergePlan = await planMergeGate(card);
+  const mergePlan = await planMergeGate(card, { reviewIdentity: metadataOf(round.metadata).reviewIdentity as ReviewIdentity | null ?? null });
   if (mergePlan.disposition === 'blocked') {
     await applyMergeGatePlan(card, mergePlan);
     return;

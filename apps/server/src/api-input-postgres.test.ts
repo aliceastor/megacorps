@@ -36,7 +36,7 @@ test('PostgreSQL authenticated read contracts include production hooks and usefu
   const [project] = await sql`INSERT INTO projects(company_id,name) VALUES(${company!.id},'Managed read fixture') RETURNING *`;
   const [foreignProject] = await sql`INSERT INTO projects(company_id,name) VALUES(${foreign!.id},'Foreign managed read') RETURNING *`;
   const [deletedProject] = await sql`INSERT INTO projects(company_id,name,deleted_at) VALUES(${company!.id},'Deleted managed read',now()) RETURNING *`;
-  const [deletedCard] = await sql`INSERT INTO kanban_cards(company_id,title,deleted_at) VALUES(${company!.id},'Deleted managed read',now()) RETURNING *`;
+  const [deletedCard] = await sql`INSERT INTO kanban_cards(company_id,title,body,deleted_at) VALUES(${company!.id},'Deleted managed read','Archived fixture evidence',now()) RETURNING *`;
   let providerCalls = 0;
   t.mock.method(globalThis, 'fetch', async () => { providerCalls++; throw new Error('unexpected_provider_call'); });
   for (const [kind, suffix, visible, hidden, deleted] of [['projects', 'merge-readiness', project!, foreignProject!, deletedProject!], ['cards', 'merge-intents', card!, foreignCard!, deletedCard!]] as const) {

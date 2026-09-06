@@ -15,6 +15,7 @@
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { db } from './db/client.ts';
+import { reviewIdentityMatches, type ReviewIdentity } from './review-identity.ts';
 import { activityLog, cardComments, externalEvents, externalWaits, kanbanCards, mergeIntents, projects, taskLogs, taskRuns, workProducts } from './db/schema.ts';
 import { executeAuthorizedMerge, settleMergeIntent } from './authorized-merge.ts';
 import { managedMergeTarget } from './managed-project-policy.ts';
@@ -333,7 +334,7 @@ async function projectForCard(card: Pick<CardRow, 'projectId'>): Promise<Project
 
 // Read-only: decides whether an approved card must park, and on which head.
 // Always verify current provider head/base/state, then compare reported evidence.
-export async function planMergeGate(card: CardRow, options: { fetchImpl?: typeof fetch } = {}): Promise<MergeGatePlan> {
+export async function resolveMergeEvidence(card: CardRow, options: { fetchImpl?: typeof fetch } = {}): Promise<MergeGatePlan> {
   const project = await projectForCard(card);
   const blocked = (reason: Exclude<MergeSkipReason, 'not_required'>, detail: string): MergeGatePlan => ({ disposition: 'blocked', reason, detail });
   if (!project || project.completionRequiresMerge !== true) return { disposition: 'not_required', reason: 'not_required', detail: null };
@@ -390,6 +391,17 @@ export async function planMergeGate(card: CardRow, options: { fetchImpl?: typeof
     : candidate.branch ?? headSha;
   const waitingFor = `merge into ${defaultBranch}`;
   return { disposition: 'wait', project, candidate, headSha, defaultBranch, waitingFor, externalId, externalUrl: pullRequestUrl };
+}
+
+/** Approval can consume only an identity durably captured before that review. */
+export async function planMergeGate(card: CardRow, options: { fetchImpl?: typeof fetch; reviewIdentity?: ReviewIdentity | null; taskRunId?: string | null } = {}): Promise<MergeGatePlan> {
+  const plan = await resolveMergeEvidence(card, options);
+  if (plan.disposition !== 'wait') return plan;
+  const [fresh] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1);
+  const [run] = options.taskRunId ? await db.select().from(taskRuns).where(eq(taskRuns.id, options.taskRunId)).limit(1) : [];
+  const identity = options.reviewIdentity !== undefined ? options.reviewIdentity : options.taskRunId ? run?.reviewIdentity : fresh?.reviewIdentity;
+  if (!identity || fresh?.reviewIdentity?.id !== identity.id || !reviewIdentityMatches(identity, plan)) return { disposition: 'blocked', reason: 'head_drift', detail: 'The review has no current matching repository, base and full head identity. Start a new review of the current evidence before authorizing merge.' };
+  return plan;
 }
 
 // The card stops here instead of finishing: waiting_on_external with the exact
@@ -469,18 +481,22 @@ async function parkForMergeLocked(card: CardRow, plan: Extract<MergeGatePlan, { 
   return committed;
 }
 
-export function mergeCompletionStatus(plan: MergeGatePlan): 'done' | 'blocked' | 'waiting_on_external' {
-  return plan.disposition === 'not_required' ? 'done' : plan.disposition === 'blocked' ? 'blocked' : 'waiting_on_external';
+export function mergeCompletionStatus(plan: MergeGatePlan): 'done' | 'blocked' | 'in_review' | 'waiting_on_external' {
+  return plan.disposition === 'not_required' ? 'done' : plan.disposition === 'blocked' ? plan.reason === 'head_drift' ? 'in_review' : 'blocked' : 'waiting_on_external';
 }
 
 export async function noteMergeEvidenceRequired(card: CardRow, plan: Extract<MergeGatePlan, { disposition: 'not_required' | 'blocked' }>, taskRunId?: string | null): Promise<void> {
   if (plan.reason === 'not_required') return;
   const body = `Completion blocked: ${plan.detail}`;
-  const updated = await guardedCompletionUpdate(card, { columnStatus: 'blocked', completedAt: null, rollupStatus: null, lastError: body, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() }, taskRunId);
+  const updated = await guardedCompletionUpdate(card, { columnStatus: plan.reason === 'head_drift' ? 'in_review' : 'blocked', completedAt: null, rollupStatus: null, lastError: body, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() }, taskRunId);
   if (!updated) return;
   await postMergeComment(card, 'merge_evidence_required', body, { reason: plan.reason });
   await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'webhook', status: 'warning', message: body });
   await mergeActivity(card, 'merge_gate.blocked', { reason: plan.reason, detail: plan.detail }, { type: 'system', id: 'merge-gate' });
+  if (plan.reason === 'head_drift') {
+    if (await panelRequiredForCard(updated)) await openPanelRound(updated, { kind: 'panel' });
+    else await enqueueTaskRun(updated.id, 'review', 'queue');
+  }
 }
 
 /** Apply one reviewed completion plan; only not_required permits direct Done. */

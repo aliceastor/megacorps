@@ -2,9 +2,10 @@ import { agentReportSchema, reportedWorkProductSchema, type AgentReport, type Re
 import { and, eq, sql } from 'drizzle-orm';
 import { extractAgentReport } from './agent-report.ts';
 import { db } from './db/client.ts';
-import { agents, approvals, cardComments, heartbeatRuns, kanbanCards, taskLogs, workProducts } from './db/schema.ts';
+import { agents, approvals, cardComments, heartbeatRuns, kanbanCards, taskLogs, taskRuns, workProducts } from './db/schema.ts';
 import { publishLiveEvent } from './live.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
+import { lockResultAuthority } from './completion-guard.ts';
 
 type Verdict = 'approved' | 'revision_requested' | 'escalate';
 /** Retain canonical evidence when the report arrived separately from prose. */
@@ -84,32 +85,44 @@ export function normalizeAgentResult(input: { output?: string | null; report?: u
 
 /** Persist validated content using only the current server-resolved ownership. */
 export async function persistAgentWorkProducts(
-  card: { id: string; companyId: string; projectId?: string | null }, agentId: string | null, taskRunId: string | null,
+  card: typeof kanbanCards.$inferSelect, agentId: string | null, taskRunId: string | null,
   products: ReportedWorkProduct[], project?: { repoProvider?: string | null; repoUrl?: string | null } | null,
   report?: AgentReport | null,
-): Promise<void> {
+): Promise<boolean> {
   if (report?.artifactRefs?.length) products = [...products, { type: 'report', title: 'Agent report evidence references', metadata: { evidenceReport: report } }];
-  if (!products.length) return;
   products = await sanitizeCompanyOutput(card.companyId, products);
-  const prior = taskRunId ? await db.select().from(workProducts).where(and(eq(workProducts.cardId, card.id), eq(workProducts.taskRunId, taskRunId))) : [];
+  const inserted = await db.transaction(async tx => {
+  if (!(await lockResultAuthority(card, taskRunId, tx, agentId))) return null;
+  const prior = taskRunId ? await tx.select().from(workProducts).where(and(eq(workProducts.cardId, card.id), eq(workProducts.taskRunId, taskRunId))) : [];
   const keys = new Set(prior.map((product) => productKey(product as ReportedWorkProduct)));
   const rows = products.filter((product) => { const key = productKey(product); if (keys.has(key)) return false; keys.add(key); return true; }).map((product) => ({
     ...product, companyId: card.companyId, cardId: card.id, projectId: card.projectId ?? null, agentId, taskRunId,
     repoProvider: product.repoProvider ?? project?.repoProvider ?? null, repoUrl: product.repoUrl ?? project?.repoUrl ?? null,
   }));
-  if (!rows.length) return;
-  const inserted = await db.insert(workProducts).values(rows).returning();
+  if (!rows.length) return [];
+  return tx.insert(workProducts).values(rows).returning();
+  });
+  if (!inserted) return false;
   for (const product of inserted) publishLiveEvent({ type: 'work_product.created', companyId: card.companyId, entityType: 'work_product', entityId: product.id, cardId: card.id, projectId: card.projectId });
+  return true;
 }
 
-export async function parkPermissionBlockedResult(cardId: string, agentId: string, heartbeatRunId: string, reason: string, output: string) {
+export async function parkPermissionBlockedResult(original: typeof kanbanCards.$inferSelect, agentId: string | null, heartbeatRunId: string | null, reason: string, output: string, taskRunId?: string | null) {
+  const cardId = original.id;
   let preservedHumanGate = false;
   const updated = await db.transaction(async (tx) => {
+    if (!(await lockResultAuthority(original, taskRunId, tx, agentId))) {
+      preservedHumanGate = true;
+      return (await tx.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1))[0];
+    }
     const [card] = await tx.update(kanbanCards).set({ columnStatus: 'blocked', lastError: reason, executionLog: output, completedAt: null, nextRunAt: null,
       executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date(),
     }).where(and(eq(kanbanCards.id, cardId), sql`NOT EXISTS (SELECT 1 FROM ${approvals} WHERE ${approvals.cardId} = ${cardId} AND ${approvals.status} = 'pending' AND ${approvals.type} = 'task_review' AND ${approvals.payload}->>'humanGate' = 'true')`)).returning();
-    await tx.update(agents).set({ isBusy: false }).where(eq(agents.id, agentId));
-    await tx.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: reason }).where(eq(heartbeatRuns.id, heartbeatRunId));
+    if (heartbeatRunId) await tx.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: reason }).where(and(eq(heartbeatRuns.id, heartbeatRunId), eq(heartbeatRuns.status, 'running')));
+    if (agentId) {
+      const active = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, 'running')));
+      if (!active.some(run => run.id !== heartbeatRunId)) await tx.update(agents).set({ isBusy: false }).where(eq(agents.id, agentId));
+    }
     if (!card) {
       preservedHumanGate = true;
       const [parked] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).limit(1);
@@ -120,6 +133,18 @@ export async function parkPermissionBlockedResult(cardId: string, agentId: strin
   if (!preservedHumanGate) await db.insert(cardComments).values({ cardId, agentId, authorType: 'agent', action: 'agent_blocked', body: reason });
   await db.insert(taskLogs).values({ cardId, agentId, type: 'dispatch', status: 'failed', message: reason, output });
   if (!updated) throw new Error('card_update_failed');
-  publishLiveEvent({ type: 'card.updated', companyId: updated.companyId, entityType: 'card', entityId: cardId, cardId, projectId: updated.projectId, action: 'agent.permission_blocked' });
+  if (!preservedHumanGate) publishLiveEvent({ type: 'card.updated', companyId: updated.companyId, entityType: 'card', entityId: cardId, cardId, projectId: updated.projectId, action: 'agent.permission_blocked' });
   return { card: updated, preservedHumanGate };
+}
+
+/** A late attempt may settle its heartbeat, never another attempt's capacity. */
+export async function settleOriginalHeartbeat(card: typeof kanbanCards.$inferSelect, agentId: string, heartbeatRunId: string | null | undefined, taskRunId?: string | null, status = 'success') {
+  await db.transaction(async tx => {
+    const [current] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).for('update').limit(1);
+    if (heartbeatRunId) await tx.update(heartbeatRuns).set({ status, completedAt: new Date() }).where(and(eq(heartbeatRuns.id, heartbeatRunId), eq(heartbeatRuns.cardId, card.id), eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, 'running')));
+    const heartbeats = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, 'running')));
+    const runs = await tx.select().from(taskRuns).where(and(eq(taskRuns.agentId, agentId), eq(taskRuns.status, 'running')));
+    const anotherLock = current?.executionLockId && ![card.executionLockId, heartbeatRunId, taskRunId].includes(current.executionLockId);
+    if (!anotherLock && !heartbeats.some(run => run.id !== heartbeatRunId) && !runs.some(run => run.id !== taskRunId)) await tx.update(agents).set({ isBusy: false }).where(eq(agents.id, agentId));
+  });
 }

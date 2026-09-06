@@ -32,10 +32,11 @@ import { agentRuntimeAvailable, createRuntimeAvailabilityCache, type RuntimeAvai
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { extractAgentReport, structuredDelegationPlan } from './agent-report.ts';
-import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
+import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts, settleOriginalHeartbeat } from './agent-results.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { finishProtocolHelp, protocolHelpOrigin, protocolRepairSession, recordProtocolFailure, resetProtocolRepair } from './protocol-repair.ts';
-import { completionCondition, completionEvidenceReady, completionStillCurrent, guardedCompletionUpdate } from './completion-guard.ts';
+import { completionCondition, completionEvidenceReady, completionStillCurrent, guardedCompletionUpdate, lockResultAuthority } from './completion-guard.ts';
+import { beginReviewIdentity, reviewIdentityContext } from './review-identity.ts';
 import type { AgentReportDelegation } from '@megacorps/shared';
 import type { TaskResult } from './adapters/hermes.ts';
 import { notify } from './notifications.ts';
@@ -512,10 +513,9 @@ function fixDispositionFeedback(errors: string[]): string {
   return ['fix_dispositions_invalid: your report did not answer the open review findings correctly.', ...errors, '', formatDispositionRules()].join('\n');
 }
 
-function cardChangedOutsideCurrentRun(latest: Pick<CardRow, 'columnStatus' | 'activeHeartbeatRunId' | 'executionLockId'> | null | undefined, lockedCard: Pick<CardRow, 'columnStatus'>, runId: string): boolean {
-  if (!latest) return false;
-  if (latest.activeHeartbeatRunId === runId || latest.executionLockId) return false;
-  return (normalizeCardStatus(latest.columnStatus) ?? 'todo') !== (normalizeCardStatus(lockedCard.columnStatus) ?? 'todo');
+function cardChangedOutsideCurrentRun(latest: CardRow | null | undefined, lockedCard: CardRow, _runId: string): boolean {
+  if (!latest || latest.deletedAt) return true;
+  return (['columnStatus', 'assigneeId', 'reviewerId', 'projectId', 'executionLockId', 'activeHeartbeatRunId'] as const).some(key => (latest[key] ?? null) !== (lockedCard[key] ?? null));
 }
 
 function goalScopeLabel(goal: GoalRow): string {
@@ -1267,7 +1267,7 @@ function splitPriorityToNumber(priority: string | undefined, fallback: number | 
   return priority === 'urgent' ? 3 : priority === 'high' ? 2 : priority === 'low' ? -1 : 0;
 }
 
-export async function processChildSplits(card: CardRow, splitter: AgentRow, children: AgentReportChild[]): Promise<{ created: string[]; errors: string[] }> {
+export async function processChildSplits(card: CardRow, splitter: AgentRow, children: AgentReportChild[], taskRunId?: string | null): Promise<{ created: string[]; errors: string[] }> {
   if (children.length === 0) return { created: [], errors: [] };
   if (card.forceBrainstorm && (card.brainstormRound ?? 0) === 0) {
     const error = 'split_brainstorm_required: the client requires a brainstorm round on this card before it is split. Broadcast to the relevant department heads first (report.broadcast).';
@@ -1282,7 +1282,7 @@ export async function processChildSplits(card: CardRow, splitter: AgentRow, chil
   let result: { rows: CardRow[]; round: number; candidates: import('./card-splitting.ts').SplitCandidate[]; repeated: boolean };
   try {
     result = await db.transaction(async tx => {
-      const [current] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).for('update').limit(1);
+      const current = await lockResultAuthority(card, taskRunId, tx, splitter.id);
       if (!current || current.assigneeId !== splitter.id || current.companyId !== splitter.companyId) throw new Error('split_authority_changed: only the current card owner may split.');
       const existing = await tx.select().from(kanbanCards).where(and(eq(kanbanCards.parentCardId, card.id), isNull(kanbanCards.deletedAt)));
       const prior = existing.filter(child => child.splitRequestKey?.startsWith(requestKey + ':'));
@@ -1319,7 +1319,7 @@ export async function processChildSplits(card: CardRow, splitter: AgentRow, chil
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'split_insert_failed';
-    await addCardMessage({ cardId: card.id, authorType: 'system', action: 'split_rejected', body: message });
+    if (!message.startsWith('split_authority_changed')) await addCardMessage({ cardId: card.id, authorType: 'system', action: 'split_rejected', body: message });
     return { created: [], errors: [message] };
   }
   const created = result.rows.map(child => child.id);
@@ -1330,7 +1330,7 @@ export async function processChildSplits(card: CardRow, splitter: AgentRow, chil
     await addCardMessage({ cardId: child.id, agentId: splitter.id, action: 'split_child_opened', body: formatChildOpening(card.title, result.round, result.candidates[index]!.reviewer), metadata: { parentCardId: card.id, round: result.round } });
     publishLiveEvent({ type: 'card.created', companyId: card.companyId, entityType: 'card', entityId: child.id, cardId: child.id, projectId: card.projectId });
   }
-  await ensureParentWaitingOnChildren(card.id, { childCount: created.length, actor: 'decomposition', agentId: splitter.id, message: 'Waiting on department/employee child evidence.' });
+  await addTaskLog({ cardId: card.id, agentId: splitter.id, type: 'children', status: 'queued', message: 'Waiting on department/employee child evidence.' });
   await addCardMessage({ cardId: card.id, agentId: splitter.id, action: 'split_opened', body: formatSplitAnnouncement(result.round, announced), metadata: { round: result.round, childIds: created } });
   return { created, errors: [] };
 }
@@ -2552,10 +2552,10 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
   const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
   if (latest && cardChangedOutsideCurrentRun(latest, card, runId ?? '')) {
     const status = isTerminalCardStatus(latest.columnStatus) ? terminalRunStatus(latest.columnStatus) : 'success';
-    await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
-    await releaseExecutionLock(card.id, runId ?? null, status);
+    await settleOriginalHeartbeat(card, agent.id, runId, taskRunId, status);
     await completeTaskRun(taskRunId, {
       status,
+      preserveCard: true,
       output: `Card moved to ${latest.columnStatus} before dispatch failed; preserving the current stage.`,
     });
     await addTaskLog({
@@ -2575,6 +2575,7 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
   const blocked = retryCount >= maxRetries;
   const failedRunId = runId ?? card.activeHeartbeatRunId ?? null;
   const updated = await db.transaction(async (tx) => {
+    if (!(await lockResultAuthority(card, taskRunId, tx, agent.id))) return undefined;
     const [row] = await tx.update(kanbanCards).set({
       columnStatus: blocked ? 'blocked' : 'todo',
       retryCount,
@@ -2593,6 +2594,11 @@ async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unkn
     }
     return row;
   });
+  if (!updated) {
+    await settleOriginalHeartbeat(card, agent.id, failedRunId, taskRunId, 'failed');
+    await completeTaskRun(taskRunId, { status: 'failed', preserveCard: true, error: message });
+    return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0] ?? card;
+  }
   await addStageLog(card.id, agent.id, card.columnStatus, blocked ? 'blocked' : 'todo', 'retry');
   await addTaskLog({
     cardId: card.id,
@@ -3191,7 +3197,13 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const adapterSession = await scopedAdapterSession(card, agent, 'dispatch');
     const adapterSessionId = adapterSession?.adapterSessionId ?? null;
     const executionAgent = await buildExecutionAgent(agent, adapterSessionId);
-    const taskPrompt = await buildTaskPrompt(card, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'dispatch' });
+    const reviewIdentity = await beginReviewIdentity(lockedCard, options.taskRunId ?? run.id, { taskRunId: options.taskRunId });
+    if (!(await completionStillCurrent(lockedCard, options.taskRunId))) {
+      await settleOriginalHeartbeat(lockedCard, agent.id, run.id, options.taskRunId, 'cancelled');
+      await completeTaskRun(options.taskRunId, { status: 'cancelled', preserveCard: true, output: 'Dispatch superseded before execution.' });
+      return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+    }
+    const taskPrompt = await buildTaskPrompt(card, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'dispatch' }) + reviewIdentityContext(reviewIdentity);
     const task = { id: card.id, title: card.title, body: taskPrompt, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent, kind: 'dispatch' }), taskRunId: options.taskRunId };
     await recordPromptLog({
       companyId: card.companyId,
@@ -3218,8 +3230,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     if (latest && cardChangedOutsideCurrentRun(latest, lockedCard, run.id)) {
       if (result.success) await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
       const status = isTerminalCardStatus(latest.columnStatus) ? terminalRunStatus(latest.columnStatus) : 'success';
-      await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
-      await db.update(heartbeatRuns).set({ status, completedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+      await settleOriginalHeartbeat(lockedCard, agent.id, run.id, options.taskRunId, status);
       await completeTaskRun(options.taskRunId, {
         status,
         preserveCard: true,
@@ -3239,9 +3250,10 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     }
     const normalizedResult = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
     if (normalizedResult.outcome === 'permission') {
-      await persistAgentWorkProducts(card, agent.id, options.taskRunId ?? null, normalizedResult.workProducts);
+      const accepted = await persistAgentWorkProducts(lockedCard, agent.id, options.taskRunId ?? null, normalizedResult.workProducts);
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-      const blocked = await parkPermissionBlockedResult(card.id, agent.id, run.id, normalizedResult.reason!, result.output);
+      if (!accepted) { await settleOriginalHeartbeat(lockedCard, agent.id, run.id, options.taskRunId); await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: result.output }); return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!; }
+      const blocked = await parkPermissionBlockedResult(lockedCard, agent.id, run.id, normalizedResult.reason!, result.output, options.taskRunId);
       await completeTaskRun(options.taskRunId, { status: 'failed', preserveCard: blocked.preservedHumanGate, error: normalizedResult.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       return blocked.card;
     }
@@ -3253,8 +3265,9 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: normalizedResult.reason!, runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
     }
-    await persistAgentWorkProducts(card, agent.id, options.taskRunId ?? null, normalizedResult.workProducts, null, normalizedResult.report);
-    await recordA2aArtifacts(card, agent.id, options.taskRunId, result.artifacts);
+    const artifactProducts = (result.artifacts ?? []).filter(artifact => artifact.uri).map(artifact => ({ type: 'external' as const, title: (artifact.name ?? artifact.artifactId).slice(0, 200), url: artifact.uri!, metadata: { a2aArtifactId: artifact.artifactId } }));
+    const acceptedProducts = await persistAgentWorkProducts(lockedCard, agent.id, options.taskRunId ?? null, [...normalizedResult.workProducts, ...artifactProducts], null, normalizedResult.report);
+    if (!acceptedProducts) { await settleOriginalHeartbeat(lockedCard, agent.id, run.id, options.taskRunId); await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: result.output }); return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!; }
     if (normalizedResult.outcome === 'failed' || normalizedResult.outcome === 'rejected') {
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       throw new Error(normalizedResult.reason!);
@@ -3269,7 +3282,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const dispatchChildren = childrenFromOutput(actionableOutput);
     if (dispatchChildren.length) {
       try {
-        const split = await processChildSplits(card, agent, dispatchChildren);
+        const split = await processChildSplits(lockedCard, agent, dispatchChildren, options.taskRunId);
         if (split.errors.length) return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: split.errors.join('\n'), runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
       } catch (error) {
         return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: String(error), runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
@@ -3437,7 +3450,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const topLevelGuidanceAccepted = parked || humanGate ? false : completionDecision.topLevelGuidanceAccepted;
     const nextStatus: CardStatus = checkpointRequest ? 'waiting_on_client' : brainstormLaunch ? 'waiting_on_brainstorm' : fixRound || humanGate ? 'in_review' : completionDecision.nextStatus;
     let childBlock = parked ? null : await completionBlockedByChildren(card, nextStatus);
-    const dispatchMergePlan = !childBlock && nextStatus === 'done' ? await planMergeGate({ ...card, executionLog: result.output }) : null;
+    const dispatchMergePlan = !childBlock && nextStatus === 'done' ? await planMergeGate({ ...card, executionLog: result.output }, { reviewIdentity, taskRunId: options.taskRunId }) : null;
     let effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : dispatchMergePlan ? mergeCompletionStatus(dispatchMergePlan) : nextStatus;
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     await resetProtocolRepair(card.id, 'dispatch', normalizedResult, result.success, lockedCard, options.taskRunId);
@@ -3480,9 +3493,14 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         error: null,
         costUsd: result.costUsd.toString(),
       }).where(eq(heartbeatRuns.id, run.id));
+      if (options.taskRunId) {
+        const [accounting] = await tx.select().from(costEvents).where(eq(costEvents.taskRunId, options.taskRunId)).limit(1);
+        await tx.update(taskRuns).set({ status: 'success', output: result.output, error: null, costUsd: accounting?.costUsd ?? undefined, durationSeconds: result.durationSeconds, completedAt: new Date(), updatedAt: new Date() }).where(and(eq(taskRuns.id, options.taskRunId), inArray(taskRuns.status, ['queued', 'running'])));
+      }
       return row;
     })).catch(error => { if (error === completionSuperseded) return undefined; throw error; });
     if (!updated) {
+      await settleOriginalHeartbeat(lockedCard, agent.id, run.id, options.taskRunId);
       await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: 'Late dispatch result ignored.' });
       return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
     }
@@ -3508,13 +3526,13 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
             : 'Assignee requested guidance but has no reviewer or manager; the card waits for client approval.'
           : nextStatus === 'in_review'
             ? fixRound ? 'Dispatch completed; review findings answered, verification round queued.' : 'Dispatch completed; card moved to quality review.'
-            : nextStatus === 'done' ? 'Dispatch completed; card marked done.' : `Dispatch returned ${normalizedResult.outcome}; card remains ${effectiveNextStatus}.`,
+            : effectiveNextStatus === 'done' ? 'Dispatch completed; card marked done.' : `Dispatch returned ${normalizedResult.outcome}; card remains ${effectiveNextStatus}.`,
       output: result.output,
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
     });
     await addCardMessage({ cardId: card.id, agentId: agent.id, action: needsHelpReview && nextStatus === 'needs_review' ? 'agent_escalated' : 'agent_update', body: result.output });
-    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: childBlock ? 'dispatch.waiting_on_children' : needsHelpReview && nextStatus === 'needs_review' ? 'dispatch.needs_review' : 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, requestedStatus: nextStatus, nextStatus: effectiveNextStatus, costUsd: result.costUsd, budgetPaused, reviewerId: effectiveReviewerId, escalation: needsHelpReview, topLevelGuidanceAccepted, childBlock } });
+    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: childBlock ? 'dispatch.waiting_on_children' : dispatchMergePlan?.disposition === 'blocked' ? 'dispatch.evidence_required' : needsHelpReview && nextStatus === 'needs_review' ? 'dispatch.needs_review' : 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, requestedStatus: nextStatus, nextStatus: effectiveNextStatus, costUsd: result.costUsd, budgetPaused, reviewerId: effectiveReviewerId, escalation: needsHelpReview, topLevelGuidanceAccepted, childBlock } });
     await completeTaskRun(options.taskRunId, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
     if (effectiveNextStatus === 'in_review') {
@@ -3636,7 +3654,8 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     }
     // Merge closure (§19): an auto-approval is still an approval, so a
     // merge-gated project parks the card here too instead of finishing it.
-    const autoMergePlan = await planMergeGate(card);
+    const autoReviewIdentity = await beginReviewIdentity(card, options.taskRunId ?? `assessment:${randomUUID()}`, { taskRunId: options.taskRunId });
+    const autoMergePlan = await planMergeGate(card, { reviewIdentity: autoReviewIdentity, taskRunId: options.taskRunId });
     if (autoMergePlan.disposition === 'blocked') {
       await applyMergeGatePlan(card, autoMergePlan, { taskRunId: options.taskRunId });
       await completeTaskRun(options.taskRunId, { status: 'success', output: autoMergePlan.detail, preserveCard: true });
@@ -3701,7 +3720,13 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     const adapterSession = await scopedAdapterSession(card, reviewer, 'review');
     const adapterSessionId = adapterSession?.adapterSessionId ?? null;
     const executionAgent = await buildExecutionAgent(reviewer, adapterSessionId);
-    const reviewPrompt = await buildReviewPrompt(promptCard, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'review' });
+    const reviewIdentity = reviewMode === 'quality' ? await beginReviewIdentity(promptCard, options.taskRunId ?? run.id, { taskRunId: options.taskRunId }) : null;
+    if (!(await completionStillCurrent(card, options.taskRunId))) {
+      await settleOriginalHeartbeat(card, reviewer.id, run.id, options.taskRunId, 'cancelled');
+      await completeTaskRun(options.taskRunId, { status: 'cancelled', preserveCard: true, output: 'Review superseded before execution.' });
+      return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+    }
+    const reviewPrompt = await buildReviewPrompt(promptCard, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'review' }) + reviewIdentityContext(reviewIdentity);
     const reviewTask = { id: card.id, title: `Review: ${card.title}`, body: reviewPrompt, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent: reviewer, kind: 'review' }), taskRunId: options.taskRunId };
     await recordPromptLog({
       companyId: card.companyId,
@@ -3745,8 +3770,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       const message = /escalate/i.test(result.output) ? 'humanGate already pending; late review escalation ignored' : 'Late review ignored because completion authority changed.';
       const ignored = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
       const status = !result.success || ['permission', 'failed', 'rejected'].includes(ignored.outcome) ? 'failed' : 'success';
-      await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
-      await db.update(heartbeatRuns).set({ status, completedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+      await settleOriginalHeartbeat(card, reviewer.id, run.id, options.taskRunId, status);
       await completeTaskRun(options.taskRunId, { status, preserveCard: true, output: message });
       await addTaskLog({ cardId: card.id, agentId: reviewer.id, type: 'review', status: 'warning', message });
       return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
@@ -3754,7 +3778,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     const normalizedReview = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
     if (normalizedReview.outcome === 'permission') {
-      const blocked = await parkPermissionBlockedResult(card.id, reviewer.id, run.id, normalizedReview.reason!, result.output);
+      const blocked = await parkPermissionBlockedResult(card, reviewer.id, run.id, normalizedReview.reason!, result.output, options.taskRunId);
       await completeTaskRun(options.taskRunId, { status: 'failed', preserveCard: blocked.preservedHumanGate, error: normalizedReview.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       return blocked.card;
     }
@@ -3765,7 +3789,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     if (normalizedReview.outcome === 'input_required' || normalizedReview.outcome === 'invalid') {
       return sendAgentFeedbackAndRequeue({ card, agent: reviewer, kind: 'review', message: normalizedReview.reason ?? normalizedReview.question ?? REVIEW_VERDICT_MISSING_MESSAGE, runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
     }
-    await persistAgentWorkProducts(card, reviewer.id, options.taskRunId ?? null, normalizedReview.workProducts, null, normalizedReview.report);
+    if (!(await persistAgentWorkProducts(card, reviewer.id, options.taskRunId ?? null, normalizedReview.workProducts, null, normalizedReview.report))) { await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: result.output }); return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!; }
     await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
     // Protocol help is guidance for the original actor, not artifact review.
     // Validate it before asking for an ordinary product verdict.
@@ -3882,8 +3906,9 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     const childBlock = rejected ? null : await completionBlockedByChildren(card, completionTarget);
     // Merge closure (§19): once no gate is left, a project that requires a
     // merge parks the card on the exact authorized head instead of finishing.
-    const mergePlan = !rejected && !humanGate && !childBlock ? await planMergeGate(card) : null;
+    const mergePlan = !rejected && !humanGate && !childBlock ? await planMergeGate(card, { reviewIdentity, taskRunId: options.taskRunId }) : null;
     const mergeParked = mergePlan?.disposition === 'wait';
+    const mergeBlocked = mergePlan?.disposition === 'blocked';
     const targetStatus: CardStatus = rejected ? 'todo' : humanGate ? 'in_review' : mergePlan ? mergeCompletionStatus(mergePlan) : 'done';
     const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : targetStatus;
     const updated = await guardedCompletionUpdate(card, {
@@ -3905,10 +3930,10 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       cardId: card.id,
       agentId: reviewer.id,
       type: childBlock ? 'children' : 'review',
-      status: childBlock ? 'queued' : acceptedReviewOutput ? 'success' : 'failed',
+      status: childBlock || mergeBlocked ? 'queued' : acceptedReviewOutput ? 'success' : 'failed',
       message: childBlock ? childBlock.message : rejected
         ? reviewMode === 'help' ? 'Reviewer provided guidance; card returned to todo for rework.' : 'Review rejected; card returned to todo.'
-        : humanGate ? 'Review passed; waiting for the client to approve.' : mergeParked ? 'Review passed; the card waits for its authorized head to be merged.' : reviewMode === 'help' ? 'Reviewer resolved the escalated task; card marked done.' : 'Review passed; card marked done.',
+        : mergeBlocked ? mergePlan.detail : humanGate ? 'Review passed; waiting for the client to approve.' : mergeParked ? 'Review passed; the card waits for its authorized head to be merged.' : reviewMode === 'help' ? 'Reviewer resolved the escalated task; card marked done.' : 'Review passed; card marked done.',
       output: result.output,
       costUsd: result.costUsd,
       durationSeconds: result.durationSeconds,
@@ -3916,8 +3941,8 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     await addCardMessage({ cardId: card.id, agentId: reviewer.id, action: childBlock ? 'review_waiting_on_children' : rejected ? (reviewMode === 'help' ? 'review_guidance' : 'review_rejected') : humanGate ? 'review_approved_awaiting_client' : 'review_note', body: childBlock ? `${childBlock.message}\n\n${result.output}` : result.output });
     await db.update(heartbeatRuns).set({ status: acceptedReviewOutput ? 'success' : 'failed', completedAt: new Date(), durationSeconds: result.durationSeconds, error: acceptedReviewOutput ? null : result.output }).where(eq(heartbeatRuns.id, run.id));
     if (humanGate && !childBlock) await ensureHumanGate(card, reviewer.id, 'Client approval required after reviewer approval', { reviewerVerdict: 'approved' });
-    else await resolvePendingApproval(card, childBlock ? 'cancelled' : rejected ? (reviewMode === 'help' ? 'revision_requested' : 'rejected') : 'approved', childBlock ? childBlock.message : rejected ? result.output : 'Reviewer approved task.', reviewer.id);
-    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: childBlock ? 'review.waiting_on_children' : rejected ? (reviewMode === 'help' ? 'review.revision_requested' : 'review.rejected') : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, mode: reviewMode, childBlock } });
+    else await resolvePendingApproval(card, childBlock || mergeBlocked ? 'cancelled' : rejected ? (reviewMode === 'help' ? 'revision_requested' : 'rejected') : 'approved', childBlock ? childBlock.message : mergeBlocked ? mergePlan.detail : rejected ? result.output : 'Reviewer approved task.', reviewer.id);
+    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: childBlock ? 'review.waiting_on_children' : mergeBlocked ? 'review.evidence_changed' : rejected ? (reviewMode === 'help' ? 'review.revision_requested' : 'review.rejected') : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, mode: reviewMode, childBlock } });
     await completeTaskRun(options.taskRunId, { status: rejected ? 'failed' : 'success', error: rejected ? result.output : null, output: childBlock ? childBlock.message : result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
     if (mergePlan) await applyMergeGatePlan(updated, mergePlan, { approvedBy: reviewer.id, fromStatus: card.columnStatus });
