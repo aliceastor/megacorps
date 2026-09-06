@@ -1356,11 +1356,13 @@ export async function processChildSplits(card: CardRow, splitter: AgentRow, chil
 
 // Injected when a parent comes back from waiting_on_children: the owner's job
 // on this turn is integration, not fresh work.
+const GOAL_ASSESSMENT_EVIDENCE_GUIDANCE = 'Server-accepted provenance and passed gates are not content verification. Cite the actual reviewer checks supporting each coverage claim and preserve their limitations; distinguish inherited evidence from anything you personally verified. If content verification is missing, request targeted verification from an eligible head or reviewer instead of asserting that every reference is real or every criterion passed. Remain strategy-only; do not perform professional artifact QA yourself.';
 async function integrationSection(card: CardRow): Promise<string> {
   if (card.rollupStatus !== 'integrating') return '';
   const evidence = await acceptedDescendantEvidence(card);
   return [
     'GOAL ASSESSMENT TURN: assess accepted department/employee evidence against the requested goal and acceptance criteria. Cite the original artifacts and authors. Strategy-only Boss must not clone, run tests, author another deliverable or present this assessment as independent professional QA. Request targeted corrections if coverage is missing; preserve explicit platform gates.',
+    GOAL_ASSESSMENT_EVIDENCE_GUIDANCE,
     evidence.ready ? 'All required descendant evidence and gates are current and server-accepted.' : `Acceptance is no longer current: ${evidence.issues.join(' ')}`,
     ...evidence.products.slice(0, 40).map(product => `- ${product.title} [product=${product.id}; card=${product.cardId}; author=${product.agentId}; run=${product.taskRunId}]: ${product.url ?? ''} ${clipText(product.summary ?? '', 600)}`),
   ].join('\n');
@@ -5102,6 +5104,7 @@ export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptio
  if (await isBossAssessment(card.companyId, card.reviewerId)) return [common,
    `GOAL ASSESSMENT for ${card.id}: ${card.title}. This is not independent quality review.`,
    'Assess acceptance coverage using department evidence and the explicit sole-head SELF-CHECK. Never clone, run tests, implement, or professionally review the artifact. Required independent-review policy is enforced separately; missing staff requires an actionable client decision.',
+   GOAL_ASSESSMENT_EVIDENCE_GUIDANCE,
    `Acceptance: ${acceptanceOf(card.body) ?? card.body}`,
    `Department result:\n${clipText(card.executionLog, 12000)}`,
    await integrationSection(card),
@@ -5120,6 +5123,6 @@ async function buildMessageReviewPrompt(card: CardRow, report: CardCommentRow, r
  report = await sanitizeCompanyOutput(card.companyId, report);
  request = await sanitizeCompanyOutput(card.companyId, request);
  const mergePolicy = await managedMergePolicyForCard(card);
- if (await isBossAssessment(card.companyId, report.reviewerAgentId)) return [await buildCommonCompanyContext(card.companyId, report.reviewerAgentId, card.tags ?? []), 'GOAL ASSESSMENT: assess scope coverage using the delegated report and cited evidence. This is not independent professional QA. Never clone, test or implement. Return approved, revision_requested or escalate with the concrete goal coverage reason.', `Assignment: ${request?.body ?? card.body}`, `Department report: ${report.body}`, mergePolicy].filter(Boolean).join('\n\n');
+ if (await isBossAssessment(card.companyId, report.reviewerAgentId)) return [await buildCommonCompanyContext(card.companyId, report.reviewerAgentId, card.tags ?? []), 'GOAL ASSESSMENT: assess scope coverage using the delegated report and cited evidence. This is not independent professional QA. Never clone, test or implement. Return approved, revision_requested or escalate with the concrete goal coverage reason.', GOAL_ASSESSMENT_EVIDENCE_GUIDANCE, `Assignment: ${request?.body ?? card.body}`, `Department report: ${report.body}`, mergePolicy].filter(Boolean).join('\n\n');
  return [await buildCommonCompanyContext(card.companyId, report.reviewerAgentId, card.tags ?? []), await buildMessageReviewPromptCore(card, report, request, options), mergePolicy].filter(Boolean).join('\n\n');
 }
