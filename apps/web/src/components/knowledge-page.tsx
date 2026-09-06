@@ -71,7 +71,8 @@ export function KnowledgePage() {
       <section className="card section-card">
         <label className="field-label">Company<select className="input" value={companyId} disabled={busy} onChange={(event) => { reset(); setWriteError(''); setCompanyId(event.target.value); }}>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
         <label className="field-label">Title<input className="input" disabled={busy} value={title} onChange={(event) => setTitle(event.target.value)} /></label>
-        <label className="field-label">Tags<input className="input" disabled={busy} value={tags} onChange={(event) => setTags(event.target.value)} placeholder="api, backend, policy" /></label>
+        <label className="field-label">Tags<input className="input" disabled={busy} value={tags} onChange={(event) => setTags(event.target.value)} placeholder="general, api, backend" aria-describedby="knowledge-tags-help" /></label>
+        <p id="knowledge-tags-help" className="muted">Leave tags empty or include general for company-wide guidance. Other tags match task tags or department names/slugs, ignoring case. Policy and Handbook are ordinary tags; add general if those documents should apply company-wide. Selected content remains subject to prompt size limits.</p>
         <label className="field-label">Markdown<textarea className="input" disabled={busy} rows={12} value={body} onChange={(event) => setBody(event.target.value)} /></label>
         <button className="btn btn-primary" disabled={busy || loading || Boolean(readError) || !title.trim() || !body.trim() || !companyId} onClick={save}><Save size={15} /> Save knowledge doc</button>
       </section>
