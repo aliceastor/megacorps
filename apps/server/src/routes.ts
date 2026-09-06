@@ -2443,6 +2443,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         name: runtime.name,
         adapterType: runtime.adapterType,
         status: runtime.isActive === false ? 'disabled' : failedRecently ? 'degraded' : busyAgents.length > 0 ? 'busy' : 'ready',
+        statusBasis: 'configuration_and_observed_runs',
+        reachability: 'not_checked',
         isActive: runtime.isActive !== false,
         agents: attachedAgents.length,
         activeAgents: activeAgents.length,
@@ -2450,7 +2452,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         lastRunAt: run?.completedAt ?? run?.startedAt ?? null,
         lastRunStatus: run?.status ?? null,
         lastError: run?.error ?? null,
-        capabilities: runtime.adapterType === 'hermes-ssh'
+        capabilities: runtime.adapterType === 'a2a'
+          ? ['a2a', 'json-rpc', 'task-push-notifications']
+          : runtime.adapterType === 'hermes-ssh'
           ? ['ssh', 'hermes-cli', 'stdout-capture']
           : runtime.adapterType === 'hermes-gateway'
             ? ['http-dispatch', 'polling']

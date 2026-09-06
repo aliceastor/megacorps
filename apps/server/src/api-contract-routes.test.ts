@@ -3,7 +3,7 @@ import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
-import { users, companies, companyMemberships, apiEvents } from './db/schema.ts';
+import { users, companies, companyMemberships, apiEvents, agentRuntimes } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { signSession } from './auth.ts';
 import { registerRoutes } from './routes.ts';
@@ -29,4 +29,20 @@ for (const path of ['/api/dashboard', '/api/search', '/api/dashboard/timeseries'
   assert.equal((await app.inject({ url: path })).statusCode, 401);
   await new Promise(resolve => setImmediate(resolve));
   assert.ok(state.rows(apiEvents).some(row => row.path === path && row.statusCode === 200 && row.userId === user.id));
+});
+
+test('runtime health describes configuration and observations without claiming connection reachability', async t => {
+  const { app, state, company, headers } = await fixture(t);
+  state.rows(agentRuntimes).push({ id: randomUUID(), companyId: company.id, name: 'Configured A2A', adapterType: 'a2a', isActive: true });
+  let probes = 0; t.mock.method(globalThis, 'fetch', async () => { probes++; throw new Error('No external probes are permitted by this read contract'); });
+  const response = await app.inject({ url: '/api/agent-runtimes/health', headers });
+  assert.equal(response.statusCode, 200, response.body);
+  const health = response.json()[0];
+  assert.equal(health.reachability, 'not_checked');
+  assert.equal(health.statusBasis, 'configuration_and_observed_runs');
+  assert.equal(health.status, 'ready'); assert.equal(health.lastRunStatus, null);
+  assert.deepEqual(health.capabilities, ['a2a', 'json-rpc', 'task-push-notifications']);
+  assert.equal(probes, 0);
+  const help = (await app.inject({ url: '/api/help' })).json().endpoints.find((entry: any) => entry.path === '/api/agent-runtimes/health');
+  assert.deepEqual(Object.keys(help.responseExample[0]).sort(), Object.keys(health).sort());
 });
