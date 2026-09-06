@@ -23,12 +23,17 @@ export const longText = 'LongContent' + 'withoutBreaks'.repeat(7);
 export async function productFixture(page: Page, populated: boolean) {
   const unexpected: string[] = [], errors: string[] = [], reads: string[] = [], failed: string[] = [];
   const completedReads: string[] = [];
+  let navigationReadOffset = 0;
   const readIndexes = new WeakMap<Request, number>();
   const successfulResponses = new WeakSet<Request>();
   let failPath = '';
   let failWrite = false, heldCompany = '';
   const held: Route[] = [], writes: { method: string; body: any }[] = [];
   page.on('pageerror', error => errors.push(error.message));
+  // The outgoing document can issue a read after the smoke loop captures its
+  // offset. Chromium may abandon it without either request terminal event.
+  // New-document API reads begin after the main-frame navigation commits.
+  page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigationReadOffset = reads.length; });
   page.on('requestfailed', request => { if (!request.failure()?.errorText.includes('ERR_ABORTED')) failed.push(request.url()); });
   // Response status is already available before requestfinished. Keep both
   // listeners synchronous so teardown cannot strand a response RPC promise.
@@ -97,7 +102,7 @@ export async function productFixture(page: Page, populated: boolean) {
     unexpected.push(`GET ${path}${url.search}`);
     return route.fulfill({ status: 404, json: { error: 'unexpected_fixture_read' } });
   });
-  return { unexpected, errors, failed, reads, completedReads, writes, fail: (path: string) => { failPath = path; }, failWrite: (value: boolean) => { failWrite = value; }, holdDocs: (company: string) => { heldCompany = company; }, hasHeld: () => held.length > 0, releaseDocs: async () => { heldCompany = ''; for (const route of held.splice(0)) { const company = new URL(route.request().url()).searchParams.get('companyId'); await route.fulfill({ json: docs.filter(doc => doc.companyId === company) }).catch(() => {}); } } };
+  return { unexpected, errors, failed, reads, completedReads, writes, navigationReadOffset: () => navigationReadOffset, fail: (path: string) => { failPath = path; }, failWrite: (value: boolean) => { failWrite = value; }, holdDocs: (company: string) => { heldCompany = company; }, hasHeld: () => held.length > 0, releaseDocs: async () => { heldCompany = ''; for (const route of held.splice(0)) { const company = new URL(route.request().url()).searchParams.get('companyId'); await route.fulfill({ json: docs.filter(doc => doc.companyId === company) }).catch(() => {}); } } };
 }
 
 export async function settlePage(page: Page) {
@@ -111,6 +116,7 @@ export async function settlePage(page: Page) {
 
 export async function waitForProductPage(page: Page, state: Awaited<ReturnType<typeof productFixture>>, path: string, populated: boolean, readOffset: number, timeout = 5000) {
   const check = expect.configure({ timeout });
+  readOffset = Math.max(readOffset, state.navigationReadOffset());
   // Include deferred queries as well as the initial catalogs. Every navigation
   // must finish its own successful reads; a previous page's data cannot qualify.
   const catalogs: Record<string, string[]> = {

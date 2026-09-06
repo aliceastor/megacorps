@@ -51,3 +51,46 @@ test('product readiness waits for held page data after shell and heading render'
   expect(state.errors).toEqual([]);
   expect(state.failed).toEqual([]);
 });
+
+test('an outgoing document read cannot strand the next navigation readiness', async ({ page }) => {
+  const state = await productFixture(page, true);
+  await page.goto('/help');
+  await waitForProductPage(page, state, '/help', true, 0);
+  state.holdDocs(companyId);
+  // Same ordering as the smoke loop: offset is captured before navigation;
+  // an outgoing document may issue one last request after that snapshot.
+  const readOffset = state.reads.length;
+  await page.evaluate(company => { void fetch(`/api/proxy/api/knowledge-docs?companyId=${company}`).catch(() => {}); }, companyId);
+  await expect.poll(state.hasHeld).toBe(true);
+  await page.goto('/knowledge');
+  await expect.poll(() => state.reads.slice(readOffset).filter(url => url.includes('/api/knowledge-docs')).length).toBe(2);
+  await state.releaseDocs();
+  // Chromium can abandon the outgoing request without either terminal event.
+  // The new document must independently complete its own reads and render data.
+  await waitForProductPage(page, state, '/knowledge', true, readOffset);
+  expect(state.failed).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test('a pending duplicate read does not qualify merely because the same resource already succeeded', async ({ page }) => {
+  const state = await productFixture(page, true);
+  const readOffset = state.reads.length;
+  await page.goto('/knowledge');
+  await waitForProductPage(page, state, '/knowledge', true, readOffset);
+  state.holdDocs(companyId);
+  await page.evaluate(company => { void fetch(`/api/proxy/api/knowledge-docs?companyId=${company}`).catch(() => {}); }, companyId);
+  await expect.poll(state.hasHeld).toBe(true);
+  await expect(waitForProductPage(page, state, '/knowledge', true, readOffset, 500)).rejects.toThrow('/knowledge unfinished reads');
+  await state.releaseDocs();
+  await waitForProductPage(page, state, '/knowledge', true, readOffset);
+});
+
+test('a failed current-navigation catalog cannot reuse the previous document success', async ({ page }) => {
+  const state = await productFixture(page, true);
+  await page.goto('/knowledge');
+  await waitForProductPage(page, state, '/knowledge', true, 0);
+  const readOffset = state.reads.length;
+  state.fail('/api/knowledge-docs');
+  await page.reload();
+  await expect(waitForProductPage(page, state, '/knowledge', true, readOffset, 500)).rejects.toThrow('/knowledge completed page-data requests');
+});
