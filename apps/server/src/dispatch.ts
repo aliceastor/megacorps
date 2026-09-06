@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { buildCommonCompanyContext } from './company-context.ts';
 import { routeDelegatedQuestion, resumeDelegatedQuestion, blockDelegatedAssignment } from './delegated-help.ts';
 import { acceptedDescendantEvidence, sealDeliveryAcceptance } from './delivery-acceptance.ts';
-import { assertCompanyExecutionReady, structuralAssignment, isBossAssessment, structuralCompletionIssue, structuralReviewer } from './company-workflow.ts';
+import { assertCompanyExecutionReady, structuralAssignment, structuralTargetContext, isBossAssessment, structuralCompletionIssue, structuralReviewer } from './company-workflow.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import { workerRepositoryReadiness } from './worker-readiness.ts';
 import { acceptDelegatedDelivery, delegatedEvidenceStatus } from './delegated-acceptance.ts';
@@ -293,6 +293,13 @@ export async function collaborationDelegationRequirement(card: CardRow, agentId:
   const reports = await activeDirectReportsForAgent(card.companyId, agentId);
   const alreadyDelegated = await actorHasDelegatedInScope(card.id, agentId, parentCommentId);
   return { required: !alreadyDelegated && (assignment.delegationRequired || (collaborationModeRequiresDelegation(card) && assignment.targets.length > 0)), alreadyDelegated, reports };
+}
+
+/** Admission backpressure only: no run, model attempt or permission gate is needed. */
+export async function delegationCapacityUnavailable(card: CardRow, agentId: string): Promise<boolean> {
+  if (card.coordinationOnly || await actorHasDelegatedInScope(card.id, agentId)) return false;
+  const assignment = await structuralAssignment(card.companyId, agentId);
+  return assignment.delegationRequired && assignment.eligible.length > 0 && assignment.available.length === 0;
 }
 
 function messageDelegationRequirementFeedback(reports: DelegationReport[]): string {
@@ -1907,7 +1914,7 @@ async function cancelTerminalMessageTaskRun(run: TaskRunRow, card: CardRow): Pro
 }
 
 async function requeueBackpressuredTaskRun(run: TaskRunRow, message: string): Promise<boolean> {
-  if (!['agent_busy', 'reviewer_busy', 'agent_runtime_unavailable', 'reviewer_runtime_unavailable', 'agent_budget_exceeded'].includes(message) && !message.startsWith('budget_exceeded_')) return false;
+  if (!['agent_busy', 'reviewer_busy', 'agent_runtime_unavailable', 'reviewer_runtime_unavailable', 'agent_budget_exceeded', 'delegation_capacity_unavailable'].includes(message) && !message.startsWith('budget_exceeded_')) return false;
   await db.update(taskRuns).set({
     status: 'queued',
     lockedBy: null,
@@ -2057,6 +2064,7 @@ async function claimNextTaskRun(): Promise<TaskRunRow | null> {
       if (!targetAgentId) continue;
       const [targetAgent] = await db.select().from(agents).where(and(eq(agents.id, targetAgentId), isNull(agents.deletedAt))).limit(1);
       if (!targetAgent || !targetAgent.isActive || targetAgent.isBusy) continue;
+      if (queued.kind === 'dispatch' && await delegationCapacityUnavailable(card, targetAgentId)) continue;
       if (!(await budgetOk(targetAgent, undefined, card))) continue;
       if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: targetAgent.runtimeId, adapterType: targetAgent.adapterType ?? 'hermes-ssh' }, availabilityCache))) continue;
       const [claimed] = await db.update(taskRuns).set({
@@ -3179,6 +3187,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     throw new Error('agent_budget_exceeded');
   }
   if (!(await cardDependenciesMet(card.id))) throw new Error('card_dependencies_not_met');
+  if (await delegationCapacityUnavailable(card, agent.id)) throw new Error('delegation_capacity_unavailable');
 
   if (!(await claimAgentCapacity(agent))) throw new Error('agent_busy');
   const run = await openHeartbeatRun(card, agent, source, options.taskRunId);
@@ -5063,8 +5072,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
  if (assignment?.delegationRequired) return [common,
    `${assignment.role === 'ceo' ? 'STRATEGY' : 'DEPARTMENT MANAGEMENT'} assignment: ${card.title} [${card.id}]`,
    card.body, `Coordination only: ${card.coordinationOnly ? 'explicitly selected by the operator; no fabricated child work' : 'no; required execution must be delegated'}.`,
-   'Available structural targets (choose suitable scope; do not invent staff):',
-   ...assignment.available.map(a => `${a.slug}: ${a.name}; department ${assignment.divisions.find(d => d.id === a.departmentId)?.name}; ${assignment.divisions.find(d => d.id === a.departmentId)?.description ?? ''}`),
+   structuralTargetContext(assignment),
    'Use report.children [{title, body: "Scope plus ## Acceptance checklist", assigneeSlug, dependsOn?}] for execution deliverables. A successful split creates required children; wait for verified acceptance. Use report.broadcast to consult departments and report.mentions for concrete peer questions. Completed report summaries are goal assessments citing verified work products, never a substitute for children or a new implementation PR.',
    `Explicit approval gate: ${card.requiresApproval ? 'required' : 'not required unless an indispensable external decision arises'}. Forced brainstorm: ${card.forceBrainstorm ? 'required before splitting' : 'no'}.`,
    await buildKanbanDeltaContext(card, options), await integrationSection(card), await clientCheckpointSection(card),

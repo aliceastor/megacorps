@@ -68,9 +68,18 @@ export async function structuralAssignment(companyId: string, actorId: string) {
   const role = structure.roleOf(actorId);
   const targets = structure.targetsFor(actorId);
   const cache = createRuntimeAvailabilityCache();
-  const available: Agent[] = [];
-  for (const target of targets) if (target.isActive !== false && !target.isBusy && (!adapterRequiresRuntime(target.adapterType) || target.runtimeId) && await agentRuntimeAvailable({ companyId, runtimeId: target.runtimeId, adapterType: target.adapterType }, cache)) available.push(target);
-  return { ...structure, role, targets, available, delegationRequired: role === 'ceo' || (role === 'department_head' && targets.length > 0) };
+  const eligible: Agent[] = [];
+  for (const target of targets) if (target.isActive !== false && (!adapterRequiresRuntime(target.adapterType) || target.runtimeId) && await agentRuntimeAvailable({ companyId, runtimeId: target.runtimeId, adapterType: target.adapterType }, cache)) eligible.push(target);
+  const available = eligible.filter(target => !target.isBusy);
+  return { ...structure, role, targets, eligible, available, delegationRequired: role === 'ceo' || (role === 'department_head' && targets.length > 0) };
+}
+
+export function structuralTargetContext(assignment: Awaited<ReturnType<typeof structuralAssignment>>): string {
+  return [
+    'Structural delegation roster (membership and current availability are separate):',
+    ...assignment.targets.map(agent => `${agent.slug}: ${agent.name}; department ${assignment.divisions.find(d => d.id === agent.departmentId)?.name ?? 'unassigned'}; ${agent.isActive === false ? 'paused' : !assignment.eligible.some(a => a.id === agent.id) ? 'runtime unavailable' : agent.isBusy ? 'busy' : 'available'}; ${assignment.divisions.find(d => d.id === agent.departmentId)?.description ?? ''}`),
+    'Busy members still exist. This is temporary capacity, not missing organization or permission. Wait for existing work to finish; never request organization setup or execute around mandatory delegation because a member is busy.',
+  ].join('\n');
 }
 
 export async function structuralCompletionIssue(card: { companyId: string }, actorId: string, result: AgentResult): Promise<string | null> {
