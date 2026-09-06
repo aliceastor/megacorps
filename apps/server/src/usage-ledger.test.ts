@@ -3,7 +3,7 @@ import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { agents, agentRuntimes, companies, costEvents, kanbanCards, taskRuns, budgetPolicies, budgetThresholds } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
-import { admitUsage, executeUsage, settleUsage, settleTaskRunUsage, summarizeUsage, usageBudgetState, utcPeriod, type AttemptScope } from './usage-ledger.ts';
+import { admitUsage, executeUsage, releaseUsage, settleUsage, settleTaskRunUsage, summarizeUsage, usageBudgetState, utcPeriod, type AttemptScope } from './usage-ledger.ts';
 import { moneyString, moneyUnits, transportUsage, unknownUsage, type UsageFacts } from './usage-facts.ts';
 import { db } from './db/client.ts';
 
@@ -17,6 +17,52 @@ function fixture(t: TestContext) {
   return { state, agent, card, company, scope };
 }
 const facts = (cost: string, status: 'estimated' | 'actual' = 'actual'): UsageFacts => ({ ...unknownUsage('synthetic_runtime_report'), costStatus: status, costUsd: cost });
+
+test('incremental cumulative cost keeps residual exposure across duplicates, corrections and cancellation', async t => {
+  const { scope, state, agent } = fixture(t); agent.budgetMonthly = '1';
+  await admitUsage(scope, { now: september });
+  const progress = { now: september, phase: 'progress' as const };
+  const entry = () => state.rows(costEvents)[0]!;
+  const expiry = entry().reservationExpiresAt;
+  await settleUsage(scope, facts('0.4'), progress);
+  assert.equal(entry().reservationUsd, '0.60000000'); assert.equal(entry().settledAt ?? null, null);
+  await settleUsage(scope, facts('0.4'), progress); assert.equal(entry().reservationUsd, '0.60000000');
+  await settleUsage(scope, facts('0.2'), progress); assert.equal(entry().reservationUsd, '0.80000000');
+  await settleUsage(scope, { ...unknownUsage('tokens_only'), tokenStatus: 'actual', inputTokens: 0 }, progress);
+  assert.equal(entry().reservationUsd, '0.80000000'); assert.equal(entry().costUsd, '0.2'); assert.deepEqual(entry().reservationExpiresAt, expiry);
+  await releaseUsage(scope); await releaseUsage(scope);
+  assert.equal(entry().reservationUsd, null); assert.equal(entry().costUsd, '0.2'); const terminal = entry().settledAt;
+  await settleUsage(scope, unknownUsage('late_progress'), progress);
+  assert.equal(entry().reservationUsd, null); assert.equal(entry().costUsd, '0.2'); assert.deepEqual(entry().settledAt, terminal);
+  await settleUsage(scope, facts('0.25'), progress);
+  assert.equal(entry().reservationUsd, null); assert.equal(entry().costUsd, '0.25');
+});
+test('progress does not extend bounded reservation expiry and later terminal facts remain payable', async t => {
+  const { scope, state, agent } = fixture(t); agent.budgetMonthly = '1';
+  const start = new Date('2026-09-03T00:00:00Z');
+  await admitUsage(scope, { now: start, timeoutSeconds: 1 });
+  const expiry = state.rows(costEvents)[0]!.reservationExpiresAt;
+  const progress = { now: september, phase: 'progress' as const };
+  await settleUsage(scope, facts('0.25'), progress);
+  assert.deepEqual(state.rows(costEvents)[0]!.reservationExpiresAt, expiry);
+  assert.equal(summarizeUsage(state.rows(costEvents) as any, {}, september).reservedUsd, '0.00000000');
+  await admitUsage({ ...scope, attemptKey: randomUUID() }, { now: september });
+  await settleUsage(scope, facts('1.25'), { now: september });
+  assert.equal(agent.spentThisMonth, '1.25000000'); assert.equal(state.rows(costEvents)[0]!.reservationUsd, null);
+});
+test('incremental actual overage stays booked and lower-rank progress cannot release allowance', async t => {
+  const { scope, state, agent } = fixture(t); agent.budgetMonthly = '1';
+  await admitUsage(scope, { now: september });
+  const progress = { now: september, phase: 'progress' as const };
+  await settleUsage(scope, facts('1.2'), progress);
+  await settleUsage(scope, facts('0.1', 'estimated'), progress);
+  await settleUsage(scope, unknownUsage('unknown_progress'), progress);
+  assert.equal(state.rows(costEvents)[0]!.costUsd, '1.2'); assert.equal(state.rows(costEvents)[0]!.reservationUsd, '0.00000000');
+  assert.equal(state.rows(costEvents)[0]!.settledAt ?? null, null);
+  await assert.rejects(admitUsage({ ...scope, attemptKey: randomUUID() }, { now: september }), /budget_exceeded_agent/);
+  await settleUsage(scope, facts('1.3'), { now: september });
+  assert.equal(agent.spentThisMonth, '1.30000000'); assert.equal(state.rows(costEvents)[0]!.reservationUsd, null);
+});
 
 test('legacy unadmitted run does not invent its original runtime from the current agent binding', async t => {
   const { state, scope, agent } = fixture(t);

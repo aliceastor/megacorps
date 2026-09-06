@@ -177,7 +177,8 @@ function reconcileTokens(previous: UsageFacts | null | undefined, incoming: Usag
   return { ...tokens, tokenProvenance };
 }
 
-export async function settleUsage(scope: AttemptScope, facts: UsageFacts, options: { now?: Date } = {}) {
+type UsageReconciliationOptions = { now?: Date; phase?: 'progress' | 'terminal' };
+export async function settleUsage(scope: AttemptScope, facts: UsageFacts, options: UsageReconciliationOptions = {}) {
   scope = canonicalScope(scope);
   const now = options.now ?? new Date();
   return retryMergeGateWrite(() => db.transaction(async tx => {
@@ -203,9 +204,18 @@ export async function settleUsage(scope: AttemptScope, facts: UsageFacts, option
     // A terminal attempt may receive a factual correction. Identity is immutable;
     // neither admission eligibility nor current orchestration ownership is tested.
     const occurredAt = accepted.occurredAt ? new Date(accepted.occurredAt) : entry?.occurredAt ?? now;
+    // Progress reports are cumulative facts, not completion of the provider IO.
+    // Transfer only the change in booked cost out of the remaining reservation;
+    // duplicates transfer zero. Preserve the original expiry and terminal marker.
+    const progress = options.phase === 'progress';
+    const remaining = entry?.reservationUsd == null ? null
+      : units(entry.reservationUsd) + units(entry.costUsd) - units(accepted.costUsd);
+    const reservationUsd = progress && !entry?.settledAt && remaining !== null ? moneyString(remaining > 0n ? remaining : 0n) : null;
     const values = { costUsd: accepted.costStatus === 'unknown' ? null : accepted.costUsd, costStatus: accepted.costStatus, usage: accepted,
       provider: accepted.provider ?? 'unknown', model: accepted.model ?? 'unknown', inputTokens: accepted.inputTokens, outputTokens: accepted.outputTokens,
-      reportingSource, providerEventId: facts.providerEventId ?? entry?.providerEventId ?? null, reservationUsd: null, reservationExpiresAt: null, settledAt: now, occurredAt };
+      reportingSource, providerEventId: facts.providerEventId ?? entry?.providerEventId ?? null, reservationUsd,
+      reservationExpiresAt: progress && !entry?.settledAt ? entry?.reservationExpiresAt ?? null : null,
+      settledAt: progress ? entry?.settledAt ?? null : now, occurredAt };
     if (entry) [entry] = await tx.update(costEvents).set(values).where(eq(costEvents.id, entry.id)).returning();
     else [entry] = await tx.insert(costEvents).values({ ...scope, ...values }).returning();
     const rows = await tx.select().from(costEvents).where(eq(costEvents.companyId, scope.companyId));
@@ -291,7 +301,7 @@ export function cardUsageScope(card: Card, agent: Agent, heartbeatRunId: string,
   return { companyId: card.companyId, agentId: agent.id, cardId: card.id, projectId: card.projectId, heartbeatRunId, taskRunId: taskRunId ?? null, runtimeId: agent.runtimeId, attemptKey: attemptKey({ taskRunId, heartbeatRunId }), source };
 }
 
-export async function settleTaskRunUsage(run: typeof taskRuns.$inferSelect, facts: UsageFacts, reportingSource?: string) {
+export async function settleTaskRunUsage(run: typeof taskRuns.$inferSelect, facts: UsageFacts, reportingSource?: string, options: UsageReconciliationOptions = {}) {
   if (!run.agentId) fail('usage_run_agent_unknown');
   const [entry] = await db.select().from(costEvents).where(eq(costEvents.attemptKey, attemptKey({ taskRunId: run.id }))).limit(1);
   const [agent] = await db.select().from(agents).where(eq(agents.id, run.agentId)).limit(1);
@@ -302,7 +312,7 @@ export async function settleTaskRunUsage(run: typeof taskRuns.$inferSelect, fact
     projectId: entry?.projectId ?? null, runtimeId: entry ? entry.runtimeId : null,
     taskRunId: run.id, heartbeatRunId: entry ? entry.heartbeatRunId : run.heartbeatRunId,
     attemptKey: attemptKey({ taskRunId: run.id }), source: entry?.source ?? 'legacy_runner_callback',
-    reportingSource: entry?.reportingSource ?? reportingSource ?? `legacy:${run.companyId}:agent:${run.agentId}` }, facts);
+    reportingSource: entry?.reportingSource ?? reportingSource ?? `legacy:${run.companyId}:agent:${run.agentId}` }, facts, options);
 }
 
 export function scopeFromEntry(entry: Entry): AttemptScope {

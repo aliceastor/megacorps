@@ -16,7 +16,7 @@ import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany, re
 import { db, sql } from './db/client.ts';
 import { activityLog, adapterSessions, agentReviewScores, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
 import { attemptKey, executeUsage, releaseCancelledCardUsage, settleUsage, settleTaskRunUsage, scopeFromEntry, resultUsage, summarizeUsage, utcPeriod } from './usage-ledger.ts';
-import { transportUsage } from './usage-facts.ts';
+import { transportUsage, unknownUsage } from './usage-facts.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completeTaskRun, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, gitRemoteMatchesProjectRepo, isGuidanceEscalation, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, processMentionQuestions, processReportNotes, reportNotesFromOutput, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest, finishRunWaitingOnBrainstorm, resolveBrainstormRequest, recordReviewScore, webhookCompletionDecision } from './dispatch.ts';
@@ -2790,7 +2790,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const secret = config.a2aPushSecret ?? config.a2aBearerToken;
       const header = request.headers['x-a2a-signature'];
       if (typeof secret !== 'string' || !verifyA2aPushSignature(request.body, secret, Array.isArray(header) ? header[0] : header)) return reply.code(401).send({ error: 'invalid_push_signature' });
-      if (event.usage) await settleUsage(scopeFromEntry(entry), event.usage);
+      const terminal = event.state != null && ['completed', 'failed', 'canceled', 'rejected'].includes(event.state);
+      if (event.usage || terminal) await settleUsage(scopeFromEntry(entry), event.usage ?? unknownUsage('a2a_push_terminal_usage_unavailable'), { phase: terminal ? 'terminal' : 'progress' });
       // The original context can now belong to another real turn. A signed
       // accounting callback never accelerates or completes that later work.
       return { ok: true, matched: true, accounted: Boolean(event.usage), accelerated: false };
@@ -3008,8 +3009,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (usageEntry && taskRunId && usageEntry.taskRunId !== taskRunId) return reply.code(409).send({ error: 'usage_attempt_identity_conflict' });
     const callbackUsage = body.usage === undefined ? resultUsage({ costUsd: body.costUsd ?? 0, tokensUsed: 0 }) : transportUsage(body.usage, 'webhook_report_v1');
     if (!callbackUsage) return reply.code(400).send({ error: 'invalid_usage_report' });
-    if (usageEntry) await settleUsage(scopeFromEntry(usageEntry), callbackUsage);
-    else if (webhookTaskRun?.agentId) await settleTaskRunUsage(webhookTaskRun, callbackUsage);
+    const usageOptions = { phase: requestedStatus === 'in_progress' ? 'progress' as const : 'terminal' as const };
+    if (usageEntry) await settleUsage(scopeFromEntry(usageEntry), callbackUsage, usageOptions);
+    else if (webhookTaskRun?.agentId) await settleTaskRunUsage(webhookTaskRun, callbackUsage, undefined, usageOptions);
     else if (body.costUsd !== undefined || body.usage !== undefined) return reply.code(409).send({ error: 'usage_attempt_required', message: 'Supply the original taskRunId or server-issued usageAttemptKey for billable usage.' });
     if (card.deletedAt || (webhookTaskRun && !['queued', 'running'].includes(webhookTaskRun.status)) || (!['message', 'message_review', 'panel_review'].includes(webhookTaskRun?.kind ?? '') && ['done', 'cancelled'].includes(card.columnStatus ?? ''))) return { ok: true, stale: true, cardId: card.id, taskRunId, newStatus: card.columnStatus };
     if (parsedBody.data.workProducts.some((product) => product.projectId && product.projectId !== card.projectId)) return reply.code(400).send({ error: 'work_product_project_mismatch' });
