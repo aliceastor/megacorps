@@ -7,6 +7,25 @@ import type { Card, CardApproval } from './card-types.ts';
 
 const tf = (key: string, vars?: Record<string, string | number>) => formatTemplate(t('zh-TW', key), vars ?? {});
 
+test('ordinary root goals accept prose and optional headings without a missing-template warning', () => {
+  for (const body of ['Make a useful task counter for our team.', '## Goal\nMake a useful task counter.']) {
+    assert.equal(overviewChips(card({ body }), { tf }).find(chip => chip.id === 'brief'), undefined);
+  }
+});
+
+test('execution children require meaningful acceptance, with a localized warning only for that requirement', () => {
+  for (const [locale, label] of [['en', 'Acceptance criteria needed'], ['zh-TW', '需要驗收條件'], ['ja', '受入基準が必要です']] as const) {
+    const translate = (key: string, vars?: Record<string, string | number>) => formatTemplate(t(locale, key), vars ?? {});
+    for (const body of ['', 'Implement the counter.', '## Acceptance\n- [ ] ']) {
+      const chip = overviewChips(card({ parentCardId: 'parent', body }), { tf: translate }).find(chip => chip.id === 'brief');
+      assert.deepEqual(chip, { id: 'brief', field: 'body', tone: 'warning', text: label });
+    }
+    for (const body of ['## Acceptance\n- [ ] Counts empty input as zero.', '- [ ] Counts empty input as zero.']) {
+      assert.equal(overviewChips(card({ parentCardId: 'parent', body }), { tf: translate }).find(chip => chip.id === 'brief'), undefined);
+    }
+  }
+});
+
 function card(overrides: Partial<Card> = {}): Card {
   return { id: 'card-1', title: 'Card', body: '', columnStatus: 'todo', tags: [], priority: 0, ...overrides };
 }

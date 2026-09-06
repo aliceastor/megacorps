@@ -198,6 +198,15 @@ test('new card reviewer choices exclude executor and company switch clears incom
   expect(writes.at(-1)?.body.requiresApproval).toBe(true);
 });
 
+test('plain goal overview has no template warning and editing explains that structure is optional', async ({ page }) => {
+  await fixture(page, '/kanban');
+  await page.getByText('Existing card', { exact: true }).click();
+  await expect(page.locator('.overview-chips')).not.toContainText('Brief missing:');
+  await expect(page.locator('.overview-chips')).not.toContainText('kanban.brief.');
+  await page.getByRole('button', { name: 'Edit fields', exact: true }).click();
+  await expect(page.locator('.brief-template-row')).toContainText('Describe the outcome in your own words. The template is optional.');
+});
+
 test('card reviewer edits preserve client approval and retries, and changing assignee clears self review', async ({ page }) => {
   const { writes } = await fixture(page, '/kanban');
   await page.getByText('Existing card', { exact: true }).click();

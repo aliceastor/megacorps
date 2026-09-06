@@ -1,7 +1,7 @@
 // Pure descriptors for the overview zone: the chip row, child-card chip tones
 // and which needs-you strip (if any) a card requires. No React here so
 // node:test can pin the rules down without rendering.
-import { briefGaps } from '../../lib/card-brief';
+import { hasAcceptance } from '../../lib/card-brief';
 import { humanGateOf, type GateFinding } from '../../lib/card-review';
 import { priorityValue } from './card-helpers';
 import type { Card, CardApproval, CardComment } from './card-types';
@@ -72,18 +72,15 @@ export function overviewChips(card: Card, ctx: OverviewChipContext): OverviewChi
 
   // Blind review panel (§17): the mode chip when the card asks for a panel or
   // has already had a round (a critical card under the company default), the
-  // critical flag, and the brief sections still missing from the body (§18).
+  // critical flag, and acceptance criteria for execution children.
   const reviewRound = card.reviewRound ?? 0;
   if (card.reviewMode === 'panel' || reviewRound > 0) {
     const base = ctx.tf('kanban.chipPanel');
     chips.push({ id: 'reviewMode', field: 'reviewMode', tone: 'accent', text: reviewRound > 0 ? `${base} · ${ctx.tf('kanban.roundN', { n: reviewRound })}` : base });
   }
   if (card.critical) chips.push({ id: 'critical', field: 'critical', tone: 'warning', text: ctx.tf('kanban.chipCritical') });
-  if (card.body && card.body.trim()) {
-    const gaps = briefGaps(card.body);
-    if (gaps.length > 0) {
-      chips.push({ id: 'brief', field: 'body', tone: gaps.includes('acceptance') ? 'warning' : 'neutral', text: ctx.tf('kanban.briefMissing', { sections: gaps.map((key) => ctx.tf(`kanban.brief.${key}`)).join(ctx.tf('kanban.listSeparator')) }) });
-    }
+  if (card.parentCardId && !hasAcceptance(card.body)) {
+    chips.push({ id: 'brief', field: 'body', tone: 'warning', text: ctx.tf('kanban.acceptanceNeeded') });
   }
   return chips;
 }
