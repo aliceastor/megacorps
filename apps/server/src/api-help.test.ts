@@ -2,6 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 
+test('webhook help explains a structured review status conflict and its coherent correction', () => {
+  const endpoint = apiHelpCatalog().endpoints.find(row => row.path === '/api/webhook/task-complete')!;
+  const help = JSON.stringify(endpoint);
+  assert.match(help, /409 review_status_conflict/);
+  assert.match(help, /needs_review.*completed.*approved/);
+  assert.match(help, /done.*in_review.*input_required.*help.*escalate/);
+});
+
 const registeredRoutes = [
   ['GET', '/health'],
   ['GET', '/api/help'],

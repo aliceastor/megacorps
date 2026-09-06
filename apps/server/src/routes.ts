@@ -3023,6 +3023,22 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (usageEntry && taskRunId && usageEntry.taskRunId !== taskRunId) return reply.code(409).send({ error: 'usage_attempt_identity_conflict' });
     const callbackUsage = body.usage === undefined ? resultUsage({ costUsd: body.costUsd ?? 0, tokensUsed: 0 }) : transportUsage(body.usage, 'webhook_report_v1');
     if (!callbackUsage) return reply.code(400).send({ error: 'invalid_usage_report' });
+    // A review cannot simultaneously approve completed work and request help
+    // through the outer status. Reject before usage or completion effects so the
+    // same current run can submit a coherent callback. Explicit stops retain
+    // their existing paths; reportless guidance is not inferred from prose.
+    if (webhookTaskRun?.kind === 'review' && requestedStatus === 'needs_review'
+      && normalizedResult.source === 'report' && normalizedResult.outcome === 'completed'
+      && normalizedResult.verdict === 'approved' && !normalizedResult.report?.escalation) {
+      if (webhookTaskRun.companyId !== card.companyId) return reply.code(403).send({ error: 'task_run_company_mismatch' });
+      if (card.deletedAt || !['queued', 'running'].includes(webhookTaskRun.status) || ['done', 'cancelled'].includes(card.columnStatus ?? '')) return { ok: true, stale: true, cardId: card.id, taskRunId, newStatus: card.columnStatus };
+      const [reviewer] = webhookTaskRun.agentId ? await db.select().from(agents).where(and(eq(agents.id, webhookTaskRun.agentId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
+      if (!reviewer || reviewer.id !== card.reviewerId) return reply.code(409).send({ error: 'review_actor_mismatch' });
+      return reply.code(409).send({
+        error: 'review_status_conflict',
+        message: 'An approved completed review conflicts with outer status="needs_review". For approved completion, use outer status="done" or "in_review" with report status="completed" and verdict="approved". For actual assistance, use the existing structured input_required request.kind="help" or explicit verdict="escalate" contract.',
+      });
+    }
     const usageOptions = { phase: requestedStatus === 'in_progress' ? 'progress' as const : 'terminal' as const };
     if (usageEntry) await settleUsage(scopeFromEntry(usageEntry), callbackUsage, usageOptions);
     else if (webhookTaskRun?.agentId) await settleTaskRunUsage(webhookTaskRun, callbackUsage, undefined, usageOptions);
