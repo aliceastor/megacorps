@@ -46,3 +46,27 @@ test('runtime health describes configuration and observations without claiming c
   const help = (await app.inject({ url: '/api/help' })).json().endpoints.find((entry: any) => entry.path === '/api/agent-runtimes/health');
   assert.deepEqual(Object.keys(help.responseExample[0]).sort(), Object.keys(health).sort());
 });
+
+test('company setup and readiness Help describe actual role-checked read envelopes', async t => {
+  const { app, state, company, headers, user } = await fixture(t);
+  state.rows(users)[0]!.role = 'operator'; state.rows(companyMemberships)[0]!.role = 'operator';
+  for (const suffix of ['setup', 'execution-readiness']) await t.test(suffix, async () => {
+    const response = await app.inject({ url: `/api/companies/${company.id}/${suffix}`, headers });
+    assert.equal(response.statusCode, 200, response.body);
+    const entry = (await app.inject({ url: '/api/help' })).json().endpoints.find((entry: any) => entry.path === `/api/companies/:id/${suffix}` && entry.method === 'GET');
+    assert.notEqual(entry.responseExample, null, `${suffix} needs its actual response envelope`);
+    assert.deepEqual(Object.keys(entry.responseExample).sort(), Object.keys(response.json()).sort());
+  });
+});
+
+test('Help labels callback authentication that the actual routes enforce', async t => {
+  const { app } = await fixture(t);
+  const old = process.env.WEBHOOK_SHARED_SECRET; process.env.WEBHOOK_SHARED_SECRET = 'synthetic-contract-webhook';
+  t.after(() => { if (old === undefined) delete process.env.WEBHOOK_SHARED_SECRET; else process.env.WEBHOOK_SHARED_SECRET = old; });
+  for (const [path, auth] of [['/api/webhook/task-complete', 'webhook'], ['/api/gitea/events', 'gitea-token']]) await t.test(path!, async () => {
+    const denied = await app.inject({ method: 'POST', url: path!, payload: {} }); assert.equal(denied.statusCode, 401, denied.body);
+    const entry = (await app.inject({ url: '/api/help' })).json().endpoints.find((entry: any) => entry.path === path);
+    assert.equal(entry.auth, auth);
+  });
+});
+

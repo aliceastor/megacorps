@@ -5,7 +5,8 @@ import Fastify from 'fastify';
 import { agents, companies, costEvents, kanbanCards, machineRunners, taskRuns, budgetPolicies } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { hashRunnerApiKey } from './runner-auth.ts';
-import { registerRunnerRoutes } from './runner-routes.ts';
+import { registerRoutes } from './routes.ts';
+import { registerRequestLogging } from './request-log.ts';
 import { unknownUsage } from './usage-facts.ts';
 import { summarizeUsage } from './usage-ledger.ts';
 
@@ -14,6 +15,9 @@ test('successful runner claim and completion share one durable original attempt'
   run.status = 'queued'; run.lockedBy = null;
   const claimed = await app.inject({ method: 'POST', url: '/api/runner/task-runs/claim', headers, payload: {} });
   assert.equal(claimed.statusCode, 200, claimed.body); assert.equal(claimed.json().taskRun?.id, run.id);
+  const claimHelp = (await app.inject({ url: '/api/help' })).json().endpoints.find((entry: any) => entry.path === '/api/runner/task-runs/claim');
+  assert.deepEqual(Object.keys(claimHelp.responseExample).sort(), Object.keys(claimed.json()).sort());
+  assert.equal(typeof claimed.json().companyContext, 'string');
   assert.equal(state.rows(costEvents).length, 1); assert.equal(state.rows(costEvents)[0]!.costStatus, 'unknown');
   const payload = { status: 'in_review', summary: 'Synthetic completed review', usage: { version: 1, ...unknownUsage('synthetic_runtime_report'), costStatus: 'actual', costUsd: '0.12500019', providerEventId: 'runner-event' } };
   const url = `/api/runner/task-runs/${run.id}/complete`;
@@ -31,7 +35,7 @@ async function fixture(t: TestContext) {
   const card: any = { id: randomUUID(), companyId: company.id, assigneeId: agent.id, reviewerId: agent.id, columnStatus: 'in_review', projectId: null, title: 'Fixture review' };
   const run: any = { id: randomUUID(), companyId: company.id, agentId: agent.id, cardId: card.id, kind: 'review', status: 'running', lockedBy: runner.id };
   const state = memoryDb(t, [[companies, [company]], [agents, [agent]], [machineRunners, [runner]], [kanbanCards, [card]], [taskRuns, [run]]]);
-  const app = Fastify(); t.after(() => app.close()); await registerRunnerRoutes(app);
+  const app = Fastify(); t.after(() => app.close()); registerRequestLogging(app); await registerRoutes(app);
   const headers = { 'x-megacorps-runner-key': 'synthetic-runner-key' };
   return { state, company, agent, runner, card, run, app, headers };
 }
