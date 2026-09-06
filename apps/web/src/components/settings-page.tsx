@@ -324,10 +324,12 @@ export function SettingsPage() {
 
       <section className="card section-card">
         <div className="panel-title"><h2>{t('settings.runtimeHealth')}</h2><span className="status-pill">{runtimeHealth.length} {t('settings.runtimesCount')}</span></div>
+        <p className="field-hint">{t('settings.runtimeSnapshotHint')}</p>
         <div className="table-list">
           {runtimeHealth.map((runtime) => <div className="list-row" key={runtime.runtimeId}>
             <b>{runtime.name}</b>
-            <p>{runtime.status} / {runtime.adapterType} / agents {runtime.activeAgents}/{runtime.agents} active / {runtime.busyAgents} busy</p>
+            <p>{runtime.status === 'ready' ? t('settings.runtimeConfigured') : runtime.status} / {runtime.adapterType} / agents {runtime.activeAgents}/{runtime.agents} active / {runtime.busyAgents} busy</p>
+            <span className="status-pill">{t('settings.connectionUnchecked')}</span>
             <div className="meta-grid">
               <span>{t('settings.lastRun')} <b>{runtime.lastRunAt ? new Date(runtime.lastRunAt).toLocaleString() : 'none'}</b></span>
               <span>{t('cron.lastStatus')} <b>{runtime.lastRunStatus ?? 'none'}</b></span>
