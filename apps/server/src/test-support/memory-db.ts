@@ -18,6 +18,8 @@ export function memoryDb(t: TestContext, fixtures: Array<[Table, Row[]]>) {
   function matches(table: Table, row: Row, condition?: SQL): boolean {
     if (!condition) return true;
     const query = dialect.sqlToQuery(condition);
+    const auditRun = /"activity_log"\."details"->>'taskRunId' = \$(\d+)/.exec(query.sql);
+    if (auditRun && row.details?.taskRunId !== query.params[Number(auditRun[1]) - 1]) return false;
     if (query.sql.includes('AS knowledge_tag')) {
       const wanted = query.params.slice(1) as string[];
       const tags = (row.tags ?? []).map((value: string) => value.trim().toLowerCase()).filter(Boolean);

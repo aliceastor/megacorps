@@ -3262,7 +3262,25 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       executionLockExpiresAt: completesRun ? null : undefined,
       activeHeartbeatRunId: completesRun ? null : undefined,
       updatedAt: new Date(),
-    }, taskRunId);
+    }, taskRunId, {
+      afterUpdate: webhookTaskRun?.kind === 'review' && actorAgentId === card.reviewerId && normalizedResult.verdict === 'approved' && normalizedResult.outcome === 'completed' && (requestedNextStatus === 'done' || humanGate) && completesRun && !childBlock && !delegationFailed && mergePlan?.disposition !== 'blocked'
+        ? async (tx, acceptedCard) => {
+          // Settle only this author's ordinary review bookkeeping. Client/human
+          // approvals and unrelated gates retain their independent authority.
+          if (!acceptedCard.assigneeId) return;
+          const pending = await tx.select().from(approvals).where(and(
+            eq(approvals.cardId, acceptedCard.id), eq(approvals.companyId, acceptedCard.companyId),
+            eq(approvals.type, 'task_review'), eq(approvals.status, 'pending'),
+            eq(approvals.requestedByAgentId, acceptedCard.assigneeId), isNull(approvals.requestedByUserId),
+          ));
+          const ordinaryIds = pending.filter(approval => (approval.payload as { humanGate?: boolean } | null)?.humanGate !== true).map(approval => approval.id);
+          if (ordinaryIds.length) {
+            const settled = await tx.update(approvals).set({ status: 'approved', decisionNote: 'Reviewer approved task.', decidedAt: new Date(), updatedAt: new Date() }).where(and(inArray(approvals.id, ordinaryIds), eq(approvals.status, 'pending'))).returning();
+            if (settled.length) await tx.insert(activityLog).values(settled.map(approval => ({ companyId: acceptedCard.companyId, actorType: 'agent', actorId: actorAgentId!, agentId: actorAgentId, action: 'approval.approved', entityType: 'approval', entityId: approval.id, details: { cardId: acceptedCard.id, taskRunId, note: 'Reviewer approved task.' } })));
+          }
+        }
+        : undefined,
+    });
     if (!updatedCard) {
       // The gate can be created after the initial read. Settle this callback
       // without clearing or rewriting any current card/approval state.

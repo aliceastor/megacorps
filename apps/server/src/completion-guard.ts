@@ -43,7 +43,7 @@ export async function completionStillCurrent(card: Card, taskRunId?: string | nu
   return Boolean(current);
 }
 
-export async function guardedCompletionUpdate(card: Card, values: Partial<typeof kanbanCards.$inferInsert>, taskRunId?: string | null): Promise<Card | undefined> {
+export async function guardedCompletionUpdate(card: Card, values: Partial<typeof kanbanCards.$inferInsert>, taskRunId?: string | null, options: { afterUpdate?: (tx: Executor, updated: Card) => Promise<void> } = {}): Promise<Card | undefined> {
   if (['done', 'cancelled', 'waiting_on_client'].includes(card.columnStatus ?? '')) return undefined;
   return retryMergeGateWrite(() => db.transaction(async (tx) => {
     await tx.select({ id: kanbanCards.id }).from(kanbanCards).where(eq(kanbanCards.id, card.id)).for('update').limit(1);
@@ -52,6 +52,12 @@ export async function guardedCompletionUpdate(card: Card, values: Partial<typeof
       if (!(await completionEvidenceReady(card, tx))) return undefined;
     }
     const [updated] = await tx.update(kanbanCards).set(values).where(completionCondition(card, taskRunId)).returning();
+    if (updated && options.afterUpdate) {
+      // SQL-only effects share this authority check and bounded transaction retry.
+      // Gate triggers may change the card version; return the final snapshot.
+      await options.afterUpdate(tx, updated);
+      return (await tx.select().from(kanbanCards).where(eq(kanbanCards.id, updated.id)).limit(1))[0];
+    }
     return updated;
   }));
 }
