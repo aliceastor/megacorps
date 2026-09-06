@@ -6,6 +6,7 @@ import { ArrowUpDown, Ban, CheckCircle2, FileText, Loader2, Pause, Pencil, Plus,
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
+import { formatUsd } from '@/lib/usage';
 
 type Agent = {
   id: string;
@@ -27,7 +28,6 @@ type Agent = {
   isActive?: boolean;
   budgetPerTask?: string;
   budgetMonthly?: string;
-  spentThisMonth?: string;
   currentSessionId?: string | null;
 };
 type Company = { id: string; name: string; slug: string; mission?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean };
@@ -36,7 +36,7 @@ type Position = { id: string; companyId: string; name: string; slug: string; pro
 type Runtime = { id: string; companyId?: string | null; name: string; adapterType: string; config?: Record<string, unknown>; isActive?: boolean };
 type Card = { id: string; companyId?: string; title: string; columnStatus?: string; assigneeId?: string | null; reviewerId?: string | null; parentCardId?: string | null };
 type Approval = { id: string; companyId: string; cardId?: string | null; status: string; type: string };
-type AgentSortKey = 'name' | 'department' | 'position' | 'adapter' | 'manager' | 'status' | 'spend';
+type AgentSortKey = 'name' | 'department' | 'position' | 'adapter' | 'manager' | 'status' | 'budget';
 
 type ConfigField = { key: string; label: string; description?: string; type?: 'text' | 'number' | 'password' };
 
@@ -416,7 +416,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
     if (key === 'adapter') return agent.adapterType ?? 'hermes-ssh';
     if (key === 'manager') return agentManager(agent);
     if (key === 'status') return agentStatus(agent);
-    if (key === 'spend') return Number(agent.spentThisMonth ?? 0);
+    if (key === 'budget') return Number(agent.budgetMonthly ?? 0);
     return agent.name;
   }
   function chooseAgentSort(key: AgentSortKey) {
@@ -595,7 +595,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
                   <th><SortButton keyName="manager" label={t('common.reportsTo')} /></th>
                   <th><SortButton keyName="adapter" label={t('settings.adapter')} /></th>
                   <th><SortButton keyName="status" label={t('common.status')} /></th>
-                  <th><SortButton keyName="spend" label={t('agents.spend')} /></th>
+                  <th><SortButton keyName="budget" label={t('agents.budgetLimits')} /></th>
                   <th>{t('common.actions')}</th>
                 </tr>
               </thead>
@@ -608,7 +608,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
                     <td>{agentManager(agent)}</td>
                     <td>{agent.adapterType ?? 'hermes-ssh'}<small>{agent.hermesProfile ?? 'no profile'}</small></td>
                     <td><span className="status-pill">{agentStatus(agent)}</span></td>
-                    <td>${agent.spentThisMonth ?? '0'}<small>task {agent.budgetPerTask ?? 'none'} / monthly {agent.budgetMonthly ?? 'none'}</small></td>
+                    <td>{t('agents.monthlyBudget')} {formatUsd(agent.budgetMonthly)}<small>{t('agents.perTaskBudget')} {formatUsd(agent.budgetPerTask)}</small></td>
                     <td>
                       <div className="action-row compact">
                         <button className="btn icon-btn" aria-label={`${t('common.edit')} ${agent.name}`} title={t('common.edit')} onClick={() => setSelected(agent)}><Pencil size={14} /></button>
@@ -654,7 +654,9 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
               <span>{t('agents.directReports')} <b>{selectedReports.length}</b></span>
               <span>{t('settings.adapter')} <b>{selected.adapterType ?? 'hermes-ssh'}</b></span>
               <span>{t('agents.profile')} <b>{selected.hermesProfile ?? 'none'}</b></span>
-              <span>{t('agents.budget')} <b>${selected.spentThisMonth ?? '0'} / monthly ${selected.budgetMonthly ?? 'none'} / task ${selected.budgetPerTask ?? 'none'}</b></span>
+              <span>{t('agents.monthlyBudget')} <b>{formatUsd(selected.budgetMonthly)}</b></span>
+              <span>{t('agents.perTaskBudget')} <b>{formatUsd(selected.budgetPerTask)}</b></span>
+              <span><Link href="/budget">{t('agents.usageDetails')}</Link></span>
             </div>
             {selectedAdapterFields.length > 0 && <section className="config-summary">
               <div className="panel-title"><h3>{t('agents.effectiveConfig')}</h3><span className="status-pill">{selectedRuntime ? `runtime: ${selectedRuntime.name}` : 'no runtime preset'}</span></div>
