@@ -1,5 +1,6 @@
 import { sealDeliveryAcceptance } from './delivery-acceptance.ts';
 import { buildCommonCompanyContext } from './company-context.ts';
+import { managedMergePolicyForCard } from './managed-project-policy.ts';
 // Blind review rounds (company pipeline design §17): the database side of the
 // panel. A panel round gives every reviewer a sealed slot and a panel_review
 // task run; findings go to review_findings, never to the message board or the
@@ -337,6 +338,7 @@ export async function buildPanelReviewPrompt(card: CardRow, round: ReviewRoundRo
       REVIEW_SCORE_RUBRIC,
       'Return exactly one JSON megacorps-report (kind "megacorps-report", status "completed") with "verifications", "verdict" and "score". Do not post findings to the message board and do not call any webhook other than the one for this task run.',
       rejected,
+      await managedMergePolicyForCard(card),
     ].filter(Boolean).join('\n\n');
   }
   const base = await buildReviewPrompt({ ...card, reviewerId: reviewer.id }, { continuation: options.continuation, since: options.since, kind: 'review' });

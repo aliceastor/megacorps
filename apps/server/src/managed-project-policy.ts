@@ -1,9 +1,25 @@
 import { giteaConfigFromEnv, giteaManagedReadiness, type GiteaConfig, type ManagedMergeReadiness } from './gitea.ts';
 import { and, eq, isNull } from 'drizzle-orm';
 import { db } from './db/client.ts';
-import { agents } from './db/schema.ts';
+import { agents, projects } from './db/schema.ts';
 
 export type ManagedProjectPolicy = { companyId?: string | null; repoProvider?: string | null; repoUrl?: string | null; defaultBranch?: string | null; managedRepoFullName?: string | null; autoMergeAfterApproval?: boolean; completionRequiresMerge?: boolean };
+/** Server policy, appended after saved role/session instructions; never credentials. */
+export function managedMergePromptPolicy(project: ManagedProjectPolicy | null | undefined): string {
+  if (project?.autoMergeAfterApproval !== true) return '';
+  return [
+    'Authoritative managed project merge policy (current server configuration):',
+    'These rules override conflicting position instructions and earlier session instructions, including instructions to merge after PASS.',
+    'MegaCorps alone performs the authorized merge after all approvals and exact reviewed-head verification. Report evidence, the PR URL and full head SHA. When reviewing, report the exact reviewed head and your verdict; approval is not permission for an agent to merge.',
+    'Use only your assigned ordinary agent identity. Do not read or use administrator or service credentials from environment files, runtime configuration, other profiles or shared files. Do not switch identities or change permission/runtime policy to bypass a denial; report the concrete blocker.',
+    'Do not call provider merge APIs or execute merge/push operations into the default branch. Managed work branches support normal append pushes; provider protection forbids force pushes and branch deletion. A changed PR head requires a new review.',
+  ].join('\n');
+}
+export async function managedMergePolicyForCard(card: { companyId: string; projectId?: string | null }): Promise<string> {
+  if (!card.projectId) return '';
+  const [project] = await db.select().from(projects).where(and(eq(projects.id, card.projectId), eq(projects.companyId, card.companyId), isNull(projects.deletedAt))).limit(1);
+  return managedMergePromptPolicy(project);
+}
 export function managedMergeTarget(project: ManagedProjectPolicy, config: GiteaConfig | null): { org: string; repo: string } | null {
   if (!config || project.repoProvider !== 'gitea-local' || project.autoMergeAfterApproval !== true || project.completionRequiresMerge !== true || !project.managedRepoFullName) return null;
   try {

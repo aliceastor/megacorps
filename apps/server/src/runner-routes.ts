@@ -2,6 +2,7 @@ import { sealDeliveryAcceptance } from './delivery-acceptance.ts';
 import { beginReviewIdentity, reviewIdentityContext } from './review-identity.ts';
 import { structuralCompletionIssue, structuralReviewer, companyExecutionReadiness, structuralAssignment, structuralTargetContext } from './company-workflow.ts';
 import { workerRepositoryReadiness } from './worker-readiness.ts';
+import { managedMergePromptPolicy } from './managed-project-policy.ts';
 import { buildCommonCompanyContext } from './company-context.ts';
 import { collaborationDelegationRequirement } from './dispatch.ts';
 import { createHash } from 'node:crypto';
@@ -569,7 +570,7 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
         });
         const reviewScope = claimed.kind === 'panel_review' ? claim.card.reviewIdentity?.scope : claimed.id;
         const reviewIdentity = reviewScope && ['dispatch', 'review', 'panel_review'].includes(claimed.kind) ? await beginReviewIdentity(claim.card, reviewScope, { taskRunId: claimed.id }) : null;
-        return { ...claimedPayload, taskRun: { ...claimed, reviewIdentity }, reviewIdentity, companyContext: await buildCommonCompanyContext(payload.card.companyId, payload.agent.id, payload.card.tags ?? []) + '\n\n' + structuralTargetContext(await structuralAssignment(payload.card.companyId, payload.agent.id)) + reviewIdentityContext(reviewIdentity) };
+        return { ...claimedPayload, taskRun: { ...claimed, reviewIdentity }, reviewIdentity, companyContext: await buildCommonCompanyContext(payload.card.companyId, payload.agent.id, payload.card.tags ?? []) + '\n\n' + structuralTargetContext(await structuralAssignment(payload.card.companyId, payload.agent.id)) + reviewIdentityContext(reviewIdentity) + '\n\n' + managedMergePromptPolicy(payload.project) };
       }
       if (candidates.length < pageSize) return { taskRun: null };
       offset += candidates.length;

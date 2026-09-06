@@ -54,7 +54,7 @@ test('normal review entrypoint settles its original run after automatic merge an
   assert.equal(f.posts(), 1); assert.equal(run.status, 'success'); assert.equal(f.card.columnStatus, 'done');
   assert.equal(f.state.rows(mergeIntents)[0]?.state, 'verified');
   const prompt = dispatchInternals.projectGitProtocol(null, f.project, f.card, { slug: 'ordinary' } as any);
-  assert.match(prompt, /MegaCorps performs the authorized merge/);
+  assert.match(prompt, /MegaCorps alone performs the authorized merge/);
   assert.doesNotMatch(prompt, /synthetic-service-secret|GITEA_ADMIN_TOKEN/);
 });
 test('automatic policy requests a PR instead of parking branch-only evidence with no executable merge', async (t) => {

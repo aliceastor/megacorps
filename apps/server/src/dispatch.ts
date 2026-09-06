@@ -5,6 +5,7 @@ import { acceptedDescendantEvidence, sealDeliveryAcceptance } from './delivery-a
 import { assertCompanyExecutionReady, structuralAssignment, structuralTargetContext, isBossAssessment, structuralCompletionIssue, structuralReviewer } from './company-workflow.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import { workerRepositoryReadiness } from './worker-readiness.ts';
+import { managedMergePromptPolicy, managedMergePolicyForCard } from './managed-project-policy.ts';
 import { acceptDelegatedDelivery, delegatedEvidenceStatus } from './delegated-acceptance.ts';
 import { and, desc, eq, inArray, isNull, lt, sql as drizzleSql, isNotNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
@@ -642,7 +643,7 @@ function projectGitProtocol(company: typeof companies.$inferSelect | null | unde
     ...(project.completionRequiresMerge
       ? [`12. Completion gate: this project counts a card as done only when its pull request is merged into ${project.defaultBranch ?? 'main'}; report the PR URL and head commit SHA as workProducts, and do not push further commits to the PR after review approval unless asked (a new head reopens review).`]
       : []),
-    ...(project.autoMergeAfterApproval ? ['13. Produce the evidence and pull request; MegaCorps performs the authorized merge after all approvals. Managed work branches support normal append pushes; provider protection forbids force pushes and branch deletion. Do not merge or use admin curl for reporting. Report repository permission denials as concrete blockers; do not change runtime policy or switch identities to bypass them.'] : []),
+    managedMergePromptPolicy(project),
   ].join('\n');
 }
 
@@ -5095,6 +5096,7 @@ async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}):
 
 export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
  const common = await buildCommonCompanyContext(card.companyId, card.reviewerId, card.tags ?? []);
+ const mergePolicy = await managedMergePolicyForCard(card);
  if (await isBossAssessment(card.companyId, card.reviewerId)) return [common,
    `GOAL ASSESSMENT for ${card.id}: ${card.title}. This is not independent quality review.`,
    'Assess acceptance coverage using department evidence and the explicit sole-head SELF-CHECK. Never clone, run tests, implement, or professionally review the artifact. Required independent-review policy is enforced separately; missing staff requires an actionable client decision.',
@@ -5102,8 +5104,9 @@ export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptio
    `Department result:\n${clipText(card.executionLog, 12000)}`,
    await integrationSection(card),
    'Return an explicit verdict approved only when the goal is covered by evidence, revision_requested with concrete missing scope, or escalate for a necessary client decision. Label the result GOAL ASSESSMENT; do not assign a professional QA score.',
+   mergePolicy,
  ].join('\n\n');
- return [common, await buildReviewPromptCore(card, options)].join('\n\n');
+ return [common, await buildReviewPromptCore(card, options), mergePolicy].filter(Boolean).join('\n\n');
 }
 
 async function buildMessageDelegationPrompt(card: CardRow, comment: CardCommentRow, options: PromptBuildOptions = {}): Promise<string> {
@@ -5114,6 +5117,7 @@ async function buildMessageDelegationPrompt(card: CardRow, comment: CardCommentR
 async function buildMessageReviewPrompt(card: CardRow, report: CardCommentRow, request: CardCommentRow | null | undefined, options: PromptBuildOptions = {}): Promise<string> {
  report = await sanitizeCompanyOutput(card.companyId, report);
  request = await sanitizeCompanyOutput(card.companyId, request);
- if (await isBossAssessment(card.companyId, report.reviewerAgentId)) return [await buildCommonCompanyContext(card.companyId, report.reviewerAgentId, card.tags ?? []), 'GOAL ASSESSMENT: assess scope coverage using the delegated report and cited evidence. This is not independent professional QA. Never clone, test or implement. Return approved, revision_requested or escalate with the concrete goal coverage reason.', `Assignment: ${request?.body ?? card.body}`, `Department report: ${report.body}`].join('\n\n');
- return [await buildCommonCompanyContext(card.companyId, report.reviewerAgentId, card.tags ?? []), await buildMessageReviewPromptCore(card, report, request, options)].join('\n\n');
+ const mergePolicy = await managedMergePolicyForCard(card);
+ if (await isBossAssessment(card.companyId, report.reviewerAgentId)) return [await buildCommonCompanyContext(card.companyId, report.reviewerAgentId, card.tags ?? []), 'GOAL ASSESSMENT: assess scope coverage using the delegated report and cited evidence. This is not independent professional QA. Never clone, test or implement. Return approved, revision_requested or escalate with the concrete goal coverage reason.', `Assignment: ${request?.body ?? card.body}`, `Department report: ${report.body}`, mergePolicy].filter(Boolean).join('\n\n');
+ return [await buildCommonCompanyContext(card.companyId, report.reviewerAgentId, card.tags ?? []), await buildMessageReviewPromptCore(card, report, request, options), mergePolicy].filter(Boolean).join('\n\n');
 }

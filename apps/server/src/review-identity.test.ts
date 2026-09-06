@@ -4,12 +4,12 @@ import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import { signSession } from './auth.ts';
-import { agents, approvals, companyMemberships, kanbanCards, machineRunners, projects, reviewRounds, taskRuns, users, workProducts, externalWaits, mergeIntents } from './db/schema.ts';
+import { agents, approvals, positions, cardComments, companyMemberships, kanbanCards, machineRunners, projects, reviewRounds, taskRuns, users, workProducts, externalWaits, mergeIntents } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { readyCompany } from './test-support/ready-company.ts';
 import { getAdapter } from './adapters/registry.ts';
-import { reviewCard } from './dispatch.ts';
-import { ensureHumanGate, openPanelRound, reviewPanelSlot } from './review-rounds.ts';
+import { reviewCard, buildReviewPrompt, reviewMessageDelegation } from './dispatch.ts';
+import { ensureHumanGate, openPanelRound, reviewPanelSlot, buildPanelReviewPrompt } from './review-rounds.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
 import { registerRoutes } from './routes.ts';
 import { hashRunnerApiKey } from './runner-auth.ts';
@@ -150,4 +150,71 @@ test('semantic and stored legacy identities ignore representation changes but re
     ]) assert.equal(reviewIdentityMatches(captured, changed), false);
   }
   assert.equal(reviewIdentityMatches({ ...identity, candidateKey: 'malformed' }, duplicate), false);
+});
+
+const legacyMergeInstruction = 'PASS，並用 gitea API merge 該 PR';
+function managedPromptFixture(t: TestContext) {
+  const f = fixture(t);
+  f.state.rows(projects)[0]!.autoMergeAfterApproval = true;
+  const reviewer: any = f.state.rows(agents).find(a => a.id === 'reviewer')!;
+  reviewer.positionId = 'legacy-review-position';
+  f.state.rows(positions).push({ id: reviewer.positionId, companyId: f.card.companyId, name: 'Reviewer', prompt: legacyMergeInstruction });
+  return { ...f, reviewer };
+}
+function assertManagedPrompt(prompt: string) {
+  assert.ok(prompt.includes(legacyMergeInstruction), 'Exercise the actual saved position instruction.');
+  const policy = prompt.lastIndexOf('Authoritative managed project merge policy');
+  assert.ok(policy > prompt.lastIndexOf(legacyMergeInstruction), 'Server policy must follow the legacy position prompt.');
+  assert.match(prompt.slice(policy), /MegaCorps alone performs the authorized merge after all approvals/);
+  assert.match(prompt.slice(policy), /only your assigned ordinary agent identity/);
+  assert.match(prompt.slice(policy), /Do not read or use administrator.*environment/);
+  assert.match(prompt.slice(policy), /Do not call.*merge/);
+  assert.match(prompt.slice(policy), /override.*position.*session/);
+  assert.match(prompt.slice(policy), /normal append pushes/);
+  assert.doesNotMatch(prompt.slice(policy), /synthetic-review-identity/);
+}
+for (const continuation of [false, true]) test(`managed review generated prompt overrides legacy merge instruction, continuation=${continuation}`, async t => {
+  const f = managedPromptFixture(t);
+  assertManagedPrompt(await buildReviewPrompt(f.card, { continuation, kind: 'review' }));
+});
+test('managed review adapter receives the authoritative project policy', async t => {
+  const f = managedPromptFixture(t); let dispatched = '';
+  t.mock.method(getAdapter('webhook'), 'dispatch', async (_agent: any, task: any) => {
+    dispatched = task.body;
+    return { ...f.approve, success: false, output: 'Synthetic stopped review; no verdict.' };
+  });
+  await assert.rejects(reviewCard(f.card.id, { taskRunId: f.run.id }), /review_adapter_failed: Synthetic stopped review/);
+  assertManagedPrompt(dispatched);
+});
+test('managed runner claim includes server project policy after saved role instructions', async t => {
+  const f = managedPromptFixture(t); f.run.status = 'queued';
+  f.state.rows(machineRunners).push({ id: 'runner', companyId: f.card.companyId, name: 'Runner', apiKeyHash: hashRunnerApiKey('synthetic-policy-runner'), supportedRuntimes: [] });
+  const app = Fastify(); t.after(() => app.close()); await registerRunnerRoutes(app);
+  const claim = await app.inject({ method: 'POST', url: '/api/runner/task-runs/claim', headers: { 'x-megacorps-runner-key': 'synthetic-policy-runner' }, payload: {} });
+  assert.equal(claim.statusCode, 200, claim.body); assertManagedPrompt(claim.json().companyContext);
+});
+test('managed blind verification prompt includes the same policy', async t => {
+  const f = managedPromptFixture(t);
+  assertManagedPrompt(await buildPanelReviewPrompt(f.card, { kind: 'verify', round: 1, reviewerIds: [f.reviewer.id], metadata: {} } as any, f.reviewer));
+});
+test('managed Boss assessment keeps execution boundaries alongside merge policy', async t => {
+  const f = managedPromptFixture(t);
+  f.state.rows(positions).find(p => p.id === f.reviewer.positionId)!.isCompanyBoss = true;
+  const prompt = await buildReviewPrompt(f.card);
+  assert.match(prompt, /GOAL ASSESSMENT/); assert.match(prompt, /Never clone, run tests, implement/); assertManagedPrompt(prompt);
+});
+test('unmanaged review does not invent automatic merge authorization', async t => {
+  const f = managedPromptFixture(t); f.state.rows(projects)[0]!.autoMergeAfterApproval = false;
+  assert.doesNotMatch(await buildReviewPrompt(f.card), /Authoritative managed project merge policy/);
+});
+
+test('managed message review adapter receives policy after legacy position instructions', async t => {
+  const f = managedPromptFixture(t); let dispatched = '';
+  f.run.kind = 'message_review'; f.run.messageCommentId = 'report';
+  f.state.rows(cardComments).push({ id: 'report', cardId: f.card.id, companyId: f.card.companyId, agentId: 'author', assigneeAgentId: 'author', reviewerAgentId: 'reviewer', reviewerScope: 'final', action: 'delegate_report', body: 'Review the submitted PR evidence.', delegationStatus: 'submitted' });
+  t.mock.method(getAdapter('webhook'), 'dispatch', async (_agent: any, task: any) => {
+    dispatched = task.body; return { ...f.approve, success: false, output: 'Synthetic stopped message review.' };
+  });
+  await reviewMessageDelegation(f.card.id, { taskRunId: f.run.id });
+  assertManagedPrompt(dispatched);
 });
