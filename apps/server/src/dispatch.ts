@@ -1294,7 +1294,9 @@ export async function processChildSplits(card: CardRow, splitter: AgentRow, chil
   children = await sanitizeCompanyOutput(card.companyId, children);
   const assignment = await structuralAssignment(card.companyId, splitter.id);
   if (!assignment.members.some(member => member.id === splitter.id)) return { created: [], errors: ['split_actor_wrong_company'] };
-  const reports = assignment.available;
+  // Capacity can change during the model turn. Preserve authorized delegation;
+  // the child stays queued until its assigned member has execution capacity.
+  const reports = assignment.eligible;
   const requestKey = createHash('sha256').update(JSON.stringify([card.id, splitter.id, children])).digest('hex');
   let result: { rows: CardRow[]; round: number; candidates: import('./card-splitting.ts').SplitCandidate[]; repeated: boolean };
   try {
