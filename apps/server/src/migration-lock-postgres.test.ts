@@ -101,4 +101,13 @@ test('PostgreSQL migrator retains and releases its own session lock under pool a
     assert.equal(executions, 1, 'Concurrent migrators must not run an unapplied body twice');
     assert.equal((await sql`SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND objid = 727274001 AND granted AND pid = ANY(${pids})`).length, 0);
   });
+
+  await t.test('more same-process migrators than pool slots cannot starve migration bodies', async () => {
+    // Every invocation begins by reserving a holder. With max=10, twelve
+    // simultaneous calls can occupy all slots with lock holders/waiters before
+    // the first can execute its pooled body. The harness bounds any SQL wait.
+    const results = await Promise.allSettled(Array.from({ length: 12 }, () => migrate()));
+    assert.deepEqual(results.map(result => result.status), Array(12).fill('fulfilled'),
+      `Every bounded same-process migration must finish: ${results.filter(result => result.status === 'rejected').map(result => String(result.reason)).join('; ')}`);
+  });
 });
