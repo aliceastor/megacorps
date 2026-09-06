@@ -149,22 +149,22 @@ export function CompanyOChartPage() {
     setError('');
     setNotice('');
     try {
-      const payload = {
-        name: String(agentDraft.name ?? selectedAgent.name),
-        slug: String(agentDraft.slug ?? selectedAgent.slug),
-        role: selectedAgent.role || 'worker',
-        soul: selectedAgent.soul ?? null,
-        capabilities: [],
-        adapterType: String(agentDraft.adapterType ?? selectedAgent.adapterType ?? 'hermes-ssh'),
-        adapterConfig: selectedAgent.adapterConfig ?? {},
-        runtimeId: agentDraft.runtimeId || null,
-        hermesProfile: agentDraft.hermesProfile ? String(agentDraft.hermesProfile) : undefined,
-        bossId: agentDraft.bossId || null,
-        departmentId: agentDraft.departmentId || null,
-        positionId: agentDraft.positionId || null,
-        budgetPerTask: agentDraft.budgetPerTask ? Number(agentDraft.budgetPerTask) : undefined,
-        budgetMonthly: agentDraft.budgetMonthly ? Number(agentDraft.budgetMonthly) : undefined,
-      };
+      // This editor owns only the visible fields. Omitted advanced fields
+      // remain stored verbatim, including redacted runtime configuration.
+      const payload: Record<string, unknown> = {};
+      for (const field of ['name', 'slug', 'adapterType'] as const) {
+        const value = String(agentDraft[field] ?? selectedAgent[field] ?? '');
+        if (value !== selectedAgent[field]) payload[field] = value;
+      }
+      for (const field of ['departmentId', 'positionId', 'bossId', 'runtimeId', 'hermesProfile'] as const) {
+        const value = agentDraft[field] || null;
+        if (value !== (selectedAgent[field] || null)) payload[field] = value;
+      }
+      for (const field of ['budgetPerTask', 'budgetMonthly'] as const) {
+        const value = agentDraft[field] === '' || agentDraft[field] == null ? null : Number(agentDraft[field]);
+        const original = selectedAgent[field] == null || selectedAgent[field] === '' ? null : Number(selectedAgent[field]);
+        if (value !== original) payload[field] = value;
+      }
       const updated = await api<Agent>(`/api/agents/${selectedAgent.id}`, { method: 'PUT', body: JSON.stringify(payload) });
       queryClient.setQueryData<Agent[]>(['agents'], (current) => current?.map((agent) => agent.id === updated.id ? updated : agent));
       setSelectedAgentId(updated.id);
