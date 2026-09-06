@@ -157,7 +157,12 @@ Completed work example:
 \`\`\`json
 { "kind": "megacorps-report", "version": 1, "status": "completed", "summary": "Completed the assigned work; evidence is attached.", "workProducts": [{ "type": "report", "title": "Deliverable", "url": "https://example.com/deliverable" }] }
 \`\`\`
-Replace example values with actual evidence. workProducts.type is report | file | preview_url | pull_request | commit | screenshot | artifact | external. For a review, include verdict approved | revision_requested | escalate and the required findings or verifications.
+Replace example values with actual evidence. workProducts.type is report | file | preview_url | pull_request | commit | screenshot | artifact | external. For a review, include verdict approved | revision_requested | escalate.
+For an ordinary review with no actionable defects, omit findings or use []. Put successful checks in summary or explanatory output, not findings.
+Ordinary review example: { "kind": "megacorps-report", "version": 1, "status": "completed", "summary": "Reviewed the assigned evidence against the requirements; no actionable defects found.", "verdict": "approved" }
+When included, findings must be an array of objects, each with severity (P0 | P1 | P2) and nonempty title, evidence, and requiredFix strings. Do not use an object of checks, strings, or success/info severities as findings.
+Actionable finding example: { "kind": "megacorps-report", "version": 1, "status": "completed", "summary": "Evidence shows an unmet requirement.", "verdict": "revision_requested", "findings": [{ "severity": "P1", "title": "<specific unmet requirement>", "evidence": "<observed behavior and its location>", "requiredFix": "<concrete correction and verification>" }] }
+For panel and verification tasks, follow the task-specific required findings, verifications, and dispositions contract; do not omit required fields based on the ordinary review example. Use examples only when supported by the actual evidence.
 Report states: completed | progress (legacy in_progress accepted) | input_required | failed | rejected. Use completed for finished work, including work awaiting ordinary QA; MegaCorps selects the next review stage.
 For input_required, use request.kind permission | help | checkpoint and request.question; checkpoint accepts checkpointKind direction | interim (default direction), options and recommendation. A permission blocker cannot approve work. Keep delegations in report.delegations when needed.
 The legacy DELEGATE block still works but is deprecated.
