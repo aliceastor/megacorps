@@ -1064,7 +1064,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         status: kanbanCards.columnStatus,
         count: drizzleSql<number>`count(*)::int`,
         costUsd: drizzleSql<number>`coalesce(sum(${kanbanCards.costUsd}), 0)::float`,
-      }).from(kanbanCards).where(inArray(kanbanCards.companyId, access.companyIds)).groupBy(kanbanCards.columnStatus),
+      }).from(kanbanCards).where(and(inArray(kanbanCards.companyId, access.companyIds), isNull(kanbanCards.deletedAt))).groupBy(kanbanCards.columnStatus),
       db.select({
         total: drizzleSql<number>`count(*)::int`,
         active: drizzleSql<number>`count(*) filter (where ${agents.isActive} is distinct from false)::int`,

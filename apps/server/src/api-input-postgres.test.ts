@@ -60,6 +60,8 @@ test('PostgreSQL authenticated read contracts include production hooks and usefu
   assert.equal((await app.inject({ url: '/api/chat/sessions/bad/messages' })).statusCode, 401);
   assert.equal((await call(`/api/usage-summary?companyId=${foreign!.id}`)).statusCode, 403);
   const dashboard = await call('/api/dashboard'); assert.equal(dashboard.statusCode, 200, dashboard.body); assert.equal(dashboard.json().stages.todo, 1);
+  assert.equal(dashboard.json().stats.tasks, 1, 'deleted and foreign cards are excluded from current task totals');
+  assert.equal(dashboard.json().stats.openTasks, 1);
   assert.equal(dashboard.json().usage.totalUsd, '0.00000000');
   // Wait for the bounded onResponse writer, then read its stored metadata.
   let logged: any[] = [];
@@ -70,4 +72,11 @@ test('PostgreSQL authenticated read contracts include production hooks and usefu
   assert.equal(logged[0]?.status_code, 200); assert.equal(logged[0]?.request_body, null);
   const summary = await call('/api/system-logs?view=summary&limit=1'); assert.equal(summary.statusCode, 200, summary.body); assert.equal(summary.json().items[0].requestBody, undefined);
   const detail = await call(`/api/system-logs/${logged[0].id}`); assert.equal(detail.statusCode, 200, detail.body); assert.equal(detail.json().responseBody.stats.tasks, 1);
+  await sql`UPDATE kanban_cards SET deleted_at=now() WHERE id=${card!.id}`;
+  const archived = await call('/api/dashboard'); assert.equal(archived.statusCode, 200, archived.body);
+  assert.deepEqual(archived.json().stages, {});
+  assert.equal(archived.json().stats.tasks, 0); assert.equal(archived.json().stats.openTasks, 0);
+  await sql`UPDATE kanban_cards SET deleted_at=NULL WHERE id=${card!.id}`;
+  const restored = await call('/api/dashboard'); assert.equal(restored.statusCode, 200, restored.body);
+  assert.equal(restored.json().stages.todo, 1); assert.equal(restored.json().stats.tasks, 1);
 });
