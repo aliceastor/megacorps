@@ -461,8 +461,8 @@ async function ensureCompanyReferences(companyId: string, input: CompanyReferenc
   }
   for (const [key, id] of [['assignee_company_mismatch', input.assigneeId], ['reviewer_company_mismatch', input.reviewerId], ['boss_company_mismatch', input.bossId]] as const) {
     if (!id) continue;
-    const company = await agentCompanyId(id);
-    if (company !== companyId) throw new Error(key);
+    const [agent] = await reader.select({ companyId: agents.companyId }).from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
+    if (agent?.companyId !== companyId) throw new Error(key);
   }
   if (input.parentCardId) {
     const company = await cardCompanyId(input.parentCardId);
@@ -2392,7 +2392,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }));
       return redactAgent(agent);
     } catch (error) {
-      if (error instanceof Error && /^(agent_self_manager|agent_reporting_cycle|.*_company_mismatch|runtime_adapter_mismatch)$/.test(error.message)) return reply.code(400).send({ error: error.message });
+      if (error instanceof Error && /^(agent_self_manager|agent_reporting_cycle|agent_runtime_required|.*_company_mismatch|runtime_adapter_mismatch)$/.test(error.message)) return reply.code(400).send({ error: error.message });
       throw error;
     }
   });

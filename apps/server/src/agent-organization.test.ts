@@ -66,3 +66,13 @@ test('agent update accepts explicit nullable profile and budget clears', async t
   assert.equal(a.hermesProfile,null); assert.equal(a.budgetPerTask,null); assert.equal(a.budgetMonthly,null);
   assert.deepEqual(a.capabilities,['research','writing']);
 });
+
+test('agent runtime admission failure keeps its existing client error status', async t => {
+  const previous=process.env.ADAPTER_ENV_FALLBACK_ENABLED;
+  process.env.ADAPTER_ENV_FALLBACK_ENABLED='false';
+  t.after(()=>{if(previous===undefined)delete process.env.ADAPTER_ENV_FALLBACK_ENABLED;else process.env.ADAPTER_ENV_FALLBACK_ENABLED=previous;});
+  const f=await fixture(t), a=f.rows[0]!;
+  const response=await f.update(a.id,{adapterType:'hermes-ssh',runtimeId:null});
+  assert.equal(response.statusCode,400,response.body); assert.equal(response.json().error,'agent_runtime_required');
+  assert.equal(a.adapterType,'a2a');
+});
