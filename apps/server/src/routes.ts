@@ -15,7 +15,7 @@ import { assertSessionSecretReady, signSession, requireAuth, requireRole } from 
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany, resolveMutationCompany } from './access.ts';
 import { db, sql } from './db/client.ts';
 import { activityLog, adapterSessions, agentReviewScores, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
-import { attemptKey, executeUsage, settleUsage, settleTaskRunUsage, scopeFromEntry, resultUsage, summarizeUsage, utcPeriod } from './usage-ledger.ts';
+import { attemptKey, executeUsage, releaseCancelledCardUsage, settleUsage, settleTaskRunUsage, scopeFromEntry, resultUsage, summarizeUsage, utcPeriod } from './usage-ledger.ts';
 import { transportUsage } from './usage-facts.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
@@ -1857,6 +1857,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       activeHeartbeatRunId: null,
       updatedAt: now,
     }).where(eq(kanbanCards.id, id)).returning();
+    await releaseCancelledCardUsage(existing.companyId, id);
     await db.insert(taskLogs).values({ cardId: id, agentId: existing.assigneeId, type: 'cancel', status: 'warning', message: reason });
     if (existing.columnStatus !== 'cancelled') {
       await recordStageAction({
@@ -1896,6 +1897,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       activeHeartbeatRunId: null,
       updatedAt: now,
     }).where(eq(kanbanCards.id, id));
+    await releaseCancelledCardUsage(existing.companyId, id);
     await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'card.deleted', entityType: 'card', entityId: id, details: { title: existing.title } });
     publishLiveEvent({ type: 'card.deleted', companyId: existing.companyId, entityType: 'card', entityId: id, cardId: id, projectId: existing.projectId });
     return { ok: true };
@@ -2124,6 +2126,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }).where(eq(kanbanCards.id, id));
       if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', error: `Paused by ${actorLabel(user)}`, completedAt: new Date() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
       await db.update(taskRuns).set({ status: 'cancelled', error: `Paused by ${actorLabel(user)}`, completedAt: new Date(), updatedAt: new Date() }).where(and(eq(taskRuns.cardId, id), inArray(taskRuns.status, ['queued', 'running'])));
+      await releaseCancelledCardUsage(card.companyId, id);
       await recordStageAction({
         cardId: id,
         agentId: card.assigneeId,
@@ -2191,6 +2194,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         logStatus: reviewerId ? 'success' : 'warning',
         metadata: { commentId: comment?.id, reviewerId, reason },
       });
+      await releaseCancelledCardUsage(card.companyId, id);
       await db.insert(taskLogs).values({ cardId: id, agentId: reviewerId ?? card.assigneeId, type: 'escalation', status: reviewerId ? 'queued' : 'failed', message: reason, output: input.body });
       await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: reviewerId ?? card.assigneeId, action: reviewerId ? 'card.escalated_to_reviewer' : 'card.escalation_blocked', entityType: 'card', entityId: card.id, details: { commentId: comment?.id, reviewerId, reason } });
       publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: reviewerId ? 'card.escalated_to_reviewer' : 'card.escalation_blocked' });
@@ -2775,6 +2779,22 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/a2a/push', async (request, reply) => {
     const event = parseA2aPushPayload(request.body);
     if (!event) return reply.code(400).send({ error: 'invalid_push_payload' });
+    const accountingKey = (request.query as { usageAttemptKey?: string }).usageAttemptKey;
+    if (accountingKey) {
+      const [entry] = await db.select().from(costEvents).where(eq(costEvents.attemptKey, accountingKey)).limit(1);
+      if (!entry) return reply.code(202).send({ ok: true, matched: false });
+      const [originalAgent] = await db.select().from(agents).where(eq(agents.id, entry.agentId)).limit(1);
+      const [runtime] = entry.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, entry.runtimeId)).limit(1) : [];
+      if (!originalAgent || originalAgent.companyId !== entry.companyId || runtime && runtime.companyId !== entry.companyId) return reply.code(202).send({ ok: true, matched: false });
+      const config = { ...(runtime?.config ?? {}), ...(originalAgent.adapterConfig ?? {}) } as Record<string, unknown>;
+      const secret = config.a2aPushSecret ?? config.a2aBearerToken;
+      const header = request.headers['x-a2a-signature'];
+      if (typeof secret !== 'string' || !verifyA2aPushSignature(request.body, secret, Array.isArray(header) ? header[0] : header)) return reply.code(401).send({ error: 'invalid_push_signature' });
+      if (event.usage) await settleUsage(scopeFromEntry(entry), event.usage);
+      // The original context can now belong to another real turn. A signed
+      // accounting callback never accelerates or completes that later work.
+      return { ok: true, matched: true, accounted: Boolean(event.usage), accelerated: false };
+    }
     const [session] = event.contextId
       ? await db.select().from(adapterSessions).where(and(
         eq(adapterSessions.adapterType, 'a2a'),
@@ -2969,7 +2989,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     // A completed report describes the agent's work, not completion of an
     // explicitly requested external/client/brainstorm wait or other stop.
     else if (normalizedResult.source === 'report' && ['done', 'in_review', 'in_progress'].includes(requestedStatus)) requestedStatus = requestedStatus === 'in_review' ? 'in_review' : 'done';
-    const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, body.cardId), isNull(kanbanCards.deletedAt))).limit(1);
+    const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, body.cardId)).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
     // An agent token is scoped to its own company; a report against another
     // company's card is refused outright, whatever the payload claims.
@@ -2979,6 +2999,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (callerAgent) {
       await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'agent', actorId: callerAgent.id, agentId: callerAgent.id, action: 'webhook.agent_report', entityType: 'card', entityId: card.id, details: { status: body.status, taskRunId: taskRunId ?? null, viaAgentToken: true } });
     }
+    const [webhookTaskRun] = taskRunId ? await db.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).limit(1) : [];
+    if (taskRunId && !webhookTaskRun) return reply.code(404).send({ error: 'task_run_not_found' });
+    if (webhookTaskRun && webhookTaskRun.cardId !== card.id) return reply.code(409).send({ error: 'task_run_card_mismatch' });
+    if (webhookTaskRun && callerAgent && webhookTaskRun.agentId !== callerAgent.id) return reply.code(403).send({ error: 'usage_actor_mismatch' });
+    const [usageEntry] = body.usageAttemptKey ? await db.select().from(costEvents).where(eq(costEvents.attemptKey, body.usageAttemptKey)).limit(1) : [];
+    if (body.usageAttemptKey && (!usageEntry || usageEntry.companyId !== card.companyId || usageEntry.cardId !== card.id || callerAgent && usageEntry.agentId !== callerAgent.id)) return reply.code(403).send({ error: 'usage_attempt_identity_conflict' });
+    if (usageEntry && taskRunId && usageEntry.taskRunId !== taskRunId) return reply.code(409).send({ error: 'usage_attempt_identity_conflict' });
+    const callbackUsage = body.usage === undefined ? resultUsage({ costUsd: body.costUsd ?? 0, tokensUsed: 0 }) : transportUsage(body.usage, 'webhook_report_v1');
+    if (!callbackUsage) return reply.code(400).send({ error: 'invalid_usage_report' });
+    if (usageEntry) await settleUsage(scopeFromEntry(usageEntry), callbackUsage);
+    else if (webhookTaskRun?.agentId) await settleTaskRunUsage(webhookTaskRun, callbackUsage);
+    else if (body.costUsd !== undefined || body.usage !== undefined) return reply.code(409).send({ error: 'usage_attempt_required', message: 'Supply the original taskRunId or server-issued usageAttemptKey for billable usage.' });
+    if (card.deletedAt || (webhookTaskRun && !['queued', 'running'].includes(webhookTaskRun.status)) || (!['message', 'message_review', 'panel_review'].includes(webhookTaskRun?.kind ?? '') && ['done', 'cancelled'].includes(card.columnStatus ?? ''))) return { ok: true, stale: true, cardId: card.id, taskRunId, newStatus: card.columnStatus };
     if (parsedBody.data.workProducts.some((product) => product.projectId && product.projectId !== card.projectId)) return reply.code(400).send({ error: 'work_product_project_mismatch' });
     if (body.workProducts.some((product) => product.repoUrl) && card.projectId) {
       const [projectForRepo] = await db.select({ repoUrl: projects.repoUrl }).from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1);
@@ -2986,18 +3019,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({ error: 'work_product_repo_mismatch', detail: 'workProduct.repoUrl must match project.repo_url (same org/repo).' });
       }
     }
-    const [webhookTaskRun] = taskRunId ? await db.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).limit(1) : [];
-    if (taskRunId && !webhookTaskRun) return reply.code(404).send({ error: 'task_run_not_found' });
-    if (webhookTaskRun && webhookTaskRun.cardId !== card.id) return reply.code(409).send({ error: 'task_run_card_mismatch' });
-    if (webhookTaskRun && callerAgent && webhookTaskRun.agentId !== callerAgent.id) return reply.code(403).send({ error: 'usage_actor_mismatch' });
-    const [usageEntry] = body.usageAttemptKey ? await db.select().from(costEvents).where(eq(costEvents.attemptKey, body.usageAttemptKey)).limit(1) : [];
-    if (body.usageAttemptKey && (!usageEntry || usageEntry.companyId !== card.companyId || usageEntry.cardId !== card.id || callerAgent && usageEntry.agentId !== callerAgent.id)) return reply.code(403).send({ error: 'usage_attempt_identity_conflict' });
-    const callbackUsage = body.usage === undefined ? resultUsage({ costUsd: body.costUsd ?? 0, tokensUsed: 0 }) : transportUsage(body.usage, 'webhook_report_v1');
-    if (!callbackUsage) return reply.code(400).send({ error: 'invalid_usage_report' });
-    if (usageEntry) await settleUsage(scopeFromEntry(usageEntry), callbackUsage);
-    else if (webhookTaskRun?.agentId) await settleTaskRunUsage(webhookTaskRun, callbackUsage);
-    else if (body.costUsd !== undefined || body.usage !== undefined) return reply.code(409).send({ error: 'usage_attempt_required', message: 'Supply the original taskRunId or server-issued usageAttemptKey for billable usage.' });
-    if ((webhookTaskRun && !['queued', 'running'].includes(webhookTaskRun.status)) || (!['message', 'message_review', 'panel_review'].includes(webhookTaskRun?.kind ?? '') && ['done', 'cancelled'].includes(card.columnStatus ?? ''))) return { ok: true, stale: true, cardId: card.id, taskRunId, newStatus: card.columnStatus };
     const protocolGuidance = webhookTaskRun?.kind === 'review' && Boolean(protocolHelpOrigin(card, webhookTaskRun.agentId ?? ''));
     if (normalizedResult.outcome === 'invalid' || (webhookTaskRun?.kind === 'review' && (normalizedResult.verdictError || (!protocolGuidance && normalizedResult.source === 'report' && normalizedResult.outcome === 'completed' && !normalizedResult.verdict)))) {
       const reason = normalizedResult.reason ?? normalizedResult.verdictError ?? 'review_verdict_missing: return one evidence-supported current verdict.';

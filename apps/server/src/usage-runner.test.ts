@@ -7,6 +7,22 @@ import { memoryDb } from './test-support/memory-db.ts';
 import { hashRunnerApiKey } from './runner-auth.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
 import { unknownUsage } from './usage-facts.ts';
+import { summarizeUsage } from './usage-ledger.ts';
+
+test('successful runner claim and completion share one durable original attempt', async t => {
+  const { app, headers, run, card, agent, state } = await fixture(t);
+  run.status = 'queued'; run.lockedBy = null;
+  const claimed = await app.inject({ method: 'POST', url: '/api/runner/task-runs/claim', headers, payload: {} });
+  assert.equal(claimed.statusCode, 200, claimed.body); assert.equal(claimed.json().taskRun?.id, run.id);
+  assert.equal(state.rows(costEvents).length, 1); assert.equal(state.rows(costEvents)[0]!.costStatus, 'unknown');
+  const payload = { status: 'in_review', summary: 'Synthetic completed review', usage: { version: 1, ...unknownUsage('synthetic_runtime_report'), costStatus: 'actual', costUsd: '0.12500019', providerEventId: 'runner-event' } };
+  const url = `/api/runner/task-runs/${run.id}/complete`;
+  const completed = await app.inject({ method: 'POST', url, headers, payload });
+  assert.equal(completed.statusCode, 200, completed.body);
+  const duplicate = await app.inject({ method: 'POST', url, headers, payload }); assert.equal(duplicate.json().duplicate, true, duplicate.body);
+  assert.equal(state.rows(costEvents).length, 1); assert.equal(summarizeUsage(state.rows(costEvents) as any).actualUsd, '0.12500019');
+  assert.equal(card.costUsd, '0.12500019'); assert.equal(agent.spentThisMonth, '0.12500019'); assert.equal(run.costUsd, '0.12500019');
+});
 
 async function fixture(t: TestContext) {
   const company: any = { id: randomUUID(), name: 'Runner fixture' };

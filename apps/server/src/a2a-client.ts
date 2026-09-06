@@ -262,6 +262,7 @@ export type A2aPushEvent = {
   contextId: string;
   state: A2aTaskState | null;
   text: string;
+  usage?: UsageFacts;
 };
 
 export function parseA2aPushPayload(body: unknown): A2aPushEvent | null {
@@ -277,6 +278,7 @@ export function parseA2aPushPayload(body: unknown): A2aPushEvent | null {
     contextId,
     state: normalizeState(status?.state),
     text: textFromParts(asRecord(status?.message)?.parts),
+    ...(transportUsage(asRecord(update.metadata)?.megacorpsUsage, 'a2a_push_metadata_v1') ? { usage: transportUsage(asRecord(update.metadata)?.megacorpsUsage, 'a2a_push_metadata_v1') } : {}),
   };
 }
 

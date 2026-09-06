@@ -47,7 +47,9 @@ test('a2a dispatch tunnels to the gateway and returns the agent reply', async ()
   assert.equal(result.output, 'work is done');
   assert.equal(result.sessionId, 'ctx-live');
   assert.ok(result.tokensUsed > 0);
-  assert.ok(result.costUsd > 0);
+  assert.equal(result.costUsd, 0);
+  assert.equal(result.usage?.costStatus, 'unknown');
+  assert.equal(result.usage?.costUsd, null);
   assert.equal(captured[0]!.url, 'http://127.0.0.1:45678/ribel');
   assert.equal(tunnelTargets[0].host, 'hermes-1.internal');
   assert.equal(tunnelTargets[0].user, 'ops');

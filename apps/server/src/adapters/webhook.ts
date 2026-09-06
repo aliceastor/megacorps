@@ -1,5 +1,6 @@
 import type { AgentLike, TaskContext, TaskResult } from './hermes.ts';
-import { estimateCost, estimateTokens } from './hermes.ts';
+import { unknownUsage } from '../usage-facts.ts';
+import { estimateTokens } from './hermes.ts';
 import { assertAdapterTargetAllowed, getAdapterOptionalStringConfig } from './config.ts';
 
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey|keyPath)/i;
@@ -45,7 +46,7 @@ async function dispatchToUrl(agent: AgentLike, task: TaskContext, adapterType: '
   const output = await response.text();
   if (!response.ok) throw new Error(`${label} dispatch failed: ${response.status} ${output}`);
   const tokensUsed = estimateTokens(output);
-  return { success: true, output, sessionId: crypto.randomUUID(), tokensUsed, costUsd: estimateCost(tokensUsed), durationSeconds: Math.round((Date.now() - started) / 1000) };
+  return { success: true, output, sessionId: crypto.randomUUID(), tokensUsed, costUsd: 0, usage: unknownUsage('character_count_output', tokensUsed), durationSeconds: Math.round((Date.now() - started) / 1000) };
 }
 
 export async function dispatchToWebhook(agent: AgentLike, task: TaskContext): Promise<TaskResult> {

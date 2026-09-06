@@ -1,8 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import readline from 'node:readline';
 import WebSocket from 'ws';
+import { unknownUsage } from '../usage-facts.ts';
 import type { AgentLike, TaskContext, TaskResult } from './hermes.ts';
-import { buildAgentPrompt, estimateCost, estimateTokens } from './hermes.ts';
+import { buildAgentPrompt, estimateTokens } from './hermes.ts';
 import { assertAdapterTargetAllowed, getAdapterNumberConfig, getAdapterOptionalStringConfig } from './config.ts';
 
 type JsonObject = Record<string, unknown>;
@@ -298,7 +299,8 @@ export async function dispatchToCodexApp(agent: AgentLike, task: TaskContext): P
       sessionId: threadId,
       turnId,
       tokensUsed,
-      costUsd: estimateCost(tokensUsed),
+      costUsd: 0,
+      usage: unknownUsage('character_count_output', tokensUsed),
       durationSeconds: Math.round((Date.now() - started) / 1000),
     };
   } finally {

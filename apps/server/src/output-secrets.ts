@@ -25,7 +25,10 @@ export async function companyOutputSanitizer(companyId: string) {
   function sanitize<T>(value: T): T {
     if (typeof value === 'string') return redactPromptForLog(value, secrets) as T;
     if (Array.isArray(value)) return value.map(sanitize) as T;
-    if (value && typeof value === 'object' && !(value instanceof Date)) return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, secretKey.test(key) && typeof nested === 'string' && nested ? '[redacted]' : sanitize(nested)])) as T;
+    if (value && typeof value === 'object' && !(value instanceof Date)) return Object.fromEntries(Object.entries(value).map(([key, nested]) => {
+      const usageStatus = key === 'tokenStatus' && ['actual', 'estimated', 'unknown'].includes(String(nested));
+      return [key, !usageStatus && secretKey.test(key) && typeof nested === 'string' && nested ? '[redacted]' : sanitize(nested)];
+    })) as T;
     return value;
   }
   return Object.assign(sanitize, { partial(value: string) {

@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { unknownUsage } from '../usage-facts.ts';
+import { currentUsageAttempt } from '../usage-context.ts';
 import { sendA2aMessage } from '../a2a-client.ts';
 import { ensureA2aTunnel, type TunnelTarget } from '../a2a-tunnel.ts';
 import { assertAdapterTargetAllowed, getAdapterNumberConfig, getAdapterOptionalStringConfig } from './config.ts';
-import { buildAgentPrompt, estimateCost, estimateTokens, megacorpsApiUrl, type AgentLike, type TaskContext, type TaskResult } from './hermes.ts';
+import { buildAgentPrompt, estimateTokens, megacorpsApiUrl, type AgentLike, type TaskContext, type TaskResult } from './hermes.ts';
 import { resolveHermesSshConnectionConfig } from './hermes-ssh.ts';
 
 // Stage B pure-transport adapter (docs/a2a-adapter-design.md §7.1): same
@@ -73,7 +74,7 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
         text: prompt,
         contextId,
         configuration: pushEnabled
-          ? { taskPushNotificationConfig: { url: `${megacorpsApiUrl(agent)}/api/a2a/push` } }
+          ? { taskPushNotificationConfig: { url: `${megacorpsApiUrl(agent)}/api/a2a/push${currentUsageAttempt() ? `?usageAttemptKey=${encodeURIComponent(currentUsageAttempt()!)}` : ''}` } }
           : null,
         bearerToken: getAdapterOptionalStringConfig(agent, 'a2aBearerToken', 'A2A_BEARER_TOKEN') ?? null,
         timeoutMs: a2aSendTimeoutMs(task.timeoutSeconds),
@@ -93,7 +94,7 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
         sessionId: outcome.contextId ?? contextId,
         turnId: outcome.taskId,
         tokensUsed,
-        costUsd: estimateCost(tokensUsed),
+        costUsd: Number(outcome.usage?.costUsd ?? 0),
         usage: outcome.usage ?? unknownUsage('character_count_prompt_and_output', tokensUsed),
         durationSeconds: durationSeconds(),
         needsInput: outcome.state === 'input_required' ? { question: outcome.text || 'The agent asked for clarification but sent no question text.' } : null,

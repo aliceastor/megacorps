@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { agents, companies, costEvents, kanbanCards, budgetPolicies, budgetThresholds } from './db/schema.ts';
+import { agents, agentRuntimes, companies, costEvents, kanbanCards, taskRuns, budgetPolicies, budgetThresholds } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
-import { admitUsage, executeUsage, settleUsage, summarizeUsage, usageBudgetState, utcPeriod, type AttemptScope } from './usage-ledger.ts';
+import { admitUsage, executeUsage, settleUsage, settleTaskRunUsage, summarizeUsage, usageBudgetState, utcPeriod, type AttemptScope } from './usage-ledger.ts';
 import { moneyString, moneyUnits, transportUsage, unknownUsage, type UsageFacts } from './usage-facts.ts';
 import { db } from './db/client.ts';
 
@@ -17,6 +17,29 @@ function fixture(t: TestContext) {
   return { state, agent, card, company, scope };
 }
 const facts = (cost: string, status: 'estimated' | 'actual' = 'actual'): UsageFacts => ({ ...unknownUsage('synthetic_runtime_report'), costStatus: status, costUsd: cost });
+
+test('legacy unadmitted run does not invent its original runtime from the current agent binding', async t => {
+  const { state, scope, agent } = fixture(t);
+  const currentRuntime = { id: randomUUID(), companyId: scope.companyId }; agent.runtimeId = currentRuntime.id;
+  state.rows(agentRuntimes).push(currentRuntime);
+  const run: any = { id: randomUUID(), companyId: scope.companyId, agentId: agent.id, cardId: scope.cardId, status: 'cancelled' }; state.rows(taskRuns).push(run);
+  await settleTaskRunUsage(run, facts('0.25'));
+  assert.equal(state.rows(costEvents)[0]!.runtimeId, null);
+  assert.match(state.rows(costEvents)[0]!.reportingSource, /legacy/);
+});
+
+test('admission rejects foreign or stale runtime binding while original-runtime late settlement survives reassignment', async t => {
+  const { state, scope, agent } = fixture(t);
+  const original = { id: randomUUID(), companyId: scope.companyId }, next = { id: randomUUID(), companyId: scope.companyId }, foreign = { id: randomUUID(), companyId: randomUUID() };
+  state.rows(agentRuntimes).push(original, next, foreign);
+  agent.runtimeId = original.id;
+  await assert.rejects(admitUsage({ ...scope, runtimeId: foreign.id }), /usage_runtime_company_mismatch/);
+  await assert.rejects(admitUsage({ ...scope, runtimeId: next.id }), /usage_runtime_binding_changed/);
+  await admitUsage({ ...scope, runtimeId: original.id });
+  agent.runtimeId = next.id;
+  await settleUsage({ ...scope, runtimeId: original.id }, facts('0.5'));
+  assert.equal(state.rows(costEvents)[0]!.runtimeId, original.id);
+});
 
 test('estimate to actual replaces by delta, duplicate actual is idempotent, distinct attempts count separately', async t => {
   const { scope, state, agent, card } = fixture(t);

@@ -11,7 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import { inferCardTransitionAction, normalizeCardStatus, type AgentReport, type CardStatus } from '@megacorps/shared';
 import { db, sql as rawSql } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, cardDependencies, cardRequiredTools, companies, costEvents, cronRuns, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, toolRegistry, users, workProducts, agentReviewScores } from './db/schema.ts';
-import { attemptKey, cardUsageScope, executeUsage, refreshUsageCaches, resultUsage, settleUsage, usageBudgetState } from './usage-ledger.ts';
+import { attemptKey, cardUsageScope, deferDeniedUsage, executeUsage, refreshUsageCaches, resultUsage, settleUsage, usageBudgetState } from './usage-ledger.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
@@ -1497,7 +1497,7 @@ export async function processReportNotes(card: CardRow, agent: AgentRow, notes: 
 }
 
 async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: CardCommentRow, target: AgentRow, authorName: string): Promise<boolean> {
-  if (!(await budgetOk(target))) return false;
+  if (!(await budgetOk(target, undefined, card))) return false;
   if (!(await claimAgentCapacity(target))) return false;
   const now = new Date();
   const [run] = await db.insert(heartbeatRuns).values({ companyId: card.companyId, cardId: card.id, agentId: target.id, source: 'peer_question', status: 'running', startedAt: now }).returning();
@@ -1907,7 +1907,7 @@ async function cancelTerminalMessageTaskRun(run: TaskRunRow, card: CardRow): Pro
 }
 
 async function requeueBackpressuredTaskRun(run: TaskRunRow, message: string): Promise<boolean> {
-  if (!['agent_busy', 'reviewer_busy', 'agent_runtime_unavailable', 'reviewer_runtime_unavailable'].includes(message)) return false;
+  if (!['agent_busy', 'reviewer_busy', 'agent_runtime_unavailable', 'reviewer_runtime_unavailable', 'agent_budget_exceeded'].includes(message) && !message.startsWith('budget_exceeded_')) return false;
   await db.update(taskRuns).set({
     status: 'queued',
     lockedBy: null,
@@ -2057,6 +2057,7 @@ async function claimNextTaskRun(): Promise<TaskRunRow | null> {
       if (!targetAgentId) continue;
       const [targetAgent] = await db.select().from(agents).where(and(eq(agents.id, targetAgentId), isNull(agents.deletedAt))).limit(1);
       if (!targetAgent || !targetAgent.isActive || targetAgent.isBusy) continue;
+      if (!(await budgetOk(targetAgent, undefined, card))) continue;
       if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: targetAgent.runtimeId, adapterType: targetAgent.adapterType ?? 'hermes-ssh' }, availabilityCache))) continue;
       const [claimed] = await db.update(taskRuns).set({
         status: 'running',
@@ -2170,11 +2171,11 @@ export async function getBudgetGuard(agent: AgentRow, preloadedPolicies?: Budget
   };
 }
 
-export async function budgetOk(agent: AgentRow, preloadedPolicies?: BudgetPolicyRow[]): Promise<boolean> {
+export async function budgetOk(agent: AgentRow, preloadedPolicies?: BudgetPolicyRow[], card?: CardRow): Promise<boolean> {
   if (agent.isActive === false) return false;
   const guard = await getBudgetGuard(agent, preloadedPolicies);
-  if (!guard.hardStop) return true;
-  return !(await usageBudgetState(agent)).blocked;
+  if (!guard.hardStop && card?.taskBudgetLimit == null) return true;
+  return !(await usageBudgetState(agent, card)).blocked;
 }
 
 function configuredAdapterOverrides(config: Record<string, unknown> | null | undefined): Record<string, unknown> {
@@ -2277,7 +2278,7 @@ async function selectBestAgent(card: CardRow): Promise<AgentRow | null> {
   const available = [];
   for (const agent of rows) {
     if (!agent.isActive || agent.isBusy) continue;
-    if (!(await budgetOk(agent, companyPolicies))) continue;
+    if (!(await budgetOk(agent, companyPolicies, card))) continue;
     if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'hermes-ssh' }, availabilityCache))) continue;
     available.push(agent);
   }
@@ -2547,6 +2548,7 @@ export async function cascadeParentStatus(parentCardId: string | null): Promise<
 }
 
 async function handleDispatchFailure(card: CardRow, agent: AgentRow, error: unknown, runId?: string | null, taskRunId?: string | null): Promise<CardRow> {
+  if (runId && await deferDeniedUsage(cardUsageScope(card, agent, runId, taskRunId), error)) return card;
   const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
   if (latest && cardChangedOutsideCurrentRun(latest, card, runId ?? '')) {
     const status = isTerminalCardStatus(latest.columnStatus) ? terminalRunStatus(latest.columnStatus) : 'success';
@@ -2652,8 +2654,7 @@ async function messageRunContext(cardId: string, taskRunId: string | null | unde
   if (!agent.isActive) throw new Error('agent_paused');
   if (agent.isBusy) throw new Error('agent_busy');
   if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'hermes-ssh' }))) throw new Error('agent_runtime_unavailable');
-  if (!(await budgetOk(agent))) {
-    await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, agent.id));
+  if (!(await budgetOk(agent, undefined, card))) {
     throw new Error('agent_budget_exceeded');
   }
   return { card, taskRun, comment, agent };
@@ -2880,6 +2881,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
     }
     return card;
   } catch (error) {
+    if (await deferDeniedUsage(cardUsageScope(card, agent, run.id, taskRun.id, 'message'), error)) return card;
     const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'message_delegation_failed');
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
     await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
@@ -2977,6 +2979,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
     await completeTaskRun(taskRun.id, { status: decision === 'revision_requested' ? 'failed' : 'success', error: decision === 'revision_requested' ? result.output : null, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     return card;
   } catch (error) {
+    if (await deferDeniedUsage(cardUsageScope(card, reviewer, run.id, taskRun.id, 'message_review'), error)) return card;
     const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'message_review_failed');
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
     const settled = await observedSettledMessageReview(taskRun, report, request);
@@ -3164,9 +3167,8 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
   if (!agent.isActive) throw new Error('agent_paused');
   if (agent.isBusy) throw new Error('agent_busy');
   if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'hermes-ssh' }))) throw new Error('agent_runtime_unavailable');
-  if (!(await budgetOk(agent))) {
-    await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, agent.id));
-    await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'budget', status: 'failed', message: `Agent ${agent.name} is over budget and was paused before dispatch.` });
+  if (!(await budgetOk(agent, undefined, card))) {
+    await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'budget', status: 'failed', message: `Agent ${agent.name} is over budget; admission waits for available allowance.` });
     await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'budget', agentId: agent.id, action: 'budget.preflight_hard_stop', entityType: 'agent', entityId: agent.id, details: { cardId: card.id } });
     throw new Error('agent_budget_exceeded');
   }
@@ -3679,6 +3681,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
   const [reviewer] = await db.select().from(agents).where(and(eq(agents.id, reviewerId), isNull(agents.deletedAt))).limit(1);
   if (!reviewer) throw new Error('reviewer_not_found');
   if (reviewer.isBusy) throw new Error('reviewer_busy');
+  if (!(await budgetOk(reviewer, undefined, card))) throw new Error('agent_budget_exceeded');
   if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: reviewer.runtimeId, adapterType: reviewer.adapterType ?? 'hermes-ssh' }))) throw new Error('reviewer_runtime_unavailable');
 
   if (!(await claimAgentCapacity(reviewer))) throw new Error('reviewer_busy');
@@ -3913,6 +3916,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     if (effectiveNextStatus === 'done') { await sealDeliveryAcceptance(updated.id); await cascadeParentStatus(updated.parentCardId); }
     return updated;
   } catch (error) {
+    if (await deferDeniedUsage(cardUsageScope(card, reviewer, run.id, options.taskRunId, 'review'), error)) return card;
     const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'review_failed');
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
     await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));

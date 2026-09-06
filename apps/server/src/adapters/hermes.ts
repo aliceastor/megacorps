@@ -1,4 +1,4 @@
-import type { UsageFacts } from '../usage-facts.ts';
+import { unknownUsage, type UsageFacts } from '../usage-facts.ts';
 import { currentUsageAttempt } from '../usage-context.ts';
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
 export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' | 'maintenance'; taskRunId?: string | null };
@@ -248,7 +248,8 @@ export function hermesTaskResult(agent: AgentLike, result: ExecResult): TaskResu
     output,
     sessionId: sessionId ?? crypto.randomUUID(),
     tokensUsed,
-    costUsd: estimateCost(tokensUsed),
+    costUsd: 0,
+    usage: unknownUsage('character_count_output', tokensUsed),
     durationSeconds: result.duration,
   };
 }

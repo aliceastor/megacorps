@@ -1,5 +1,6 @@
 import type { AgentLike, TaskContext, TaskResult } from './hermes.ts';
-import { buildAgentPrompt, estimateTokens, estimateCost } from './hermes.ts';
+import { unknownUsage } from '../usage-facts.ts';
+import { buildAgentPrompt, estimateTokens } from './hermes.ts';
 import { assertAdapterTargetAllowed, getAdapterOptionalStringConfig, getAdapterStringConfig } from './config.ts';
 
 async function hermesFetch(agent: AgentLike, path: string, init: RequestInit = {}): Promise<Response> {
@@ -70,7 +71,8 @@ export async function dispatchToHermesGateway(agent: AgentLike, task: TaskContex
     output,
     sessionId: taskId,
     tokensUsed,
-    costUsd: estimateCost(tokensUsed),
+    costUsd: 0,
+    usage: unknownUsage('character_count_output', tokensUsed),
     durationSeconds: Math.round((Date.now() - started) / 1000),
   };
 }

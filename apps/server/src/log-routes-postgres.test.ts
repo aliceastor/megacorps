@@ -81,7 +81,7 @@ test('PostgreSQL bounded log routes preserve precise cursors, projections and au
   assert.equal(taskRow.error, 'synthetic failure');
   assert.equal(taskRow.adapterSessionId, adapterSessionId);
   assert.equal(taskRow.durationSeconds, 9);
-  assert.equal(taskRow.costUsd, '0.1234');
+  assert.equal(taskRow.costUsd, '0.12340000');
   const taskDetail = await call(`/api/task-runs/${task!.id}`);
   assert.equal(taskDetail.statusCode, 200, taskDetail.body);
   assert.equal(taskDetail.json().output, 'full diagnostic output');

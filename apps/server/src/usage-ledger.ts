@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { db } from './db/client.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
-import { activityLog, agents, budgetPolicies, budgetThresholds, companies, costEvents, heartbeatRuns, kanbanCards, projects, taskRuns } from './db/schema.ts';
+import { activityLog, agents, agentRuntimes, budgetPolicies, budgetThresholds, companies, costEvents, heartbeatRuns, kanbanCards, projects, taskRuns } from './db/schema.ts';
 import { moneyString, moneyUnits, unknownUsage, type UsageFacts } from './usage-facts.ts';
 import type { TaskResult } from './adapters/hermes.ts';
 import { withUsageAttempt } from './usage-context.ts';
@@ -52,6 +52,10 @@ async function lockScope(tx: Reader, scope: AttemptScope) {
   if (!company) fail('usage_company_not_found');
   const [agent] = await tx.select().from(agents).where(eq(agents.id, scope.agentId)).for('update').limit(1);
   if (!agent || agent.companyId !== scope.companyId) fail('usage_agent_company_mismatch');
+  if (scope.runtimeId) {
+    const [runtime] = await tx.select().from(agentRuntimes).where(eq(agentRuntimes.id, scope.runtimeId)).limit(1);
+    if (!runtime || runtime.companyId !== scope.companyId) fail('usage_runtime_company_mismatch');
+  }
   const [card] = scope.cardId ? await tx.select().from(kanbanCards).where(eq(kanbanCards.id, scope.cardId)).for('update').limit(1) : [];
   if (scope.cardId && (!card || card.companyId !== scope.companyId)) fail('usage_card_company_mismatch');
   if (scope.projectId) {
@@ -112,6 +116,7 @@ export async function admitUsage(scope: AttemptScope, options: { now?: Date; tim
   const now = options.now ?? new Date();
   const work = async (tx: Reader) => {
     const { agent, card } = await lockScope(tx, scope);
+    if ((agent.runtimeId ?? null) !== (scope.runtimeId ?? null)) fail('usage_runtime_binding_changed');
     const [existing] = await tx.select().from(costEvents).where(eq(costEvents.attemptKey, scope.attemptKey)).limit(1);
     if (existing) {
       assertIdentity(existing, scope);
@@ -199,6 +204,37 @@ export async function releaseUsage(scope: AttemptScope) {
   return settleUsage(scope, unknownUsage('cancelled_or_abandoned_usage_unknown'));
 }
 
+export async function releaseCancelledCardUsage(companyId: string, cardId: string) {
+  const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, cardId), eq(kanbanCards.companyId, companyId))).limit(1);
+  if (!card) return;
+  const entries = await db.select().from(costEvents).where(and(eq(costEvents.companyId, companyId), eq(costEvents.cardId, cardId)));
+  for (const entry of entries) {
+    if (!entry.attemptKey || entry.settledAt) continue;
+    const [run] = entry.taskRunId ? await db.select().from(taskRuns).where(eq(taskRuns.id, entry.taskRunId)).limit(1) : [];
+    const [heartbeat] = entry.heartbeatRunId ? await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, entry.heartbeatRunId)).limit(1) : [];
+    if (card.deletedAt || card.columnStatus === 'cancelled' || run?.status === 'cancelled' || heartbeat?.status === 'cancelled') await releaseUsage(scopeFromEntry(entry));
+  }
+}
+
+/** Only admission errors raised before provider IO may defer an orchestration
+ * attempt. A factual settlement or provider failure must never use this path. */
+export async function deferDeniedUsage(scope: AttemptScope, error: unknown): Promise<boolean> {
+  const code = (error as { code?: string; statusCode?: number })?.code;
+  if ((error as { statusCode?: number })?.statusCode !== 409 || !code || !(/^(budget_exceeded_|usage_runtime_binding_changed$|usage_agent_inactive$)/.test(code))) return false;
+  await retryMergeGateWrite(() => db.transaction(async tx => {
+    await lockScope(tx, scope);
+    const [entry] = await tx.select().from(costEvents).where(eq(costEvents.attemptKey, scope.attemptKey)).limit(1);
+    if (entry) fail('usage_admitted_attempt_cannot_defer');
+    if (scope.taskRunId) await tx.update(taskRuns).set({ status: 'queued', lockedBy: null, lockedAt: null, startedAt: null, heartbeatRunId: null, error: `Budget admission deferred: ${code}`, updatedAt: new Date() }).where(and(eq(taskRuns.id, scope.taskRunId), eq(taskRuns.status, 'running')));
+    if (scope.heartbeatRunId) {
+      await tx.update(heartbeatRuns).set({ status: 'cancelled', completedAt: new Date(), error: `No provider call: ${code}` }).where(and(eq(heartbeatRuns.id, scope.heartbeatRunId), eq(heartbeatRuns.status, 'running')));
+      if (scope.cardId) await tx.update(kanbanCards).set({ executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null }).where(and(eq(kanbanCards.id, scope.cardId), eq(kanbanCards.executionLockId, scope.heartbeatRunId)));
+    }
+    await tx.update(agents).set({ isBusy: false }).where(eq(agents.id, scope.agentId));
+  }));
+  return true;
+}
+
 export async function executeUsage(scope: AttemptScope, operation: () => Promise<TaskResult>, options: { timeoutSeconds?: number; boundUsd?: string | null } = {}) {
   await admitUsage(scope, options);
   let result: TaskResult;
@@ -238,10 +274,10 @@ export async function settleTaskRunUsage(run: typeof taskRuns.$inferSelect, fact
   return settleUsage({ companyId: run.companyId, agentId: run.agentId, cardId: run.cardId,
     // Old unadmitted runs have no durable project snapshot. Do not assign their
     // late cost to whichever project the card happens to belong to today.
-    projectId: entry?.projectId ?? null, runtimeId: entry ? entry.runtimeId : agent.runtimeId,
+    projectId: entry?.projectId ?? null, runtimeId: entry ? entry.runtimeId : null,
     taskRunId: run.id, heartbeatRunId: entry ? entry.heartbeatRunId : run.heartbeatRunId,
     attemptKey: attemptKey({ taskRunId: run.id }), source: entry?.source ?? 'legacy_runner_callback',
-    reportingSource: entry?.reportingSource ?? reportingSource }, facts);
+    reportingSource: entry?.reportingSource ?? reportingSource ?? `legacy:${run.companyId}:agent:${run.agentId}` }, facts);
 }
 
 export function scopeFromEntry(entry: Entry): AttemptScope {

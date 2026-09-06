@@ -2,6 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createA2aDispatch } from './adapters/a2a.ts';
 import { normalizeA2aSendResult } from './a2a-client.ts';
+import { hermesTaskResult } from './adapters/hermes.ts';
+import { dispatchToWebhook, dispatchToOpenClaw } from './adapters/webhook.ts';
+import { dispatchToHermesGateway } from './adapters/hermes-gateway.ts';
+import { dispatchToCodexApp } from './adapters/codex-app.ts';
+import { fileURLToPath } from 'node:url';
 
 const agent = { id: 'synthetic-agent', hermesProfile: 'configured-profile', currentSessionId: 'reused-context', adapterConfig: { a2aBaseUrl: 'http://usage-fixture.internal:9900' } };
 const task = { id: 'synthetic-card', title: 'Usage fixture', body: 'Synthetic prompt' };
@@ -27,6 +32,7 @@ test('A2A retains only the versioned transport metadata usage contract', () => {
 test('A2A prompt plus output heuristics do not invent output tokens, model or price', async () => {
   const result = await createA2aDispatch({ fetchImpl: async () => new Response(JSON.stringify({ jsonrpc: '2.0', id: 'fixture', result: { kind: 'task', id: 'real-turn-1', contextId: 'reused-context', status: { state: 'completed', message: { parts: [{ kind: 'text', text: 'Synthetic answer' }] } } } }), { headers: { 'content-type': 'application/json' } }) })(agent, task);
   assert.equal(result.success, true);
+  assert.equal(result.costUsd, 0, 'Compatibility subtotal must not invent a fixed model price');
   assert.equal((result as any).usage?.costStatus, 'unknown');
   assert.equal((result as any).usage?.costUsd, null);
   assert.equal((result as any).usage?.provider, null);
@@ -36,4 +42,31 @@ test('A2A prompt plus output heuristics do not invent output tokens, model or pr
   assert.equal((result as any).usage?.outputTokens, null);
   assert.ok((result as any).usage?.totalTokens > 0);
 });
-
+test('Hermes CLI heuristics retain estimated tokens but no invented pricing', () => {
+  const result = hermesTaskResult({ hermesProfile: null, currentSessionId: null }, { stdout: 'Synthetic output', stderr: '', exitCode: 1, duration: 1 });
+  assert.equal(result.costUsd, 0, 'Compatibility subtotal must not invent a fixed model price');
+  assert.equal(result.usage?.costStatus, 'unknown');
+  assert.equal(result.usage?.tokenStatus, 'estimated');
+  assert.equal(result.usage?.costUsd, null);
+});
+for (const dispatch of [dispatchToWebhook, dispatchToOpenClaw]) test(`${dispatch.name} output is not a model price or factual token report`, async t => {
+  t.mock.method(globalThis, 'fetch', async () => new Response('Synthetic output'));
+  const result = await dispatch({ hermesProfile: null, currentSessionId: null, adapterConfig: { webhookUrl: 'http://usage-fixture.internal:9999' } }, task);
+  assert.equal(result.costUsd, 0, 'Compatibility subtotal must not invent a fixed model price');
+  assert.equal(result.usage?.costStatus, 'unknown');
+  assert.equal(result.usage?.tokenStatus, 'estimated');
+  assert.equal(result.usage?.provider, null);
+});
+test('Hermes gateway without reported usage leaves cost unknown', async t => {
+  t.mock.method(globalThis, 'fetch', async (url: string) => new Response(JSON.stringify(url.endsWith('/tasks') ? { id: 'synthetic-task' } : url.includes('/log?') ? { log: 'Synthetic output' } : { status: 'done' })));
+  const result = await dispatchToHermesGateway({ hermesProfile: 'synthetic', currentSessionId: null, adapterConfig: { hermesGatewayUrl: 'http://usage-fixture.internal:9999' } }, task);
+  assert.equal(result.costUsd, 0, 'Compatibility subtotal must not invent a fixed model price');
+  assert.equal(result.usage?.costStatus, 'unknown');
+});
+test('Codex app-server synthetic completed turn leaves cost unknown without pricing facts', async () => {
+  const result = await dispatchToCodexApp({ hermesProfile: null, currentSessionId: null, adapterConfig: { codexTransport: 'stdio', codexCommand: process.execPath, codexArgs: `"${fileURLToPath(new URL('./test-support/synthetic-codex-usage.cjs', import.meta.url))}"` } }, { ...task, timeoutSeconds: 5 });
+  assert.equal(result.success, true);
+  assert.equal(result.costUsd, 0, 'Compatibility subtotal must not invent a fixed model price');
+  assert.equal(result.costUsd, 0, 'Compatibility subtotal must not invent a fixed model price');
+  assert.equal(result.usage?.costStatus, 'unknown');
+});

@@ -11,7 +11,7 @@ import { createAgentSessionSchema, createMachineRunnerSchema, inferCardTransitio
 import { requireAnyVisibleCompany, requireCompanyRole, resolveMutationCompany } from './access.ts';
 import { assertCardTransition, recordCardAction, recordStageAction } from './card-actions.ts';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agentSessions, agents, cardComments, companies, externalWaits, heartbeatRuns, kanbanCards, machineRunners, projects, taskLogs, taskRuns, workProducts } from './db/schema.ts';
+import { activityLog, agentRuntimes, agentSessions, agents, cardComments, companies, costEvents, externalWaits, heartbeatRuns, kanbanCards, machineRunners, projects, taskLogs, taskRuns, workProducts } from './db/schema.ts';
 import { publishLiveEvent } from './live.ts';
 import { runRetryReady } from './run-retry.ts';
 import { generateRunnerApiKey, hashRunnerApiKey, requireAgentSessionAuth, requireRunnerAuth } from './runner-auth.ts';
@@ -571,13 +571,16 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
     const body = runnerTaskCompleteSchema.parse(request.body ?? {});
     const [run] = await db.select().from(taskRuns).where(and(eq(taskRuns.id, id), eq(taskRuns.companyId, runner.companyId))).limit(1);
     if (!run) return reply.code(404).send({ error: 'task_run_not_found' });
-    if (run.lockedBy !== runner.id || run.status === 'queued') return reply.code(409).send({ error: 'task_run_not_claimed_by_runner' });
+    const terminal = !['queued', 'running'].includes(run.status);
+    const [originalUsage] = terminal ? await db.select().from(costEvents).where(eq(costEvents.attemptKey, attemptKey({ taskRunId: run.id }))).limit(1) : [];
+    const originallyOwned = run.lockedBy === runner.id || terminal && originalUsage?.reportingSource === `runner:${runner.id}` && originalUsage.agentId === run.agentId;
+    if (!originallyOwned || run.status === 'queued') return reply.code(409).send({ error: 'task_run_not_claimed_by_runner' });
     const usage = body.usage === undefined ? resultUsage({ costUsd: body.costUsd ?? 0, tokensUsed: 0 }) : transportUsage(body.usage, 'runner_report_v1');
     if (!usage) return reply.code(400).send({ error: 'invalid_usage_report' });
     await settleTaskRunUsage(run, usage, `runner:${runner.id}`);
     // Idempotent ack: a retried completion for a run this runner already finished must
     // not 409 (the retry would loop) and must not re-run completion side effects.
-    if (run.lockedBy === runner.id && run.status !== 'running' && run.status !== 'queued') {
+    if (terminal) {
       return { ok: true, duplicate: true, taskRunId: run.id, status: run.status };
     }
     if (run.status !== 'running' || run.lockedBy !== runner.id) return reply.code(409).send({ error: 'task_run_not_claimed_by_runner' });

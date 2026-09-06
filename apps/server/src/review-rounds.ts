@@ -27,7 +27,7 @@ import { REVIEWER_PLAYBOOK } from './role-playbooks.ts';
 import { acceptanceOf } from './card-brief.ts';
 import { composeReviewPanel, dispositionWarnings, findingIsOpen, formatDispositionRules, formatFindingsForPrompt, formatRoundClosedMessage, formatVerifyInstructions, mergeFindings, nextFixOwner, normalizeFindingKey, normalizeSeverity, panelRequired, roundDecision, takeoverTrigger, verificationDecision, type FindingRow, type MergedFinding, type ReviewVerdict, type TakeoverTrigger, type VerificationInput } from './review-panel.ts';
 import { addActivity, addCardMessage, addStageLog, addTaskLog, budgetOk, buildExecutionAgent, buildReviewPrompt, cardTaskTimeoutSeconds, cascadeParentStatus, claimAgentCapacity, clipText, completeTaskRun, completionBlockedByChildren, createPendingApproval, dispatchInternals, enqueuePanelReviewRun, enqueueTaskRun, openHeartbeatRun, recordCostAndEnforceBudget, recordReviewScore, rememberTaskAdapterSession, resolvePendingApproval, scopedAdapterSession } from './dispatch.ts';
-import { cardUsageScope, executeUsage } from './usage-ledger.ts';
+import { cardUsageScope, deferDeniedUsage, executeUsage } from './usage-ledger.ts';
 import { applyMergeGatePlan, noteMergeEvidenceRequired, parkForMerge, planMergeGate } from './merge-gate.ts';
 import { guardedCompletionUpdate } from './completion-guard.ts';
 
@@ -485,8 +485,7 @@ export async function reviewPanelSlot(cardId: string, options: { taskRunId?: str
   if (!reviewer.isActive) throw new Error('agent_paused');
   if (reviewer.isBusy) throw new Error('reviewer_busy');
   if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: reviewer.runtimeId, adapterType: reviewer.adapterType ?? 'hermes-ssh' }))) throw new Error('reviewer_runtime_unavailable');
-  if (!(await budgetOk(reviewer))) {
-    await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, reviewer.id));
+  if (!(await budgetOk(reviewer, undefined, card))) {
     throw new Error('agent_budget_exceeded');
   }
   if (!(await claimAgentCapacity(reviewer))) throw new Error('reviewer_busy');
@@ -540,6 +539,7 @@ export async function reviewPanelSlot(cardId: string, options: { taskRunId?: str
     }
     return card;
   } catch (error) {
+    if (await deferDeniedUsage(cardUsageScope(card, reviewer, run.id, taskRun.id, round.kind === 'verify' ? 'verify' : 'panel_review'), error)) return card;
     const message = error instanceof Error ? error.message : 'panel_review_failed';
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
     await requeueSlot({ card, round, slot, reviewer, taskRun, heartbeatRunId: run.id, output: null, error: message });

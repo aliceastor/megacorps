@@ -3,7 +3,9 @@ import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import { agents, approvals, cardComments, externalWaits, heartbeatRuns, kanbanCards, projects, reviewFindings, reviewRounds, taskRuns, workProducts } from './db/schema.ts';
-import { dispatchCard, reviewCard, runMessageDelegation } from './dispatch.ts';
+import { dispatchCard, reviewCard, runMessageDelegation, reviewMessageDelegation, sweepPeerQuestions } from './dispatch.ts';
+import { admitUsage, summarizeUsage, utcPeriod } from './usage-ledger.ts';
+import { unknownUsage } from './usage-facts.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { registerRoutes } from './routes.ts';
@@ -13,6 +15,93 @@ import { apiHelpCatalog } from './api-help.ts';
 import { reviewPanelSlot } from './review-rounds.ts';
 import { readyCompany } from './test-support/ready-company.ts';
 import { costEvents } from './db/schema.ts';
+
+for (const kind of ['dispatch', 'message', 'panel'] as const) test(`${kind} budget preflight does not turn a budget stop into manual deactivation`, async t => {
+  const { card, agent, run, state } = kind === 'panel' ? panelFixture(t, kind) : fixture(t);
+  (agent as any).budgetMonthly = '1';
+  state.rows(costEvents).push({ id: randomUUID(), companyId: card.companyId, agentId: agent.id, costUsd: '1', costStatus: 'actual', occurredAt: new Date() });
+  if (kind === 'message') {
+    const comment = { id: randomUUID(), cardId: card.id, assigneeAgentId: agent.id, action: 'delegate_request', body: 'Synthetic', delegationStatus: 'queued' };
+    state.rows(cardComments).push(comment); run.kind = 'message'; (run as any).messageCommentId = comment.id;
+  }
+  let calls = 0; t.mock.method(getAdapter('webhook'), 'dispatch', async () => { calls++; throw new Error('must_not_execute'); });
+  await assert.rejects(kind === 'dispatch' ? dispatchCard(card.id, 'manual', { taskRunId: run.id }) : kind === 'message' ? runMessageDelegation(card.id, { taskRunId: run.id }) : reviewPanelSlot(card.id, { taskRunId: run.id }), /agent_budget_exceeded/);
+  assert.equal(calls, 0); assert.equal(agent.isActive, true, 'Budget stop must not overwrite manual activation');
+});
+test('direct-card budget preflight does not consume a provider retry or execution lock', async t => {
+  const { card, agent, run, state } = fixture(t); card.taskBudgetLimit = '1';
+  state.rows(costEvents).push({ id: randomUUID(), companyId: card.companyId, agentId: agent.id, cardId: card.id, costUsd: '1', costStatus: 'actual', occurredAt: new Date() });
+  let calls = 0; t.mock.method(getAdapter('webhook'), 'dispatch', async () => { calls++; throw new Error('must_not_execute'); });
+  await assert.rejects(dispatchCard(card.id, 'manual', { taskRunId: run.id }), /agent_budget_exceeded/);
+  assert.equal(calls, 0); assert.equal(card.retryCount, 0); assert.ok(!card.executionLockId); assert.equal(agent.isActive, true);
+});
+test('allowance consumed between preflight and admission requeues without counting a provider failure', async t => {
+  const { card, agent, run, state } = fixture(t); (agent as any).budgetMonthly = '1';
+  const insert = db.insert.bind(db);
+  t.mock.method(db, 'insert', ((table: any) => {
+    if (table === heartbeatRuns) state.rows(costEvents).push({ id: randomUUID(), companyId: card.companyId, agentId: agent.id, costUsd: '1', costStatus: 'actual', occurredAt: new Date() });
+    return insert(table);
+  }) as typeof db.insert);
+  let calls = 0; t.mock.method(getAdapter('webhook'), 'dispatch', async () => { calls++; throw new Error('must_not_execute'); });
+  await dispatchCard(card.id, 'manual', { taskRunId: run.id });
+  assert.equal(calls, 0); assert.equal(card.retryCount, 0); assert.equal(run.status, 'queued');
+  assert.equal(agent.isActive, true); assert.equal(agent.isBusy, false); assert.ok(!card.executionLockId);
+});
+test('returned transport and same-attempt webhook dedupe before a later actual correction', async t => {
+  const { card, agent, run, state } = fixture(t);
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'Synthetic completed work' }), sessionId: 'context', tokensUsed: 2, costUsd: 0.25, durationSeconds: 1 }));
+  await dispatchCard(card.id, 'manual', { taskRunId: run.id });
+  const send = await webhook(t);
+  const payload = { cardId: card.id, taskRunId: run.id, status: 'done', costUsd: 0.25, summary: 'Duplicate transport result' };
+  assert.equal((await send(payload)).statusCode, 200);
+  assert.equal(state.rows(costEvents).length, 1);
+  const actual = { ...payload, usage: { version: 1, ...unknownUsage('synthetic'), costStatus: 'actual', costUsd: '0.35000019', providerEventId: 'stable-event' } };
+  const firstActual = await send(actual); assert.equal(firstActual.statusCode, 200, firstActual.body); assert.equal((await send(actual)).statusCode, 200);
+  assert.equal(state.rows(costEvents).length, 1); assert.equal(card.costUsd, '0.35000019'); assert.equal((agent as any).spentThisMonth, '0.35000019');
+});
+for (const retired of [false, true]) test(`late webhook settles original project despite ${retired ? 'soft deletion' : 'reassignment and old work-product scope'}`, async t => {
+  const { card, agent, run, state } = fixture(t);
+  const original = { id: randomUUID(), companyId: card.companyId, name: 'Original' }, later = { ...original, id: randomUUID(), name: 'Later' };
+  state.rows(projects).push(original, later); card.projectId = original.id;
+  await admitUsage({ companyId: card.companyId, agentId: agent.id, cardId: card.id, projectId: original.id, taskRunId: run.id, attemptKey: `task-run:${run.id}`, source: 'dispatch' });
+  card.projectId = later.id; run.status = 'cancelled'; if (retired) card.deletedAt = new Date();
+  const send = await webhook(t);
+  const response = await send({ cardId: card.id, taskRunId: run.id, status: 'done', costUsd: 0.25, workProducts: [{ type: 'report', title: 'Original result', projectId: original.id }] });
+  assert.equal(response.statusCode, 200, response.body); assert.equal(response.json().stale, true);
+  assert.equal(state.rows(costEvents)[0]!.costUsd, '0.25000000'); assert.equal(state.rows(costEvents)[0]!.projectId, original.id);
+  assert.equal(card.projectId, later.id); assert.equal(state.rows(workProducts).length, 0);
+});
+test('a webhook cannot combine one attempt key with another task-run identity', async t => {
+  const { card, agent, run, state } = fixture(t);
+  const key = `task-run:${run.id}`;
+  await admitUsage({ companyId: card.companyId, agentId: agent.id, cardId: card.id, taskRunId: run.id, attemptKey: key, source: 'dispatch' });
+  const other = { ...run, id: randomUUID() }; state.rows(taskRuns).push(other);
+  const send = await webhook(t);
+  const response = await send({ cardId: card.id, taskRunId: other.id, usageAttemptKey: key, status: 'done', costUsd: 0.25 });
+  assert.equal(response.statusCode, 409, response.body); assert.equal(state.rows(costEvents)[0]!.costUsd, null);
+});
+
+for (const kind of ['dispatch', 'review', 'message', 'message_review', 'peer', 'panel', 'verify'] as const) for (const success of [true, false]) test(`${kind} ${success ? 'success' : 'failure'} entrypoint keeps exact actual totals in original scopes`, async t => {
+  const { card, agent, run, state } = kind === 'panel' || kind === 'verify' ? panelFixture(t, kind) : fixture(t);
+  if (kind === 'review') { card.columnStatus = 'in_review'; card.assigneeId = 'author'; card.reviewerId = agent.id; run.kind = 'review'; }
+  if (kind === 'message' || kind === 'message_review' || kind === 'peer') {
+    const request = { id: randomUUID(), cardId: card.id, assigneeAgentId: agent.id, reviewerAgentId: agent.id, action: kind === 'peer' ? 'peer_question' : 'delegate_request', body: 'Synthetic scope', delegationStatus: 'queued' };
+    state.rows(cardComments).push(request);
+    const comment = kind === 'message_review' ? { ...request, id: randomUUID(), parentCommentId: request.id, action: 'delegate_report', delegationStatus: 'submitted' } : request;
+    if (comment !== request) state.rows(cardComments).push(comment);
+    run.kind = kind; (run as any).messageCommentId = comment.id;
+  }
+  let calls = 0;
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => { calls++; return { success, output: success ? JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'Synthetic completed work', verdict: 'approved', findings: [] }) : 'synthetic provider failure', sessionId: 'reused-synthetic-session', tokensUsed: 10, costUsd: 0.12500019, durationSeconds: 1, usage: { ...unknownUsage('synthetic_runtime_report'), costStatus: 'actual', costUsd: '0.12500019' } }; });
+  const app = Fastify(); t.after(() => app.close());
+  const execute = () => kind === 'dispatch' ? dispatchCard(card.id, 'manual', { taskRunId: run.id }) : kind === 'review' ? reviewCard(card.id, { taskRunId: run.id }) : kind === 'message' ? runMessageDelegation(card.id, { taskRunId: run.id }) : kind === 'message_review' ? reviewMessageDelegation(card.id, { taskRunId: run.id }) : kind === 'peer' ? sweepPeerQuestions(app) : reviewPanelSlot(card.id, { taskRunId: run.id });
+  try { await execute(); } catch (error) { assert.match(String(error), /synthetic provider failure/); }
+  assert.equal(calls, 1, 'Actual entrypoint must reach one synthetic adapter operation');
+  const rows = state.rows(costEvents);
+  assert.equal(rows.length, 1); assert.equal(rows[0]!.costUsd, '0.12500019');
+  for (const filter of [{}, { agentId: agent.id }, { cardId: card.id }]) assert.equal(summarizeUsage(rows as any, { ...filter, period: utcPeriod() }).actualUsd, '0.12500019');
+  assert.equal((agent as any).spentThisMonth, '0.12500019'); assert.equal(card.costUsd, '0.12500019');
+});
 
 function fixture(t: TestContext) {
   const card: any = { id: randomUUID(), companyId: randomUUID(), title: 'Build change', body: 'Implement the requested change.', assigneeId: randomUUID(), reviewerId: null, projectId: null, columnStatus: 'todo', requiresApproval: false, deletedAt: null, tags: [], dependencyCardIds: [], retryCount: 0 };
