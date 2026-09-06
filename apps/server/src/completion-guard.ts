@@ -6,6 +6,14 @@ import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import { delegatedEvidenceStatus } from './delegated-acceptance.ts';
 
 type Card = typeof kanbanCards.$inferSelect;
+type Executor = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** Evaluate completion evidence while the caller owns the parent/run locks. */
+export async function completionEvidenceReady(card: Card, tx: Executor): Promise<boolean> {
+  if (!(await delegatedEvidenceStatus(card, tx)).ready) return false;
+  const descendants = await acceptedDescendantEvidence(card, tx, true);
+  return !descendants.issues.length && (!descendants.requiredCount || descendants.ready);
+}
 /** Compare the authority that produced a result, including the original run. */
 export function completionCondition(card: Card, taskRunId?: string | null) {
   const same = (column: any, value: unknown) => value == null ? isNull(column) : eq(column, value);
@@ -30,9 +38,7 @@ export async function guardedCompletionUpdate(card: Card, values: Partial<typeof
     await tx.select({ id: kanbanCards.id }).from(kanbanCards).where(eq(kanbanCards.id, card.id)).for('update').limit(1);
     if (taskRunId) await tx.select({ id: taskRuns.id }).from(taskRuns).where(eq(taskRuns.id, taskRunId)).for('update').limit(1);
     if (values.columnStatus === 'done') {
-      if (!(await delegatedEvidenceStatus(card, tx)).ready) return undefined;
-      const descendants = await acceptedDescendantEvidence(card, tx, true);
-      if (descendants.issues.length || (descendants.requiredCount && !descendants.ready)) return undefined;
+      if (!(await completionEvidenceReady(card, tx))) return undefined;
     }
     const [updated] = await tx.update(kanbanCards).set(values).where(completionCondition(card, taskRunId)).returning();
     return updated;

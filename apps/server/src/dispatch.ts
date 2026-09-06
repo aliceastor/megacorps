@@ -35,7 +35,7 @@ import { extractAgentReport, structuredDelegationPlan } from './agent-report.ts'
 import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { finishProtocolHelp, protocolHelpOrigin, protocolRepairSession, recordProtocolFailure, resetProtocolRepair } from './protocol-repair.ts';
-import { completionCondition, completionStillCurrent, guardedCompletionUpdate } from './completion-guard.ts';
+import { completionCondition, completionEvidenceReady, completionStillCurrent, guardedCompletionUpdate } from './completion-guard.ts';
 import type { AgentReportDelegation } from '@megacorps/shared';
 import type { TaskResult } from './adapters/hermes.ts';
 import { notify } from './notifications.ts';
@@ -3436,17 +3436,24 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const humanGate = !parked && !fixRound && !effectiveReviewerId && ((completionDecision.needsHelpReview && completionDecision.nextStatus !== 'blocked') || (completionDecision.nextStatus === 'done' && card.requiresApproval === true));
     const topLevelGuidanceAccepted = parked || humanGate ? false : completionDecision.topLevelGuidanceAccepted;
     const nextStatus: CardStatus = checkpointRequest ? 'waiting_on_client' : brainstormLaunch ? 'waiting_on_brainstorm' : fixRound || humanGate ? 'in_review' : completionDecision.nextStatus;
-    const childBlock = parked ? null : await completionBlockedByChildren(card, nextStatus);
+    let childBlock = parked ? null : await completionBlockedByChildren(card, nextStatus);
     const dispatchMergePlan = !childBlock && nextStatus === 'done' ? await planMergeGate({ ...card, executionLog: result.output }) : null;
-    const effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : dispatchMergePlan ? mergeCompletionStatus(dispatchMergePlan) : nextStatus;
+    let effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : dispatchMergePlan ? mergeCompletionStatus(dispatchMergePlan) : nextStatus;
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     await resetProtocolRepair(card.id, 'dispatch', normalizedResult, result.success, lockedCard, options.taskRunId);
     // Agent release + card stage move + heartbeat completion commit atomically, so a
     // crash mid-completion cannot leave the agent free while the card looks running.
-    const updated = await db.transaction(async (tx) => {
+    const completionSuperseded = new Error('dispatch_completion_superseded');
+    const updated = await retryMergeGateWrite(() => db.transaction(async (tx) => {
       await tx.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, agent.id));
       await tx.select({ id: kanbanCards.id }).from(kanbanCards).where(eq(kanbanCards.id, card.id)).for('update').limit(1);
       if (options.taskRunId) await tx.select({ id: taskRuns.id }).from(taskRuns).where(eq(taskRuns.id, options.taskRunId)).for('update').limit(1);
+      const [authorized] = await tx.select().from(kanbanCards).where(completionCondition(lockedCard, options.taskRunId)).limit(1);
+      if (!authorized) throw completionSuperseded;
+      if (effectiveNextStatus === 'done' && !(await completionEvidenceReady(authorized, tx))) {
+        effectiveNextStatus = 'in_progress';
+        childBlock = { blocked: true, targetStatus: 'done', childCount: 0, incompleteCount: 1, incompleteTitles: [], message: 'Required descendant or delegated acceptance changed during completion; waiting for current accepted evidence.' };
+      }
       const [row] = await tx.update(kanbanCards).set({
         columnStatus: effectiveNextStatus,
         rollupStatus: childBlock ? 'waiting_on_children' : effectiveNextStatus === 'done' ? 'done' : undefined,
@@ -3465,6 +3472,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         activeHeartbeatRunId: null,
         updatedAt: new Date(),
       }).where(completionCondition(lockedCard, options.taskRunId)).returning();
+      if (!row) throw completionSuperseded;
       await tx.update(heartbeatRuns).set({
         status: 'success',
         completedAt: new Date(),
@@ -3473,7 +3481,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         costUsd: result.costUsd.toString(),
       }).where(eq(heartbeatRuns.id, run.id));
       return row;
-    });
+    })).catch(error => { if (error === completionSuperseded) return undefined; throw error; });
     if (!updated) {
       await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: 'Late dispatch result ignored.' });
       return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
