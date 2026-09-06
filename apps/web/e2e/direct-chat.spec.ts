@@ -40,15 +40,23 @@ async function fulfillJson(route: Route, json: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(json) });
 }
 
-async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirstCreate?: boolean; busyAgents?: string[]; holdAgentSessions?: string; failSessionGetsForAgents?: string[]; failMessageGetsForSessions?: string[]; sendDelayMs?: number; sessionDelayMs?: number; locale?: 'en' | 'zh-TW' | 'ja' } = {}) {
+async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirstCreate?: boolean; busyAgents?: string[]; holdAgentSessions?: string; holdCompanyRefresh?: boolean; failSessionGetsForAgents?: string[]; failMessageGetsForSessions?: string[]; sendDelayMs?: number; sessionDelayMs?: number; locale?: 'en' | 'zh-TW' | 'ja' } = {}) {
   let releaseSessions!: () => void;
   const sessionsGate = new Promise<void>((resolve) => { releaseSessions = resolve; });
+  let releaseCompanies!: () => void;
+  const companiesGate = new Promise<void>((resolve) => { releaseCompanies = resolve; });
+  const companyStore = companies.map((company) => ({ ...company }));
+  const projectStore = projects.map((project) => ({ ...project }));
+  const agentStore = agents.map((agent) => ({ ...agent }));
   const messageStore = Object.fromEntries(Object.entries(messages).map(([sessionId, rows]) => [sessionId, rows.map((row) => ({ ...row }))])) as typeof messages;
   const sessionStore = sessions.map((session) => ({ ...session }));
   const failingSessionGets = new Set(options.failSessionGetsForAgents ?? []);
   const failingMessageGets = new Set(options.failMessageGetsForSessions ?? []);
   const state = {
     releaseSessions,
+    releaseCompanies,
+    companyGetCount: 0,
+    heldCompanyGets: 0,
     heldSessionGets: 0,
     sessionGetCounts: {} as Record<string, number>,
     messageGetCounts: {} as Record<string, number>,
@@ -63,6 +71,10 @@ async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirs
     recoverSessionGets(agentId: string) { failingSessionGets.delete(agentId); },
     failMessageGets(sessionId: string) { failingMessageGets.add(sessionId); },
     recoverMessageGets(sessionId: string) { failingMessageGets.delete(sessionId); },
+    removeCompany(companyId: string) {
+      const index = companyStore.findIndex((company) => company.id === companyId);
+      if (index >= 0) companyStore.splice(index, 1);
+    },
   };
   await page.addInitScript((locale) => {
     localStorage.setItem('locale', locale);
@@ -74,9 +86,16 @@ async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirs
     const path = url.pathname.replace(/^\/api\/proxy/, '');
     if (path === '/api/me') return fulfillJson(route, { user: { email: 'chat@example.test', role: 'admin' } });
     if (path === '/api/notifications') return fulfillJson(route, { notifications: [], unreadCount: 0 });
-    if (path === '/api/companies') return fulfillJson(route, companies);
-    if (path === '/api/projects') return fulfillJson(route, projects);
-    if (path === '/api/agents') return fulfillJson(route, agents.map((agent) => ({ ...agent, isBusy: options.busyAgents?.includes(agent.id) ?? agent.isBusy })));
+    if (path === '/api/companies') {
+      state.companyGetCount += 1;
+      if (options.holdCompanyRefresh && state.companyGetCount > 1) {
+        state.heldCompanyGets += 1;
+        await companiesGate;
+      }
+      return fulfillJson(route, companyStore);
+    }
+    if (path === '/api/projects') return fulfillJson(route, projectStore);
+    if (path === '/api/agents') return fulfillJson(route, agentStore.map((agent) => ({ ...agent, isBusy: options.busyAgents?.includes(agent.id) ?? agent.isBusy })));
     if (path === '/api/chat/sessions' && request.method() === 'GET') {
       const companyId = url.searchParams.get('companyId');
       const agentId = url.searchParams.get('agentId');
@@ -418,6 +437,83 @@ test('scoped GET loading removes old session click and send targets', async ({ p
   expect(state.sentBodies).toEqual(['Grace loading-window payload', 'Grace confirmed payload']);
   await page.getByLabel('Agent', { exact: true }).selectOption('agent-ada');
   await expect(page.getByPlaceholder('Message')).toHaveValue('Ada private draft');
+});
+
+test('late Refresh preserves a newer agent session and draft', async ({ page }) => {
+  await page.setViewportSize({ width: 1158, height: 844 });
+  const state = await mockChat(page, { holdCompanyRefresh: true });
+  await page.goto('/chat');
+  await expect(page.locator('.chat-thread-head')).toContainText('Orbit incident analysis');
+
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect.poll(() => state.heldCompanyGets).toBe(1);
+  await page.getByLabel('Agent', { exact: true }).selectOption('agent-grace');
+  await expect(page.locator('.chat-thread-head')).toContainText('Compiler migration');
+  await page.getByPlaceholder('Message').fill('Grace draft after refresh started');
+
+  expect(state.sendAttempts).toBe(0);
+  expect(state.sessionCreates).toEqual([]);
+  state.releaseCompanies();
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
+  await expect(page.getByLabel('Company', { exact: true })).toHaveValue('company-acme');
+  await expect(page.getByLabel('Agent', { exact: true })).toHaveValue('agent-grace');
+  await expect(page.locator('.chat-thread-head')).toContainText('Grace Hopper');
+  await expect(page.locator('.chat-thread-head')).toContainText('Compiler migration');
+  await expect(page.getByPlaceholder('Message')).toHaveValue('Grace draft after refresh started');
+  expect(state.sendAttempts).toBe(0);
+  expect(state.sessionCreates).toEqual([]);
+
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByText('Reply to: Grace draft after refresh started')).toBeVisible();
+  expect(state.messagePostSessionIds).toEqual(['session-grace']);
+});
+
+test('late Refresh preserves a newer company scope and its conversation', async ({ page }) => {
+  await page.setViewportSize({ width: 1158, height: 844 });
+  const state = await mockChat(page, { holdCompanyRefresh: true });
+  await page.goto('/chat');
+  await expect(page.locator('.chat-thread-head')).toContainText('Orbit incident analysis');
+
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect.poll(() => state.heldCompanyGets).toBe(1);
+  await page.getByLabel('Company', { exact: true }).selectOption('company-globex');
+  await expect(page.locator('.chat-thread-head')).toContainText('Launch window');
+  await page.getByPlaceholder('Message').fill('Katherine draft after refresh started');
+
+  expect(state.sendAttempts).toBe(0);
+  expect(state.sessionCreates).toEqual([]);
+  state.releaseCompanies();
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
+  await expect(page.getByLabel('Company', { exact: true })).toHaveValue('company-globex');
+  await expect(page.getByLabel('Project', { exact: true })).toHaveValue('all');
+  await expect(page.getByLabel('Project', { exact: true }).locator('option[value="project-globex"]')).toHaveText('Globex Launch');
+  await expect(page.getByLabel('Project', { exact: true }).locator('option[value="project-orbit"]')).toHaveCount(0);
+  await expect(page.getByLabel('Agent', { exact: true })).toHaveValue('agent-katherine');
+  await expect(page.getByLabel('Agent', { exact: true }).locator('option[value="agent-ada"]')).toHaveCount(0);
+  await expect(page.locator('.chat-thread-head')).toContainText('Katherine Johnson');
+  await expect(page.locator('.chat-thread-head')).toContainText('Launch window');
+  await expect(page.getByPlaceholder('Message')).toHaveValue('Katherine draft after refresh started');
+  expect(state.sendAttempts).toBe(0);
+  expect(state.sessionCreates).toEqual([]);
+
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByText('Reply to: Katherine draft after refresh started')).toBeVisible();
+  expect(state.messagePostSessionIds).toEqual(['session-katherine']);
+});
+
+test('Refresh falls back when the selected company disappears', async ({ page }) => {
+  await page.setViewportSize({ width: 1158, height: 844 });
+  const state = await mockChat(page);
+  await page.goto('/chat');
+  await expect(page.locator('.chat-thread-head')).toContainText('Orbit incident analysis');
+  state.removeCompany('company-acme');
+
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByLabel('Company', { exact: true })).toHaveValue('company-globex');
+  await expect(page.getByLabel('Agent', { exact: true })).toHaveValue('agent-katherine');
+  await expect(page.locator('.chat-thread-head')).toContainText('Launch window');
+  expect(state.sendAttempts).toBe(0);
+  expect(state.sessionCreates).toEqual([]);
 });
 
 test('scoped sessions GET failure stays truthful and Retry only refetches that scope', async ({ page }) => {

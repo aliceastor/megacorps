@@ -153,6 +153,7 @@ export function ChatPage() {
   const [sessionReadErrors, setSessionReadErrors] = useState<Record<string, string>>({});
   const [messageReadErrors, setMessageReadErrors] = useState<Record<string, string>>({});
   const creationPendingRef = useRef(new Set<string>());
+  const selectionGenerationRef = useRef(0);
   const messageEndRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const activeIdentityRef = useRef('');
@@ -208,6 +209,7 @@ export function ChatPage() {
   async function refreshBase() {
     setLoading(true);
     setError('');
+    const refreshedSelectionGeneration = selectionGenerationRef.current;
     const refreshedScopeKey = creationScopeKey;
     const refreshedSessionId = selectedSession?.id;
     try {
@@ -228,8 +230,10 @@ export function ChatPage() {
       setAgents(agentRows);
       const nextCompany = companyRows.find((company) => company.id === companyId) ?? companyRows[0];
       const nextAgent = nextCompany ? agentRows.find((agent) => agent.companyId === nextCompany.id && agent.id === agentId) ?? agentRows.find((agent) => agent.companyId === nextCompany.id) : undefined;
-      setCompanyId(nextCompany?.id ?? '');
-      setAgentId(nextAgent?.id ?? '');
+      if (selectionGenerationRef.current === refreshedSelectionGeneration) {
+        setCompanyId(nextCompany?.id ?? '');
+        setAgentId(nextAgent?.id ?? '');
+      }
       if (sessionResult) {
         setSessionReadErrors((current) => ({ ...current, [refreshedScopeKey]: sessionResult.error instanceof Error ? sessionResult.error.message : '' }));
       }
@@ -489,6 +493,7 @@ export function ChatPage() {
         <select className="input" aria-label={t('chat.company')} value={companyId} onChange={(event) => {
           const nextCompanyId = event.target.value;
           const nextAgent = agents.find((agent) => agent.companyId === nextCompanyId);
+          selectionGenerationRef.current += 1;
           setCompanyId(nextCompanyId);
           setProjectFilter('all');
           setAgentId(nextAgent?.id ?? '');
@@ -502,6 +507,7 @@ export function ChatPage() {
       <label className="chat-scope-field">
         <span>{t('chat.project')}</span>
         <select className="input" aria-label={t('chat.project')} value={projectFilter} onChange={(event) => {
+          selectionGenerationRef.current += 1;
           setProjectFilter(event.target.value);
           setSessionId('');
           setMobilePane('sessions');
@@ -515,6 +521,7 @@ export function ChatPage() {
       <label className="chat-scope-field">
         <span>{t('chat.agent')}</span>
         <select className="input" aria-label={t('chat.agent')} value={agentId} onChange={(event) => {
+          selectionGenerationRef.current += 1;
           setAgentId(event.target.value);
           setSessionId('');
           setMobilePane('sessions');
@@ -537,7 +544,7 @@ export function ChatPage() {
           <em style={{ color: status.color }}>{status.label}</em>
         </div>
         <div className="chat-list">
-          {sessions.map((session) => <button className={`chat-list-item ${session.id === sessionId ? 'active' : ''}`} key={session.id} onClick={() => { setSessionId(session.id); setMobilePane('conversation'); setError(''); }}>
+          {sessions.map((session) => <button className={`chat-list-item ${session.id === sessionId ? 'active' : ''}`} key={session.id} onClick={() => { selectionGenerationRef.current += 1; setSessionId(session.id); setMobilePane('conversation'); setError(''); }}>
             <b>{session.title}</b>
             <span>{shortTime(session.updatedAt)} / {session.projectId ? projects.find((project) => project.id === session.projectId)?.name ?? t('chat.project') : t('chat.noProject')} / {session.agentSessionId ? t('chat.resumable') : t('common.new')}</span>
           </button>)}
