@@ -1,13 +1,14 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Building2, CheckCircle2, Loader2, Network, Pause, Save, Users, Wifi } from 'lucide-react';
 import { api } from '@/lib/api';
+import { layoutOrgChart } from '@/lib/org-layout';
 import { useLocale } from '@/lib/locale-context';
 
 type Company = { id: string; name: string; slug: string };
 type Department = { id: string; companyId: string; name: string; slug: string };
-type Position = { id: string; companyId: string; name: string; slug: string };
+type Position = { id: string; companyId: string; name: string; slug: string; rank?: number | null };
 type Runtime = { id: string; companyId?: string | null; name: string; adapterType: string; config?: Record<string, unknown>; isActive?: boolean };
 type Agent = {
   id: string;
@@ -42,37 +43,70 @@ function agentStatusLabel(agent: Agent): string {
   return 'Idle';
 }
 
-function OChartNode({ agent, agents, departments, positions, selectedId, onSelect, lineage = new Set<string>() }: {
-  agent: Agent;
-  agents: Agent[];
-  departments: Department[];
-  positions: Position[];
-  selectedId?: string;
-  onSelect: (agent: Agent) => void;
-  lineage?: Set<string>;
+function MeasuredOrgChart({ agents, departments, positions, selectedId, onSelect }: {
+  agents: Agent[]; departments: Department[]; positions: Position[];
+  selectedId?: string; onSelect: (agent: Agent) => void;
 }) {
-  const nextLineage = new Set(lineage).add(agent.id);
-  const children = agents.filter((item) => item.bossId === agent.id && !nextLineage.has(item.id));
-  const department = departments.find((item) => item.id === agent.departmentId);
-  const position = positions.find((item) => item.id === agent.positionId);
-  const assignment = `${position?.name ?? 'No position'}${department ? ` / ${department.name}` : ''}`;
-  return <div className={`company-o-node${children.length ? ' has-children' : ''}`}>
-    <button type="button" className={`company-o-card ${selectedId === agent.id ? 'active' : ''}`} onClick={() => onSelect(agent)}>
-      <span className="company-o-copy">
-        <span className={`org-agent-dot ${agentStatus(agent)}`} />
-        <span className="company-o-copy-text">
-          <b>{agent.name}</b>
-          <small>{assignment}</small>
-          <small>{agent.adapterType ?? 'hermes-ssh'} | {agentStatusLabel(agent)}</small>
-        </span>
-      </span>
-    </button>
-    {children.length > 0 && <div className="company-o-children">
-      {children.map((child) => <OChartNode key={child.id} agent={child} agents={agents} departments={departments} positions={positions} selectedId={selectedId} onSelect={onSelect} lineage={nextLineage} />)}
-    </div>}
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const cardRefs = useRef(new Map<string, HTMLButtonElement>());
+  const [cardWidth, setCardWidth] = useState(264);
+  const [sizes, setSizes] = useState<Record<string, { width: number; height: number }>>({});
+  const layout = useMemo(() => layoutOrgChart({ departments, nodes: agents.map(agent => ({
+    id: agent.id, name: agent.name, bossId: agent.bossId, departmentId: agent.departmentId,
+    rank: positions.find(position => position.id === agent.positionId)?.rank ?? null,
+    width: sizes[agent.id]?.width ?? cardWidth, height: sizes[agent.id]?.height ?? 128,
+  })) }), [agents, departments, positions, sizes, cardWidth]);
+
+  useLayoutEffect(() => {
+    let frame = 0, disposed = false;
+    const measure = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (disposed) return;
+        if (scrollRef.current) setCardWidth(Math.max(220, Math.min(264, Math.floor(scrollRef.current.clientWidth - 48))));
+        const next: Record<string, { width: number; height: number }> = {};
+        for (const [id, element] of cardRefs.current) {
+          const bounds = element.getBoundingClientRect(); next[id] = { width: bounds.width, height: bounds.height };
+        }
+        setSizes(previous => Object.keys(previous).length === Object.keys(next).length && Object.entries(next).every(([id, value]) => previous[id] && Math.abs(previous[id].width-value.width)<.1 && Math.abs(previous[id].height-value.height)<.1) ? previous : next);
+      });
+    };
+    const observer = new ResizeObserver(measure);
+    if (scrollRef.current) observer.observe(scrollRef.current);
+    for (const card of cardRefs.current.values()) observer.observe(card);
+    void document.fonts.ready.then(measure);
+    document.fonts.addEventListener('loadingdone', measure);
+    measure();
+    return () => { disposed = true; cancelAnimationFrame(frame); observer.disconnect(); document.fonts.removeEventListener('loadingdone', measure); };
+  }, [agents, cardWidth]);
+
+  return <div className="company-o-scroll" ref={scrollRef} role="region" tabIndex={0} aria-label="Company organization chart. Scroll to explore all ranks and departments.">
+    <div className="company-o-canvas" style={{ width: layout.width, height: layout.height }}>
+      {layout.groups.map(group => <div key={group.id} className="company-o-group" data-org-group={group.id} data-members={JSON.stringify(group.memberIds)} style={{ left: group.x, top: group.y, width: group.width, height: group.height }}><h3>{group.name}</h3></div>)}
+      <svg className="company-o-edges" width={layout.width} height={layout.height} aria-hidden="true">
+        <defs><marker id="org-report-arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 6 4 L 0 8" fill="none" stroke="currentColor" strokeWidth="1.5" /></marker></defs>
+        {layout.edges.map(edge => <g key={edge.id}>
+          <path d={edge.path} fill="none" stroke="var(--card)" strokeWidth="6" />
+          <path data-org-edge={edge.id} data-source={edge.sourceId} data-target={edge.targetId} d={edge.path} fill="none" stroke="currentColor" strokeWidth={edge.strokeWidth} markerEnd="url(#org-report-arrow)" />
+        </g>)}
+      </svg>
+      {layout.nodes.map(node => {
+        const agent = agents.find(a => a.id === node.id)!;
+        const position = positions.find(p => p.id === agent.positionId);
+        const manager = agents.find(a => a.id === agent.bossId);
+        return <button key={node.id} ref={element => { if (element) cardRefs.current.set(node.id, element); else cardRefs.current.delete(node.id); }} type="button" className={`company-o-card ${selectedId === node.id ? 'active' : ''}`} data-org-agent={node.id} data-rank={node.rank ?? ''} aria-pressed={selectedId === node.id} style={{ left: node.x, top: node.y, width: cardWidth }} onClick={() => onSelect(agent)}>
+          <span className="company-o-copy"><span className={`org-agent-dot ${agentStatus(agent)}`} /><span className="company-o-copy-text">
+            <b>{agent.name}</b>
+            <small>{position?.name ?? 'No position'} · {node.rank == null ? 'Unassigned rank' : `Rank ${node.rank}`}</small>
+            <small>Reports to: {manager?.name ?? (agent.bossId ? 'unavailable manager' : 'top-level')}</small>
+            {node.relationshipIssue && <small className="company-o-warning">{node.relationshipIssue}</small>}
+            <small>{agent.adapterType ?? 'hermes-ssh'} · {agentStatusLabel(agent)}</small>
+          </span></span>
+        </button>;
+      })}
+    </div>
   </div>;
 }
-
 export function CompanyOChartPage() {
   const { t } = useLocale();
   const queryClient = useQueryClient();
@@ -113,11 +147,6 @@ export function CompanyOChartPage() {
   const companyDepartments = useMemo(() => departments.filter((department) => department.companyId === companyId), [departments, companyId]);
   const companyPositions = useMemo(() => positions.filter((position) => position.companyId === companyId), [positions, companyId]);
   const companyAgents = useMemo(() => agents.filter((agent) => agent.companyId === companyId), [agents, companyId]);
-  const companyAgentIds = useMemo(() => new Set(companyAgents.map((agent) => agent.id)), [companyAgents]);
-  const roots = useMemo(() => {
-    const rootRows = companyAgents.filter((agent) => !agent.bossId || !companyAgentIds.has(agent.bossId));
-    return rootRows.length ? rootRows : companyAgents;
-  }, [companyAgents, companyAgentIds]);
   const selectedAgent = companyAgents.find((agent) => agent.id === selectedAgentId) ?? null;
   const selectedDepartment = selectedAgent ? companyDepartments.find((department) => department.id === selectedAgent.departmentId) : null;
   const selectedPosition = selectedAgent ? companyPositions.find((position) => position.id === selectedAgent.positionId) : null;
@@ -207,9 +236,8 @@ export function CompanyOChartPage() {
         <div><h2><Network size={18} /> {selectedCompany?.name ?? 'Company'} O-Chart</h2><span>{companyAgents.length} agents / {companyDepartments.length} departments</span></div>
         <Building2 size={18} />
       </div>
-      <div className="company-o-scroll" aria-label="Company organization chart">
-        {roots.length > 0 ? roots.map((agent) => <OChartNode key={agent.id} agent={agent} agents={companyAgents} departments={companyDepartments} positions={companyPositions} selectedId={selectedAgent?.id} onSelect={(next) => setSelectedAgentId(next.id)} />) : <div className="chat-empty-state"><Users size={28} /><b>No agents in this company</b><span>Create agents first, then assign reporting lines in Departments.</span></div>}
-      </div>
+      <p className="company-o-legend">Smaller Rank appears higher. Arrows run from each manager's bottom to each report's top. Scroll inside the chart to explore.</p>
+      {companyAgents.length ? <MeasuredOrgChart agents={companyAgents} departments={companyDepartments} positions={companyPositions} selectedId={selectedAgent?.id} onSelect={next => setSelectedAgentId(next.id)} /> : <div className="chat-empty-state"><Users size={28} /><b>No agents in this company</b><span>Create agents first, then assign reporting lines in Departments.</span></div>}
     </section>
 
     {selectedAgent && agentDraft && <section className="card section-card company-o-details">
