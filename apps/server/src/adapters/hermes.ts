@@ -151,6 +151,7 @@ ${task.body}
 
 === Native Reporting Instructions ===
 Return one structured megacorps-report JSON directly in your final response. This native response is the primary and sufficient reporting channel. No HTTP request is needed to report progress, delegation, or results. MegaCorps records the response and evidence, validates assignments, and applies review, approval, and merge gates. A completed report does not bypass those gates.
+The notation report.children means the top-level "children" key beside kind/status/summary in that JSON; the same applies to delegations, workProducts, notes and request. Do not add another "report" wrapper to your native response. The optional HTTP webhook body's "report" envelope is a separate API format.
 
 Completed work example:
 \`\`\`json

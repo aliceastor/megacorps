@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { agentReportSchema } from '@megacorps/shared';
-import { agents, companies, departments, positions, kanbanCards, taskRuns, cardComments, workProducts } from './db/schema.ts';
+import { agents, companies, departments, positions, kanbanCards, taskRuns, cardComments, workProducts, approvals, projects } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
-import { dispatchCard, runMessageDelegation, buildReviewPrompt, dispatchInternals } from './dispatch.ts';
+import { dispatchCard, runMessageDelegation, buildReviewPrompt, dispatchInternals, childrenFromOutput, processChildSplits } from './dispatch.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { buildAgentPrompt, type TaskContext } from './adapters/hermes.ts';
 import { extractAgentReport } from './agent-report.ts';
@@ -104,4 +104,83 @@ test('native prompt examples pass the real report schema and extraction parser',
   }
   assert.match(prompt, /verdict approved \| revision_requested \| escalate/);
   assert.match(prompt, /does not authorize a denied task action or remove a real permission blocker/);
+  assert.match(prompt, /report\.children means the top-level "children" key/);
+  assert.match(prompt, /Do not add another "report" wrapper/);
+});
+
+test('actual Boss dispatch consumes observed nested children and waits without an empty-progress requeue', async t => {
+  const f = fixture(t, 'boss');
+  const output = JSON.stringify({ kind: 'megacorps-report', version: 1, status: 'progress', summary: 'Delegate the guide.', notes: ['The assigned head will return the evidence.'], report: { children: [{ title: 'Write the guide', assigneeSlug: f.target.slug, body: '## Acceptance\n- Deliver a complete, verified guide for the intended audience.' }] } });
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output, sessionId: 'synthetic-envelope', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
+  await dispatchCard(f.card.id, 'manual', { taskRunId: f.run.id });
+  const children = f.state.rows(kanbanCards).filter(row => row.parentCardId === f.card.id);
+  assert.equal(children.length, 1, 'The real observed envelope must not silently discard its child.');
+  assert.equal(children[0]!.assigneeId, f.target.id);
+  assert.equal(f.card.rollupStatus, 'waiting_on_children');
+  assert.equal(f.state.rows(taskRuns).filter(row => row.cardId === f.card.id && row.status === 'queued').length, 0);
+  assert.ok(f.state.rows(cardComments).some(row => row.action === 'comment' && row.body === 'The assigned head will return the evidence.'));
+  const repeated = await processChildSplits(f.card, f.actor, childrenFromOutput(output), f.run.id);
+  assert.deepEqual(repeated.created, []);
+  assert.match(repeated.errors.join('\n'), /split_authority_changed/, 'A repeated result after lease settlement must not regain split authority.');
+  assert.equal(f.state.rows(kanbanCards).filter(row => row.parentCardId === f.card.id).length, 1);
+});
+
+test('duplicate normalized child delivery during the same active dispatch creates work only once', async t => {
+  const f = fixture(t, 'head');
+  const output = JSON.stringify({ kind: 'megacorps-report', status: 'progress', summary: 'Delegate the deliverable.', report: { children: [{ title: 'Write guide', assigneeSlug: f.target.slug, body: '## Acceptance\n- Deliver a complete verified guide for the intended audience.' }] } });
+  let firstIds: string[] = [];
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => {
+    // Two arrivals of the same fixed report while the original lease is live:
+    // existing split ingestion followed by the native adapter final response.
+    const first = await processChildSplits(f.card, f.actor, childrenFromOutput(output), f.run.id);
+    assert.deepEqual(first.errors, []); assert.equal(first.created.length, 1);
+    firstIds = first.created;
+    return { success: true, output, sessionId: 'synthetic-duplicate-envelope', tokensUsed: 0, costUsd: 0, durationSeconds: 1 };
+  });
+  await dispatchCard(f.card.id, 'manual', { taskRunId: f.run.id });
+  assert.deepEqual(f.state.rows(kanbanCards).filter(row => row.parentCardId === f.card.id).map(row => row.id), firstIds);
+  assert.equal(f.state.rows(cardComments).filter(row => row.action === 'split_opened').length, 1);
+  assert.equal(f.card.rollupStatus, 'waiting_on_children');
+});
+
+for (const invalid of ['foreign_company', 'outside_hierarchy', 'invalid_body', 'recursive', 'conflict'] as const) test(`actual nested-child dispatch preserves ${invalid} rejection`, async t => {
+  const f = fixture(t, 'boss');
+  const child = { title: 'Write guide', assigneeSlug: f.target.slug, body: '## Acceptance\n- Deliver a complete verified guide for its intended audience.' };
+  const report: any = { kind: 'megacorps-report', status: 'progress', summary: 'Delegate the guide.', report: { children: [child] } };
+  if (invalid === 'foreign_company') {
+    child.assigneeSlug = 'foreign';
+    f.state.rows(agents).push({ ...f.target, id: randomUUID(), companyId: randomUUID(), slug: 'foreign' });
+  }
+  if (invalid === 'outside_hierarchy') child.assigneeSlug = 'worker';
+  if (invalid === 'invalid_body') child.body = 'too short';
+  if (invalid === 'recursive') report.report = { report: { children: [child] } };
+  if (invalid === 'conflict') report.report.status = 'failed';
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: JSON.stringify(report), sessionId: 'synthetic-invalid-envelope', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
+  await dispatchCard(f.card.id, 'manual', { taskRunId: f.run.id });
+  assert.equal(f.state.rows(kanbanCards).length, 1);
+  assert.notEqual(f.card.columnStatus, 'done');
+  assert.equal(f.card.protocolRepairState.dispatch?.failures, 1, 'Invalid nested intent must enter existing corrective feedback, not ordinary progress.');
+});
+
+test('wrapped permission stops actual dispatch without child creation or approval', async t => {
+  const f = fixture(t, 'boss');
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'Work result.', report: { request: { kind: 'permission', question: 'Authorize repository access.' }, children: [{ title: 'Write guide', assigneeSlug: f.target.slug, body: '## Acceptance\n- Deliver a verified guide for the intended audience.' }] } }), sessionId: 'synthetic-permission-envelope', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
+  await dispatchCard(f.card.id, 'manual', { taskRunId: f.run.id });
+  assert.equal(f.card.columnStatus, 'blocked');
+  assert.match(f.card.lastError, /agent_permission_blocked/);
+  assert.equal(f.state.rows(kanbanCards).length, 1);
+  assert.equal(f.state.rows(approvals).length, 0);
+});
+
+for (const mergeRequired of [false, true]) test(`wrapped evidence respects ${mergeRequired ? 'merge' : 'review'} completion gate`, async t => {
+  const f = fixture(t, 'worker');
+  if (mergeRequired) {
+    f.card.projectId = randomUUID();
+    f.state.rows(projects).push({ id: f.card.projectId, companyId: f.card.companyId, completionRequiresMerge: true, repoUrl: null });
+  }
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'Deliverable ready for review.', report: { workProducts: [{ type: 'report', title: 'Evidence', url: 'https://example.test/evidence' }] } }), sessionId: 'synthetic-evidence-envelope', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
+  await dispatchCard(f.card.id, 'manual', { taskRunId: f.run.id });
+  assert.equal(f.state.rows(workProducts).length, 1);
+  assert.notEqual(f.card.columnStatus, 'done');
+  if (!mergeRequired) assert.equal(f.card.columnStatus, 'in_review');
 });

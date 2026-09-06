@@ -5,6 +5,29 @@ const DELEGATION_LINE_MAX = 500;
 
 export type AgentReportExtraction = { report: AgentReport } | { error: string };
 
+const DUPLICABLE_ENVELOPE_METADATA = new Set(['kind', 'version', 'status', 'summary']);
+
+/** Repair one unambiguous native envelope, then use the unchanged schema. */
+function normalizeReportEnvelope(value: unknown): { data: unknown } | { error: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.hasOwn(value, 'report')) return { data: value };
+  const outer = value as Record<string, unknown>;
+  const nested = outer.report;
+  const invalid = (reason: string) => ({ error: `report_envelope_invalid: ${reason}. Return one flat megacorps-report with children/delegations/workProducts beside kind/status/summary.` });
+  if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return invalid('report must be a single object');
+  const merged = { ...outer };
+  delete merged.report;
+  for (const [key, field] of Object.entries(nested)) {
+    if (key === 'report') return invalid('recursive report wrappers are not supported');
+    if (!Object.hasOwn(agentReportSchema.shape, key)) return invalid('unknown nested report field');
+    if (Object.hasOwn(outer, key)) {
+      // No array/object combining or decision precedence. Only exactly equal
+      // scalar metadata is redundant rather than an ambiguous second payload.
+      if (!DUPLICABLE_ENVELOPE_METADATA.has(key) || !['string', 'number'].includes(typeof field) || outer[key] !== field) return invalid(`duplicate or conflicting ${key}`);
+    } else merged[key] = field;
+  }
+  return { data: merged };
+}
+
 function balancedJsonCandidates(text: string, marker: string): string[] {
   // Collect top-level {...} spans that contain the marker. A simple depth
   // counter is enough here: the JSON is machine-written and the marker check
@@ -67,7 +90,9 @@ export function extractAgentReport(output: string | null | undefined): AgentRepo
   let parsed: unknown;
   try { parsed = JSON.parse(candidate); }
   catch { return { error: 'report_json_parse_failed' }; }
-  const result = agentReportSchema.safeParse(parsed);
+  const normalized = normalizeReportEnvelope(parsed);
+  if ('error' in normalized) return normalized;
+  const result = agentReportSchema.safeParse(normalized.data);
   if (result.success) return { report: result.data };
   return { error: `report_schema_invalid: ${result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ').slice(0, 500)}` };
 }
