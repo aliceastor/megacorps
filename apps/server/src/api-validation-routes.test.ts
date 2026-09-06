@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { users, companies, companyMemberships, kanbanCards, chatSessions, apiEvents } from './db/schema.ts';
+import { users, companies, companyMemberships, kanbanCards, chatSessions, apiEvents, projects } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { signSession } from './auth.ts';
 
@@ -21,7 +21,7 @@ test('authenticated startup rejects malformed read inputs before SQL', async t =
   const { buildServer } = await import('./index.ts');
   const app = await buildServer(); t.after(() => app.close());
   const headers = { cookie: `session=${await signSession(user)}` };
-  for (const suffix of ['actions', 'assignment-history']) {
+  for (const suffix of ['actions', 'assignment-history', 'merge-intents']) {
     for (const authenticated of [false, true]) await t.test(`${suffix}: malformed path ${authenticated ? 'authenticated' : 'anonymous'}`, async () => {
       const response = await app.inject({ url: `/api/cards/not-a-uuid/${suffix}`, ...(authenticated ? { headers } : {}) });
       assert.equal(response.statusCode, authenticated ? 400 : 401, response.body);
@@ -34,6 +34,23 @@ test('authenticated startup rejects malformed read inputs before SQL', async t =
       const response = await app.inject({ url: `/api/cards/${id}/${suffix}`, headers });
       assert.equal(response.statusCode, status, response.body);
       if (status === 200) assert.deepEqual(response.json(), []);
+    });
+  }
+  const project = { id: randomUUID(), companyId: company.id, name: 'Visible project' };
+  const foreignProject = { ...project, id: randomUUID(), companyId: foreign.id };
+  const deletedProject = { ...project, id: randomUUID(), deletedAt: new Date() };
+  state.rows(projects).push(project, foreignProject, deletedProject);
+  let providerCalls = 0;
+  t.mock.method(globalThis, 'fetch', async () => { providerCalls++; throw new Error('unexpected_provider_call'); });
+  for (const [kind, suffix, visible, hidden, deleted] of [['projects', 'merge-readiness', project, foreignProject, deletedProject], ['cards', 'merge-intents', card, foreignCard, deletedCard]] as const) {
+    for (const id of ['not-a-uuid', randomUUID(), visible.id]) await t.test(`${suffix}: anonymous ${id}`, async () => {
+      assert.equal((await app.inject({ url: `/api/${kind}/${id}/${suffix}` })).statusCode, 401);
+    });
+    for (const [id, status] of [['not-a-uuid', 400], [randomUUID(), 404], [hidden.id, 403], [deleted.id, 404], [visible.id, 200]] as const) await t.test(`${suffix}: scoped ${status}`, async () => {
+      const response = await app.inject({ url: `/api/${kind}/${id}/${suffix}`, headers });
+      assert.equal(response.statusCode, status, response.body);
+      if (status === 400) assert.deepEqual(response.json().issues[0].path, ['id']);
+      assert.equal(providerCalls, 0);
     });
   }
   const routes = ['/api/search?q=synthetic&limit=', '/api/dashboard/timeseries?days=', '/api/approvals?limit=', '/api/notifications?limit=', '/api/chat/sessions?limit=', `/api/chat/sessions/${session.id}/messages?limit=`, '/api/cards?limit=', `/api/cards/${card.id}/actions?limit=`, `/api/cards/${card.id}/assignment-history?limit=`, '/api/cards?offset='];

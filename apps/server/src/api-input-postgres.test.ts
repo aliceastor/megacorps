@@ -20,7 +20,7 @@ test('PostgreSQL authenticated read contracts include production hooks and usefu
   const headers = { cookie: `session=${await signSession(user as any)}` };
   const call = (url: string) => app.inject({ url, headers });
   const [foreignCard] = await sql`INSERT INTO kanban_cards(company_id,title,body,column_status) VALUES(${foreign!.id},'Foreign goal','Out of scope','todo') RETURNING *`;
-  for (const suffix of ['actions', 'assignment-history']) {
+  for (const suffix of ['actions', 'assignment-history', 'merge-intents']) {
     const malformed = `/api/cards/not-a-uuid/${suffix}`;
     assert.equal((await app.inject({ url: malformed })).statusCode, 401);
     const invalid = await call(malformed);
@@ -32,6 +32,22 @@ test('PostgreSQL authenticated read contracts include production hooks and usefu
     const visible = await call(`/api/cards/${card!.id}/${suffix}`);
     assert.equal(visible.statusCode, 200, visible.body);
     assert.deepEqual(visible.json(), []);
+  }
+  const [project] = await sql`INSERT INTO projects(company_id,name) VALUES(${company!.id},'Managed read fixture') RETURNING *`;
+  const [foreignProject] = await sql`INSERT INTO projects(company_id,name) VALUES(${foreign!.id},'Foreign managed read') RETURNING *`;
+  const [deletedProject] = await sql`INSERT INTO projects(company_id,name,deleted_at) VALUES(${company!.id},'Deleted managed read',now()) RETURNING *`;
+  const [deletedCard] = await sql`INSERT INTO kanban_cards(company_id,title,deleted_at) VALUES(${company!.id},'Deleted managed read',now()) RETURNING *`;
+  let providerCalls = 0;
+  t.mock.method(globalThis, 'fetch', async () => { providerCalls++; throw new Error('unexpected_provider_call'); });
+  for (const [kind, suffix, visible, hidden, deleted] of [['projects', 'merge-readiness', project!, foreignProject!, deletedProject!], ['cards', 'merge-intents', card!, foreignCard!, deletedCard!]] as const) {
+    for (const id of ['not-a-uuid', randomUUID(), visible.id]) await t.test(`${suffix} anonymous ${id}`, async () => {
+      assert.equal((await app.inject({ url: `/api/${kind}/${id}/${suffix}` })).statusCode, 401);
+    });
+    for (const [id, status] of [['not-a-uuid', 400], [randomUUID(), 404], [hidden.id, 403], [deleted.id, 404], [visible.id, 200]] as const) await t.test(`${suffix} scoped ${status}`, async () => {
+      const response = await call(`/api/${kind}/${id}/${suffix}`); assert.equal(response.statusCode, status, response.body);
+      if (status === 400) assert.deepEqual(response.json().issues[0].path, ['id']);
+      assert.equal(providerCalls, 0);
+    });
   }
   for (const url of ['/api/search?q=Synthetic&limit=NaN', '/api/dashboard/timeseries?days=NaN', '/api/chat/sessions?agentId=bad', '/api/chat/sessions/bad/messages', `/api/chat/sessions/${session!.id}/messages?limit=1.5`, '/api/approvals?limit=NaN', '/api/notifications?limit=Infinity', '/api/cards?offset=-1', `/api/cards/${card!.id}/actions?limit=NaN`, `/api/cards/${card!.id}/assignment-history?limit=1.5`, '/api/usage-summary?period=2026-13', '/api/prompt-logs/bad', '/api/system-logs/bad', '/api/task-runs?agentId=bad', '/api/cron/runs/bad']) {
     const response = await call(url); assert.equal(response.statusCode, 400, `${url}: ${response.body}`); assert.equal(response.json().error, 'validation_failed');
