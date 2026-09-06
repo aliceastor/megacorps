@@ -5419,6 +5419,16 @@ button.agent-node-card {
   align-items: center;
 }
 
+.heartbeat-row > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.heartbeat-row > .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .knowledge-page .data-grid {
   grid-template-columns: minmax(360px, 0.95fr) minmax(320px, 1.05fr);
 }
