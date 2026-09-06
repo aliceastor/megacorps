@@ -1,5 +1,5 @@
 import { agentReportSchema, reportedWorkProductSchema, type AgentReport, type ReportedWorkProduct } from '@megacorps/shared';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { extractAgentReport } from './agent-report.ts';
 import { db } from './db/client.ts';
 import { agents, approvals, cardComments, heartbeatRuns, kanbanCards, taskLogs, taskRuns, workProducts } from './db/schema.ts';
@@ -130,6 +130,7 @@ export async function parkPermissionBlockedResult(original: typeof kanbanCards.$
     }
     return card;
   });
+  if (preservedHumanGate) await settleOriginalHeartbeat(original, agentId, heartbeatRunId, taskRunId, 'failed');
   if (!preservedHumanGate) await db.insert(cardComments).values({ cardId, agentId, authorType: 'agent', action: 'agent_blocked', body: reason });
   await db.insert(taskLogs).values({ cardId, agentId, type: 'dispatch', status: 'failed', message: reason, output });
   if (!updated) throw new Error('card_update_failed');
@@ -138,10 +139,11 @@ export async function parkPermissionBlockedResult(original: typeof kanbanCards.$
 }
 
 /** A late attempt may settle its heartbeat, never another attempt's capacity. */
-export async function settleOriginalHeartbeat(card: typeof kanbanCards.$inferSelect, agentId: string, heartbeatRunId: string | null | undefined, taskRunId?: string | null, status = 'success') {
+export async function settleOriginalHeartbeat(card: typeof kanbanCards.$inferSelect, agentId: string | null, heartbeatRunId: string | null | undefined, taskRunId?: string | null, status = 'success') {
   await db.transaction(async tx => {
     const [current] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).for('update').limit(1);
-    if (heartbeatRunId) await tx.update(heartbeatRuns).set({ status, completedAt: new Date() }).where(and(eq(heartbeatRuns.id, heartbeatRunId), eq(heartbeatRuns.cardId, card.id), eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, 'running')));
+    if (heartbeatRunId) await tx.update(heartbeatRuns).set({ status, completedAt: new Date() }).where(and(eq(heartbeatRuns.id, heartbeatRunId), eq(heartbeatRuns.cardId, card.id), agentId ? eq(heartbeatRuns.agentId, agentId) : isNull(heartbeatRuns.agentId), eq(heartbeatRuns.status, 'running')));
+    if (!agentId) return;
     const heartbeats = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, 'running')));
     const runs = await tx.select().from(taskRuns).where(and(eq(taskRuns.agentId, agentId), eq(taskRuns.status, 'running')));
     const anotherLock = current?.executionLockId && ![card.executionLockId, heartbeatRunId, taskRunId].includes(current.executionLockId);

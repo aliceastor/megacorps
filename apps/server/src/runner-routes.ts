@@ -18,7 +18,7 @@ import { runRetryReady } from './run-retry.ts';
 import { generateRunnerApiKey, hashRunnerApiKey, requireAgentSessionAuth, requireRunnerAuth } from './runner-auth.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
 import { cascadeParentStatus, completeTaskRun, completionBlockedByChildren, completionStatusForQualityGate, createPendingApproval, enqueueTaskRun } from './dispatch.ts';
-import { agentResultExecutionLog, normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts } from './agent-results.ts';
+import { agentResultExecutionLog, normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts, settleOriginalHeartbeat } from './agent-results.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { applyMergeGatePlan, mergeCompletionStatus, planMergeGate } from './merge-gate.ts';
 import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
@@ -140,6 +140,7 @@ async function createRunnerTaskCompletion(input: {
   }
   output = agentResultExecutionLog(output, normalized);
   if (!(await persistAgentWorkProducts(card, runAgentId, input.run.id, normalized.workProducts, null, normalized.report))) {
+    await settleOriginalHeartbeat(card, runAgentId, input.run.heartbeatRunId, input.run.id);
     await completeTaskRun(input.run.id, { status: 'success', preserveCard: true, output });
     return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
   }

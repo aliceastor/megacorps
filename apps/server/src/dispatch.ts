@@ -3789,7 +3789,11 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     if (normalizedReview.outcome === 'input_required' || normalizedReview.outcome === 'invalid') {
       return sendAgentFeedbackAndRequeue({ card, agent: reviewer, kind: 'review', message: normalizedReview.reason ?? normalizedReview.question ?? REVIEW_VERDICT_MISSING_MESSAGE, runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
     }
-    if (!(await persistAgentWorkProducts(card, reviewer.id, options.taskRunId ?? null, normalizedReview.workProducts, null, normalizedReview.report))) { await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: result.output }); return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!; }
+    if (!(await persistAgentWorkProducts(card, reviewer.id, options.taskRunId ?? null, normalizedReview.workProducts, null, normalizedReview.report))) {
+      await settleOriginalHeartbeat(card, reviewer.id, run.id, options.taskRunId);
+      await completeTaskRun(options.taskRunId, { status: 'success', preserveCard: true, output: result.output });
+      return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
+    }
     await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
     // Protocol help is guidance for the original actor, not artifact review.
     // Validate it before asking for an ordinary product verdict.

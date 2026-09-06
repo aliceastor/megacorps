@@ -150,6 +150,65 @@ test('PostgreSQL whole-branch completion authority and review provenance', { ski
     if (response) assert.ok(response.statusCode < 500, response.body);
   });
 
+  for (const path of ['review_products', 'direct_permission', 'review_permission', 'runner_products', 'runner_permission'] as const) for (const change of ['reassigned', 'new_heartbeat', 'cancelled'] as const) await t.test(`superseded ${path} settles original heartbeat after ${change} committed at helper entry`, async ctx => {
+    const f = await fixture(); const reviewing = path.startsWith('review'), runner = path.startsWith('runner'), permission = path.endsWith('permission');
+    if (reviewing) {
+      await db.update(s.kanbanCards).set({ columnStatus: 'in_review', assigneeId: f.head.id, reviewerId: f.boss.id }).where(eq(s.kanbanCards.id, f.card.id));
+      await db.update(s.taskRuns).set({ kind: 'review' }).where(eq(s.taskRuns.id, f.run.id));
+    }
+    if (runner) {
+      const [heartbeat] = await db.insert(s.heartbeatRuns).values({ companyId: f.company.id, cardId: f.card.id, agentId: f.boss.id, source: 'manual', status: 'running' }).returning();
+      await db.update(s.taskRuns).set({ heartbeatRunId: heartbeat!.id }).where(eq(s.taskRuns.id, f.run.id));
+      await db.update(s.kanbanCards).set({ executionLockId: f.run.id, activeHeartbeatRunId: heartbeat!.id }).where(eq(s.kanbanCards.id, f.card.id));
+      await db.update(s.agents).set({ isBusy: true }).where(eq(s.agents.id, f.boss.id));
+    }
+    const boundary = permission ? 'parkPermissionBlockedResult' : 'persistAgentWorkProducts';
+    const newerHeartbeat = randomUUID(); let reached = false, originalHeartbeat = '', winning: any;
+    const transaction = db.transaction.bind(db);
+    // The selected production helper has been entered, but owns no lock yet.
+    // Commit from another PG connection before admitting its transaction.
+    ctx.mock.method(db, 'transaction', (async (callback: any, ...args: any[]) => {
+      if (!reached && new Error().stack?.includes(boundary)) {
+        reached = true;
+        const [old] = await sql`SELECT id FROM heartbeat_runs WHERE card_id=${f.card.id} AND agent_id=${f.boss.id} AND status='running'`;
+        assert.ok(old, 'actual handler owns a non-null original heartbeat'); originalHeartbeat = old!.id;
+        await sql.begin(async writer => {
+          if (change === 'reassigned') await writer`UPDATE kanban_cards SET assignee_id=${reviewing ? f.boss.id : f.head.id} WHERE id=${f.card.id}`;
+          if (change === 'cancelled') {
+            await writer`UPDATE kanban_cards SET column_status='cancelled', execution_lock_id=NULL, active_heartbeat_run_id=NULL WHERE id=${f.card.id}`;
+            await writer`UPDATE task_runs SET status='cancelled' WHERE id=${f.run.id}`;
+          }
+          if (change === 'new_heartbeat') {
+            await writer`INSERT INTO heartbeat_runs(id,company_id,card_id,agent_id,source,status) VALUES(${newerHeartbeat},${f.company.id},${f.card.id},${f.boss.id},'manual','running')`;
+            await writer`UPDATE kanban_cards SET execution_lock_id=${newerHeartbeat},active_heartbeat_run_id=${newerHeartbeat} WHERE id=${f.card.id}`;
+          }
+        });
+        winning = (await sql`SELECT column_status,assignee_id,reviewer_id,execution_lock_id,active_heartbeat_run_id FROM kanban_cards WHERE id=${f.card.id}`)[0];
+      }
+      return transaction(callback, ...args);
+    }) as typeof db.transaction);
+    const report = answer(permission ? { status: 'input_required', request: { kind: 'permission', question: 'Allow repository read?' } } : { verdict: 'approved', workProducts: [{ type: 'report', title: 'Reviewed evidence' }] });
+    ctx.mock.method(getAdapter('webhook'), 'dispatch', async () => result(report));
+    if (runner) {
+      const key = `synthetic-round2-${randomUUID()}`;
+      const [machine] = await db.insert(s.machineRunners).values({ companyId: f.company.id, name: 'Round2 runner', slug: 'round2', apiKeyHash: hashRunnerApiKey(key) }).returning();
+      await db.update(s.taskRuns).set({ lockedBy: machine!.id }).where(eq(s.taskRuns.id, f.run.id));
+      const app = Fastify(); ctx.after(() => app.close()); await registerRunnerRoutes(app);
+      const response = await app.inject({ method: 'POST', url: `/api/runner/task-runs/${f.run.id}/complete`, headers: { 'x-megacorps-runner-key': key }, payload: { status: 'success', report } });
+      assert.equal(response.statusCode, 200, response.body);
+    } else if (reviewing) await reviewCard(f.card.id, { taskRunId: f.run.id });
+    else await dispatchCard(f.card.id, 'manual', { taskRunId: f.run.id });
+    assert.ok(reached);
+    assert.deepEqual((await sql`SELECT column_status,assignee_id,reviewer_id,execution_lock_id,active_heartbeat_run_id FROM kanban_cards WHERE id=${f.card.id}`)[0], winning);
+    assert.equal((await db.select().from(s.workProducts).where(eq(s.workProducts.cardId, f.card.id))).length, 0);
+    assert.equal((await db.select().from(s.kanbanCards).where(eq(s.kanbanCards.parentCardId, f.card.id))).length, 0);
+    const [run] = await db.select().from(s.taskRuns).where(eq(s.taskRuns.id, f.run.id)); assert.notEqual(run!.status, 'running');
+    const usage = await db.select().from(s.costEvents).where(eq(s.costEvents.taskRunId, f.run.id)); assert.equal(usage.length, 1); assert.equal(usage[0]!.agentId, f.boss.id);
+    const [old] = await db.select().from(s.heartbeatRuns).where(eq(s.heartbeatRuns.id, originalHeartbeat)); assert.notEqual(old!.status, 'running');
+    assert.equal((await db.select().from(s.agents).where(eq(s.agents.id, f.boss.id)))[0]!.isBusy, change === 'new_heartbeat');
+    if (change === 'new_heartbeat') assert.equal((await db.select().from(s.heartbeatRuns).where(eq(s.heartbeatRuns.id, newerHeartbeat)))[0]!.status, 'running');
+  });
+
   for (const drift of [true, false]) await t.test(`URL-only review binds durable identity before reviewer starts: drift=${drift}`, async ctx => {
     const f = await fixture();
     const [project] = await db.insert(s.projects).values({ companyId: f.company.id, name: 'Review repository', repoUrl: 'https://gitea.test/org/repo', defaultBranch: 'main', completionRequiresMerge: true, autoMergeAfterApproval: false }).returning();

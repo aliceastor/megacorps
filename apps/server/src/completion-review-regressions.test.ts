@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import Fastify from 'fastify';
-import { agents, approvals, cardComments, departments, externalWaits, kanbanCards, machineRunners, projects, taskRuns, workProducts } from './db/schema.ts';
+import { agents, approvals, cardComments, costEvents, departments, externalWaits, heartbeatRuns, kanbanCards, machineRunners, projects, taskRuns, workProducts } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
 import { hashRunnerApiKey } from './runner-auth.ts';
@@ -24,6 +24,50 @@ function fixture(t: TestContext) {
   return { card, actor, run, state, complete };
 }
 const report = (extra: any = {}) => ({ kind: 'megacorps-report', status: 'completed', summary: 'Implemented and verified the requested deliverable.', ...extra });
+
+for (const path of ['review_products', 'direct_permission', 'review_permission', 'runner_products', 'runner_permission'] as const) for (const change of ['reassigned', 'new_heartbeat', 'cancelled'] as const) test(`superseded ${path} settles only its original heartbeat after ${change} at helper entry`, async t => {
+  const { card, actor, run, state, complete } = fixture(t);
+  const reviewing = path.startsWith('review');
+  if (reviewing) { card.columnStatus = 'in_review'; card.reviewerId = actor.id; card.assigneeId = 'implementer'; run.kind = 'review'; }
+  const runner = path.startsWith('runner');
+  if (runner) {
+    run.heartbeatRunId = 'original-heartbeat'; card.executionLockId = run.id; card.activeHeartbeatRunId = run.heartbeatRunId; actor.isBusy = true;
+    state.rows(heartbeatRuns).push({ id: run.heartbeatRunId, cardId: card.id, companyId: card.companyId, agentId: actor.id, status: 'running' });
+  }
+  const permission = path.endsWith('permission');
+  const boundary = permission ? 'parkPermissionBlockedResult' : 'persistAgentWorkProducts';
+  let reached = false, originalHeartbeat: any, winning: any;
+  const transaction = db.transaction.bind(db);
+  t.mock.method(db, 'transaction', (async (callback: any, ...args: any[]) => {
+    if (!reached && new Error().stack?.includes(boundary)) {
+      reached = true;
+      originalHeartbeat = state.rows(heartbeatRuns).find(row => row.agentId === actor.id && row.status === 'running');
+      assert.ok(originalHeartbeat, 'handler must own a real original heartbeat');
+      if (change === 'reassigned') card.assigneeId = 'replacement';
+      if (change === 'cancelled') { card.columnStatus = 'cancelled'; card.executionLockId = null; card.activeHeartbeatRunId = null; run.status = 'cancelled'; }
+      if (change === 'new_heartbeat') {
+        card.executionLockId = 'new-heartbeat'; card.activeHeartbeatRunId = 'new-heartbeat';
+        state.rows(heartbeatRuns).push({ id: 'new-heartbeat', cardId: card.id, companyId: card.companyId, agentId: actor.id, status: 'running' });
+      }
+      winning = structuredClone(card);
+    }
+    return transaction(callback, ...args);
+  }) as typeof db.transaction);
+  const data = report(permission ? { status: 'input_required', request: { kind: 'permission', question: 'Allow repository access?' } } : { verdict: 'approved', workProducts: [{ type: 'report', title: 'Reviewed evidence' }] });
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: JSON.stringify(data), sessionId: 'synthetic-result', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
+  if (runner) { const response = await complete({ report: data }); assert.equal(response.statusCode, 200, response.body); }
+  else if (reviewing) await reviewCard(card.id, { taskRunId: run.id });
+  else await dispatchCard(card.id, 'manual', { taskRunId: run.id });
+  assert.equal(reached, true); assert.deepEqual(card, winning);
+  assert.equal(state.rows(workProducts).length, 0);
+  assert.equal(state.rows(kanbanCards).filter(row => row.parentCardId === card.id).length, 0);
+  assert.notEqual(run.status, 'running');
+  const accounting = state.rows(costEvents).filter(row => row.taskRunId === run.id);
+  assert.equal(accounting.length, 1); assert.equal(accounting[0]!.agentId, actor.id);
+  assert.notEqual(originalHeartbeat.status, 'running', 'returned attempt must settle its original heartbeat');
+  assert.equal(actor.isBusy, change === 'new_heartbeat', 'release capacity only when no newer work owns it');
+  if (change === 'new_heartbeat') assert.equal(state.rows(heartbeatRuns).find(row => row.id === 'new-heartbeat')!.status, 'running');
+});
 
 test('runner legacy rejection cannot become Done', async (t) => {
   const { card, run, complete } = fixture(t); card.columnStatus = 'in_review'; run.kind = 'review';
