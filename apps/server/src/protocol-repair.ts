@@ -108,16 +108,23 @@ export async function recordProtocolFailure(input: { card: Card; actor: Agent; k
   });
 }
 
-export async function resetProtocolRepair(cardId: string, kind: ProtocolKind, result: AgentResult, adapterSucceeded: boolean, expectedCard?: Card, taskRunId?: string | null): Promise<void> {
+/** Values for an accepted result; callers can include the reset in their guarded completion write. */
+export function protocolRepairResetState(card: Pick<Card, 'protocolRepairState'>, kind: ProtocolKind, result: AgentResult, adapterSucceeded: boolean, actorId?: string | null): ProtocolRepairState | undefined {
   const summary = result.report?.summary.trim() ?? '';
   const concrete = result.workProducts.length > 0 || (summary.length >= 24 && !/^(?:still\s+)?(?:working|processing|thinking|starting|will\s+|going\s+to\s+)/i.test(summary));
   const meaningful = adapterSucceeded && ((result.source === 'report' && ['progress', 'completed'].includes(result.outcome) && concrete) || (result.source === 'prose' && result.verdictExplicit && !result.verdictError));
-  if (!meaningful) return;
+  const old = card.protocolRepairState?.[kind];
+  if (!meaningful || !old || old.failures === 0 || old.mode === 'escalated' || (actorId !== undefined && actorId !== old.actorId)) return undefined;
+  return { ...card.protocolRepairState, [kind]: { ...old, failures: 0, mode: 'clear', sessionId: null } };
+}
+
+export async function resetProtocolRepair(cardId: string, kind: ProtocolKind, result: AgentResult, adapterSucceeded: boolean, expectedCard?: Card, taskRunId?: string | null): Promise<void> {
   await db.transaction(async (tx) => {
     const [card] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, cardId)).for('update').limit(1);
-    if (taskRunId) await tx.select({ id: taskRuns.id }).from(taskRuns).where(eq(taskRuns.id, taskRunId)).for('update').limit(1);
-    const old = card?.protocolRepairState?.[kind];
-    if (!card || !old || old.failures === 0 || old.mode === 'escalated' || ['done', 'cancelled', 'waiting_on_client'].includes(card.columnStatus ?? '')) return;
-    await tx.update(kanbanCards).set({ protocolRepairState: { ...card.protocolRepairState, [kind]: { ...old, failures: 0, mode: 'clear', sessionId: null } }, updatedAt: new Date() }).where(completionCondition(expectedCard ?? card, taskRunId));
+    const [run] = taskRunId ? await tx.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).for('update').limit(1) : [];
+    if (!card || ['done', 'cancelled', 'waiting_on_client'].includes(card.columnStatus ?? '')) return;
+    const protocolRepairState = protocolRepairResetState(card, kind, result, adapterSucceeded, run?.agentId);
+    if (!protocolRepairState) return;
+    await tx.update(kanbanCards).set({ protocolRepairState, updatedAt: new Date() }).where(completionCondition(expectedCard ?? card, taskRunId));
   });
 }

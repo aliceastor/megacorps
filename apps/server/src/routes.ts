@@ -34,7 +34,7 @@ import { delegationLineFromReportItem } from './agent-report.ts';
 import { agentResultExecutionLog, normalizeAgentResult, persistAgentWorkProducts } from './agent-results.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
-import { finishProtocolHelp, protocolHelpOrigin, resetProtocolRepair } from './protocol-repair.ts';
+import { finishProtocolHelp, protocolHelpOrigin, protocolRepairResetState } from './protocol-repair.ts';
 import { completionCondition, guardedCompletionUpdate } from './completion-guard.ts';
 import { inspectManagedProject, optInManagedBinding } from './managed-project-policy.ts';
 import { mergeIntents } from './db/schema.ts';
@@ -3136,7 +3136,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (protocolHelp.continueKind) await enqueueTaskRun(card.id, protocolHelp.continueKind, 'queue');
       return { ok: true, cardId: card.id, taskRunId, newStatus: protocolHelp.card.columnStatus };
     }
-    if (!webhookTaskRun || ['dispatch', 'review'].includes(webhookTaskRun.kind)) await resetProtocolRepair(card.id, webhookTaskRun?.kind === 'review' ? 'review' : 'dispatch', normalizedResult, true, card, taskRunId);
     const webhookNotes = actorAgent && !blockedResult ? reportNotesFromOutput(executionLog, body.report ?? null) : [];
     if (actorAgent && webhookNotes.length) {
       try { await processReportNotes(card, actorAgent, webhookNotes); } catch (error) { app.log.warn({ error, cardId: card.id }, 'report note processing failed'); }
@@ -3240,7 +3239,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const nextStatus = childBlock ? 'in_progress' : mergePlan ? mergeCompletionStatus(mergePlan) : requestedNextStatus;
     const completesRun = delegatedViaWebhook || delegationFailed || Boolean(childBlock) || nextStatus !== 'in_progress';
     const webhookAction = childBlock ? 'webhook.waiting_on_children' : delegatedViaWebhook ? 'webhook.message_delegated' : delegationFailed ? 'webhook.delegation_failed' : `webhook.task_${nextStatus}`;
+    // Progress callbacks may arrive before a malformed adapter tail. Only an
+    // accepted run-completing callback can clear its actor/kind repair budget,
+    // atomically with the guarded card update; rejected or stale results cannot.
+    const protocolRepairState = completesRun && !delegationFailed && !reviewRevisionRequested && (!webhookTaskRun || ['dispatch', 'review'].includes(webhookTaskRun.kind))
+      ? protocolRepairResetState(card, webhookTaskRun?.kind === 'review' ? 'review' : 'dispatch', normalizedResult, true, actorAgentId)
+      : undefined;
     const updatedCard = await guardedCompletionUpdate(card, {
+      protocolRepairState,
       columnStatus: nextStatus,
       rollupStatus: childBlock ? 'waiting_on_children' : nextStatus === 'done' ? 'done' : undefined,
       executionLog,
