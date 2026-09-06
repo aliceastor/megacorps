@@ -81,4 +81,20 @@ test('PostgreSQL 16 completion transactions', { skip: !process.env.TEST_DATABASE
     assert.equal((await db.select().from(externalEvents).where(eq(externalEvents.cardId, card.id))).length, 1);
     assert.equal((await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)))[0]?.columnStatus, 'done');
   });
+  await t.test('lost wait claim rolls back the preceding card mutation on real PostgreSQL', async () => {
+    const { card } = await fixture('waiting_on_external');
+    const [wait] = await db.insert(externalWaits).values({ cardId: card.id, companyId: card.companyId, waitingFor: 'External result', provider: 'test', status: 'waiting' }).returning();
+    const [baseline] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id));
+    // Controlled DB fault at the conditional UPDATE boundary: RETURNING is empty
+    // after the card UPDATE ran. This proves rollback, not an unfenced writer race.
+    await sql.unsafe(`CREATE FUNCTION mc_test_lose_wait_claim() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.id = '${wait!.id}'::uuid THEN RETURN NULL; END IF; RETURN NEW; END $$`);
+    await sql.unsafe('CREATE TRIGGER mc_test_lose_wait_claim BEFORE UPDATE ON external_waits FOR EACH ROW EXECUTE FUNCTION mc_test_lose_wait_claim()');
+    try {
+      const result = await applyExternalEvent({ card: baseline!, input: { provider: 'test', eventType: 'success', status: 'success', waitId: wait!.id }, actor: { type: 'system', id: 'postgres-test' } });
+      assert.equal(result.event, null);
+      assert.deepEqual((await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)))[0], baseline);
+      assert.deepEqual((await db.select().from(externalWaits).where(eq(externalWaits.id, wait!.id)))[0], wait);
+      assert.equal((await db.select().from(externalEvents).where(eq(externalEvents.cardId, card.id))).length, 0);
+    } finally { await sql.unsafe('DROP TRIGGER mc_test_lose_wait_claim ON external_waits'); await sql.unsafe('DROP FUNCTION mc_test_lose_wait_claim()'); }
+  });
 });
