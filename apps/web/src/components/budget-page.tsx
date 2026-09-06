@@ -119,7 +119,7 @@ export function BudgetPage() {
           return <article className="list-row budget-attempt" data-usage-status={status} key={event.id}>
             <div className="panel-title"><b>{status === 'unknown' ? '—' : formatUsd(event.costUsd)}</b><span className="status-pill">{label}</span></div>
             <p>{agentName(event.agentId)} · {event.cardId ? <Link href={`/kanban?cardId=${encodeURIComponent(event.cardId)}`}>{cardName(event.cardId)}</Link> : text.noCard}</p>
-            <p>{provider}{event.model && event.model.toLowerCase() !== 'unknown' ? ` / ${event.model}` : ''} · {event.occurredAt ? new Date(event.occurredAt).toLocaleString() : '—'}</p>
+            <p>{provider}{event.model && event.model.toLowerCase() !== 'unknown' ? ` / ${event.model}` : ''} · {event.occurredAt ? `${new Date(event.occurredAt).toLocaleString(locale, { timeZone: 'UTC' })} UTC` : '—'}</p>
             <p>{tokenStatus === 'actual' ? text.tokenActual : tokenStatus === 'estimated' ? text.tokenEstimated : text.tokenUnknown}: {tokenStatus === 'unknown' ? '—' : event.usage?.totalTokens ?? '—'}</p>
           </article>;
         }) : <p>{text.none}</p>}</div>}

@@ -76,6 +76,7 @@ test('budget preserves tiny decimal costs and separates missing usage from factu
   const attempts = page.getByRole('region', { name: 'Recent attempts (all time)' });
   await expect(attempts.locator('[data-usage-status="unknown"]').first()).toContainText('Unknown cost');
   await expect(attempts.locator('[data-usage-status="unknown"]').first()).not.toContainText('$0.00');
+  await expect(attempts.locator('[data-usage-status="unknown"]').first()).toContainText('9/6/2026, 12:00:00 AM UTC');
   await expect(attempts).toContainText('Legacy estimate');
   await expect(page.getByText('$999')).toHaveCount(0);
   await page.getByRole('button', { name: 'Next attempts' }).click();
