@@ -1056,7 +1056,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/dashboard', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     if (access.companyIds.length === 0) {
-      return { stats: { companies: 0, tasks: 0, openTasks: 0, completedTasks: 0, blockedTasks: 0, cancelledTasks: 0, agents: 0, activeAgents: 0, busyAgents: 0, activeRuns: 0, pendingApprovals: 0, budgetPolicies: 0, monthlyCost: 0 }, stages: {}, recentTaskLogs: [], recentApiEvents: [], recentActivity: [], recentRuns: [], pendingApprovals: [] };
+      return { stats: { companies: 0, tasks: 0, openTasks: 0, completedTasks: 0, blockedTasks: 0, cancelledTasks: 0, agents: 0, activeAgents: 0, busyAgents: 0, activeRuns: 0, pendingApprovals: 0, budgetPolicies: 0, monthlyCost: 0 }, usage: { ...summarizeUsage([], { period: utcPeriod() }), period: utcPeriod() }, stages: {}, recentTaskLogs: [], recentApiEvents: [], recentActivity: [], recentRuns: [], pendingApprovals: [] };
     }
     const [cardStatRows, agentStatRows, companyStatRows, recentTaskLogs, recentApiEvents, recentActivity, recentRuns, pendingApprovals, policyStatRows, usageRows] = await Promise.all([
       db.select({

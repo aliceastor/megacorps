@@ -90,3 +90,14 @@ test('dashboard month uses scoped ledger actual, estimated and unknown instead o
   const denied = await app.inject({ method: 'GET', url: `/api/usage-summary?companyId=${foreign}`, headers });
   assert.equal(denied.statusCode, 403);
 });
+
+test('companyless dashboard retains the documented zero monthly usage envelope', async t => {
+  const user = { id: randomUUID(), email: 'companyless-usage@example.test', role: 'viewer', status: 'active' };
+  memoryDb(t, [[users, [user]]]);
+  const app = Fastify(); t.after(() => app.close()); await app.register(cookie); await registerRoutes(app);
+  const response = await app.inject({ url: '/api/dashboard', headers: { cookie: `session=${await signSession(user)}` } });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.ok(response.json().usage, 'Dashboard usage is present before a first company exists');
+  assert.equal(response.json().usage.totalUsd, '0.00000000'); assert.equal(response.json().usage.unknownAttempts, 0);
+  assert.equal(response.json().usage.period.timezone, 'UTC'); assert.equal(response.json().stats.monthlyCost, 0);
+});
