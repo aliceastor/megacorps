@@ -298,7 +298,7 @@ test('agent prompts include taskRunId for idempotent webhooks', () => {
   assert.match(prompt, /"taskRunId": "run-1"/);
 });
 
-test('agent prompts tell task runtimes to delegate through webhook output', () => {
+test('agent prompts tell task runtimes to delegate through native output', () => {
   const prompt = buildAgentPrompt({
     hermesProfile: 'alice',
     currentSessionId: null,
@@ -307,7 +307,7 @@ test('agent prompts tell task runtimes to delegate through webhook output', () =
     },
   }, { id: 'card-1', title: 'Brainstorm', body: 'Run a multi-agent brainstorm.' });
 
-  assert.match(prompt, /status "in_progress" and include a DELEGATE block/);
+  assert.match(prompt, /return status "progress" with "delegations"/);
   assert.match(prompt, /Do not call session-auth endpoints such as POST \/api\/cards/);
   assert.doesNotMatch(prompt, /Create a new card/);
 });

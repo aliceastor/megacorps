@@ -131,9 +131,6 @@ This session is only for consolidating your own memory and skills. Do not call t
   const webhookBodyExample = task.taskRunId
     ? `{ "cardId": "${task.id}", "taskRunId": "${task.taskRunId}", "status": "done", "summary": "...", "output": "..." }`
     : `{ "cardId": "${task.id}", ${currentUsageAttempt() ? `"usageAttemptKey": "${currentUsageAttempt()}", ` : ''}"status": "done", "summary": "...", "output": "..." }`;
-  const escalationBodyExample = task.taskRunId
-    ? `{ "cardId": "${task.id}", "taskRunId": "${task.taskRunId}", "status": "needs_review", "summary": "needs reviewer guidance: ...", "output": "Attempted methods:\\n- ...\\n\\nBlocker/root cause:\\n...\\n\\nReviewer questions:\\n- ...\\n\\nPartial output/logs:\\n..." }`
-    : `{ "cardId": "${task.id}", "status": "needs_review", "summary": "needs reviewer guidance: ...", "output": "Attempted methods:\\n- ...\\n\\nBlocker/root cause:\\n...\\n\\nReviewer questions:\\n- ...\\n\\nPartial output/logs:\\n..." }`;
   // The conversation endpoint authenticates with the per-agent token only, so
   // it is advertised only when the agent actually has one.
   const commentsEndpointLine = agent.apiToken
@@ -141,11 +138,7 @@ This session is only for consolidating your own memory and skills. Do not call t
     : '';
   return `You are now working under PLATFORM MegaCorps at ${apiUrl}.
 
-=== Common API Endpoints ===
-- POST ${apiUrl}/api/webhook/task-complete -- Report task progress, delegation, or completion${commentsEndpointLine}
-- GET  ${apiUrl}/api/help -- Read API documentation if network access is available
-
-Task runtimes usually do not have a browser session cookie. Do not call session-auth endpoints such as POST /api/cards for delegation. If the MegaCorps task prompt asks you to delegate, include the exact DELEGATE block in your output or webhook payload; the MegaCorps server will create Message Board delegation requests inside the same card and assign direct reports.
+Task runtimes usually do not have a browser session cookie. Do not call session-auth endpoints such as POST /api/cards for delegation. Return structured report.delegations for same-card help or report.children for authorized independent deliverables as specified in the task. MegaCorps validates and creates the assignments.
 
 === Your Identity ===
 Agent: ${agent.hermesProfile ?? 'unknown'}
@@ -156,15 +149,15 @@ Card Title: ${task.title}
 === Task ===
 ${task.body}
 
-=== Instructions ===
-When you complete this task, POST your results to:
-POST ${apiUrl}/api/webhook/task-complete
-${webhookAuthLine}
-Body: ${webhookBodyExample}
+=== Native Reporting Instructions ===
+Return one structured megacorps-report JSON directly in your final response. This native response is the primary and sufficient reporting channel. No HTTP request is needed to report progress, delegation, or results. MegaCorps records the response and evidence, validates assignments, and applies review, approval, and merge gates. A completed report does not bypass those gates.
 
-Prefer including a structured "report" field in the webhook body:
-"report": { "kind": "megacorps-report", "version": 1, "status": "completed", "summary": "...", "workProducts": [{ "type": "report", "title": "Deliverable", "url": "<durable URL>" }] }
-Report states: completed | progress (legacy in_progress accepted) | input_required | failed | rejected. The report state controls completion even when the webhook status says done. Report JSON may also be returned directly in your output.
+Completed work example:
+\`\`\`json
+{ "kind": "megacorps-report", "version": 1, "status": "completed", "summary": "Completed the assigned work; evidence is attached.", "workProducts": [{ "type": "report", "title": "Deliverable", "url": "https://example.com/deliverable" }] }
+\`\`\`
+Replace example values with actual evidence. workProducts.type is report | file | preview_url | pull_request | commit | screenshot | artifact | external. For a review, include verdict approved | revision_requested | escalate and the required findings or verifications.
+Report states: completed | progress (legacy in_progress accepted) | input_required | failed | rejected. Use completed for finished work, including work awaiting ordinary QA; MegaCorps selects the next review stage.
 For input_required, use request.kind permission | help | checkpoint and request.question; checkpoint accepts checkpointKind direction | interim (default direction), options and recommendation. A permission blocker cannot approve work. Keep delegations in report.delegations when needed.
 The legacy DELEGATE block still works but is deprecated.
 
@@ -176,13 +169,16 @@ To leave a message on the card conversation for the humans and colleagues follow
 "notes": ["..."]
 Each note is posted as your comment on the card (maximum 3 per report). Writing @<agent-slug> inside a note wakes that agent with the message; @client pings the human client without blocking the card.
 
-If you are delegating to direct reports, POST status "in_progress" and include a DELEGATE block in summary/output. Do not mark the parent card done and do not try to create Kanban cards yourself; MegaCorps will create same-card Message Board delegation requests.
-If the work is complete but needs QA, POST status "in_review" with the completed output.
-If you cannot solve the task, do not mark it done. POST status "needs_review" with attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs:
-Body: ${escalationBodyExample}
-Use status "blocked" only for a hard stop that needs human intervention and cannot be usefully reviewed by another agent.
+For same-card delegation, return status "progress" with "delegations": [{ "to": "<direct-report-slug>", "objective": "<specific work and expected evidence>" }]. For independent deliverables use the task's report.children instructions. Do not mark the parent done while delegating, and do not create Kanban cards yourself.
+If you cannot solve the task, return status "input_required" with request.kind "help", request.question, and attempted methods, blocker/root cause, partial output, and logs in summary/output. For an actual permission blocker on the task action, use request.kind "permission" and state the exact authorization needed; do not claim that work is complete.
 
-For full API documentation, fetch: GET ${apiUrl}/api/help
+=== Optional Asynchronous API Integration ===
+The existing authorized webhook is optional. Use your native response for normal reporting even when HTTP is unavailable. If an optional reporting call is declined, do not retry the reporting call or weaken its security gate; return your report directly, distinguishing completed work from any genuinely blocked task action. This does not authorize a denied task action or remove a real permission blocker.
+- POST ${apiUrl}/api/webhook/task-complete -- Optional asynchronous task report${commentsEndpointLine}
+${webhookAuthLine}
+Optional webhook body: ${webhookBodyExample}
+If using this integration, include the same structured object as its "report" field. The report state controls completion even when the webhook status says done. Use only this card and task run's authorized endpoint and identity.
+- GET ${apiUrl}/api/help -- Optional full API documentation when network access is available; no fetch is required to return a report.
 `;
 }
 

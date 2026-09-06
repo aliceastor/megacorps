@@ -638,8 +638,8 @@ function projectGitProtocol(company: typeof companies.$inferSelect | null | unde
     project.testCommand ? `7. Validate with: ${project.testCommand}` : '7. Run the most relevant tests/checks available in the repo/work path.',
     project.pushAfterRun === false ? '8. Push-after-run is disabled; report the local result and blocker clearly.' : `8. Before any push, run \`git remote get-url origin\` (or the push remote). It must match ${repoUrl} (same org/repo; host and credentials may differ). If it does not match, do not push: hard-fail and report the mismatch. Then commit and push your branch when work is complete. Prefer a pull request when policy is ${project.completionPolicy ?? 'push_or_pr'}.`,
     '9. Durable non-code deliverables, reports, exports, and handoff docs belong in the project repo too (e.g. a deliverables/ or docs/ folder): commit and push them, then reference them as workProducts. Use the company shared directory only for company-wide reference material, never as the primary home of task output.',
-    '10. Include workProducts in the webhook payload: pull_request, commit, preview_url, report, screenshot, artifact, file, or external metadata as applicable. Never use runtime-local file paths as the final artifact reference unless the user explicitly asked for local-only work.',
-    '11. If you report status=waiting_on_external, include pollIntervalSeconds when the external system will not call MegaCorps back. Choose the interval yourself, minimum 30 seconds: MegaCorps hands the card back to you at that cadence for a check-only turn, up to 24 times.',
+    '10. Include workProducts in your returned structured report: pull_request, commit, preview_url, report, screenshot, artifact, file, or external metadata as applicable. Never use runtime-local file paths as the final artifact reference unless the user explicitly asked for local-only work.',
+    '11. Report unfinished external work in your native report with status="progress" and its evidence. The optional asynchronous webhook additionally supports its outer status=waiting_on_external and pollIntervalSeconds (minimum 30 seconds, up to 24 check-only turns); these are webhook fields, not canonical report states. No HTTP call is required merely to report the wait.',
     ...(project.completionRequiresMerge
       ? [`12. Completion gate: this project counts a card as done only when its pull request is merged into ${project.defaultBranch ?? 'main'}; report the PR URL and head commit SHA as workProducts, and do not push further commits to the PR after review approval unless asked (a new head reopens review).`]
       : []),
@@ -4631,7 +4631,7 @@ function completionProtocol(card: CardRow, reports: DelegationReport[] = [], opt
   void options.delegationAlreadySatisfied;
   return [
     mode === 'solo'
-      ? 'Collaboration mode: SOLO. Do this card yourself: no DELEGATE blocks and no child cards. If it is genuinely too large for one agent, say so with status="needs_review" instead of splitting.'
+      ? 'Collaboration mode: SOLO. Do this card yourself: no DELEGATE blocks and no child cards. If it is genuinely too large for one agent, return status="input_required" with request.kind="help" and request.question instead of splitting.'
       : optionalDelegationInstructions(reports),
     mode === 'pair'
       ? 'Collaboration mode: PAIR. Before each significant decision or at each checkpoint, ask your reviewer through a report mention ("mentions": [{ "to": "<reviewer slug>", "question": "..." }]) and wait for the answer on the message board before proceeding.'
@@ -4639,24 +4639,24 @@ function completionProtocol(card: CardRow, reports: DelegationReport[] = [], opt
     mode === 'swarm'
       ? 'Collaboration mode: SWARM. The work is homogeneous; split it into equal slices across your direct reports as child cards (see the split rules below), one slice per report, in parallel.'
       : '',
-    `Do not ask the user whether to proceed, whether they want a draft first, or whether you should submit/POST. Kanban tasks are assigned work; complete them autonomously unless you truly cannot proceed, then use status="needs_review".`,
-    `Do not call POST /api/cards yourself for delegation. MegaCorps creates Message Board delegation requests from the DELEGATE block inside this same Kanban card. If your runtime reports through the webhook, send status="in_progress" and include the same DELEGATE block in summary/output instead of marking the current card done.`,
+    `Kanban tasks are assigned work. Return the structured report directly; no HTTP call or extra approval is needed merely to report. Actual task actions remain subject to their permission gates. If you cannot proceed, use status="input_required" with request.kind="help" or "permission" and request.question as appropriate.`,
+    `Do not call POST /api/cards yourself for delegation. Return status="progress" with report.delegations for Message Board help inside this same Kanban card; MegaCorps validates and creates the requests. The legacy DELEGATE block remains accepted in your returned output. Do not mark the current card done while delegating.`,
     mode === 'solo' ? '' : [
       'Splitting vs delegating: an independent deliverable that needs its own reviewer and should be visible on the board becomes a CHILD CARD; help inside your own deliverable, judged by your own reviewer, is a DELEGATE (Message Board, same card). Never call POST /api/cards yourself.',
       'To split, add to your structured report:',
       '"children": [{ "title": "...", "body": "<the deliverable and its acceptance criteria, at least 40 characters>", "assigneeSlug": "<one of your direct reports>", "reviewerSlug": "<optional; defaults to you>", "dependsOn": [<indexes of other children this one waits for>] }]',
-      `Rules MegaCorps enforces: only your active direct reports; at most ${fanoutCap} live child cards at once (the company boss instead splits exactly one card per department); one round at a time — all children must close and you must integrate their output before opening another round, and a card gets at most 3 rounds; every child has a reviewer who is not its assignee. Slice by deliverable (each child end-to-end verifiable), never by technical layer; keep each child within its assignee's timeout window. When you split, report status "in_progress": this card then waits on its children and comes back to you for integration.`,
+      `Rules MegaCorps enforces: only your active direct reports; at most ${fanoutCap} live child cards at once (the company boss instead splits exactly one card per department); one round at a time — all children must close and you must integrate their output before opening another round, and a card gets at most 3 rounds; every child has a reviewer who is not its assignee. Slice by deliverable (each child end-to-end verifiable), never by technical layer; keep each child within its assignee's timeout window. When you split, return report status "progress": this card then waits on its children and comes back to you for integration.`,
       'Every child body must carry an Acceptance section (or a checklist of acceptance criteria); a child without one is rejected as split_child_missing_acceptance. Mark a child "critical": true when it touches persisted data or performs an irreversible external action; such cards get a blind review panel instead of a single reviewer.',
     ].join('\n'),
-    `When the task produces repo changes or reviewable artifacts, include workProducts in the webhook. Use PR URL, commit SHA, branch, preview URL, project shared file path/URL, report URL, screenshot URL, artifact URL, or file metadata instead of local-only scratch paths.`,
-    `If you need ordinary QA on completed work, use status="in_review" and include the completed output.`,
-    `If you are waiting on CI/CD, deploy, external approval, or another external system, use status="waiting_on_external". Include pollIntervalSeconds when that system will not notify MegaCorps by itself: you will be handed the card back at that cadence for a check-only turn, and you either report the outcome or park it again with the same interval.`,
+    `When the task produces repo changes or reviewable artifacts, include workProducts in your returned structured report. Use PR URL, commit SHA, branch, preview URL, project shared file path/URL, report URL, screenshot URL, artifact URL, or file metadata instead of local-only scratch paths.`,
+    `If you need ordinary QA on completed work, return status="completed" and the completed output; MegaCorps applies the review gate.`,
+    `If you are waiting on CI/CD, deploy, external approval, or another external system, return report status="progress" with the outstanding work and evidence. The optional asynchronous webhook also supports outer status="waiting_on_external" and pollIntervalSeconds for scheduled check-only turns; do not put those webhook fields in the canonical report or call HTTP merely to report progress.`,
     `Brainstorm: if you are the CEO or a department head and this card spans several departments or its requirements are vague, broadcast one question to the heads of the departments it concerns before planning: add "broadcast": { "departments": ["<slug>", "<slug>"], "question": "..." } to your report and stop. Name only relevant departments (the directory above lists slugs, heads and charters); MegaCorps parks the card as waiting_on_brainstorm, collects each head's proposal, and resumes you with them. One round at a time.`,
-    `Client checkpoint: if you are the CEO or a department head and this card genuinely needs the client's decision on direction, or the client's look at interim output, add "checkpoint": { "kind": "direction" | "interim", "question": "...", "options": ["A", "B"], "recommendation": "A", "artifactRefs": ["repo path or URL"] } to your report and stop working; MegaCorps parks the card as waiting_on_client and resumes you with the answer injected. One checkpoint at a time. Members cannot ask the client: use status="needs_review" for your reviewer or report.mentions for a peer.`,
+    `Client checkpoint: if you are the CEO or a department head and this card genuinely needs the client's decision on direction, or the client's look at interim output, add "checkpoint": { "kind": "direction" | "interim", "question": "...", "options": ["A", "B"], "recommendation": "A", "artifactRefs": ["repo path or URL"] } to your report and stop working; MegaCorps parks the card as waiting_on_client and resumes you with the answer injected. One checkpoint at a time. Members cannot ask the client: return status="input_required" with request.kind="help" and request.question for your reviewer, or report.mentions for a peer.`,
     `Conversation: to leave a message on this card for the humans and colleagues following it, add "notes": ["..."] (max 3) to your structured report. Write @<agent slug> inside a note to wake that agent with your message; they answer on the same thread and you see the answer next run. @client pings the human client without blocking the card (use a checkpoint when you need a binding decision). If your runtime can reach MegaCorps over HTTP you may also post at any time: POST /api/cards/${card.id}/comments with your Bearer token and { "body": "..." }.`,
     `If this prompt carries a "Review findings to fix" section, your completion report must include "dispositions" for every finding key listed there (or "escalation": { "reason": "..." } when the fix is beyond your ability or authority); a report without them is returned to you.`,
-    `If you cannot solve it, do not mark it complete. Use status="needs_review" and include: attempted methods, blocker/root cause, exact reviewer questions, partial output, and logs.`,
-    `If no reviewer/manager exists above you, still use status="needs_review" with the blocker details; MegaCorps parks the card for human approval instead of marking it done.`,
+    `If you cannot solve it, do not mark it complete. Return status="input_required" with request.kind="help", request.question, and attempted methods, blocker/root cause, partial output, and logs. Use request.kind="permission" for a genuine task authorization blocker.`,
+    `If no reviewer/manager exists above you, still return the input_required report with the blocker details; MegaCorps parks the card for human approval instead of marking it done.`,
   ].filter(Boolean).join('\n');
 }
 
@@ -4706,7 +4706,7 @@ async function buildKanbanDeltaContext(card: CardRow, options: PromptBuildOption
       log.output ? `  output: ${clipText(promptDiagnostic(log.output), 900)}` : '',
     ].filter(Boolean).join('\n')).join('\n') || 'none'}`,
     `New work products:\n${recentProducts.map((product) => `- ${product.type}: ${product.title}${product.url ? ` (${product.url})` : product.pullRequestUrl ? ` (${product.pullRequestUrl})` : ''}${product.summary ? ` -- ${clipText(product.summary, 500)}` : ''}`).join('\n') || 'none'}`,
-    'If your adapter session has lost the original task context, do not guess. Use status="needs_review" and say that the session context was lost so a full context retry is needed.',
+    'If your adapter session has lost the original task context, do not guess. Return status="input_required" with request.kind="help" and request.question explaining that the session context was lost and a full context retry is needed.',
   ].join('\n');
 }
 
@@ -4886,13 +4886,13 @@ async function buildMessageDelegationPromptCore(card: CardRow, comment: CardComm
       : 'You have no available direct reports for nested delegation; complete this delegation yourself.';
   const delegateProtocol = [
     'You are handling a Message Board delegation inside a Kanban card.',
-    'Do the requested work and report your answer back through the normal MegaCorps webhook for this task run.',
+    'Do the requested work and return your structured megacorps-report directly in the native response for this task run. MegaCorps records and routes it to your reviewer; no HTTP call is required.',
     'Do not move the Kanban card stage. Do not create child Kanban cards.',
     comment.reviewerScope === 'final'
       ? `Your report goes to FINAL REVIEWER: ${reviewer[0]?.name ?? comment.reviewerAgentId ?? 'none'}.`
       : `Your report goes to PHASE REVIEWER: ${reviewer[0]?.name ?? comment.reviewerAgentId ?? 'none'}.`,
     nestedDelegationProtocol,
-    'When complete, provide a concise report with evidence, decisions, and any risks. If you cannot complete it, use status="needs_review" with blocker/root cause and exact reviewer questions.',
+    'When complete, return status="completed" with evidence, decisions, and any risks. If you cannot complete it, return status="input_required" with request.kind="help" or "permission", request.question, and blocker/root cause.',
   ].join('\n');
   return [
     options.continuation ? 'Continue this existing Message Board delegation adapter session.' : 'New Message Board delegation assignment.',
