@@ -302,6 +302,15 @@ export async function delegationCapacityUnavailable(card: CardRow, agentId: stri
   return assignment.delegationRequired && assignment.eligible.length > 0 && assignment.available.length === 0;
 }
 
+export async function parentWaitingOnChildren(card: CardRow): Promise<boolean> {
+  if (card.rollupStatus !== 'waiting_on_children') return false;
+  const repair = card.protocolRepairState?.dispatch;
+  // A malformed report may still need one of its existing bounded corrections.
+  // Once a meaningful report clears that repair, child acceptance resumes work.
+  if (repair?.actorId === card.assigneeId && repair.failures > 0 && ['same_session', 'fresh_context', 'helped'].includes(repair.mode)) return false;
+  return Boolean(await completionBlockedByChildren(card, 'done'));
+}
+
 function messageDelegationRequirementFeedback(reports: DelegationReport[]): string {
   return [
     'collaboration_mode_requires_delegation',
@@ -1914,7 +1923,7 @@ async function cancelTerminalMessageTaskRun(run: TaskRunRow, card: CardRow): Pro
 }
 
 async function requeueBackpressuredTaskRun(run: TaskRunRow, message: string): Promise<boolean> {
-  if (!['agent_busy', 'reviewer_busy', 'agent_runtime_unavailable', 'reviewer_runtime_unavailable', 'agent_budget_exceeded', 'delegation_capacity_unavailable'].includes(message) && !message.startsWith('budget_exceeded_')) return false;
+  if (!['agent_busy', 'reviewer_busy', 'agent_runtime_unavailable', 'reviewer_runtime_unavailable', 'agent_budget_exceeded', 'delegation_capacity_unavailable', 'parent_waiting_on_children'].includes(message) && !message.startsWith('budget_exceeded_')) return false;
   await db.update(taskRuns).set({
     status: 'queued',
     lockedBy: null,
@@ -2043,6 +2052,7 @@ async function claimNextTaskRun(): Promise<TaskRunRow | null> {
       } else if (queued.kind === 'dispatch') {
         if (card.nextRunAt && card.nextRunAt > now) continue;
         if (!(await cardDependenciesMet(card.id))) continue;
+        if (await parentWaitingOnChildren(card)) continue;
       } else if (!queued.messageCommentId) {
         continue;
       } else if (queued.kind === 'panel_review' && card.columnStatus !== 'in_review') {
@@ -3187,6 +3197,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     throw new Error('agent_budget_exceeded');
   }
   if (!(await cardDependenciesMet(card.id))) throw new Error('card_dependencies_not_met');
+  if (await parentWaitingOnChildren(card)) throw new Error('parent_waiting_on_children');
   if (await delegationCapacityUnavailable(card, agent.id)) throw new Error('delegation_capacity_unavailable');
 
   if (!(await claimAgentCapacity(agent))) throw new Error('agent_busy');
@@ -3458,7 +3469,8 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const humanGate = !parked && !fixRound && !effectiveReviewerId && ((completionDecision.needsHelpReview && completionDecision.nextStatus !== 'blocked') || (completionDecision.nextStatus === 'done' && card.requiresApproval === true));
     const topLevelGuidanceAccepted = parked || humanGate ? false : completionDecision.topLevelGuidanceAccepted;
     const nextStatus: CardStatus = checkpointRequest ? 'waiting_on_client' : brainstormLaunch ? 'waiting_on_brainstorm' : fixRound || humanGate ? 'in_review' : completionDecision.nextStatus;
-    let childBlock = parked ? null : await completionBlockedByChildren(card, nextStatus);
+    const childGateStatus = normalizedResult.outcome === 'progress' && await actorHasDelegatedInScope(card.id, agent.id) ? 'done' : nextStatus;
+    let childBlock = parked ? null : await completionBlockedByChildren(card, childGateStatus);
     const dispatchMergePlan = !childBlock && nextStatus === 'done' ? await planMergeGate({ ...card, executionLog: result.output }, { reviewIdentity, taskRunId: options.taskRunId }) : null;
     let effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : dispatchMergePlan ? mergeCompletionStatus(dispatchMergePlan) : nextStatus;
     const budgetPaused = await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);

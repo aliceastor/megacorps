@@ -17,7 +17,7 @@ import { publishLiveEvent } from './live.ts';
 import { runRetryReady } from './run-retry.ts';
 import { generateRunnerApiKey, hashRunnerApiKey, requireAgentSessionAuth, requireRunnerAuth } from './runner-auth.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
-import { delegationCapacityUnavailable } from './dispatch.ts';
+import { delegationCapacityUnavailable, parentWaitingOnChildren } from './dispatch.ts';
 import { cascadeParentStatus, completeTaskRun, completionBlockedByChildren, completionStatusForQualityGate, createPendingApproval, enqueueTaskRun } from './dispatch.ts';
 import { agentResultExecutionLog, normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts, settleOriginalHeartbeat } from './agent-results.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
@@ -512,6 +512,7 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
             continue;
           }
           if (!(await cardDependenciesMet(payload.card.id))) continue;
+          if (await parentWaitingOnChildren(payload.card)) continue;
           if (await delegationCapacityUnavailable(payload.card, payload.agent.id)) continue;
           try {
             assertStatusMove(fromStatus, 'in_progress', 'machine');
