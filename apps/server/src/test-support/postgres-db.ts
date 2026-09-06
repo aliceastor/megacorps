@@ -55,7 +55,17 @@ export async function isolatedPostgres(t: TestContext) {
   const [scope] = await appSql`SELECT current_schema() AS name`;
   assert.equal(scope!.name, schemaName, 'All application SQL must target the isolated schema.');
   const { migrate, appliedMigrations } = await import('../db/migrate.ts');
-  await migrate();
+  // Fresh fixture schemas all run the complete migration history. Serialize
+  // that setup on a distinct fixture-only control lock so their DDL does not
+  // exhaust the deliberately short production race-test lock timeout. Only
+  // this control transaction has a longer bounded admission wait; application
+  // sessions retain 1200ms, verified below, including migration lock tests.
+  await control.begin(async setup => {
+    await setup`SET LOCAL lock_timeout = '30s'`;
+    await setup`SET LOCAL statement_timeout = '60s'`;
+    await setup`SELECT pg_advisory_xact_lock(727274003)`;
+    await migrate();
+  });
   assert.ok((await appliedMigrations()).some((migration) => migration.version === 21), 'Actual application migrations must initialize the fixture.');
   // Verify session settings on several independently reserved app connections.
   const connections = await Promise.all([appSql.reserve(), appSql.reserve(), appSql.reserve()]);

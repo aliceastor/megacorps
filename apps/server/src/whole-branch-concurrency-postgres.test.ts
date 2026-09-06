@@ -29,7 +29,7 @@ test('PostgreSQL whole-branch completion authority and review provenance', { ski
   // Intercept a returned production read, after PostgreSQL materializes its
   // snapshot but before the caller resumes. The independent connection commits
   // the winning write; no timer or in-memory mutation establishes ordering.
-  function afterCardRead(ctx: typeof t, armed: () => boolean, change: () => Promise<void>) {
+  function afterCardRead(ctx: typeof t, armed: () => boolean, change: () => Promise<void>, skipReads = 0) {
     let reached = false;
     const select = db.select.bind(db);
     ctx.mock.method(db, 'select', ((...args: any[]) => {
@@ -41,6 +41,7 @@ test('PostgreSQL whole-branch completion authority and review provenance', { ski
           q.limit = (count: number) => {
             const pending = limit(count);
             if (!armed() || reached) return pending;
+            if (skipReads-- > 0) return pending;
             reached = true;
             return Promise.resolve(pending).then(async rows => { await change(); return rows; });
           };
@@ -111,16 +112,17 @@ test('PostgreSQL whole-branch completion authority and review provenance', { ski
         else await writer`UPDATE kanban_cards SET execution_lock_id=${newerLock}, execution_locked_by_agent_id=${f.boss.id} WHERE id=${f.card.id}`;
       });
       winning = (await sql`SELECT column_status,assignee_id,execution_lock_id,active_heartbeat_run_id FROM kanban_cards WHERE id=${f.card.id}`)[0];
-    });
+    }, via === 'runner' ? 1 : 0);
     const report = effect === 'permission' ? answer({ status: 'input_required', request: { kind: 'permission', question: 'Allow repository read?' }, workProducts: [{ type: 'report', title: 'Partial evidence' }] }) : answer({ children: [{ title: 'Implement parser', body: 'Implement the parser and verify all supported records.\n\nAcceptance:\n- Regression tests cover valid and invalid input.', assigneeSlug: 'head' }] });
     if (via === 'direct') {
       ctx.mock.method(getAdapter('webhook'), 'dispatch', async () => { armed = true; return result(report); });
       await dispatchCard(f.card.id, 'manual', { taskRunId: f.run.id });
     } else {
-      const [runner] = await db.insert(s.machineRunners).values({ companyId: f.company.id, name: 'Synthetic runner', slug: 'runner', apiKeyHash: hashRunnerApiKey('whole-synthetic-runner') }).returning();
+      const runnerKey = `synthetic-runner-${randomUUID()}`;
+      const [runner] = await db.insert(s.machineRunners).values({ companyId: f.company.id, name: 'Synthetic runner', slug: 'runner', apiKeyHash: hashRunnerApiKey(runnerKey) }).returning();
       await db.update(s.taskRuns).set({ lockedBy: runner!.id }).where(eq(s.taskRuns.id, f.run.id));
       const app = Fastify(); ctx.after(() => app.close()); await registerRunnerRoutes(app);
-      const response = await app.inject({ method: 'POST', url: `/api/runner/task-runs/${f.run.id}/complete`, headers: { 'x-megacorps-runner-key': 'whole-synthetic-runner' }, payload: { status: 'success', report } });
+      const response = await app.inject({ method: 'POST', url: `/api/runner/task-runs/${f.run.id}/complete`, headers: { 'x-megacorps-runner-key': runnerKey }, payload: { status: 'success', report } });
       assert.ok(response.statusCode < 500, response.body);
     }
     assert.ok(reached(), 'initial production card snapshot must be returned before winning commit');
