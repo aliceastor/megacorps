@@ -1,6 +1,7 @@
 import { boolean, integer, jsonb, numeric, pgTable, primaryKey, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core';
 import type { RunRetryState } from '../run-retry.ts';
 import type { ProtocolRepairState } from '../protocol-repair.ts';
+import type { UsageFacts } from '../usage-facts.ts';
 
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -152,9 +153,9 @@ export const agents = pgTable('agents', {
   runtimeId: uuid('runtime_id'),
   hermesProfile: text('hermes_profile'),
   bossId: uuid('boss_id'),
-  budgetPerTask: numeric('budget_per_task', { precision: 10, scale: 4 }),
-  budgetMonthly: numeric('budget_monthly', { precision: 10, scale: 4 }),
-  spentThisMonth: numeric('spent_this_month', { precision: 10, scale: 4 }).default('0'),
+  budgetPerTask: numeric('budget_per_task', { precision: 20, scale: 8 }),
+  budgetMonthly: numeric('budget_monthly', { precision: 20, scale: 8 }),
+  spentThisMonth: numeric('spent_this_month', { precision: 20, scale: 8 }).default('0'),
   capabilities: text('capabilities').array().default([]),
   memoryConfig: jsonb('memory_config').default({}),
   maxConcurrent: integer('max_concurrent').default(1),
@@ -249,7 +250,7 @@ export const kanbanCards = pgTable('kanban_cards', {
   childRequirementLevel: text('child_requirement_level').default('required'),
   estimatedWeight: numeric('estimated_weight', { precision: 10, scale: 2 }),
   estimatedDurationMinutes: integer('estimated_duration_minutes'),
-  taskBudgetLimit: numeric('task_budget_limit', { precision: 10, scale: 4 }),
+  taskBudgetLimit: numeric('task_budget_limit', { precision: 20, scale: 8 }),
   revisionCount: integer('revision_count').default(0),
   maxRevisions: integer('max_revisions').default(3),
   retryCount: integer('retry_count').default(0),
@@ -275,7 +276,7 @@ export const kanbanCards = pgTable('kanban_cards', {
   createdBy: uuid('created_by').references(() => users.id),
   executionLog: text('execution_log'),
   sessionId: text('session_id'),
-  costUsd: numeric('cost_usd', { precision: 10, scale: 4 }),
+  costUsd: numeric('cost_usd', { precision: 20, scale: 8 }),
   executionLockId: uuid('execution_lock_id'),
   executionLockedByAgentId: uuid('execution_locked_by_agent_id').references(() => agents.id),
   executionLockedAt: timestamp('execution_locked_at', { withTimezone: true }),
@@ -333,7 +334,7 @@ export const heartbeatRuns = pgTable('heartbeat_runs', {
   completedAt: timestamp('completed_at', { withTimezone: true }),
   durationSeconds: integer('duration_seconds'),
   error: text('error'),
-  costUsd: numeric('cost_usd', { precision: 10, scale: 4 }),
+  costUsd: numeric('cost_usd', { precision: 20, scale: 8 }),
   inputTokens: integer('input_tokens').default(0),
   outputTokens: integer('output_tokens').default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
@@ -362,7 +363,7 @@ export const taskRuns = pgTable('task_runs', {
   durationSeconds: integer('duration_seconds'),
   error: text('error'),
   output: text('output'),
-  costUsd: numeric('cost_usd', { precision: 10, scale: 4 }),
+  costUsd: numeric('cost_usd', { precision: 20, scale: 8 }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
@@ -412,7 +413,7 @@ export const taskLogs = pgTable('task_logs', {
   status: text('status').notNull(),
   message: text('message').notNull(),
   output: text('output'),
-  costUsd: numeric('cost_usd', { precision: 10, scale: 4 }),
+  costUsd: numeric('cost_usd', { precision: 20, scale: 8 }),
   durationSeconds: integer('duration_seconds'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
@@ -712,7 +713,7 @@ export const chatMessages = pgTable('chat_messages', {
   authorType: text('author_type').notNull(),
   body: text('body').notNull(),
   metadata: jsonb('metadata').default({}),
-  costUsd: numeric('cost_usd', { precision: 10, scale: 4 }),
+  costUsd: numeric('cost_usd', { precision: 20, scale: 8 }),
   durationSeconds: integer('duration_seconds'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
@@ -787,9 +788,30 @@ export const costEvents = pgTable('cost_events', {
   model: text('model').notNull().default('unknown'),
   inputTokens: integer('input_tokens').default(0),
   outputTokens: integer('output_tokens').default(0),
-  costUsd: numeric('cost_usd', { precision: 10, scale: 4 }).notNull(),
+  costUsd: numeric('cost_usd', { precision: 20, scale: 8 }),
+  attemptKey: text('attempt_key').unique(),
+  taskRunId: uuid('task_run_id').references(() => taskRuns.id),
+  heartbeatRunId: uuid('heartbeat_run_id').references(() => heartbeatRuns.id),
+  runtimeId: uuid('runtime_id').references(() => agentRuntimes.id),
+  reportingSource: text('reporting_source'),
+  providerEventId: text('provider_event_id'),
+  usage: jsonb('usage').$type<UsageFacts>(),
+  source: text('source').notNull().default('legacy_fixed_rate'),
+  costStatus: text('cost_status').notNull().default('estimated'),
+  reservationUsd: numeric('reservation_usd', { precision: 20, scale: 8 }),
+  reservationExpiresAt: timestamp('reservation_expires_at', { withTimezone: true }),
+  settledAt: timestamp('settled_at', { withTimezone: true }),
+  admittedAt: timestamp('admitted_at', { withTimezone: true }),
   billingCode: text('billing_code'),
   occurredAt: timestamp('occurred_at', { withTimezone: true }).defaultNow(),
+});
+
+export const budgetThresholds = pgTable('budget_thresholds', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => companies.id),
+  thresholdKey: text('threshold_key').notNull().unique(),
+  details: jsonb('details').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 
 export const budgetPolicies = pgTable('budget_policies', {
@@ -797,8 +819,8 @@ export const budgetPolicies = pgTable('budget_policies', {
   companyId: uuid('company_id').notNull().references(() => companies.id),
   agentId: uuid('agent_id').references(() => agents.id),
   name: text('name').notNull(),
-  monthlyLimitUsd: numeric('monthly_limit_usd', { precision: 10, scale: 4 }),
-  perTaskLimitUsd: numeric('per_task_limit_usd', { precision: 10, scale: 4 }),
+  monthlyLimitUsd: numeric('monthly_limit_usd', { precision: 20, scale: 8 }),
+  perTaskLimitUsd: numeric('per_task_limit_usd', { precision: 20, scale: 8 }),
   warnAtPercent: integer('warn_at_percent').default(80),
   hardStop: boolean('hard_stop').default(true),
   isActive: boolean('is_active').default(true),

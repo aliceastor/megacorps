@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { agents, agentRuntimes, projects, workProducts } from './db/schema.ts';
+import { companies, agents, agentRuntimes, projects, workProducts } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { persistAgentWorkProducts } from './agent-results.ts';
 import { redactPromptForLog } from './prompt-logs.ts';
@@ -20,8 +20,8 @@ test('known credential values are redacted even when echoed without a credential
 for (const via of ['webhook', 'runner', 'message'] as const) test(`${via} never persists echoed credentials in card, comment or metadata`, async (t) => {
   const sentinel = 'synthetic-echo-secret-398417';
   const card: any = { id: randomUUID(), companyId: randomUUID(), title: 'Report', columnStatus: 'in_progress', assigneeId: null };
-  const run = { id: randomUUID(), cardId: card.id, companyId: card.companyId, kind: 'dispatch', status: 'running', lockedBy: 'runner' };
-  const state = memoryDb(t, [[kanbanCards, [card]], [taskRuns, [run]], [agents, [{ id: randomUUID(), companyId: card.companyId, giteaToken: sentinel }]], [machineRunners, [{ id: 'runner', companyId: card.companyId, apiKeyHash: hashRunnerApiKey('synthetic-runner') }]]]);
+  const run = { id: randomUUID(), cardId: card.id, companyId: card.companyId, agentId: 'original-worker', kind: 'dispatch', status: 'running', lockedBy: 'runner' };
+  const state = memoryDb(t, [[companies, [{ id: card.companyId }]], [kanbanCards, [card]], [taskRuns, [run]], [agents, [{ id: 'original-worker', companyId: card.companyId, giteaToken: sentinel }]], [machineRunners, [{ id: 'runner', companyId: card.companyId, apiKeyHash: hashRunnerApiKey('synthetic-runner') }]]]);
   if (via === 'message') await addCardMessage({ cardId: card.id, action: 'delegate_request', body: `Echo ${sentinel}`, metadata: { sourceContext: `Ancestor ${sentinel}` } });
   else {
     const app = Fastify(); t.after(() => app.close());
@@ -47,7 +47,7 @@ for (const mode of ['returned', 'exception'] as const) test(`ordinary review san
   const sentinel = 'synthetic-review-secret-725184';
   const card: any = { id: 'review-card', companyId: 'c', title: 'Review', assigneeId: 'worker', reviewerId: 'reviewer', columnStatus: 'in_review', requiresApproval: false, tags: [], dependencyCardIds: [] };
   const reviewer = { id: 'reviewer', companyId: 'c', name: 'Reviewer', slug: 'reviewer', adapterType: 'webhook', isActive: true, isBusy: false, giteaToken: sentinel };
-  const state = memoryDb(t, [[kanbanCards, [card]], [agents, [reviewer]], [taskRuns, [{ id: 'review-run', companyId: 'c', cardId: card.id, agentId: reviewer.id, kind: 'review', status: 'running' }]]]);
+  const state = memoryDb(t, [[companies, [{ id: card.companyId }]], [kanbanCards, [card]], [agents, [reviewer]], [taskRuns, [{ id: 'review-run', companyId: 'c', cardId: card.id, agentId: reviewer.id, kind: 'review', status: 'running' }]]]);
   const { getAdapter } = await import('./adapters/registry.ts');
   const { reviewCard } = await import('./dispatch.ts');
   const { heartbeatRuns, taskLogs } = await import('./db/schema.ts');

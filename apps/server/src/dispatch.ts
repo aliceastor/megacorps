@@ -11,6 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import { inferCardTransitionAction, normalizeCardStatus, type AgentReport, type CardStatus } from '@megacorps/shared';
 import { db, sql as rawSql } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, approvals, budgetPolicies, cardActions, cardComments, cardDependencies, cardRequiredTools, companies, costEvents, cronRuns, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, taskLogs, taskRuns, toolRegistry, users, workProducts, agentReviewScores } from './db/schema.ts';
+import { attemptKey, cardUsageScope, executeUsage, refreshUsageCaches, resultUsage, settleUsage, usageBudgetState } from './usage-ledger.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { configuredWebhookSharedSecret } from './webhook-secret.ts';
@@ -1539,7 +1540,7 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { peerQuestionCommentId: comment.id, megacorpsPromptChars: prompt.length, contextMode: 'full_bootstrap' },
     });
-    const result = await sanitizeCompanyOutput(card.companyId, await adapter.dispatch(executionAgent, task));
+    const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, target, run.id, null, 'peer'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds }));
     const normalizedAnswer = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
     if (!result.success || !result.output.trim() || ['failed', 'rejected', 'invalid', 'permission', 'input_required'].includes(normalizedAnswer.outcome)) throw new Error(normalizedAnswer.reason ?? result.output ?? 'peer_answer_failed');
     await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: target.id, action: 'peer_answer', body: result.output, delegationStatus: 'done' });
@@ -1548,8 +1549,8 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
       if (resumed) await enqueueMessageTaskRun(resumed, 'message');
     } else await db.update(cardComments).set({ delegationStatus: 'done' }).where(eq(cardComments.id, comment.id));
     await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), durationSeconds: result.durationSeconds, outputTokens: result.tokensUsed, costUsd: result.costUsd.toString() }).where(eq(heartbeatRuns.id, run.id));
-    await db.insert(costEvents).values({ companyId: card.companyId, agentId: target.id, projectId: card.projectId, provider: target.adapterType ?? 'unknown', model: target.hermesProfile ?? 'peer-question', outputTokens: result.tokensUsed, costUsd: result.costUsd.toString() });
-    await db.update(agents).set({ isBusy: false, spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${result.costUsd}` }).where(eq(agents.id, target.id));
+
+    await db.update(agents).set({ isBusy: false }).where(eq(agents.id, target.id));
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: target.id, agentId: target.id, action: 'peer_question.answered', entityType: 'card_comment', entityId: comment.id, details: { cardId: card.id } });
     publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'peer_question.answered' });
     return true;
@@ -1828,6 +1829,8 @@ async function addTaskRunLog(run: TaskRunRow, status: LogStatus, message: string
 
 export async function completeTaskRun(runId: string | null | undefined, input: RunCompletion) {
   if (!runId) return;
+  const [accounting] = await db.select().from(costEvents).where(eq(costEvents.taskRunId, runId)).limit(1);
+  if (accounting) input = { ...input, costUsd: accounting.costUsd == null ? undefined : Number(accounting.costUsd) };
   if (await completeRetryableRun(runId, input)) return;
   await db.update(taskRuns).set({
     status: input.status,
@@ -2150,7 +2153,7 @@ type BudgetPolicyRow = typeof budgetPolicies.$inferSelect;
 
 export async function getBudgetGuard(agent: AgentRow, preloadedPolicies?: BudgetPolicyRow[]): Promise<{ monthlyLimit: number | null; perTaskLimit: number | null; warnAtPercent: number; hardStop: boolean }> {
   const rows = preloadedPolicies ?? await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, agent.companyId), eq(budgetPolicies.isActive, true)));
-  const applicable = rows.filter((policy) => !policy.agentId || policy.agentId === agent.id);
+  const applicable = rows.filter((policy) => policy.isActive !== false && (!policy.agentId || policy.agentId === agent.id));
   const monthlyLimits = [
     agent.budgetMonthly ? Number(agent.budgetMonthly) : null,
     ...applicable.map((policy) => policy.monthlyLimitUsd ? Number(policy.monthlyLimitUsd) : null),
@@ -2162,15 +2165,16 @@ export async function getBudgetGuard(agent: AgentRow, preloadedPolicies?: Budget
   return {
     monthlyLimit: monthlyLimits.length ? Math.min(...monthlyLimits) : null,
     perTaskLimit: perTaskLimits.length ? Math.min(...perTaskLimits) : null,
-    warnAtPercent: Math.min(...applicable.map((policy) => policy.warnAtPercent ?? 80), 80),
+    warnAtPercent: applicable.length ? Math.min(...applicable.map((policy) => policy.warnAtPercent ?? 80)) : 80,
     hardStop: applicable.some((policy) => policy.hardStop !== false) || Boolean(agent.budgetMonthly || agent.budgetPerTask),
   };
 }
 
 export async function budgetOk(agent: AgentRow, preloadedPolicies?: BudgetPolicyRow[]): Promise<boolean> {
+  if (agent.isActive === false) return false;
   const guard = await getBudgetGuard(agent, preloadedPolicies);
-  if (!guard.monthlyLimit) return true;
-  return Number(agent.spentThisMonth ?? 0) < guard.monthlyLimit;
+  if (!guard.hardStop) return true;
+  return !(await usageBudgetState(agent)).blocked;
 }
 
 function configuredAdapterOverrides(config: Record<string, unknown> | null | undefined): Record<string, unknown> {
@@ -2473,59 +2477,14 @@ export async function resolvePendingApproval(card: CardRow, status: 'approved' |
 }
 
 export async function recordCostAndEnforceBudget(card: CardRow, agent: AgentRow, runId: string | null, costUsd: number, tokensUsed: number, durationSeconds?: number): Promise<boolean> {
-  await db.insert(costEvents).values({
-    companyId: card.companyId,
-    agentId: agent.id,
-    cardId: card.id,
-    projectId: card.projectId,
-    goalId: card.goalId,
-    provider: agent.adapterType ?? 'unknown',
-    model: agent.hermesProfile ?? 'unknown',
-    outputTokens: tokensUsed,
-    costUsd: costUsd.toString(),
-  });
-  const guard = await getBudgetGuard(agent);
-  const newSpend = Number(agent.spentThisMonth ?? 0) + costUsd;
-  const monthlyExceeded = guard.monthlyLimit !== null && newSpend >= guard.monthlyLimit;
-  const taskExceeded = guard.perTaskLimit !== null && costUsd > guard.perTaskLimit;
-  const warning = guard.monthlyLimit !== null && newSpend >= guard.monthlyLimit * (guard.warnAtPercent / 100);
-  const shouldPause = guard.hardStop && (monthlyExceeded || taskExceeded);
-  await db.update(agents).set({
-    spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${costUsd}`,
-    isBusy: false,
-    isActive: shouldPause ? false : undefined,
-  }).where(eq(agents.id, agent.id));
-  if (runId) await db.update(heartbeatRuns).set({ costUsd: costUsd.toString(), outputTokens: tokensUsed, durationSeconds }).where(eq(heartbeatRuns.id, runId));
-  if (warning || shouldPause) {
-    const message = shouldPause
-      ? `Budget hard stop reached; ${agent.name} paused.`
-      : `Budget warning: ${agent.name} reached ${guard.warnAtPercent}% of monthly budget.`;
-    await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'budget', status: shouldPause ? 'failed' : 'queued', message, costUsd });
-    await addActivity({ companyId: card.companyId, actorType: 'system', actorId: 'budget', agentId: agent.id, action: shouldPause ? 'budget.hard_stop' : 'budget.warning', entityType: 'agent', entityId: agent.id, details: { cardId: card.id, costUsd, newSpend, monthlyLimit: guard.monthlyLimit, perTaskLimit: guard.perTaskLimit, monthlyExceeded, taskExceeded } });
-    if (shouldPause) {
-      await db.insert(approvals).values({
-        companyId: card.companyId,
-        cardId: card.id,
-        requestedByAgentId: agent.id,
-        type: 'budget_override_required',
-        status: 'pending',
-        payload: { costUsd, newSpend, monthlyLimit: guard.monthlyLimit, perTaskLimit: guard.perTaskLimit, monthlyExceeded, taskExceeded },
-      });
-    }
-    await notify({
-      companyId: card.companyId,
-      type: shouldPause ? 'budget_stop' : 'budget_warning',
-      title: shouldPause ? `Budget hard stop: ${agent.name} paused` : `Budget warning: ${agent.name} at ${guard.warnAtPercent}% of monthly budget`,
-      body: message,
-      entityType: 'agent',
-      entityId: agent.id,
-      cardId: card.id,
-      agentId: agent.id,
-    });
+  const [existing] = runId ? await db.select().from(costEvents).where(eq(costEvents.heartbeatRunId, runId)).limit(1) : [];
+  if (!existing) {
+    const scope = { companyId: card.companyId, agentId: agent.id, cardId: card.id, projectId: card.projectId, heartbeatRunId: runId, attemptKey: attemptKey({ heartbeatRunId: runId }), source: 'legacy_callback' };
+    await settleUsage(scope, resultUsage({ costUsd, tokensUsed }));
   }
-  return shouldPause;
+  if (runId) await db.update(heartbeatRuns).set({ costUsd: existing?.costUsd ?? costUsd.toFixed(8), durationSeconds }).where(eq(heartbeatRuns.id, runId));
+  return (await usageBudgetState(agent, card)).blocked;
 }
-
 export async function cascadeParentStatus(parentCardId: string | null): Promise<void> {
   if (!parentCardId) return;
   const [parent] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, parentCardId), isNull(kanbanCards.deletedAt))).limit(1);
@@ -2817,7 +2776,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { adapterSessionId, messageCommentId: comment.id, megacorpsPromptChars: prompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
-    const result = await sanitizeCompanyOutput(card.companyId, await adapter.dispatch(executionAgent, task));
+    const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, agent, run.id, taskRun.id, 'message'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds }));
     const [latestTaskRun] = await db.select().from(taskRuns).where(eq(taskRuns.id, taskRun.id)).limit(1);
     if (latestTaskRun && latestTaskRun.status !== 'running') {
       if (result.success) await rememberTaskAdapterSession(card, agent, 'message', result, taskRun.id);
@@ -2959,7 +2918,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { adapterSessionId, reportCommentId: report.id, requestCommentId: request?.id ?? null, megacorpsPromptChars: prompt.length },
     });
-    const result = await sanitizeCompanyOutput(card.companyId, await adapter.dispatch(executionAgent, task));
+    const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, reviewer, run.id, taskRun.id, 'message_review'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds }));
     const [latestTaskRun] = await db.select().from(taskRuns).where(eq(taskRuns.id, taskRun.id)).limit(1);
     if (latestTaskRun && latestTaskRun.status !== 'running') {
       if (result.success) await rememberTaskAdapterSession(card, reviewer, 'message_review', result, taskRun.id);
@@ -3249,7 +3208,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const stopLockRenewal = startExecutionLockRenewal(card.id, run.id);
     let result: Awaited<ReturnType<typeof adapter.dispatch>>;
     try {
-      result = await sanitizeCompanyOutput(card.companyId, await adapter.dispatch(executionAgent, task));
+      result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, agent, run.id, options.taskRunId, 'dispatch'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds }));
     } finally {
       stopLockRenewal();
     }
@@ -3334,7 +3293,6 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
           columnStatus: 'todo',
           sessionId: null,
           executionLog: result.output,
-          costUsd: result.costUsd.toString(),
           retryCount: 0,
           nextRunAt: null,
           completedAt: null,
@@ -3383,7 +3341,6 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
           columnStatus: 'in_progress',
           executionLog: result.output,
           sessionId: result.sessionId,
-          costUsd: result.costUsd.toString(),
           retryCount: 0,
           nextRunAt: null,
           completedAt: null,
@@ -3493,7 +3450,6 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
         rollupStatus: childBlock ? 'waiting_on_children' : effectiveNextStatus === 'done' ? 'done' : undefined,
         executionLog: result.output,
         sessionId: result.sessionId,
-        costUsd: result.costUsd.toString(),
         reviewerId: effectiveReviewerId,
         reviewFeedback: needsInputQuestion ?? undefined,
         retryCount: 0,
@@ -3750,7 +3706,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       prompt: promptSnapshotForAdapter(executionAgent, reviewTask),
       metadata: { adapterSessionId, reviewMode, megacorpsPromptChars: reviewPrompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
-    const result = await sanitizeCompanyOutput(card.companyId, await adapter.dispatch(executionAgent, reviewTask));
+    const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, reviewer, run.id, options.taskRunId, 'review'), () => adapter.dispatch(executionAgent, reviewTask), { timeoutSeconds: reviewTask.timeoutSeconds }));
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && latest.columnStatus !== card.columnStatus && latest.activeHeartbeatRunId !== run.id) {
       if (result.success) await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
@@ -4123,47 +4079,11 @@ export function getDispatchCronStatus(): DispatchCronStatus {
   };
 }
 
-async function resetMonthlyBudgetsIfDue(app: FastifyInstance, now: Date): Promise<number> {
-  if (process.env.BUDGET_RESET_ENABLED === 'false') return 0;
-  if (now.getUTCDate() !== BUDGET_RESET_DAY) return 0;
-
-  const monthKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-  const [existing] = await db.select().from(cronRuns).where(and(
-    eq(cronRuns.name, 'budget-monthly-reset'),
-    drizzleSql`${cronRuns.details}->>'monthKey' = ${monthKey}`,
-  )).limit(1);
-  if (existing) return 0;
-
-  const agentRows = await db.select().from(agents);
-  const resetRows = agentRows.filter((agent) => Number(agent.spentThisMonth ?? 0) !== 0);
-  await db.update(agents).set({ spentThisMonth: '0', isBusy: false });
-
-  const [run] = await db.insert(cronRuns).values({
-    name: 'budget-monthly-reset',
-    source: 'loop',
-    status: 'success',
-    startedAt: now,
-    completedAt: new Date(),
-    durationSeconds: 0,
-    details: { monthKey, resetAgents: resetRows.length },
-  }).returning();
-
-  const companyIds = Array.from(new Set(agentRows.map((agent) => agent.companyId)));
-  for (const companyId of companyIds) {
-    await addActivity({
-      companyId,
-      actorType: 'system',
-      actorId: 'budget-reset',
-      action: 'budget.monthly_reset',
-      entityType: 'company',
-      entityId: companyId,
-      details: { monthKey, resetAgents: resetRows.filter((agent) => agent.companyId === companyId).length, cronRunId: run?.id },
-    });
-  }
-  app.log.info({ monthKey, resetAgents: resetRows.length }, 'monthly agent budgets reset');
-  return resetRows.length;
+async function resetMonthlyBudgetsIfDue(_app: FastifyInstance, now: Date): Promise<number> {
+  // Compatibility cache only. Admission always reads the explicit UTC ledger
+  // period and never depends on a particular day or a successful prior sweep.
+  return refreshUsageCaches(now);
 }
-
 export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' | 'manual' | 'startup' = 'manual', options: DispatchCronOptions = {}): Promise<DispatchCronResult> {
   const started = Date.now();
   const startedAt = new Date(started);

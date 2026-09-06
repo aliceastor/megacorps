@@ -1,0 +1,267 @@
+import { randomUUID } from 'node:crypto';
+import { and, eq } from 'drizzle-orm';
+import { db } from './db/client.ts';
+import { retryMergeGateWrite } from './db/merge-gate-write.ts';
+import { activityLog, agents, budgetPolicies, budgetThresholds, companies, costEvents, heartbeatRuns, kanbanCards, projects, taskRuns } from './db/schema.ts';
+import { moneyString, moneyUnits, unknownUsage, type UsageFacts } from './usage-facts.ts';
+import type { TaskResult } from './adapters/hermes.ts';
+import { withUsageAttempt } from './usage-context.ts';
+
+type Reader = Pick<typeof db, 'select' | 'insert' | 'update'>;
+type Entry = typeof costEvents.$inferSelect;
+type Agent = typeof agents.$inferSelect;
+type Card = typeof kanbanCards.$inferSelect;
+export type AttemptScope = {
+  companyId: string; agentId: string; cardId?: string | null; projectId?: string | null;
+  taskRunId?: string | null; heartbeatRunId?: string | null; runtimeId?: string | null;
+  attemptKey: string; source: string; reportingSource?: string | null;
+};
+export function attemptKey(scope: { taskRunId?: string | null; heartbeatRunId?: string | null }): string {
+  return scope.taskRunId ? `task-run:${scope.taskRunId}` : scope.heartbeatRunId ? `heartbeat:${scope.heartbeatRunId}` : `operation:${randomUUID()}`;
+}
+export function utcPeriod(at = new Date()) {
+  const start = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 1));
+  const end = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 1));
+  return { key: start.toISOString().slice(0, 7), start: start.toISOString(), end: end.toISOString(), timezone: 'UTC' as const };
+}
+const units = (value: string | null | undefined) => value == null ? 0n : moneyUnits(value);
+function fail(code: string): never { throw Object.assign(new Error(code), { statusCode: 409, code }); }
+function canonicalScope(scope: AttemptScope): AttemptScope {
+  return { ...scope, runtimeId: scope.runtimeId ?? null, reportingSource: scope.reportingSource ?? `${scope.companyId}:runtime:${scope.runtimeId ?? `agent:${scope.agentId}`}` };
+}
+
+export function summarizeUsage(rows: Entry[], filter: { agentId?: string; cardId?: string; projectId?: string; period?: ReturnType<typeof utcPeriod> } = {}, now = new Date()) {
+  let actual = 0n, estimated = 0n, reserved = 0n, unknown = 0, count = 0;
+  for (const row of rows) {
+    if (filter.agentId && row.agentId !== filter.agentId || filter.cardId && row.cardId !== filter.cardId || filter.projectId && row.projectId !== filter.projectId) continue;
+    // Outstanding exposure survives a UTC month boundary. Reservation totals
+    // are always current as of `now`, independently of the cost event period.
+    if (!row.settledAt && row.reservationExpiresAt && new Date(row.reservationExpiresAt) > now) reserved += units(row.reservationUsd);
+    const occurred = new Date(row.occurredAt ?? row.admittedAt ?? 0).getTime();
+    if (filter.period && (occurred < Date.parse(filter.period.start) || occurred >= Date.parse(filter.period.end))) continue;
+    count++;
+    if (row.costStatus === 'actual') actual += units(row.costUsd);
+    else if (row.costStatus === 'unknown' || row.costUsd == null) unknown++;
+    else estimated += units(row.costUsd);
+  }
+  return { actualUsd: moneyString(actual), estimatedUsd: moneyString(estimated), totalUsd: moneyString(actual + estimated), reservedUsd: moneyString(reserved), unknownAttempts: unknown, attempts: count };
+}
+
+async function lockScope(tx: Reader, scope: AttemptScope) {
+  const [company] = await tx.select().from(companies).where(eq(companies.id, scope.companyId)).for('update').limit(1);
+  if (!company) fail('usage_company_not_found');
+  const [agent] = await tx.select().from(agents).where(eq(agents.id, scope.agentId)).for('update').limit(1);
+  if (!agent || agent.companyId !== scope.companyId) fail('usage_agent_company_mismatch');
+  const [card] = scope.cardId ? await tx.select().from(kanbanCards).where(eq(kanbanCards.id, scope.cardId)).for('update').limit(1) : [];
+  if (scope.cardId && (!card || card.companyId !== scope.companyId)) fail('usage_card_company_mismatch');
+  if (scope.projectId) {
+    const [project] = await tx.select().from(projects).where(eq(projects.id, scope.projectId)).limit(1);
+    if (!project || project.companyId !== scope.companyId) fail('usage_project_company_mismatch');
+  }
+  for (const [id, table] of [[scope.taskRunId, taskRuns], [scope.heartbeatRunId, heartbeatRuns]] as const) if (id) {
+    const [run] = await tx.select().from(table).where(eq(table.id, id)).limit(1);
+    if (!run || run.companyId !== scope.companyId || run.agentId !== scope.agentId || (scope.cardId && run.cardId !== scope.cardId)) fail('usage_run_identity_mismatch');
+  }
+  return { agent, card };
+}
+function assertIdentity(entry: Entry, scope: AttemptScope) {
+  for (const key of ['companyId', 'agentId', 'cardId', 'projectId', 'taskRunId', 'heartbeatRunId', 'runtimeId', 'reportingSource'] as const) {
+    if ((entry[key] ?? null) !== (scope[key] ?? null)) fail('usage_attempt_identity_conflict');
+  }
+}
+type Rule = { key: string; scope: 'company' | 'agent' | 'card'; limit: bigint; hard: boolean; warn: number; monthly: boolean };
+async function rulesFor(tx: Reader, agent: Agent, card?: Card): Promise<Rule[]> {
+  const rules: Rule[] = [];
+  const add = (key: string, scope: Rule['scope'], value: string | null | undefined, hard: boolean, warn: number, monthly: boolean) => {
+    if (value != null) rules.push({ key, scope, limit: units(value), hard, warn, monthly });
+  };
+  add(`agent:${agent.id}:monthly`, 'agent', agent.budgetMonthly, true, 80, true);
+  if (card) {
+    add(`agent:${agent.id}:card`, 'card', agent.budgetPerTask, true, 80, false);
+    add(`card:${card.id}`, 'card', card.taskBudgetLimit, true, 80, false);
+  }
+  const policies = await tx.select().from(budgetPolicies).where(eq(budgetPolicies.companyId, agent.companyId));
+  for (const policy of policies) {
+    if (policy.isActive === false || policy.agentId && policy.agentId !== agent.id) continue;
+    add(`policy:${policy.id}:monthly`, policy.agentId ? 'agent' : 'company', policy.monthlyLimitUsd, policy.hardStop !== false, policy.warnAtPercent ?? 80, true);
+    if (card) add(`policy:${policy.id}:card`, 'card', policy.perTaskLimitUsd, policy.hardStop !== false, policy.warnAtPercent ?? 80, false);
+  }
+  return rules;
+}
+function totalsFor(rule: Rule, rows: Entry[], agent: Agent, card: Card | undefined, now: Date) {
+  return summarizeUsage(rows, { agentId: rule.scope === 'agent' ? agent.id : undefined, cardId: rule.scope === 'card' ? card?.id : undefined, period: rule.monthly ? utcPeriod(now) : undefined }, now);
+}
+async function warnThresholds(tx: Reader, rules: Rule[], rows: Entry[], agent: Agent, card: Card | undefined, now: Date) {
+  for (const rule of rules) {
+    const totals = totalsFor(rule, rows, agent, card, now);
+    const used = units(totals.totalUsd);
+    const stopped = rule.hard && used >= rule.limit;
+    if (used * 100n < rule.limit * BigInt(rule.warn)) continue;
+    const thresholdKey = `${rule.key}:${rule.monthly ? utcPeriod(now).key : card?.id}:${stopped ? 'stop' : 'warning'}`;
+    const [existing] = await tx.select().from(budgetThresholds).where(eq(budgetThresholds.thresholdKey, thresholdKey)).limit(1);
+    if (existing) continue;
+    const details = { ...totals, scope: rule.scope, limitUsd: moneyString(rule.limit), period: rule.monthly ? utcPeriod(now) : null, cardId: card?.id ?? null, warnAtPercent: rule.warn, hardStop: stopped, enforcement: 'Recorded usage and reservations; unavailable provider costs are unknown. Direct card execution excludes child cards.' };
+    await tx.insert(budgetThresholds).values({ companyId: agent.companyId, thresholdKey, details });
+    await tx.insert(activityLog).values({ companyId: agent.companyId, actorType: 'system', actorId: 'budget', agentId: agent.id, action: stopped ? 'budget.hard_stop' : 'budget.warning', entityType: rule.scope, entityId: rule.scope === 'company' ? agent.companyId : rule.scope === 'card' ? card!.id : agent.id, details });
+  }
+}
+
+/** Company first, then original agent/card. No provider IO occurs in this transaction. */
+export async function admitUsage(scope: AttemptScope, options: { now?: Date; timeoutSeconds?: number; boundUsd?: string | null; transaction?: Reader } = {}): Promise<Entry> {
+  scope = canonicalScope(scope);
+  const now = options.now ?? new Date();
+  const work = async (tx: Reader) => {
+    const { agent, card } = await lockScope(tx, scope);
+    const [existing] = await tx.select().from(costEvents).where(eq(costEvents.attemptKey, scope.attemptKey)).limit(1);
+    if (existing) {
+      assertIdentity(existing, scope);
+      fail('usage_attempt_already_admitted');
+    }
+    if (agent.isActive === false || agent.deletedAt) fail('usage_agent_inactive');
+    if (card && (card.deletedAt || ['cancelled', 'done'].includes(card.columnStatus ?? ''))) fail('usage_card_terminal');
+    const rows = await tx.select().from(costEvents).where(eq(costEvents.companyId, scope.companyId));
+    const rules = await rulesFor(tx, agent, card);
+    let reservation = options.boundUsd == null ? null : units(options.boundUsd);
+    for (const rule of rules.filter(rule => rule.hard)) {
+      const total = totalsFor(rule, rows, agent, card, now);
+      const remaining = rule.limit - units(total.totalUsd) - units(total.reservedUsd);
+      if (remaining <= 0n || options.boundUsd != null && reservation !== null && reservation > remaining) fail(`budget_exceeded_${rule.scope}`);
+      if (reservation === null) reservation = remaining;
+      else if (options.boundUsd == null && remaining < reservation) reservation = remaining;
+    }
+    const [entry] = await tx.insert(costEvents).values({ ...scope, id: randomUUID(), provider: 'unknown', model: 'unknown', source: scope.source, costStatus: 'unknown', costUsd: null, usage: unknownUsage('awaiting_transport_usage'), occurredAt: now, admittedAt: now, reservationUsd: reservation === null ? null : moneyString(reservation), reservationExpiresAt: new Date(now.getTime() + Math.min(86_400, Math.max(60, (options.timeoutSeconds ?? 300) + 300)) * 1000) }).returning();
+    return entry!;
+  };
+  return options.transaction ? work(options.transaction) : retryMergeGateWrite(() => db.transaction(work));
+}
+
+export function resultUsage(result: Pick<TaskResult, 'usage' | 'costUsd' | 'tokensUsed'>): UsageFacts {
+  if (result.usage) return result.usage;
+  // Backward compatible authenticated legacy adapter results remain estimates;
+  // a zero without facts is unknown, never proof of a free provider attempt.
+  const usage = unknownUsage('legacy_adapter_estimate', result.tokensUsed > 0 ? result.tokensUsed : undefined);
+  if (result.costUsd > 0) {
+    usage.costUsd = moneyString(moneyUnits(result.costUsd.toFixed(8)));
+    usage.costStatus = 'estimated';
+  }
+  return usage;
+}
+
+export async function settleUsage(scope: AttemptScope, facts: UsageFacts, options: { now?: Date } = {}) {
+  scope = canonicalScope(scope);
+  const now = options.now ?? new Date();
+  return retryMergeGateWrite(() => db.transaction(async tx => {
+    const { agent, card } = await lockScope(tx, scope);
+    let [entry] = await tx.select().from(costEvents).where(eq(costEvents.attemptKey, scope.attemptKey)).limit(1);
+    if (entry) assertIdentity(entry, scope);
+    const reportingSource = scope.reportingSource!;
+    if (facts.providerEventId) {
+      const [bound] = await tx.select().from(costEvents).where(and(eq(costEvents.reportingSource, reportingSource), eq(costEvents.provider, facts.provider ?? entry?.provider ?? 'unknown'), eq(costEvents.providerEventId, facts.providerEventId))).limit(1);
+      if (bound && bound.attemptKey !== scope.attemptKey) fail('usage_provider_event_already_bound');
+      if (entry?.providerEventId && entry.providerEventId !== facts.providerEventId) fail('usage_attempt_provider_event_conflict');
+      if (entry?.providerEventId && facts.provider != null && entry.provider !== facts.provider) fail('usage_attempt_identity_conflict');
+    }
+    const rank = { unknown: 0, estimated: 1, actual: 2 };
+    const previous = entry?.usage;
+    const cost = previous && rank[previous.costStatus] > rank[facts.costStatus] ? previous : facts;
+    const tokens = previous && rank[previous.tokenStatus] > rank[facts.tokenStatus] ? previous : facts;
+    const accepted: UsageFacts = { ...facts, costStatus: cost.costStatus, costUsd: cost.costUsd, costSource: cost.costSource ?? cost.source,
+      tokenStatus: tokens.tokenStatus, tokenSource: tokens.tokenSource ?? tokens.source,
+      provider: facts.provider ?? previous?.provider ?? null, model: facts.model ?? previous?.model ?? null,
+      inputTokens: tokens.inputTokens, outputTokens: tokens.outputTokens, cacheReadTokens: tokens.cacheReadTokens, cacheWriteTokens: tokens.cacheWriteTokens,
+      reasoningTokens: tokens.reasoningTokens, totalTokens: tokens.totalTokens, occurredAt: facts.occurredAt ?? previous?.occurredAt };
+    // A terminal attempt may receive a factual correction. Identity is immutable;
+    // neither admission eligibility nor current orchestration ownership is tested.
+    const occurredAt = accepted.occurredAt ? new Date(accepted.occurredAt) : entry?.occurredAt ?? now;
+    const values = { costUsd: accepted.costStatus === 'unknown' ? null : accepted.costUsd, costStatus: accepted.costStatus, usage: accepted,
+      provider: accepted.provider ?? 'unknown', model: accepted.model ?? 'unknown', inputTokens: accepted.inputTokens, outputTokens: accepted.outputTokens,
+      reportingSource, providerEventId: facts.providerEventId ?? entry?.providerEventId ?? null, reservationUsd: null, reservationExpiresAt: null, settledAt: now, occurredAt };
+    if (entry) [entry] = await tx.update(costEvents).set(values).where(eq(costEvents.id, entry.id)).returning();
+    else [entry] = await tx.insert(costEvents).values({ ...scope, ...values }).returning();
+    const rows = await tx.select().from(costEvents).where(eq(costEvents.companyId, scope.companyId));
+    const agentTotals = summarizeUsage(rows, { agentId: agent.id, period: utcPeriod(now) }, now);
+    await tx.update(agents).set({ spentThisMonth: agentTotals.totalUsd }).where(eq(agents.id, agent.id));
+    if (card) {
+      const totalUsd = summarizeUsage(rows, { cardId: card.id }, now).totalUsd;
+      if (units(card.costUsd) !== units(totalUsd)) await tx.update(kanbanCards).set({ costUsd: totalUsd }).where(eq(kanbanCards.id, card.id));
+    }
+    if (scope.taskRunId) await tx.update(taskRuns).set({ costUsd: entry!.costUsd }).where(eq(taskRuns.id, scope.taskRunId));
+    if (scope.heartbeatRunId) await tx.update(heartbeatRuns).set({ costUsd: entry!.costUsd }).where(eq(heartbeatRuns.id, scope.heartbeatRunId));
+    const rules = await rulesFor(tx, agent, card);
+    await warnThresholds(tx, rules, rows, agent, card, now);
+    return { entry: entry!, totals: agentTotals, stopped: rules.some(rule => rule.hard && units(totalsFor(rule, rows, agent, card, now).totalUsd) >= rule.limit) };
+  }));
+}
+
+export async function releaseUsage(scope: AttemptScope) {
+  // Cancellation never deletes an attempt or declares it free. Late facts can
+  // still settle; expired reservations are excluded by timestamp, even day 2/3.
+  return settleUsage(scope, unknownUsage('cancelled_or_abandoned_usage_unknown'));
+}
+
+export async function executeUsage(scope: AttemptScope, operation: () => Promise<TaskResult>, options: { timeoutSeconds?: number; boundUsd?: string | null } = {}) {
+  await admitUsage(scope, options);
+  let result: TaskResult;
+  try {
+    result = await withUsageAttempt(scope.attemptKey, operation);
+  } catch (error) {
+    await settleUsage(scope, unknownUsage('operation_threw_usage_unavailable'));
+    throw error;
+  }
+  // A DB error after provider return is a pending settlement, not evidence that
+  // the provider threw or that its reported cost should become unknown.
+  const settled = await settleUsage(scope, resultUsage(result));
+  return { ...result, usage: settled.entry.usage ?? resultUsage(result), costUsd: Number(settled.entry.costUsd ?? 0) };
+}
+
+export async function usageSummary(companyId: string, filter: Parameters<typeof summarizeUsage>[1] = {}, now = new Date()) {
+  const rows = await db.select().from(costEvents).where(eq(costEvents.companyId, companyId));
+  return { ...summarizeUsage(rows, filter, now), period: filter.period ?? null, accounting: 'runtime-reported actual, estimates, and unknown usage; not invoice reconciliation', taskScope: 'direct card executions; child cards accounted independently' };
+}
+
+export async function usageBudgetState(agent: Agent, card?: Card, now = new Date()) {
+  const rules = await rulesFor(db, agent, card);
+  const rows = await db.select().from(costEvents).where(eq(costEvents.companyId, agent.companyId));
+  const scopes = rules.map(rule => ({ ...totalsFor(rule, rows, agent, card, now), scope: rule.scope, limitUsd: moneyString(rule.limit), hardStop: rule.hard, warnAtPercent: rule.warn }));
+  return { blocked: agent.isActive === false || scopes.some(scope => scope.hardStop && units(scope.totalUsd) + units(scope.reservedUsd) >= units(scope.limitUsd)), scopes, period: utcPeriod(now) };
+}
+
+export function cardUsageScope(card: Card, agent: Agent, heartbeatRunId: string, taskRunId?: string | null, source = 'dispatch'): AttemptScope {
+  return { companyId: card.companyId, agentId: agent.id, cardId: card.id, projectId: card.projectId, heartbeatRunId, taskRunId: taskRunId ?? null, runtimeId: agent.runtimeId, attemptKey: attemptKey({ taskRunId, heartbeatRunId }), source };
+}
+
+export async function settleTaskRunUsage(run: typeof taskRuns.$inferSelect, facts: UsageFacts, reportingSource?: string) {
+  if (!run.agentId) fail('usage_run_agent_unknown');
+  const [entry] = await db.select().from(costEvents).where(eq(costEvents.attemptKey, attemptKey({ taskRunId: run.id }))).limit(1);
+  const [agent] = await db.select().from(agents).where(eq(agents.id, run.agentId)).limit(1);
+  if (!agent || agent.companyId !== run.companyId) fail('usage_run_identity_mismatch');
+  return settleUsage({ companyId: run.companyId, agentId: run.agentId, cardId: run.cardId,
+    // Old unadmitted runs have no durable project snapshot. Do not assign their
+    // late cost to whichever project the card happens to belong to today.
+    projectId: entry?.projectId ?? null, runtimeId: entry ? entry.runtimeId : agent.runtimeId,
+    taskRunId: run.id, heartbeatRunId: entry ? entry.heartbeatRunId : run.heartbeatRunId,
+    attemptKey: attemptKey({ taskRunId: run.id }), source: entry?.source ?? 'legacy_runner_callback',
+    reportingSource: entry?.reportingSource ?? reportingSource }, facts);
+}
+
+export function scopeFromEntry(entry: Entry): AttemptScope {
+  if (!entry.attemptKey) fail('usage_legacy_identity_unknown');
+  return { attemptKey: entry.attemptKey, companyId: entry.companyId, agentId: entry.agentId, cardId: entry.cardId, projectId: entry.projectId, taskRunId: entry.taskRunId, heartbeatRunId: entry.heartbeatRunId, runtimeId: entry.runtimeId, source: entry.source, reportingSource: entry.reportingSource };
+}
+
+export async function refreshUsageCaches(now = new Date()) {
+  const companyRows = await db.select().from(companies);
+  let changed = 0;
+  for (const company of companyRows) await retryMergeGateWrite(() => db.transaction(async tx => {
+    await tx.select().from(companies).where(eq(companies.id, company.id)).for('update').limit(1);
+    const agentRows = await tx.select().from(agents).where(eq(agents.companyId, company.id));
+    const usage = await tx.select().from(costEvents).where(eq(costEvents.companyId, company.id));
+    for (const agent of agentRows.sort((a, b) => a.id.localeCompare(b.id))) {
+      const total = summarizeUsage(usage, { agentId: agent.id, period: utcPeriod(now) }, now).totalUsd;
+      if (units(agent.spentThisMonth) === units(total)) continue;
+      await tx.update(agents).set({ spentThisMonth: total }).where(eq(agents.id, agent.id));
+      changed++;
+    }
+  }));
+  return changed;
+}

@@ -1,4 +1,5 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { transportUsage, type UsageFacts } from './usage-facts.ts';
 import { agentReportSchema, type AgentReport } from '@megacorps/shared';
 
 // Minimal A2A v1.0 JSON-RPC client. Deliberately not @a2a-js/sdk: our only
@@ -23,6 +24,7 @@ export type A2aArtifactRef = {
 };
 
 export type A2aSendOutcome = {
+  usage?: UsageFacts;
   text: string;
   contextId: string | null;
   taskId: string | null;
@@ -215,6 +217,7 @@ export function normalizeA2aSendResult(result: unknown): A2aSendOutcome {
       state: normalizeState(status?.state),
       report: reportFromParts(statusMessage?.parts),
       artifacts: artifactRefs(task.artifacts),
+      usage: transportUsage(asRecord(task.metadata)?.megacorpsUsage, 'a2a_metadata_v1'),
     };
   }
 
@@ -226,6 +229,7 @@ export function normalizeA2aSendResult(result: unknown): A2aSendOutcome {
       state: null,
       report: reportFromParts(message.parts),
       artifacts: [],
+      usage: transportUsage(asRecord(message.metadata)?.megacorpsUsage, 'a2a_metadata_v1'),
     };
   }
 

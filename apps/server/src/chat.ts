@@ -11,6 +11,7 @@ import { stripHermesSessionMetadata } from './adapters/hermes.ts';
 import { db } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, kanbanCards, positions, projects } from './db/schema.ts';
 import { budgetOk, buildCompanyKanbanContext, buildExecutionAgent, getBudgetGuard } from './dispatch.ts';
+import { attemptKey, executeUsage, usageBudgetState } from './usage-ledger.ts';
 import { publishLiveEvent } from './live.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
@@ -460,7 +461,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
           data: { agentId: agent.id, runId: run.id, text: stripHermesSessionMetadata(sanitizeOutput.partial(partialBuffer)) },
         });
       };
-      const result = sanitizeOutput(await adapter.dispatch(executionAgent, chatTask, { onOutput: publishPartial }));
+      const result = sanitizeOutput(await executeUsage({ companyId: session.companyId, agentId: agent.id, projectId: session.projectId, heartbeatRunId: run.id, runtimeId: agent.runtimeId, attemptKey: attemptKey({ heartbeatRunId: run.id }), source: 'chat' }, () => adapter.dispatch(executionAgent, chatTask, { onOutput: publishPartial }), { timeoutSeconds: chatTask.timeoutSeconds }));
       if (!result.success) throw new Error(result.output || 'agent_chat_failed');
       if (supportsScopedDirectChatAdapterSession(agent.adapterType)) {
         await rememberAdapterSession({
@@ -477,15 +478,11 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      const guard = await getBudgetGuard(agent);
-      const nextSpend = Number(agent.spentThisMonth ?? 0) + result.costUsd;
-      const monthlyExceeded = guard.monthlyLimit !== null && nextSpend >= guard.monthlyLimit;
-      const taskExceeded = guard.perTaskLimit !== null && result.costUsd > guard.perTaskLimit;
-      const overBudget = guard.hardStop && (monthlyExceeded || taskExceeded);
+      const overBudget = (await usageBudgetState(agent)).blocked;
+      const monthlyExceeded = overBudget;
+      const taskExceeded = false;
       await db.update(agents).set({
         isBusy: false,
-        isActive: overBudget ? false : undefined,
-        spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${result.costUsd}`,
       }).where(eq(agents.id, agent.id));
       await db.update(heartbeatRuns).set({
         status: 'success',
@@ -494,15 +491,6 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         outputTokens: result.tokensUsed,
         costUsd: result.costUsd.toString(),
       }).where(eq(heartbeatRuns.id, run.id));
-      await db.insert(costEvents).values({
-        companyId: session.companyId,
-        agentId: agent.id,
-        projectId: session.projectId,
-        provider: agent.adapterType ?? 'unknown',
-        model: agent.hermesProfile ?? 'direct-chat',
-        outputTokens: result.tokensUsed,
-        costUsd: result.costUsd.toString(),
-      });
       const [agentMessage] = await db.insert(chatMessages).values({
         sessionId: session.id,
         companyId: session.companyId,

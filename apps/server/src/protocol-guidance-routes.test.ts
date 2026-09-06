@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
-import { agents, kanbanCards, machineRunners, taskRuns, workProducts } from './db/schema.ts';
+import { companies, agents, kanbanCards, machineRunners, taskRuns, workProducts } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { reviewCard } from './dispatch.ts';
@@ -15,7 +15,7 @@ for (const via of ['reviewCard', 'runner', 'webhook']) for (const status of ['pr
   const card: any = { id: randomUUID(), companyId, title: 'Repair original report', columnStatus: 'needs_review', assigneeId: authorId, reviewerId: helperId, tags: [], dependencyCardIds: [], runRetryState: {}, protocolRepairState: { dispatch: { actorId: authorId, originalReviewerId: null, failures: 3, mode: 'escalated', fallbackId: helperId, helpAttempted: true, runKeys: ['one', 'two', 'three'], visitedActorIds: [authorId], sessionId: null, updatedAt: '' } } };
   const helper = { id: helperId, companyId, name: 'Helper', slug: 'helper', adapterType: 'webhook', isActive: true, isBusy: false, capabilities: [] };
   const run = { id: randomUUID(), companyId, cardId: card.id, agentId: helperId, kind: 'review', status: 'running', lockedBy: 'runner' };
-  const state = memoryDb(t, [[kanbanCards, [card]], [agents, [helper, { ...helper, id: authorId, slug: 'author' }]], [taskRuns, [run]], [machineRunners, [{ id: 'runner', companyId, name: 'Runner', apiKeyHash: hashRunnerApiKey('synthetic-runner') }]]]);
+  const state = memoryDb(t, [[companies, [{ id: card.companyId }]], [kanbanCards, [card]], [agents, [helper, { ...helper, id: authorId, slug: 'author' }]], [taskRuns, [run]], [machineRunners, [{ id: 'runner', companyId, name: 'Runner', apiKeyHash: hashRunnerApiKey('synthetic-runner') }]]]);
   const report = { kind: 'megacorps-report', status: status === 'empty' ? 'completed' : status, summary: status === 'empty' ? '' : 'Use status progress and include the parser validation results in the report summary.' };
   const app = Fastify(); t.after(() => app.close());
   if (via === 'reviewCard') {

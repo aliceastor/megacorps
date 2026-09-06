@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { unknownUsage } from '../usage-facts.ts';
 import { sendA2aMessage } from '../a2a-client.ts';
 import { ensureA2aTunnel, type TunnelTarget } from '../a2a-tunnel.ts';
 import { assertAdapterTargetAllowed, getAdapterNumberConfig, getAdapterOptionalStringConfig } from './config.ts';
@@ -93,6 +94,7 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
         turnId: outcome.taskId,
         tokensUsed,
         costUsd: estimateCost(tokensUsed),
+        usage: outcome.usage ?? unknownUsage('character_count_prompt_and_output', tokensUsed),
         durationSeconds: durationSeconds(),
         needsInput: outcome.state === 'input_required' ? { question: outcome.text || 'The agent asked for clarification but sent no question text.' } : null,
         artifacts: outcome.artifacts,
@@ -104,6 +106,7 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
         sessionId: agent.currentSessionId ?? '',
         tokensUsed: 0,
         costUsd: 0,
+        usage: unknownUsage('a2a_transport_error'),
         durationSeconds: durationSeconds(),
       };
     }

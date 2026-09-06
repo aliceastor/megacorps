@@ -1,3 +1,5 @@
+import type { UsageFacts } from '../usage-facts.ts';
+import { currentUsageAttempt } from '../usage-context.ts';
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
 export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' | 'maintenance'; taskRunId?: string | null };
 export type TaskResult = {
@@ -8,6 +10,7 @@ export type TaskResult = {
   tokensUsed: number;
   costUsd: number;
   durationSeconds: number;
+  usage?: UsageFacts;
   // Native A2A task-mode extensions (optional; legacy adapters never set them).
   needsInput?: { question: string } | null;
   artifacts?: Array<{ artifactId: string; name?: string; uri?: string; text?: string }>;
@@ -127,7 +130,7 @@ This session is only for consolidating your own memory and skills. Do not call t
       : 'Webhook auth: no shared secret was provided in your runtime config.';
   const webhookBodyExample = task.taskRunId
     ? `{ "cardId": "${task.id}", "taskRunId": "${task.taskRunId}", "status": "done", "summary": "...", "output": "..." }`
-    : `{ "cardId": "${task.id}", "status": "done", "summary": "...", "output": "..." }`;
+    : `{ "cardId": "${task.id}", ${currentUsageAttempt() ? `"usageAttemptKey": "${currentUsageAttempt()}", ` : ''}"status": "done", "summary": "...", "output": "..." }`;
   const escalationBodyExample = task.taskRunId
     ? `{ "cardId": "${task.id}", "taskRunId": "${task.taskRunId}", "status": "needs_review", "summary": "needs reviewer guidance: ...", "output": "Attempted methods:\\n- ...\\n\\nBlocker/root cause:\\n...\\n\\nReviewer questions:\\n- ...\\n\\nPartial output/logs:\\n..." }`
     : `{ "cardId": "${task.id}", "status": "needs_review", "summary": "needs reviewer guidance: ...", "output": "Attempted methods:\\n- ...\\n\\nBlocker/root cause:\\n...\\n\\nReviewer questions:\\n- ...\\n\\nPartial output/logs:\\n..." }`;

@@ -4,6 +4,7 @@ import { getAdapter } from './adapters/registry.ts';
 import { db } from './db/client.ts';
 import { activityLog, agents, cardComments, costEvents, heartbeatRuns, kanbanCards, taskRuns, workProducts } from './db/schema.ts';
 import { budgetOk, buildExecutionAgent, getBudgetGuard } from './dispatch.ts';
+import { attemptKey, executeUsage, usageBudgetState } from './usage-ledger.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { readKanbanTaskTimeoutSeconds } from './runtime-settings.ts';
 
@@ -218,16 +219,12 @@ export async function runAgentMaintenance(app: FastifyInstance, agent: AgentRow,
       metadata: { trigger: options.source, since: since?.toISOString() ?? null },
     });
     const adapter = getAdapter(agent.adapterType ?? 'hermes-ssh');
-    const result = await adapter.dispatch(executionAgent, task);
+    const result = await executeUsage({ companyId: agent.companyId, agentId: agent.id, heartbeatRunId: run.id, runtimeId: agent.runtimeId, attemptKey: attemptKey({ heartbeatRunId: run.id }), source: 'maintenance' }, () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds });
     if (!result.success) throw new Error(result.output || 'maintenance_run_failed');
 
-    const guard = await getBudgetGuard(agent);
-    const nextSpend = Number(agent.spentThisMonth ?? 0) + result.costUsd;
-    const overBudget = guard.hardStop && ((guard.monthlyLimit !== null && nextSpend >= guard.monthlyLimit) || (guard.perTaskLimit !== null && result.costUsd > guard.perTaskLimit));
+    const overBudget = (await usageBudgetState(agent)).blocked;
     await db.update(agents).set({
       isBusy: false,
-      isActive: overBudget ? false : undefined,
-      spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${result.costUsd}`,
     }).where(eq(agents.id, agent.id));
     await db.update(heartbeatRuns).set({
       status: 'success',
@@ -236,14 +233,6 @@ export async function runAgentMaintenance(app: FastifyInstance, agent: AgentRow,
       outputTokens: result.tokensUsed,
       costUsd: result.costUsd.toString(),
     }).where(eq(heartbeatRuns.id, run.id));
-    await db.insert(costEvents).values({
-      companyId: agent.companyId,
-      agentId: agent.id,
-      provider: agent.adapterType ?? 'unknown',
-      model: agent.hermesProfile ?? 'maintenance',
-      outputTokens: result.tokensUsed,
-      costUsd: result.costUsd.toString(),
-    });
     await db.insert(activityLog).values({
       companyId: agent.companyId,
       actorType: 'agent',

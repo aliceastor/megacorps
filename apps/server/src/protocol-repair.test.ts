@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { agents, cardComments, kanbanCards, taskRuns } from './db/schema.ts';
+import { companies, agents, cardComments, kanbanCards, taskRuns } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { reviewCard } from './dispatch.ts';
 import { getAdapter } from './adapters/registry.ts';
@@ -12,7 +12,7 @@ import { departments, positions } from './db/schema.ts';
 test('malformed review has persisted same-session then fresh-context repair, then one actionable blocker', async (t) => {
   const card: any = { id: randomUUID(), companyId: 'company', title: 'Review deliverable', assigneeId: 'author', reviewerId: 'reviewer', columnStatus: 'in_review', tags: [], runRetryState: {} };
   const agent = { id: 'reviewer', companyId: 'company', name: 'Reviewer', slug: 'reviewer', isActive: true, isBusy: false, adapterType: 'webhook', capabilities: [] };
-  const state = memoryDb(t, [[kanbanCards, [card]], [agents, [agent]]]);
+  const state = memoryDb(t, [[companies, [{ id: card.companyId }]], [kanbanCards, [card]], [agents, [agent]]]);
   t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: '{"kind":"megacorps-report","status":"bogus","summary":"Invalid answer"}', sessionId: 'session-1', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
   for (let attempt = 1; attempt <= 3; attempt++) {
     const id = randomUUID(); state.rows(taskRuns).push({ id, cardId: card.id, companyId: card.companyId, agentId: agent.id, kind: 'review', status: 'running' });
@@ -29,7 +29,7 @@ test('malformed review has persisted same-session then fresh-context repair, the
 test('duplicate run repair is durable, and vague/adapter-failed output cannot reset it', async (t) => {
   const card: any = { id: 'card', companyId: 'company', columnStatus: 'in_review', reviewerId: 'reviewer', runRetryState: { review: { failures: 2, nextRunAt: '2027-01-01T00:00:00.000Z' } } };
   const actor: any = { id: 'reviewer', companyId: 'company', isActive: true, adapterType: 'webhook' };
-  const state = memoryDb(t, [[kanbanCards, [card]], [agents, [actor]]]);
+  const state = memoryDb(t, [[companies, [{ id: card.companyId }]], [kanbanCards, [card]], [agents, [actor]]]);
   const input = { card, actor, kind: 'review' as const, runKey: 'run-1', reason: 'Missing verdict', sessionId: 'old-session' };
   await recordProtocolFailure(input);
   const restarted = structuredClone(card);
@@ -63,7 +63,7 @@ test('invalid escalated help stops with the existing actionable request', async 
   const actor: any = { id: 'actor', companyId: 'company', bossId: 'head', adapterType: 'webhook' };
   const head: any = { id: 'head', companyId: 'company', role: 'head', isActive: true, isBusy: false, adapterType: 'webhook' };
   const card: any = { id: 'card', companyId: 'company', assigneeId: 'author', reviewerId: actor.id, columnStatus: 'in_review' };
-  const state = memoryDb(t, [[kanbanCards, [card]], [agents, [actor, head]]]);
+  const state = memoryDb(t, [[companies, [{ id: card.companyId }]], [kanbanCards, [card]], [agents, [actor, head]]]);
   for (let n = 1; n <= 3; n++) await recordProtocolFailure({ card: structuredClone(card), actor, kind: 'review', runKey: `run-${n}`, reason: 'Invalid reply' });
   assert.equal(card.columnStatus, 'needs_review');
   assert.equal(card.reviewerId, head.id);

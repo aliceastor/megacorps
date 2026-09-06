@@ -27,6 +27,7 @@ import { REVIEWER_PLAYBOOK } from './role-playbooks.ts';
 import { acceptanceOf } from './card-brief.ts';
 import { composeReviewPanel, dispositionWarnings, findingIsOpen, formatDispositionRules, formatFindingsForPrompt, formatRoundClosedMessage, formatVerifyInstructions, mergeFindings, nextFixOwner, normalizeFindingKey, normalizeSeverity, panelRequired, roundDecision, takeoverTrigger, verificationDecision, type FindingRow, type MergedFinding, type ReviewVerdict, type TakeoverTrigger, type VerificationInput } from './review-panel.ts';
 import { addActivity, addCardMessage, addStageLog, addTaskLog, budgetOk, buildExecutionAgent, buildReviewPrompt, cardTaskTimeoutSeconds, cascadeParentStatus, claimAgentCapacity, clipText, completeTaskRun, completionBlockedByChildren, createPendingApproval, dispatchInternals, enqueuePanelReviewRun, enqueueTaskRun, openHeartbeatRun, recordCostAndEnforceBudget, recordReviewScore, rememberTaskAdapterSession, resolvePendingApproval, scopedAdapterSession } from './dispatch.ts';
+import { cardUsageScope, executeUsage } from './usage-ledger.ts';
 import { applyMergeGatePlan, noteMergeEvidenceRequired, parkForMerge, planMergeGate } from './merge-gate.ts';
 import { guardedCompletionUpdate } from './completion-guard.ts';
 
@@ -512,7 +513,7 @@ export async function reviewPanelSlot(cardId: string, options: { taskRunId?: str
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { adapterSessionId, roundId: round.id, round: round.round, kind: round.kind, megacorpsPromptChars: prompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
-    const result = await adapter.dispatch(executionAgent, task);
+    const result = await executeUsage(cardUsageScope(card, reviewer, run.id, taskRun.id, round.kind === 'verify' ? 'verify' : 'panel_review'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds });
     const [latestRun] = await db.select().from(taskRuns).where(eq(taskRuns.id, taskRun.id)).limit(1);
     if (latestRun && latestRun.status !== 'running') {
       // The webhook answered this slot (or the round closed) while the adapter ran.

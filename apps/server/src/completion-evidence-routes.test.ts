@@ -3,7 +3,7 @@ import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
-import { agents, approvals, cardComments, companyMemberships, kanbanCards, machineRunners, projects, reviewRounds, taskRuns, users, workProducts } from './db/schema.ts';
+import { companies, agents, approvals, cardComments, companyMemberships, kanbanCards, machineRunners, projects, reviewRounds, taskRuns, users, workProducts } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { registerRoutes } from './routes.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
@@ -15,9 +15,9 @@ import { tryCloseRound } from './review-rounds.ts';
 for (const via of ['auto_review', 'webhook', 'runner', 'human', 'manual', 'panel'] as const) {
   test(`${via} cannot finish a project missing required merge evidence`, async (t) => {
     const card: any = { id: randomUUID(), companyId: randomUUID(), projectId: randomUUID(), title: 'Ship change', columnStatus: 'in_review', requiresApproval: false, reviewerId: null, assigneeId: null, tags: [], dependencyCardIds: [] };
-    const run = { id: randomUUID(), cardId: card.id, companyId: card.companyId, kind: 'review', status: 'running', lockedBy: 'runner' };
+    const run = { id: randomUUID(), cardId: card.id, companyId: card.companyId, agentId: 'original-reviewer', kind: 'review', status: 'running', lockedBy: 'runner' };
     const approval = { id: randomUUID(), cardId: card.id, companyId: card.companyId, type: 'task_review', status: 'pending', payload: { humanGate: true } };
-    const state = memoryDb(t, [[kanbanCards, [card]], [projects, [{ id: card.projectId, companyId: card.companyId, completionRequiresMerge: true, repoUrl: null }]], [taskRuns, [run]], [approvals, via === 'human' ? [approval] : []], [machineRunners, [{ id: 'runner', companyId: card.companyId, name: 'Runner', apiKeyHash: hashRunnerApiKey('synthetic-runner') }]]]);
+    const state = memoryDb(t, [[companies, [{ id: card.companyId }]], [kanbanCards, [card]], [projects, [{ id: card.projectId, companyId: card.companyId, completionRequiresMerge: true, repoUrl: null }]], [agents, [{ id: 'original-reviewer', companyId: card.companyId }]], [taskRuns, [run]], [approvals, via === 'human' ? [approval] : []], [machineRunners, [{ id: 'runner', companyId: card.companyId, name: 'Runner', apiKeyHash: hashRunnerApiKey('synthetic-runner') }]]]);
     const app = Fastify(); t.after(() => app.close());
     if (via === 'auto_review') await reviewCard(card.id, { taskRunId: run.id });
     if (via === 'panel') {
@@ -56,7 +56,7 @@ for (const via of ['auto_review', 'webhook', 'runner', 'human', 'manual', 'panel
 for (const status of ['failed', 'progress', 'input_required', 'bogus']) {
   test(`runner must normalize ${status} report before accepting success alias`, async (t) => {
     const card: any = { id: 'card', companyId: 'company', columnStatus: 'in_progress', assigneeId: 'agent' };
-    memoryDb(t, [[kanbanCards, [card]], [agents, [{ id: 'agent', companyId: 'company', isActive: true, adapterType: 'webhook' }]], [taskRuns, [{ id: 'run', cardId: 'card', companyId: 'company', kind: 'dispatch', status: 'running', lockedBy: 'runner' }]], [machineRunners, [{ id: 'runner', companyId: 'company', name: 'Runner', apiKeyHash: hashRunnerApiKey('synthetic-runner') }]]]);
+    memoryDb(t, [[companies, [{ id: card.companyId }]], [kanbanCards, [card]], [agents, [{ id: 'agent', companyId: 'company', isActive: true, adapterType: 'webhook' }]], [taskRuns, [{ id: 'run', cardId: 'card', companyId: 'company', agentId: 'agent', kind: 'dispatch', status: 'running', lockedBy: 'runner' }]], [machineRunners, [{ id: 'runner', companyId: 'company', name: 'Runner', apiKeyHash: hashRunnerApiKey('synthetic-runner') }]]]);
     const app = Fastify(); t.after(() => app.close()); await registerRunnerRoutes(app);
     const response = await app.inject({ method: 'POST', url: '/api/runner/task-runs/run/complete', headers: { 'x-megacorps-runner-key': 'synthetic-runner' }, payload: { status: 'success', report: { kind: 'megacorps-report', status, summary: 'Current result' } } });
     assert.ok(response.statusCode < 500, response.body);

@@ -12,6 +12,7 @@ import { normalizeAgentResult } from './agent-results.ts';
 import { apiHelpCatalog } from './api-help.ts';
 import { reviewPanelSlot } from './review-rounds.ts';
 import { readyCompany } from './test-support/ready-company.ts';
+import { costEvents } from './db/schema.ts';
 
 function fixture(t: TestContext) {
   const card: any = { id: randomUUID(), companyId: randomUUID(), title: 'Build change', body: 'Implement the requested change.', assigneeId: randomUUID(), reviewerId: null, projectId: null, columnStatus: 'todo', requiresApproval: false, deletedAt: null, tags: [], dependencyCardIds: [], retryCount: 0 };
@@ -37,6 +38,19 @@ function fixture(t: TestContext) {
 
 const report = (status: string, extra = {}) => ({ kind: 'megacorps-report', status, summary: 'Current result', ...extra });
 const product = { type: 'pull_request', title: 'Change', url: 'https://github.com/example/repo/pull/1' };
+
+test('cancelled dispatch preserves its paid late result without moving the card', async t => {
+  const { card, run, state } = fixture(t);
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => {
+    card.columnStatus = 'cancelled';
+    card.executionLockId = null;
+    card.activeHeartbeatRunId = null;
+    return { success: true, output: 'Late synthetic response', sessionId: 'session', tokensUsed: 4, costUsd: 0.125, durationSeconds: 1 };
+  });
+  await dispatchCard(card.id, 'manual', { taskRunId: run.id });
+  assert.equal(card.columnStatus, 'cancelled');
+  assert.equal(state.rows(costEvents).length, 1, 'Late original dispatch usage must survive cancellation');
+});
 
 test('transport-level permission denial bypasses protocol and transport retries', async (t) => {
   const { card, run, state } = fixture(t);
@@ -156,6 +170,17 @@ function panelFixture(t: TestContext, roundKind: 'panel' | 'verify') {
   return { ...data, round, slot };
 }
 
+for (const kind of ['panel', 'verify'] as const) test(`late ${kind} slot callback retains usage after workflow completion`, async t => {
+  const { card, run, state } = panelFixture(t, kind);
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => {
+    run.status = 'cancelled';
+    return { success: false, output: 'synthetic paid failure', sessionId: 'session', tokensUsed: 4, costUsd: 0.125, durationSeconds: 1 };
+  });
+  await reviewPanelSlot(card.id, { taskRunId: run.id });
+  assert.equal(run.status, 'cancelled');
+  assert.equal(state.rows(costEvents).length, 1, 'A late panel or verification result must settle');
+});
+
 for (const via of ['returned', 'webhook'] as const) for (const roundKind of ['panel', 'verify'] as const) for (const status of ['failed', 'rejected', 'progress', 'input_required', 'permission', 'invalid']) {
   test(`${via} ${roundKind} review cannot submit ${status} work with an approved verdict`, async (t) => {
     const { card, agent, run, round, slot } = panelFixture(t, roundKind);
@@ -249,6 +274,17 @@ async function webhook(t: TestContext) {
   await registerRoutes(app);
   return (payload: any) => app.inject({ method: 'POST', url: '/api/webhook/task-complete', headers: { 'x-megacorps-webhook-secret': 'synthetic-task-one-secret' }, payload });
 }
+
+test('stale original webhook records supplied usage before its workflow acknowledgement', async t => {
+  const { card, run, state } = fixture(t);
+  card.columnStatus = 'cancelled'; run.status = 'cancelled';
+  const send = await webhook(t);
+  const response = await send({ cardId: card.id, taskRunId: run.id, status: 'done', costUsd: 0.25 });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().stale, true);
+  assert.equal(state.rows(costEvents).length, 1, 'Stale same-original-attempt webhook usage remains billable');
+  assert.equal(card.columnStatus, 'cancelled');
+});
 
 for (const [label, output] of unsafeOutputs) {
   test(`webhook entrypoint cannot finish ${label} report in returned content`, async (t) => {

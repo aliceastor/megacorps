@@ -1,4 +1,5 @@
 import { cleanupUnusedDefault } from './companyless-migration.ts';
+import { usageLedgerMigration } from './usage-ledger-migration.ts';
 import { sql } from './client.ts';
 import { CEO_POSITION_PROMPT, LEGACY_CEO_POSITION_PROMPT } from '../role-playbooks.ts';
 import { managedMergeMigration, managedMergeRunFenceMigration, managedMergeLockOrderMigration } from './managed-merge-migration.ts';
@@ -15,6 +16,7 @@ const MIGRATION_LOCK_KEY = 727274001;
 // created before the version table will re-run v1 exactly once to get recorded.
 // Never edit an applied migration's statements — add the change as a new version.
 const migrations: Migration[] = [
+  { version: 30, name: 'truthful-usage-ledger', run: async () => { await sql.unsafe(usageLedgerMigration); } },
   { version: 29, name: 'bounded-log-paging', run: async () => { await sql.unsafe(`CREATE INDEX IF NOT EXISTS api_events_user_created_id_idx ON api_events(user_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS prompt_logs_company_created_id_idx ON prompt_logs(company_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS prompt_logs_company_agent_created_id_idx ON prompt_logs(company_id, agent_id, created_at DESC, id DESC);

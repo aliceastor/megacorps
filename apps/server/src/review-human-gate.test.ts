@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { agents, approvals, heartbeatRuns, kanbanCards, taskLogs, taskRuns } from './db/schema.ts';
+import { companies, agents, approvals, heartbeatRuns, kanbanCards, taskLogs, taskRuns } from './db/schema.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { ensureHumanGate } from './review-rounds.ts';
 import { reviewCard, webhookCompletionDecision } from './dispatch.ts';
@@ -9,7 +9,7 @@ import { memoryDb } from './test-support/memory-db.ts';
 test('an in-flight ESCALATE with no manager cannot overwrite a later human gate', async (t) => {
   const card = { id: 'card', companyId: 'company', title: 'snake', body: 'Review the game', assigneeId: 'author', reviewerId: 'reviewer', columnStatus: 'needs_review', requiresApproval: false, deletedAt: null, tags: [], dependencyCardIds: [] };
   const reviewer = { id: 'reviewer', companyId: 'company', name: 'Reviewer', slug: 'reviewer', isActive: true, isBusy: false, bossId: null, adapterType: 'webhook', capabilities: [], deletedAt: null };
-  const state = memoryDb(t, [[kanbanCards, [card]], [agents, [reviewer]], [taskRuns, [{ id: 'late-run', cardId: card.id, kind: 'review', status: 'running' }]]]);
+  const state = memoryDb(t, [[companies, [{ id: card.companyId }]], [kanbanCards, [card]], [agents, [reviewer]], [taskRuns, [{ id: 'late-run', companyId: card.companyId, agentId: reviewer.id, cardId: card.id, kind: 'review', status: 'running' }]]]);
   let started!: () => void;
   const adapterStarted = new Promise<void>((resolve) => { started = resolve; });
   let finish!: () => void;
@@ -45,7 +45,7 @@ for (const approval of [
   test(`ordinary no-manager escalation still blocks without this card's pending human gate (${JSON.stringify(approval)})`, async (t) => {
     const card = { id: 'card', companyId: 'company', title: 'snake', body: 'Review the game', assigneeId: 'author', reviewerId: 'reviewer', columnStatus: 'needs_review', deletedAt: null, tags: [], dependencyCardIds: [] };
     const reviewer = { id: 'reviewer', companyId: 'company', name: 'Reviewer', slug: 'reviewer', isActive: true, isBusy: false, bossId: null, adapterType: 'webhook', capabilities: [], deletedAt: null };
-    const state = memoryDb(t, [[kanbanCards, [card]], [agents, [reviewer]], [approvals, [{ id: 'approval', type: 'task_review', ...approval }]]]);
+    const state = memoryDb(t, [[companies, [{ id: card.companyId }]], [kanbanCards, [card]], [agents, [reviewer]], [approvals, [{ id: 'approval', type: 'task_review', ...approval }]]]);
     t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: 'VERDICT: ESCALATE', sessionId: 's', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
     await reviewCard(card.id);
     assert.equal(card.columnStatus, 'blocked');

@@ -15,6 +15,8 @@ import { assertSessionSecretReady, signSession, requireAuth, requireRole } from 
 import { requireAnyVisibleCompany, requireCompanyRole, requireVisibleCompany, resolveMutationCompany } from './access.ts';
 import { db, sql } from './db/client.ts';
 import { activityLog, adapterSessions, agentReviewScores, agentRuntimes, agents, apiEvents, appSettings, approvals, budgetPolicies, cardComments, chatMessages, chatSessions, companies, companyMemberships, costEvents, departments, externalWaits, goals, heartbeatRuns, kanbanCards, knowledgeDocs, positions, projects, projectWorkspaceFiles, promptLogs, taskLogs, taskRuns, userInvites, users, workProducts } from './db/schema.ts';
+import { attemptKey, executeUsage, settleUsage, settleTaskRunUsage, scopeFromEntry, resultUsage, summarizeUsage, utcPeriod } from './usage-ledger.ts';
+import { transportUsage } from './usage-facts.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import { activeDirectReportsForAgent, buildExecutionAgent, cascadeParentStatus, collaborationDelegationInstructions, collaborationDelegationRequirement, collaborationModeRequiresDelegation, completeMessageTaskRunFromWebhook, completeTaskRun, completionBlockedByChildren, completionStatusForQualityGate, createMessageDelegations, createPendingApproval, delegationItems, enqueueMessageTaskRun, enqueueTaskRun, ensureParentWaitingOnChildren, getTaskLogs, gitRemoteMatchesProjectRepo, isGuidanceEscalation, optionalDelegationInstructions, peerMentionsFromOutput, performWebhookHandoff, processChildSplits, processPeerMentions, processMentionQuestions, processReportNotes, reportNotesFromOutput, childrenFromOutput, answerClientCheckpoint, finishRunWaitingOnClient, resolveClientCheckpointRequest, finishRunWaitingOnBrainstorm, resolveBrainstormRequest, recordReviewScore, webhookCompletionDecision } from './dispatch.ts';
@@ -893,14 +895,24 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.get('/api/cost-events', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
-    const query = request.query as { companyId?: string; agentId?: string; cardId?: string; limit?: string };
+    const query = z.object({ companyId: z.string().uuid().optional(), agentId: z.string().uuid().optional(), cardId: z.string().uuid().optional(), projectId: z.string().uuid().optional(), limit: z.coerce.number().int().min(1).max(500).default(200), offset: z.coerce.number().int().min(0).max(1000000).default(0) }).parse(request.query);
     if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
     const filters = [
       query.companyId ? eq(costEvents.companyId, query.companyId) : inArray(costEvents.companyId, access.companyIds),
       query.agentId ? eq(costEvents.agentId, query.agentId) : undefined,
       query.cardId ? eq(costEvents.cardId, query.cardId) : undefined,
+      query.projectId ? eq(costEvents.projectId, query.projectId) : undefined,
     ].filter(Boolean);
-    return db.select().from(costEvents).where(filters.length ? and(...filters) : undefined).orderBy(desc(costEvents.occurredAt)).limit(Math.min(Math.max(Number(query.limit ?? 200), 1), 500));
+    return db.select().from(costEvents).where(filters.length ? and(...filters) : undefined).orderBy(desc(costEvents.occurredAt), desc(costEvents.id)).limit(query.limit).offset(query.offset);
+  });
+  app.get('/api/usage-summary', async (request, reply) => {
+    const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
+    const query = z.object({ companyId: z.string().uuid().optional(), agentId: z.string().uuid().optional(), cardId: z.string().uuid().optional(), projectId: z.string().uuid().optional(), period: z.string().regex(/^(all|\d{4}-(0[1-9]|1[0-2]))$/).optional() }).parse(request.query);
+    if (query.companyId && !access.companyIds.includes(query.companyId)) return reply.code(403).send({ error: 'company_access_denied' });
+    const now = new Date();
+    const period = query.period === 'all' ? undefined : query.period ? utcPeriod(new Date(`${query.period}-01T00:00:00.000Z`)) : utcPeriod(now);
+    const rows = access.companyIds.length ? await db.select().from(costEvents).where(query.companyId ? eq(costEvents.companyId, query.companyId) : inArray(costEvents.companyId, access.companyIds)) : [];
+    return { ...summarizeUsage(rows, { ...query, period }, now), period: period ?? null, reservationAsOf: now.toISOString(), accounting: 'Runtime-reported actual, estimates and unknown usage; not invoice reconciliation.', taskScope: 'Direct card executions; child cards accounted independently.' };
   });
   app.get('/api/approvals', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
@@ -1045,7 +1057,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (access.companyIds.length === 0) {
       return { stats: { companies: 0, tasks: 0, openTasks: 0, completedTasks: 0, blockedTasks: 0, cancelledTasks: 0, agents: 0, activeAgents: 0, busyAgents: 0, activeRuns: 0, pendingApprovals: 0, budgetPolicies: 0, monthlyCost: 0 }, stages: {}, recentTaskLogs: [], recentApiEvents: [], recentActivity: [], recentRuns: [], pendingApprovals: [] };
     }
-    const [cardStatRows, agentStatRows, companyStatRows, recentTaskLogs, recentApiEvents, recentActivity, recentRuns, pendingApprovals, policyStatRows] = await Promise.all([
+    const [cardStatRows, agentStatRows, companyStatRows, recentTaskLogs, recentApiEvents, recentActivity, recentRuns, pendingApprovals, policyStatRows, usageRows] = await Promise.all([
       db.select({
         status: kanbanCards.columnStatus,
         count: drizzleSql<number>`count(*)::int`,
@@ -1063,18 +1075,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.companyId, access.companyIds)).orderBy(desc(heartbeatRuns.createdAt)).limit(20),
       db.select().from(approvals).where(and(inArray(approvals.companyId, access.companyIds), eq(approvals.status, 'pending'))).orderBy(desc(approvals.createdAt)).limit(50),
       db.select({ count: drizzleSql<number>`count(*)::int` }).from(budgetPolicies).where(and(inArray(budgetPolicies.companyId, access.companyIds), eq(budgetPolicies.isActive, true))),
+      db.select().from(costEvents).where(inArray(costEvents.companyId, access.companyIds)),
     ]);
     const stages: Record<string, number> = {};
     let totalTasks = 0;
     let completedTasks = 0;
     let blockedTasks = 0;
     let cancelledTasks = 0;
-    let monthlyCost = 0;
+    const usage = { ...summarizeUsage(usageRows, { period: utcPeriod() }), period: utcPeriod() };
     for (const row of cardStatRows) {
       const key = row.status ?? 'todo';
       stages[key] = (stages[key] ?? 0) + row.count;
       totalTasks += row.count;
-      monthlyCost += row.costUsd;
       if (key === 'done') completedTasks += row.count;
       if (key === 'blocked') blockedTasks += row.count;
       if (key === 'cancelled') cancelledTasks += row.count;
@@ -1094,8 +1106,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         activeRuns: recentRuns.filter((run) => run.status === 'running').length,
         pendingApprovals: pendingApprovals.length,
         budgetPolicies: policyStatRows[0]?.count ?? 0,
-        monthlyCost: Number(monthlyCost.toFixed(4)),
+        monthlyCost: Number(usage.totalUsd),
       },
+      usage,
       stages,
       recentTaskLogs: recentTaskLogs.map((row) => row.task_logs),
       recentApiEvents,
@@ -2505,7 +2518,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         prompt: promptSnapshotForAdapter(executionAgent, task),
         metadata: { requestedByUserId: user.id, megacorpsPromptChars: task.body.length },
       });
-      const result = await adapter.dispatch(executionAgent, task);
+      const result = await executeUsage({ companyId: agent.companyId, agentId: agent.id, runtimeId: agent.runtimeId, attemptKey: attemptKey({}), source: 'test_connection' }, () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds });
       if (fingerprint) await recordSetupConnectionCheck(id, fingerprint, result.success === true && !result.needsInput, 'execution');
       return result;
     }
@@ -2919,6 +2932,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     const parsedBody = z.object({
       cardId: z.string().uuid(),
+      usage: z.unknown().optional(),
+      usageAttemptKey: z.string().min(1).max(200).optional(),
       taskRunId: z.string().uuid().optional(),
       idempotencyKey: z.string().uuid().optional(),
       status: z.string(),
@@ -2974,6 +2989,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [webhookTaskRun] = taskRunId ? await db.select().from(taskRuns).where(eq(taskRuns.id, taskRunId)).limit(1) : [];
     if (taskRunId && !webhookTaskRun) return reply.code(404).send({ error: 'task_run_not_found' });
     if (webhookTaskRun && webhookTaskRun.cardId !== card.id) return reply.code(409).send({ error: 'task_run_card_mismatch' });
+    if (webhookTaskRun && callerAgent && webhookTaskRun.agentId !== callerAgent.id) return reply.code(403).send({ error: 'usage_actor_mismatch' });
+    const [usageEntry] = body.usageAttemptKey ? await db.select().from(costEvents).where(eq(costEvents.attemptKey, body.usageAttemptKey)).limit(1) : [];
+    if (body.usageAttemptKey && (!usageEntry || usageEntry.companyId !== card.companyId || usageEntry.cardId !== card.id || callerAgent && usageEntry.agentId !== callerAgent.id)) return reply.code(403).send({ error: 'usage_attempt_identity_conflict' });
+    const callbackUsage = body.usage === undefined ? resultUsage({ costUsd: body.costUsd ?? 0, tokensUsed: 0 }) : transportUsage(body.usage, 'webhook_report_v1');
+    if (!callbackUsage) return reply.code(400).send({ error: 'invalid_usage_report' });
+    if (usageEntry) await settleUsage(scopeFromEntry(usageEntry), callbackUsage);
+    else if (webhookTaskRun?.agentId) await settleTaskRunUsage(webhookTaskRun, callbackUsage);
+    else if (body.costUsd !== undefined || body.usage !== undefined) return reply.code(409).send({ error: 'usage_attempt_required', message: 'Supply the original taskRunId or server-issued usageAttemptKey for billable usage.' });
     if ((webhookTaskRun && !['queued', 'running'].includes(webhookTaskRun.status)) || (!['message', 'message_review', 'panel_review'].includes(webhookTaskRun?.kind ?? '') && ['done', 'cancelled'].includes(card.columnStatus ?? ''))) return { ok: true, stale: true, cardId: card.id, taskRunId, newStatus: card.columnStatus };
     const protocolGuidance = webhookTaskRun?.kind === 'review' && Boolean(protocolHelpOrigin(card, webhookTaskRun.agentId ?? ''));
     if (normalizedResult.outcome === 'invalid' || (webhookTaskRun?.kind === 'review' && (normalizedResult.verdictError || (!protocolGuidance && normalizedResult.source === 'report' && normalizedResult.outcome === 'completed' && !normalizedResult.verdict)))) {
@@ -3182,7 +3205,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       executionLog,
       reviewFeedback: reviewRevisionRequested ? body.report?.summary ?? executionLog : undefined,
       reviewerId: escalation ? escalationReviewerId : qualityReviewerId ?? undefined,
-      costUsd: completesRun ? body.costUsd?.toString() : undefined,
       completedAt: nextStatus === 'done' ? new Date() : completesRun ? null : undefined,
       retryCount: nextStatus === 'done' || delegatedViaWebhook ? 0 : undefined,
       nextRunAt: completesRun ? null : undefined,
@@ -3267,10 +3289,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: webhookAction });
     if (webhookComment) publishLiveEvent({ type: 'card.comment.created', companyId: card.companyId, entityType: 'card_comment', entityId: webhookComment.id, cardId: card.id, projectId: card.projectId, action: webhookComment.action });
     if (completesRun && actorAgentId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, actorAgentId));
-    if (completesRun && actorAgentId && body.costUsd) {
-      await db.update(agents).set({ spentThisMonth: drizzleSql`${agents.spentThisMonth} + ${body.costUsd}` }).where(eq(agents.id, actorAgentId));
-      await db.insert(costEvents).values({ companyId: card.companyId, agentId: actorAgentId, cardId: card.id, projectId: card.projectId, goalId: card.goalId, provider: 'webhook', model: 'external', costUsd: body.costUsd.toString() });
-    }
     const heartbeatRunId = webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId;
     if (completesRun) {
       const runStatus = delegationFailed || reviewRevisionRequested ? 'failed' : webhookRunStatus(nextStatus);

@@ -28,6 +28,9 @@ import { childrenFromOutput, processChildSplits, createMessageDelegations, perfo
 import { delegationLineFromReportItem } from './agent-report.ts';
 import { checkpointFromOutput } from './client-checkpoints.ts';
 import { brainstormFromOutput } from './brainstorm.ts';
+import { admitUsage, attemptKey, resultUsage, settleTaskRunUsage } from './usage-ledger.ts';
+import { transportUsage } from './usage-facts.ts';
+import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
@@ -243,7 +246,6 @@ async function createRunnerTaskCompletion(input: {
     columnStatus: nextStatus,
     rollupStatus: childBlock ? 'waiting_on_children' : nextStatus === 'done' ? 'done' : undefined,
     executionLog: output || undefined,
-    costUsd: input.body.costUsd?.toString(),
     completedAt: nextStatus === 'done' ? now : nextStatus === 'blocked' || nextStatus === 'cancelled' ? null : undefined,
     reviewerId: helpReviewerId ?? qualityReviewerId ?? undefined,
     reviewFeedback: normalized.question ?? undefined,
@@ -512,37 +514,27 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
         if (run.kind === 'review' && !reviewCanRun(fromStatus)) continue;
         if (!runnerSupports(runner, payload.runtime, payload.agent.adapterType ?? 'hermes-ssh')) continue;
         const now = new Date();
-        const [claimed] = await db.update(taskRuns).set({
-          status: 'running',
-          lockedBy: runner.id,
-          lockedAt: now,
-          startedAt: now,
-          updatedAt: now,
-        }).where(and(eq(taskRuns.id, run.id), eq(taskRuns.status, 'queued'))).returning();
-        if (!claimed) continue;
-        let claimedPayload = { ...payload, taskRun: claimed };
-        if (claimed.kind === 'dispatch') {
-          const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
-          const [lockedCard] = await db.update(kanbanCards).set({
-            columnStatus: 'in_progress',
-            executionLockId: claimed.id,
-            executionLockedByAgentId: payload.agent.id,
-            executionLockedAt: now,
-            executionLockExpiresAt: expiresAt,
-            startedAt: payload.card.startedAt ?? now,
-            lastError: null,
-            updatedAt: now,
-          }).where(and(
-            eq(kanbanCards.id, payload.card.id),
-            isNull(kanbanCards.deletedAt),
-            drizzleSql`(${kanbanCards.executionLockId} IS NULL OR ${kanbanCards.executionLockExpiresAt} < now())`,
-          )).returning();
-          if (!lockedCard) {
-            await db.update(taskRuns).set({ status: 'queued', lockedBy: null, lockedAt: null, startedAt: null, updatedAt: new Date(), error: 'card_execution_locked' }).where(eq(taskRuns.id, claimed.id));
-            continue;
+        const claim = await retryMergeGateWrite(() => db.transaction(async tx => {
+          await admitUsage({ companyId: run.companyId, agentId: payload.agent!.id, cardId: payload.card.id, projectId: payload.card.projectId, taskRunId: run.id, heartbeatRunId: run.heartbeatRunId, runtimeId: payload.agent!.runtimeId, attemptKey: attemptKey({ taskRunId: run.id }), source: 'runner', reportingSource: `runner:${runner.id}` }, { transaction: tx, now, timeoutSeconds: 600 });
+          const [claimed] = await tx.update(taskRuns).set({ status: 'running', lockedBy: runner.id, lockedAt: now, startedAt: now, updatedAt: now })
+            .where(and(eq(taskRuns.id, run.id), eq(taskRuns.status, 'queued'))).returning();
+          if (!claimed) throw httpError(409, 'runner_claim_raced');
+          let card = payload.card;
+          if (claimed.kind === 'dispatch') {
+            const [lockedCard] = await tx.update(kanbanCards).set({ columnStatus: 'in_progress', executionLockId: claimed.id, executionLockedByAgentId: payload.agent!.id, executionLockedAt: now, executionLockExpiresAt: new Date(now.getTime() + 10 * 60 * 1000), startedAt: payload.card.startedAt ?? now, lastError: null, updatedAt: now })
+              .where(and(eq(kanbanCards.id, payload.card.id), isNull(kanbanCards.deletedAt), drizzleSql`(${kanbanCards.executionLockId} IS NULL OR ${kanbanCards.executionLockExpiresAt} < now())`)).returning();
+            if (!lockedCard) throw httpError(409, 'card_execution_locked');
+            card = lockedCard;
           }
-          claimedPayload = { ...claimedPayload, card: lockedCard };
-          if (fromStatus !== 'in_progress') {
+          return { claimed, card };
+        })).catch(error => {
+          if (error?.statusCode === 409) return null;
+          throw error;
+        });
+        if (!claim) continue;
+        const { claimed } = claim;
+        const claimedPayload = { ...payload, taskRun: claimed, card: claim.card };
+        if (claimed.kind === 'dispatch') {          if (fromStatus !== 'in_progress') {
             await recordStageAction({
               cardId: payload.card.id,
               agentId: payload.agent.id,
@@ -579,6 +571,10 @@ export async function registerRunnerRoutes(app: FastifyInstance): Promise<void> 
     const body = runnerTaskCompleteSchema.parse(request.body ?? {});
     const [run] = await db.select().from(taskRuns).where(and(eq(taskRuns.id, id), eq(taskRuns.companyId, runner.companyId))).limit(1);
     if (!run) return reply.code(404).send({ error: 'task_run_not_found' });
+    if (run.lockedBy !== runner.id || run.status === 'queued') return reply.code(409).send({ error: 'task_run_not_claimed_by_runner' });
+    const usage = body.usage === undefined ? resultUsage({ costUsd: body.costUsd ?? 0, tokensUsed: 0 }) : transportUsage(body.usage, 'runner_report_v1');
+    if (!usage) return reply.code(400).send({ error: 'invalid_usage_report' });
+    await settleTaskRunUsage(run, usage, `runner:${runner.id}`);
     // Idempotent ack: a retried completion for a run this runner already finished must
     // not 409 (the retry would loop) and must not re-run completion side effects.
     if (run.lockedBy === runner.id && run.status !== 'running' && run.status !== 'queued') {

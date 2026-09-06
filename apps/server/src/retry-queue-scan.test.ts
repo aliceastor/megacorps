@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import Fastify from 'fastify';
-import { agents, kanbanCards, machineRunners, taskRuns } from './db/schema.ts';
+import { companies, agents, kanbanCards, machineRunners, taskRuns } from './db/schema.ts';
 import { dispatchInternals } from './dispatch.ts';
 import { registerRunnerRoutes } from './runner-routes.ts';
 import { hashRunnerApiKey } from './runner-auth.ts';
@@ -36,7 +36,7 @@ test('internal claimant scans past a full delayed retry page', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now });
   const queue = retryQueue(250, now);
   memoryDb(t, [
-    [kanbanCards, queue.cards],
+    [companies, [{ id: 'company' }]], [kanbanCards, queue.cards],
     [agents, [{ id: 'reviewer', companyId: 'company', isActive: true, isBusy: false, adapterType: 'webhook', deletedAt: null }]],
     [taskRuns, queue.runs],
   ]);
@@ -51,7 +51,7 @@ test('runner claim API scans past a full delayed retry page', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now });
   const queue = retryQueue(25, now);
   memoryDb(t, [
-    [kanbanCards, queue.cards],
+    [companies, [{ id: 'company' }]], [kanbanCards, queue.cards],
     [agents, [{ id: 'reviewer', companyId: 'company', isActive: true, isBusy: false, adapterType: 'webhook', deletedAt: null }]],
     [machineRunners, [{ id: 'runner', companyId: 'company', name: 'Runner', apiKeyHash: hashRunnerApiKey('test-only-key') }]],
     [taskRuns, queue.runs],
