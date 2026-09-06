@@ -83,7 +83,7 @@ export async function registerCronRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/cron/runs/:id', async (request, reply) => {
     const user = await requireRole(request, reply, 'viewer'); if (!user) return reply;
-    const [row] = await db.select().from(cronRuns).where(eq(cronRuns.id, (request.params as { id: string }).id)).limit(1);
+    const [row] = await db.select().from(cronRuns).where(eq(cronRuns.id, z.string().uuid().parse((request.params as { id: string }).id))).limit(1);
     return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
 

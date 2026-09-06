@@ -25,7 +25,7 @@ test('authenticated startup rejects malformed read inputs before SQL', async t =
     assert.equal(response.json().error, 'validation_failed');
     assert.ok(response.json().issues.length);
   });
-  for (const route of ['/api/chat/sessions?agentId=bad', '/api/chat/sessions?projectId=bad', '/api/chat/sessions/bad/messages', '/api/search?companyId=bad', '/api/approvals?cardId=bad', '/api/cards?assigneeId=bad']) await t.test(route, async () => {
+  for (const route of ['/api/chat/sessions?agentId=bad', '/api/chat/sessions?projectId=bad', '/api/chat/sessions/bad/messages', '/api/search?companyId=bad', '/api/approvals?cardId=bad', '/api/cards?assigneeId=bad', '/api/system-logs/bad', '/api/prompt-logs/bad', '/api/activity/bad', '/api/heartbeat-runs/bad', '/api/task-runs/bad', '/api/cron/runs/bad', '/api/prompt-logs?agentId=bad', '/api/heartbeat-runs?cardId=bad', '/api/task-runs?agentId=bad']) await t.test(route, async () => {
     const response = await app.inject({ url: route, headers }); assert.equal(response.statusCode, 400, response.body);
   });
   await t.test('unauthenticated malformed chat detail is 401 before lookup; supported unbound project remains valid', async () => {

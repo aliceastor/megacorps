@@ -19,7 +19,7 @@ test('PostgreSQL authenticated read contracts include production hooks and usefu
   const [card] = await sql`INSERT INTO kanban_cards(company_id,title,body,column_status) VALUES(${company!.id},'Synthetic goal','Natural language deliverable','todo') RETURNING *`;
   const headers = { cookie: `session=${await signSession(user as any)}` };
   const call = (url: string) => app.inject({ url, headers });
-  for (const url of ['/api/search?q=Synthetic&limit=NaN', '/api/dashboard/timeseries?days=NaN', '/api/chat/sessions?agentId=bad', '/api/chat/sessions/bad/messages', `/api/chat/sessions/${session!.id}/messages?limit=1.5`, '/api/approvals?limit=NaN', '/api/notifications?limit=Infinity', '/api/cards?offset=-1', `/api/cards/${card!.id}/actions?limit=NaN`, `/api/cards/${card!.id}/assignment-history?limit=1.5`, '/api/usage-summary?period=2026-13']) {
+  for (const url of ['/api/search?q=Synthetic&limit=NaN', '/api/dashboard/timeseries?days=NaN', '/api/chat/sessions?agentId=bad', '/api/chat/sessions/bad/messages', `/api/chat/sessions/${session!.id}/messages?limit=1.5`, '/api/approvals?limit=NaN', '/api/notifications?limit=Infinity', '/api/cards?offset=-1', `/api/cards/${card!.id}/actions?limit=NaN`, `/api/cards/${card!.id}/assignment-history?limit=1.5`, '/api/usage-summary?period=2026-13', '/api/prompt-logs/bad', '/api/system-logs/bad', '/api/task-runs?agentId=bad', '/api/cron/runs/bad']) {
     const response = await call(url); assert.equal(response.statusCode, 400, `${url}: ${response.body}`); assert.equal(response.json().error, 'validation_failed');
   }
   const search = await call('/api/search?q=Synthetic&limit=8'); assert.equal(search.statusCode, 200, search.body); assert.equal(search.json().cards[0].id, card!.id);

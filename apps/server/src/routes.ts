@@ -486,6 +486,7 @@ async function ensureCompanyReferences(companyId: string, input: CompanyReferenc
 type LogListQuery = ReturnType<typeof parseLogListQuery>;
 
 function parsedLogQuery(request: FastifyRequest, reply: FastifyReply, legacyDefault: number): LogListQuery | null {
+  z.object({ companyId: optionalReadId, cardId: optionalReadId, agentId: optionalReadId }).parse(request.query);
   try {
     return parseLogListQuery(request.query as Record<string, string | undefined>, legacyDefault);
   } catch (error) {
@@ -786,7 +787,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.get('/api/system-logs/:id', async (request, reply) => {
     const user = await requireAuth(request, reply); if (!user) return reply;
-    const [row] = await db.select().from(apiEvents).where(and(eq(apiEvents.id, (request.params as { id: string }).id), eq(apiEvents.userId, user.id))).limit(1);
+    const [row] = await db.select().from(apiEvents).where(and(eq(apiEvents.id, z.string().uuid().parse((request.params as { id: string }).id)), eq(apiEvents.userId, user.id))).limit(1);
     return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
   app.get('/api/prompt-logs', async (request, reply) => {
@@ -810,7 +811,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/prompt-logs/:id', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     if (access.companyIds.length === 0) return reply.code(404).send({ error: 'log_not_found' });
-    const [row] = await db.select().from(promptLogs).where(and(eq(promptLogs.id, (request.params as { id: string }).id), inArray(promptLogs.companyId, access.companyIds))).limit(1);
+    const [row] = await db.select().from(promptLogs).where(and(eq(promptLogs.id, z.string().uuid().parse((request.params as { id: string }).id)), inArray(promptLogs.companyId, access.companyIds))).limit(1);
     return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
   app.get('/api/admin/activity', async (request, reply) => {
@@ -823,7 +824,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   app.get('/api/admin/activity/:id', async (request, reply) => {
     const user = await requireRole(request, reply, 'admin'); if (!user) return reply;
-    const [row] = await db.select().from(activityLog).where(and(eq(activityLog.id, (request.params as { id: string }).id), isNull(activityLog.companyId))).limit(1);
+    const [row] = await db.select().from(activityLog).where(and(eq(activityLog.id, z.string().uuid().parse((request.params as { id: string }).id)), isNull(activityLog.companyId))).limit(1);
     return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
   app.get('/api/activity', async (request, reply) => {
@@ -844,7 +845,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/activity/:id', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     if (access.companyIds.length === 0) return reply.code(404).send({ error: 'log_not_found' });
-    const [row] = await db.select().from(activityLog).where(and(eq(activityLog.id, (request.params as { id: string }).id), inArray(activityLog.companyId, access.companyIds))).limit(1);
+    const [row] = await db.select().from(activityLog).where(and(eq(activityLog.id, z.string().uuid().parse((request.params as { id: string }).id)), inArray(activityLog.companyId, access.companyIds))).limit(1);
     return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
   app.get('/api/heartbeat-runs', async (request, reply) => {
@@ -867,7 +868,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/heartbeat-runs/:id', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     if (access.companyIds.length === 0) return reply.code(404).send({ error: 'log_not_found' });
-    const [row] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, (request.params as { id: string }).id), inArray(heartbeatRuns.companyId, access.companyIds))).limit(1);
+    const [row] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, z.string().uuid().parse((request.params as { id: string }).id)), inArray(heartbeatRuns.companyId, access.companyIds))).limit(1);
     return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
   app.get('/api/task-runs', async (request, reply) => {
@@ -891,7 +892,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/task-runs/:id', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     if (access.companyIds.length === 0) return reply.code(404).send({ error: 'log_not_found' });
-    const [row] = await db.select().from(taskRuns).where(and(eq(taskRuns.id, (request.params as { id: string }).id), inArray(taskRuns.companyId, access.companyIds))).limit(1);
+    const [row] = await db.select().from(taskRuns).where(and(eq(taskRuns.id, z.string().uuid().parse((request.params as { id: string }).id)), inArray(taskRuns.companyId, access.companyIds))).limit(1);
     return row ?? reply.code(404).send({ error: 'log_not_found' });
   });
   app.get('/api/cost-events', async (request, reply) => {
