@@ -47,7 +47,7 @@ test('A2A callback URL carries logical attempt identity independently of reused 
     urls.push(JSON.parse(String(init?.body)).params.configuration.taskPushNotificationConfig.url);
     return new Response(JSON.stringify({ result: { task: { id: 'turn', contextId: 'same-session', status: { state: 'completed' } } } }));
   } });
-  const agent = { id: 'synthetic', hermesProfile: null, currentSessionId: 'same-session', adapterConfig: { a2aBaseUrl: 'http://usage-fixture.internal:9900' } };
+  const agent = { id: 'synthetic', hermesProfile: null, currentSessionId: 'same-session', adapterConfig: { a2aBaseUrl: 'http://usage-fixture.internal:9900', a2aPushSecret: 'synthetic-registered-secret' } };
   for (const key of ['operation:first', 'operation:second']) await withUsageAttempt(key, () => dispatch(agent, { id: 'card', title: 'Test', body: 'Synthetic' }));
   assert.equal(new URL(urls[0]!).searchParams.get('usageAttemptKey'), 'operation:first');
   assert.equal(new URL(urls[1]!).searchParams.get('usageAttemptKey'), 'operation:second');
@@ -99,4 +99,33 @@ test('signed late push settles original terminal attempt without borrowing a reu
   assert.equal(state.rows(costEvents).length, 1);
   const denied = await app.inject({ method: 'POST', url, payload }); assert.equal(denied.statusCode, 401);
   assert.equal(parseA2aPushPayload(payload)?.usage?.source, 'a2a_push_metadata_v1');
+});
+
+test('unsigned adapter callbacks retain context hints without settling ledger accounting', async t => {
+  const company: any = { id: randomUUID() };
+  const agent: any = { id: randomUUID(), companyId: company.id, name: 'Synthetic', isActive: true, budgetMonthly: '1', currentSessionId: 'unsigned-context', adapterConfig: { a2aBaseUrl: 'http://synthetic.internal:9900' } };
+  const card: any = { id: randomUUID(), companyId: company.id, columnStatus: 'todo', nextRunAt: new Date(Date.now() + 100000) };
+  const state = memoryDb(t, [[companies, [company]], [agents, [agent]], [kanbanCards, [card]], [adapterSessions, [{ id: randomUUID(), adapterType: 'a2a', agentId: agent.id, adapterSessionId: 'unsigned-context', scopeType: 'card', scopeId: card.id }]]]);
+  const scope = { companyId: company.id, agentId: agent.id, cardId: card.id, attemptKey: randomUUID(), source: 'dispatch' };
+  await admitUsage(scope);
+  let callback = '';
+  const dispatch = createA2aDispatch({ fetchImpl: async (_url, init) => {
+    callback = JSON.parse(String(init?.body)).params.configuration.taskPushNotificationConfig.url;
+    return new Response(JSON.stringify({ result: { task: { id: 'turn', contextId: 'unsigned-context', status: { state: 'completed' } } } }));
+  } });
+  const result = await withUsageAttempt(scope.attemptKey, () => dispatch(agent, { id: card.id, title: 'Test', body: 'Synthetic' }));
+  assert.equal(result.success, true);
+  const app = Fastify(); t.after(() => app.close()); await registerRoutes(app);
+  const payload = { statusUpdate: { taskId: 'turn', contextId: 'unsigned-context', status: { state: 'completed' }, metadata: { megacorpsUsage: { version: 1, costStatus: 'actual', costUsd: '0.5', tokenStatus: 'unknown' } } } };
+  const url = new URL(callback);
+  const response = await app.inject({ method: 'POST', url: url.pathname + url.search, payload });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().accelerated, true);
+  assert.equal(url.searchParams.has('usageAttemptKey'), false);
+  assert.equal(card.nextRunAt, null);
+  assert.equal(state.rows(costEvents)[0]!.costUsd, null);
+  assert.equal(state.rows(costEvents)[0]!.reservationUsd, '1.00000000');
+  assert.equal(state.rows(costEvents)[0]!.settledAt ?? null, null);
+  const forged = await app.inject({ method: 'POST', url: `/api/a2a/push?usageAttemptKey=${scope.attemptKey}`, payload });
+  assert.equal(forged.statusCode, 401);
 });

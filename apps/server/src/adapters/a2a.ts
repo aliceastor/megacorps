@@ -69,12 +69,16 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
         : null;
       const contextId = priorContext ?? `${GENERATED_CONTEXT_PREFIX}${randomUUID()}`;
       const pushEnabled = agent.adapterConfig?.a2aPushEnabled !== false;
+      // Only register accounting callbacks when the receiver can authenticate them.
+      // Unconfigured gateways retain context-only reconciliation hints.
+      const pushSecret = getAdapterOptionalStringConfig(agent, 'a2aPushSecret') ?? getAdapterOptionalStringConfig(agent, 'a2aBearerToken');
+      const accountingKey = pushSecret ? currentUsageAttempt() : undefined;
       const outcome = await sendA2aMessage({
         baseUrl: url,
         text: prompt,
         contextId,
         configuration: pushEnabled
-          ? { taskPushNotificationConfig: { url: `${megacorpsApiUrl(agent)}/api/a2a/push${currentUsageAttempt() ? `?usageAttemptKey=${encodeURIComponent(currentUsageAttempt()!)}` : ''}` } }
+          ? { taskPushNotificationConfig: { url: `${megacorpsApiUrl(agent)}/api/a2a/push${accountingKey ? `?usageAttemptKey=${encodeURIComponent(accountingKey)}` : ''}` } }
           : null,
         bearerToken: getAdapterOptionalStringConfig(agent, 'a2aBearerToken', 'A2A_BEARER_TOKEN') ?? null,
         timeoutMs: a2aSendTimeoutMs(task.timeoutSeconds),
