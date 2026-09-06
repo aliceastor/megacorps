@@ -2617,13 +2617,17 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(row ? redactProject(row) : row);
   });
   app.get('/api/projects/:id/merge-readiness', async (request, reply) => {
-    const [project] = await db.select().from(projects).where(and(eq(projects.id, (request.params as { id: string }).id), isNull(projects.deletedAt))).limit(1);
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const [project] = await db.select().from(projects).where(and(eq(projects.id, id), isNull(projects.deletedAt))).limit(1);
     if (!project) return reply.code(404).send({ error: 'project_not_found' });
     if (!(await requireVisibleCompany(request, reply, project.companyId))) return reply;
     return { autoMergeAfterApproval: project.autoMergeAfterApproval, completionRequiresMerge: project.completionRequiresMerge, ...(await inspectManagedProject(project)) };
   });
   app.get('/api/cards/:id/merge-intents', async (request, reply) => {
-    const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, (request.params as { id: string }).id)).limit(1);
+    const user = await requireAuth(request, reply); if (!user) return reply;
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, id), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card) return reply.code(404).send({ error: 'card_not_found' });
     if (!(await requireVisibleCompany(request, reply, card.companyId))) return reply;
     return db.select().from(mergeIntents).where(eq(mergeIntents.cardId, card.id));
