@@ -6,8 +6,7 @@ import cookie from '@fastify/cookie';
 import { isolatedPostgres } from './test-support/postgres-db.ts';
 
 test('PostgreSQL companyless bootstrap, audit, complete inventory and deletion transactions', { skip: !process.env.TEST_DATABASE_URL && !process.env.CI ? 'TEST_DATABASE_URL absent; real PostgreSQL checks run in CI' : false, timeout: 120_000 }, async t => {
-  const { sql } = await isolatedPostgres(t);
-  const { migrate } = await import('./db/migrate.ts');
+  const { sql, migrateFixture } = await isolatedPostgres(t);
   const { registerRoutes } = await import('./routes.ts');
   const { cleanupUnusedDefault } = await import('./db/companyless-migration.ts');
   const { CEO_POSITION_PROMPT } = await import('./role-playbooks.ts');
@@ -17,7 +16,10 @@ test('PostgreSQL companyless bootstrap, audit, complete inventory and deletion t
   const call = (method: 'POST' | 'PUT' | 'GET' | 'DELETE', url: string, payload?: any) => app.inject({ method, url, payload, headers: { cookie: session } });
   await t.test('fresh migrations are companyless and repeated startup does not recreate a seed', async () => {
     assert.equal((await sql`SELECT * FROM companies`).length, 0);
-    await migrate(); assert.equal((await sql`SELECT * FROM companies`).length, 0);
+    // Repeated startup uses the same fixture admission lock as initial setup;
+    // unrelated test schemas can otherwise hold the global migration lock.
+    await migrateFixture(); assert.equal((await sql`SELECT * FROM companies`).length, 0);
+    assert.equal((await sql`SHOW lock_timeout`)[0]!.lock_timeout, '1200ms', 'race-test timeouts must remain unchanged');
     const denied = await call('POST', '/api/auth/bootstrap', { email: 'invalid@example.test', name: 'Denied', password: 'Synthetic-password-2026', token: 'wrong' });
     assert.ok([401,503].includes(denied.statusCode)); assert.equal((await sql`SELECT * FROM users`).length, 0);
     const previousToken=process.env.BOOTSTRAP_TOKEN;process.env.BOOTSTRAP_TOKEN='Synthetic-bootstrap-token-2026';
