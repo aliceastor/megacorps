@@ -19,7 +19,7 @@ import { runRetryReady } from './run-retry.ts';
 import { generateRunnerApiKey, hashRunnerApiKey, requireAgentSessionAuth, requireRunnerAuth } from './runner-auth.ts';
 import { dependenciesMet as cardDependenciesMet } from './card-dependencies.ts';
 import { delegationCapacityUnavailable, parentWaitingOnChildren } from './dispatch.ts';
-import { cascadeParentStatus, completeTaskRun, completionBlockedByChildren, completionStatusForQualityGate, createPendingApproval, enqueueTaskRun } from './dispatch.ts';
+import { cascadeParentStatus, completeTaskRun, completionBlockedByChildren, completionStatusForQualityGate, createPendingApproval, enqueueMessageTaskRun, enqueueTaskRun } from './dispatch.ts';
 import { agentResultExecutionLog, normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts, settleOriginalHeartbeat } from './agent-results.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { applyMergeGatePlan, mergeCompletionStatus, planMergeGate } from './merge-gate.ts';
@@ -34,6 +34,7 @@ import { brainstormFromOutput } from './brainstorm.ts';
 import { admitUsage, attemptKey, resultUsage, settleTaskRunUsage } from './usage-ledger.ts';
 import { transportUsage } from './usage-facts.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
+import { applyRecoveryReport, isRecoveryReview } from './card-recovery.ts';
 
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
@@ -133,6 +134,29 @@ async function createRunnerTaskCompletion(input: {
   input.body = await sanitizeCompanyOutput(card.companyId, input.body);
   let output = [input.body.summary, input.body.output].filter(Boolean).join('\n\n');
   const normalized = normalizeAgentResult({ output, report: input.body.report, workProducts: input.body.workProducts });
+  if (isRecoveryReview(card) && normalized.outcome !== 'permission') {
+    if (input.run.kind !== 'review' || !runAgentId || card.reviewerId !== runAgentId) throw httpError(409, 'Recovery owner or stage changed.', 'recovery_authority_changed');
+    const [actor] = await db.select().from(agents).where(and(eq(agents.id,runAgentId),eq(agents.companyId,card.companyId),isNull(agents.deletedAt))).limit(1);
+    if (!actor || !actor.isActive) throw httpError(409, 'Recovery actor is unavailable.', 'recovery_authority_changed');
+    let recovery;
+    try {
+      if (normalized.outcome === 'invalid') throw new Error(normalized.reason ?? 'recovery_report_invalid');
+      if (!['success','done','in_review'].includes(input.body.status)) throw new Error('recovery_status_conflict: A recovery decision cannot override an unsuccessful or stopped attempt.');
+      recovery = await applyRecoveryReport(card,runAgentId,normalized.report!,input.run.id);
+    } catch (error) {
+      const reason = normalized.reason ?? String(error);
+      await sendAgentFeedbackAndRequeue({card,agent:actor,kind:'review',message:reason,taskRunId:input.run.id,runId:input.run.heartbeatRunId,result:{sessionId:actor.currentSessionId??''}});
+      throw httpError(409,reason,'recovery_action_rejected');
+    }
+    await settleOriginalHeartbeat(card,runAgentId,input.run.heartbeatRunId,input.run.id);
+    await completeTaskRun(input.run.id,{status:'success',preserveCard:true,output:agentResultExecutionLog(output,normalized)});
+    if (recovery?.continueKind && recovery.sourceMessageId) {
+      const [source] = await db.select().from(cardComments).where(and(eq(cardComments.id,recovery.sourceMessageId),eq(cardComments.cardId,card.id))).limit(1);
+      if(source)await enqueueMessageTaskRun(source,recovery.continueKind==='message_review'?'message_review':'message');
+    } else if (recovery?.continueKind==='dispatch' || recovery?.continueKind==='review') await enqueueTaskRun(card.id,recovery.continueKind,'queue');
+    return recovery?.card ?? (await db.select().from(kanbanCards).where(eq(kanbanCards.id,card.id)).limit(1))[0]!;
+  }
+  if (normalized.report?.recovery && !isRecoveryReview(card)) throw httpError(409,'Recovery actions require the current recovery review.','recovery_context_required');
   const protocolGuidance = input.run.kind === 'review' && Boolean(protocolHelpOrigin(card, runAgentId ?? ''));
   if (normalized.outcome === 'invalid' || (input.run.kind === 'review' && normalized.outcome === 'completed' && (normalized.verdictError || (!protocolGuidance && normalized.source === 'report' && !normalized.verdict)))) {
     const [actor] = runAgentId ? await db.select().from(agents).where(eq(agents.id, runAgentId)).limit(1) : [];
@@ -141,15 +165,17 @@ async function createRunnerTaskCompletion(input: {
     return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: input.run.kind === 'review' ? 'review' : 'dispatch', message: reason, taskRunId: input.run.id, runId: input.run.heartbeatRunId, result: { sessionId: actor.currentSessionId ?? '' } });
   }
   output = agentResultExecutionLog(output, normalized);
-  if (!(await persistAgentWorkProducts(card, runAgentId, input.run.id, normalized.workProducts, null, normalized.report))) {
-    await settleOriginalHeartbeat(card, runAgentId, input.run.heartbeatRunId, input.run.id);
-    await completeTaskRun(input.run.id, { status: 'success', preserveCard: true, output });
-    return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
-  }
+  // Permission denials carry diagnostics, never accepted completion evidence.
+  // Route them before persisting any products, matching native completion.
   if (normalized.outcome === 'permission') {
     const parked = await parkPermissionBlockedResult(card, runAgentId, input.run.heartbeatRunId, normalized.reason!, output, input.run.id);
     await completeTaskRun(input.run.id, { status: 'failed', preserveCard: true, error: normalized.reason, output });
     return parked.card;
+  }
+  if (!(await persistAgentWorkProducts(card, runAgentId, input.run.id, normalized.workProducts, null, normalized.report))) {
+    await settleOriginalHeartbeat(card, runAgentId, input.run.heartbeatRunId, input.run.id);
+    await completeTaskRun(input.run.id, { status: 'success', preserveCard: true, output });
+    return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
   }
   const [actor] = runAgentId ? await db.select().from(agents).where(eq(agents.id, runAgentId)).limit(1) : [];
   const protocolHelp = actor && input.run.kind === 'review' ? await finishProtocolHelp(card, actor.id, output, input.run.id) : null;
