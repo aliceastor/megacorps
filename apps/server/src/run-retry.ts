@@ -5,6 +5,7 @@ import { recordStageAction } from './card-actions.ts';
 import { notify } from './notifications.ts';
 import { publishLiveEvent } from './live.ts';
 import { completionCondition } from './completion-guard.ts';
+import { requestCardRecovery } from './card-recovery.ts';
 
 export type RetryKind = 'review' | 'message' | 'message_review';
 export type RunRetryState = Partial<Record<RetryKind, { failures: number; nextRunAt: string | null }>>;
@@ -15,14 +16,19 @@ export function isRetryKind(kind: string): kind is RetryKind {
   return kind === 'review' || kind === 'message' || kind === 'message_review';
 }
 
-export function runRetryReady(card: { columnStatus: string | null; runRetryState?: RunRetryState | null }, kind: string, now = new Date()): boolean {
+type RetryCard = { columnStatus: string | null; runRetryState?: RunRetryState | null; protocolRepairState?: { recovery?: {mode:string} } | null };
+export function runRetryReady(card: RetryCard, kind: string, now = new Date()): boolean {
+  const recovery = card.protocolRepairState?.recovery;
+  if (recovery?.mode === 'awaiting_human' || recovery?.mode === 'awaiting_manager' && kind !== 'review') return false;
   if (!isRetryKind(kind)) return true;
   if (card.columnStatus === 'blocked') return false;
   const retry = card.runRetryState?.[kind];
   return !retry || (retry.failures < RUN_FAILURE_LIMIT && (!retry.nextRunAt || new Date(retry.nextRunAt) <= now));
 }
 
-export function assertRunRetryNotExhausted(card: { columnStatus: string | null; runRetryState?: RunRetryState | null }, kind: RetryKind): void {
+export function assertRunRetryNotExhausted(card: RetryCard, kind: RetryKind): void {
+  const recovery = card.protocolRepairState?.recovery;
+  if (recovery?.mode === 'awaiting_human' || recovery?.mode === 'awaiting_manager' && kind !== 'review') throw new Error('recovery_pending');
   if (card.columnStatus === 'blocked') throw new Error('card_blocked');
   if ((card.runRetryState?.[kind]?.failures ?? 0) >= RUN_FAILURE_LIMIT) throw new Error(`${kind}_retry_exhausted`);
 }
@@ -84,11 +90,12 @@ export async function completeRetryableRun(runId: string, input: RunCompletion):
     if (humanGate || ['cancelled', 'waiting_on_client'].includes(card.columnStatus ?? '')) return null;
     const block = exhausted && !humanGate && !['done', 'cancelled', 'blocked', 'waiting_on_client'].includes(card.columnStatus ?? '');
     const reason = `${kind} failed ${failures} consecutive time(s): ${input.error ?? 'adapter failure'}`;
-    await tx.update(kanbanCards).set({
+    const [updated] = await tx.update(kanbanCards).set({
       runRetryState: state,
       ...(block ? { columnStatus: 'blocked', lastError: reason, nextRunAt: null, completedAt: null } : {}),
       updatedAt: now,
-    }).where(completionCondition(card));
+    }).where(completionCondition(card)).returning();
+    if(block && updated)await requestCardRecovery(updated,{reason,eventKey:`run:${run.id}`,actorId:run.agentId,stage:kind,sourceMessageId:run.messageCommentId,taskRunId:run.id},tx);
     if (failed) await tx.insert(taskLogs).values({
       cardId: card.id, agentId: run.agentId, type: 'retry', status: exhausted ? 'failed' : 'warning',
       message: exhausted ? `${reason}; automatic retries stopped; operator action required.` : `${reason}; next ${kind} attempt no earlier than ${state[kind]!.nextRunAt}.`,

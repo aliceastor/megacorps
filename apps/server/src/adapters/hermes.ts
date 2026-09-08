@@ -1,7 +1,8 @@
 import { unknownUsage, type UsageFacts } from '../usage-facts.ts';
 import { currentUsageAttempt } from '../usage-context.ts';
+import { agentReportGuidance, type ReportingMode } from '../agent-report-guidance.ts';
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
-export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' | 'maintenance'; taskRunId?: string | null };
+export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' | 'maintenance'; taskRunId?: string | null; reportingMode?: ReportingMode; informationalOnly?: boolean };
 export type TaskResult = {
   success: boolean;
   output: string;
@@ -76,6 +77,13 @@ function webhookSharedSecret(agent: AgentLike): string | undefined {
 }
 
 export function buildAgentPrompt(agent: AgentLike, task: TaskContext): string {
+  if (task.informationalOnly && task.kind === 'chat') {
+    return `This is an informational colleague question, not authorization to execute work or change the board.\n\n${task.body}\n\nReply with the answer text only; MegaCorps posts it to the original thread.`;
+  }
+  if (task.reportingMode && task.kind !== 'chat' && task.kind !== 'maintenance') {
+    return [`Agent: ${agent.hermesProfile ?? 'unknown'}; Card: ${task.id}; Run: ${task.taskRunId ?? 'none'}`,
+      task.body, agentReportGuidance(task.reportingMode)].join('\n\n');
+  }
   if (task.kind === 'chat') {
     return `You are in a direct MegaCorps chat session.
 

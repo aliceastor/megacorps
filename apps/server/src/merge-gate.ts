@@ -490,6 +490,10 @@ export async function noteMergeEvidenceRequired(card: CardRow, plan: Extract<Mer
   const body = `Completion blocked: ${plan.detail}`;
   const updated = await guardedCompletionUpdate(card, { columnStatus: plan.reason === 'head_drift' ? 'in_review' : 'blocked', completedAt: null, rollupStatus: null, lastError: body, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() }, taskRunId);
   if (!updated) return;
+  if (['no_candidate','no_repo','no_head','wrong_base','closed_unmerged'].includes(plan.reason)) {
+    const { requestCardRecovery } = await import('./card-recovery.ts');
+    await requestCardRecovery(updated, {reason:body,eventKey:`merge:${taskRunId ?? card.reviewIdentity?.id ?? card.updatedAt?.toISOString() ?? 'unkeyed'}:${plan.reason}`,actorId:card.assigneeId,stage:'dispatch'});
+  }
   await postMergeComment(card, 'merge_evidence_required', body, { reason: plan.reason });
   await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'webhook', status: 'warning', message: body });
   await mergeActivity(card, 'merge_gate.blocked', { reason: plan.reason, detail: plan.detail }, { type: 'system', id: 'merge-gate' });

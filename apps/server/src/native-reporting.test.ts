@@ -77,10 +77,21 @@ for (const role of ['boss', 'head', 'worker', 'message'] as const) {
     const { prompt } = await nativeRun(t, role);
     assert.doesNotMatch(prompt, /When you complete this task, POST|POST status|through the normal MegaCorps webhook|include workProducts in the webhook/i);
     assert.match(prompt, /No HTTP request is needed to report progress, delegation, or results/);
-    assert.match(prompt, /optional asynchronous/i);
-    assert.match(prompt, /do not retry.*reporting call/i);
+    assert.doesNotMatch(prompt, /Optional webhook body:/);
+    assert.match(prompt, /does not authorize a denied task action or remove a real permission blocker/);
   });
 }
+
+test('actual worker dispatch uses a scoped contract without unrelated review and HTTP instructions', async t => {
+  const { prompt } = await nativeRun(t, 'worker');
+  assert.doesNotMatch(prompt, /Ordinary review example|Optional webhook body:|legacy DELEGATE block/);
+});
+
+for (const role of ['boss', 'head', 'worker', 'message'] as const) test(`${role} receives current goal before historical company reference material`, async t => {
+  const { prompt } = await nativeRun(t, role);
+  assert.ok(prompt.indexOf('Deliver verified result') >= 0);
+  assert.ok(prompt.indexOf('Deliver verified result') < prompt.indexOf('Company knowledge (current selected documents)'), 'The current goal must precede reference documents');
+});
 
 test('ordinary review prompt returns a native report and repository protocol uses returned evidence', async t => {
   const f = fixture(t, 'worker');
@@ -162,14 +173,18 @@ for (const invalid of ['foreign_company', 'outside_hierarchy', 'invalid_body', '
   assert.equal(f.card.protocolRepairState.dispatch?.failures, 1, 'Invalid nested intent must enter existing corrective feedback, not ordinary progress.');
 });
 
-test('wrapped permission stops actual dispatch without child creation or approval', async t => {
+test('wrapped Boss permission stops execution and creates a human recovery gate without child creation', async t => {
   const f = fixture(t, 'boss');
   t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'Work result.', report: { request: { kind: 'permission', question: 'Authorize repository access.' }, children: [{ title: 'Write guide', assigneeSlug: f.target.slug, body: '## Acceptance\n- Deliver a verified guide for the intended audience.' }] } }), sessionId: 'synthetic-permission-envelope', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
   await dispatchCard(f.card.id, 'manual', { taskRunId: f.run.id });
-  assert.equal(f.card.columnStatus, 'blocked');
+  assert.equal(f.card.columnStatus, 'in_review');
+  assert.equal(f.card.protocolRepairState.recovery.mode, 'awaiting_human');
   assert.match(f.card.lastError, /agent_permission_blocked/);
   assert.equal(f.state.rows(kanbanCards).length, 1);
-  assert.equal(f.state.rows(approvals).length, 0);
+  assert.equal(f.state.rows(approvals).length, 1);
+  assert.equal(f.state.rows(approvals)[0]!.status, 'pending');
+  assert.equal(f.state.rows(approvals)[0]!.payload.humanGate, true);
+  assert.equal(f.state.rows(taskRuns).filter(row => row.status === 'queued').length, 0, 'A denied operation is not retried');
 });
 
 for (const mergeRequired of [false, true]) test(`wrapped evidence respects ${mergeRequired ? 'merge' : 'review'} completion gate`, async t => {

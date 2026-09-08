@@ -1,9 +1,10 @@
 import { agentReportSchema, type AgentReport, type AgentReportDelegation } from '@megacorps/shared';
+import { formatReportIssues, normalizeOptionalReportFields } from './report-validation.ts';
 
 const REPORT_MARKER = 'megacorps-report';
 const DELEGATION_LINE_MAX = 500;
 
-export type AgentReportExtraction = { report: AgentReport } | { error: string };
+export type AgentReportExtraction = { report: AgentReport; corrections: string[] } | { error: string };
 
 const DUPLICABLE_ENVELOPE_METADATA = new Set(['kind', 'version', 'status', 'summary']);
 
@@ -12,17 +13,17 @@ function normalizeReportEnvelope(value: unknown): { data: unknown } | { error: s
   if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.hasOwn(value, 'report')) return { data: value };
   const outer = value as Record<string, unknown>;
   const nested = outer.report;
-  const invalid = (reason: string) => ({ error: `report_envelope_invalid: ${reason}. Return one flat megacorps-report with children/delegations/workProducts beside kind/status/summary.` });
-  if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return invalid('report must be a single object');
+  const invalid = (reason: string, path: PropertyKey[] = ['report']) => ({ error: `${formatReportIssues(value, [{ path, message: reason }], 'report_envelope_invalid')} Return one flat megacorps-report with children/delegations/workProducts beside kind/status/summary.` });
+  if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return invalid('must be a single object');
   const merged = { ...outer };
   delete merged.report;
   for (const [key, field] of Object.entries(nested)) {
-    if (key === 'report') return invalid('recursive report wrappers are not supported');
-    if (!Object.hasOwn(agentReportSchema.shape, key)) return invalid('unknown nested report field');
+    if (key === 'report') return invalid('recursive report wrappers are not supported', ['report', key]);
+    if (!Object.hasOwn(agentReportSchema.shape, key)) return invalid('unknown nested report field', ['report', key]);
     if (Object.hasOwn(outer, key)) {
       // No array/object combining or decision precedence. Only exactly equal
       // scalar metadata is redundant rather than an ambiguous second payload.
-      if (!DUPLICABLE_ENVELOPE_METADATA.has(key) || !['string', 'number'].includes(typeof field) || outer[key] !== field) return invalid(`duplicate or conflicting ${key}`);
+      if (!DUPLICABLE_ENVELOPE_METADATA.has(key) || !['string', 'number'].includes(typeof field) || outer[key] !== field) return invalid(`duplicates or conflicts with ${key}`, ['report', key]);
     } else merged[key] = field;
   }
   return { data: merged };
@@ -92,9 +93,10 @@ export function extractAgentReport(output: string | null | undefined): AgentRepo
   catch { return { error: 'report_json_parse_failed' }; }
   const normalized = normalizeReportEnvelope(parsed);
   if ('error' in normalized) return normalized;
-  const result = agentReportSchema.safeParse(normalized.data);
-  if (result.success) return { report: result.data };
-  return { error: `report_schema_invalid: ${result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ').slice(0, 500)}` };
+  const optionalFields = normalizeOptionalReportFields(normalized.data);
+  const result = agentReportSchema.safeParse(optionalFields.data);
+  if (result.success) return { report: result.data, corrections: optionalFields.corrections };
+  return { error: formatReportIssues(optionalFields.data, result.error.issues, 'report_schema_invalid') };
 }
 
 export type StructuredDelegationPlan = {

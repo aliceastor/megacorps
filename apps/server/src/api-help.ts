@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { startInput, stepInput } from './company-setup-schema.ts';
+import { agentReportGuidance } from './agent-report-guidance.ts';
 import { agentAdapterTypes, cardStatuses, legacyCardStatusAliases, agentReportSchema, runnerTaskCompleteSchema, runnerTaskClaimSchema } from '@megacorps/shared';
 
 type ApiMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
@@ -778,6 +779,13 @@ export function apiHelpCatalog() {
       ui: '/help',
     },
     architecture: currentArchitecture,
+    agentReporting: {
+      schema: z.toJSONSchema(agentReportSchema, { io: 'input' }),
+      help: 'Return input_required with request.kind help and request.question. MegaCorps routes it to the reviewer or responsible superior.',
+      correction: 'Repair the report format without repeating completed work. Preserve the intended decision and evidence.',
+      recovery: 'Current recovery reviewer only: fix_card, rework, raise_to_human. Recovery never approves an artifact or changes permissions; three manager rounds maximum across causes.',
+      examples: { execution: agentReportGuidance('execution'), management: agentReportGuidance('management'), review: agentReportGuidance('review'), recovery: agentReportGuidance('recovery') },
+    },
     auth: {
       mode: 'Cookie session with company membership role checks for human/API management. Admin-created direct API tokens can call session-auth management endpoints with Authorization: Bearer MEGACORPS_API_TOKEN and inherit the owner user memberships. Runner endpoints use Authorization: Bearer MEGACORPS_RUNNER_KEY or X-MegaCorps-Runner-Key against hashed machine runner keys. Agent-session endpoints use Ed25519-signed JWTs from runner-created sessions. Signup is DB-configured and defaults to enabled; if no active admin exists, the next signup becomes global admin without any implicit company membership; the admin can create the first company. If BOOTSTRAP_TOKEN is configured, POST /api/auth/bootstrap can create or recover the admin account only while no active admin exists. Viewer can read data for visible companies; company operator/admin is required for company-scoped mutation, run/review, adapter tests, runtime edits, and budget decisions. Manual cron remains an operator system action.',
       login: 'POST /api/auth/login',
@@ -845,6 +853,13 @@ export function apiHelpMarkdown(): string {
     '## Kanban Stages',
     `Canonical stages: ${catalog.kanban.stages.join(', ')}`,
     'Legacy alias: backlog -> todo',
+    '',
+    '## Agent Reporting and Recovery',
+    'Native report status is not a board column. Use input_required with request.kind help and request.question for the assigned reviewer or responsible superior. Use request.kind permission for actual authorization blockers. Ordinary uncertainty should be resolved within the company.',
+    'A format correction repairs the report without repeating completed task actions. MegaCorps normalizes unambiguous optional fields, then validates the unchanged intent; conflicting decisions and unsupported evidence require correction.',
+    'Recovery can never approve an artifact, fabricate evidence, change project authority or bypass a pending permission, review, client or merge gate. Failed attempts and missing evidence route to an eligible superior; busy superiors remain queued. Three managerial rounds are shared across recovery causes before human help is required.',
+    'Recovery actions are accepted only from the current assigned recovery reviewer/run: fix_card appends clarification or selects an authorized execution assignee; rework sends concrete instructions back; raise_to_human records the exact unresolved decision. Boss coordinates only. The report recovery field is reserved for a recovery review, not ordinary execution.',
+    agentReportGuidance('recovery'),
     '',
     '## CLI Commands',
     `Package: ${catalog.cli.package}`,

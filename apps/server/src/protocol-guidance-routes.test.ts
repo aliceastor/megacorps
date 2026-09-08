@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
-import { companies, agents, kanbanCards, machineRunners, taskRuns, workProducts } from './db/schema.ts';
+import { companies, agents, approvals, kanbanCards, machineRunners, taskRuns, workProducts } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { reviewCard } from './dispatch.ts';
@@ -35,7 +35,11 @@ for (const via of ['reviewCard', 'runner', 'webhook']) for (const status of ['pr
     const response = await app.inject({ method: 'POST', url: '/api/webhook/task-complete', headers: { 'x-megacorps-webhook-secret': 'synthetic-webhook' }, payload: { cardId: card.id, taskRunId: run.id, status: 'done', report } });
     assert.equal(response.statusCode, status === 'empty' ? 409 : 200, response.body);
   }
-  assert.equal(card.columnStatus, status === 'empty' ? 'blocked' : 'todo');
+  assert.equal(card.columnStatus, status === 'empty' ? 'in_review' : 'todo');
+  if (status === 'empty') {
+    assert.equal(card.protocolRepairState.recovery.mode, 'awaiting_human');
+    assert.equal(state.rows(approvals).filter(row => row.status === 'pending' && row.payload?.humanGate).length, 1);
+  }
   assert.equal(card.assigneeId, authorId);
   assert.equal(card.protocolRepairState.dispatch.failures, 3);
   assert.equal(card.protocolRepairState.review, undefined);

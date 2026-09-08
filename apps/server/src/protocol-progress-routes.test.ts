@@ -13,7 +13,7 @@ const progress = { kind: 'megacorps-report', status: 'progress', summary: 'The d
 function repair(actorId: string) { return { actorId, failures: 2, mode: 'fresh_context', sessionId: null, runKeys: ['previous-one', 'previous-two'], visitedActorIds: [actorId], fallbackId: null, updatedAt: new Date().toISOString() }; }
 async function fixture(t: TestContext, helper = false) {
   const companyId = randomUUID(), state = memoryDb(t, []);
-  const { headId, departmentId } = readyCompany(state, companyId);
+  const { headId, bossId, departmentId } = readyCompany(state, companyId);
   const actor = helper ? { id: randomUUID(), companyId, name: 'Worker', slug: 'worker', departmentId, bossId: headId, isActive: true, isBusy: false, adapterType: 'webhook' } : state.rows(agents).find(row => row.id === headId)!;
   if (helper) state.rows(agents).push(actor);
   const card: any = { id: randomUUID(), companyId, title: 'Verified department delivery', assigneeId: actor.id, columnStatus: 'todo', tags: [], dependencyCardIds: [], runRetryState: {}, protocolRepairState: {}, requiresApproval: false };
@@ -22,11 +22,11 @@ async function fixture(t: TestContext, helper = false) {
   t.after(() => { if (old === undefined) delete process.env.WEBHOOK_SHARED_SECRET; else process.env.WEBHOOK_SHARED_SECRET = old; });
   const app = Fastify(); t.after(() => app.close()); await registerRoutes(app);
   const send = (payload: object) => app.inject({ method: 'POST', url: '/api/webhook/task-complete', headers: { 'x-megacorps-webhook-secret': 'synthetic-progress-webhook' }, payload });
-  return { state, card, actor, headId, send };
+  return { state, card, actor, headId, bossId, send };
 }
 
 for (const helper of [false, true]) test(`in-flight progress cannot replenish malformed dispatch budget (${helper ? 'one helper' : 'no helper'})`, async t => {
-  const { state, card, actor, headId, send } = await fixture(t, helper);
+  const { state, card, actor, headId, bossId, send } = await fixture(t, helper);
   const sessions: Array<string | null | undefined> = [];
   let runId = '', previousRunId = '';
   t.mock.method(getAdapter('webhook'), 'dispatch', async (executionAgent: { currentSessionId?: string | null }) => {
@@ -58,8 +58,10 @@ for (const helper of [false, true]) test(`in-flight progress cannot replenish ma
   assert.deepEqual(sessions.map(value => value ?? null), [null, 'original-context', null]);
   assert.equal(state.rows(taskRuns).filter(row => row.cardId === card.id && row.kind === 'dispatch' && row.status === 'queued').length, 0);
   const helpRuns = state.rows(taskRuns).filter(row => row.cardId === card.id && row.kind === 'review' && row.status === 'queued');
-  assert.equal(helpRuns.length, helper ? 1 : 0);
-  if (helper) assert.equal(helpRuns[0]?.agentId, headId);
+  assert.equal(helpRuns.length, 1);
+  assert.equal(helpRuns[0]?.agentId, helper ? headId : bossId);
+  assert.equal(card.protocolRepairState.recovery.mode, 'awaiting_manager');
+  assert.equal(card.protocolRepairState.recovery.round, 1, 'Exhaustion transfers responsibility without refreshing the original protocol budget');
   assert.equal(state.rows(cardComments).filter(row => row.action === 'protocol_help_required').length, 1);
 });
 

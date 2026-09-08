@@ -5,21 +5,25 @@ import { companyStructure } from './company-workflow.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import { guardedCompletionUpdate } from './completion-guard.ts';
+import { requestCardRecovery } from './card-recovery.ts';
 
 type Card = typeof kanbanCards.$inferSelect;
 type Comment = typeof cardComments.$inferSelect;
-export async function blockDelegatedAssignment(card: Card, requestId: string, reason: string) {
+export async function blockDelegatedAssignment(card: Card, requestId: string, reason: string, options: {eventKey:string;permissionBlocked?:boolean}) {
   reason = await sanitizeCompanyOutput(card.companyId, reason);
   await retryMergeGateWrite(() => db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, requestId)));
   const [current] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1);
-  if (current) await guardedCompletionUpdate(current, { columnStatus: 'blocked', lastError: reason, completedAt: null, updatedAt: new Date() });
+  if (current) {
+    const [request] = await db.select().from(cardComments).where(eq(cardComments.id,requestId)).limit(1);
+    await requestCardRecovery(current, {reason,eventKey:`delegation:${requestId}:${options.eventKey}`,actorId:request?.assigneeAgentId ?? card.assigneeId,stage:'message',sourceMessageId:requestId,permissionBlocked:options.permissionBlocked});
+  }
 }
 export async function routeDelegatedQuestion(card: Card, request: Comment, actorId: string | null, runId: string, question: string) {
   const structure = await companyStructure(card.companyId);
   const actor = structure.members.find(a => a.id === actorId);
   const responsibleId = [request.reviewerAgentId, structure.divisions.find(d => d.id === actor?.departmentId)?.headAgentId, actor?.bossId, structure.bosses[0]?.id].find(id => id && id !== actorId && structure.members.some(a => a.id === id && a.isActive !== false));
   if (!responsibleId) {
-    await blockDelegatedAssignment(card, request.id, 'delegated_help_recipient_unavailable: Assign an active responsible head or manager to answer this delegated question.');
+    await blockDelegatedAssignment(card, request.id, 'delegated_help_recipient_unavailable: Assign an active responsible head or manager to answer this delegated question.',{eventKey:runId});
     return null;
   }
   const body = await sanitizeCompanyOutput(card.companyId, question);

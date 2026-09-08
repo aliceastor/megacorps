@@ -451,11 +451,17 @@ export const agentReportRequestSchema = z.discriminatedUnion('kind', [
     checkpointKind: z.enum(['direction', 'interim']).default('direction'),
   }),
 ]);
+export const agentRecoverySchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('fix_card'), reason: z.string().trim().min(1).max(4000), instructions: z.string().trim().min(1).max(8000).optional(), patch: z.object({ body: z.string().trim().min(1).max(30000).optional(), assigneeSlug: z.string().trim().min(1).max(200).optional() }).strict().refine(patch => patch.body !== undefined || patch.assigneeSlug !== undefined, 'Provide a supported card patch') }).strict(),
+  z.object({ action: z.literal('rework'), reason: z.string().trim().min(1).max(4000), instructions: z.string().trim().min(1).max(8000) }).strict(),
+  z.object({ action: z.literal('raise_to_human'), reason: z.string().trim().min(1).max(4000), instructions: z.string().trim().min(1).max(8000).optional() }).strict(),
+]);
 export const agentReportSchema = z.object({
   kind: z.literal('megacorps-report'),
   version: z.literal(1).default(1),
   status: z.enum(['completed', 'progress', 'in_progress', 'input_required', 'failed', 'rejected']).transform((status) => status === 'in_progress' ? 'progress' as const : status),
   request: agentReportRequestSchema.optional(),
+  recovery: agentRecoverySchema.optional(),
   workProducts: z.array(reportedWorkProductSchema).optional(),
   verdict: z.enum(['approved', 'revision_requested', 'escalate']).optional(),
   summary: z.string().trim().min(1).max(4000),

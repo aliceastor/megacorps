@@ -35,6 +35,7 @@ import { agentResultExecutionLog, normalizeAgentResult, persistAgentWorkProducts
 import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
 import { finishProtocolHelp, protocolHelpOrigin, protocolRepairResetState } from './protocol-repair.ts';
+import { applyRecoveryReport, finishHumanRecovery, isRecoveryReview, requestCardRecovery } from './card-recovery.ts';
 import { completionCondition, guardedCompletionUpdate } from './completion-guard.ts';
 import { inspectManagedProject, optInManagedBinding } from './managed-project-policy.ts';
 import { mergeIntents } from './db/schema.ts';
@@ -937,6 +938,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [approvalCard] = approval.cardId
       ? await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, approval.cardId), isNull(kanbanCards.deletedAt))).limit(1)
       : [];
+    if ((approval.payload as Record<string,unknown>|null)?.kind === 'recovery') {
+      if(!approvalCard)return reply.code(404).send({error:'card_not_found'});
+      let recovery;
+      try { recovery=await finishHumanRecovery(approvalCard,approval.id,user.id,{status:input.status,instructions:input.answer??input.decisionNote??undefined}); }
+      catch(error) { return reply.code(400).send({error:String(error)}); }
+      if(!recovery)return reply.code(409).send({error:'recovery_decision_superseded'});
+      if(recovery.continueKind && recovery.sourceMessageId){const [source]=await db.select().from(cardComments).where(eq(cardComments.id,recovery.sourceMessageId)).limit(1);if(source)await enqueueMessageTaskRun(source,recovery.continueKind==='message_review'?'message_review':'message');}
+      else if(recovery.continueKind==='dispatch'||recovery.continueKind==='review')await enqueueTaskRun(approvalCard.id,recovery.continueKind,'queue');
+      return (await db.select().from(approvals).where(eq(approvals.id,id)).limit(1))[0];
+    }
     if (approval.type === CLIENT_CHECKPOINT_APPROVAL_TYPE) {
       if (approval.status !== 'pending') return reply.code(409).send({ error: 'checkpoint_not_pending', status: approval.status });
       if (!approvalCard) return reply.code(404).send({ error: 'card_not_found' });
@@ -3051,6 +3062,24 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({ error: 'work_product_repo_mismatch', detail: 'workProduct.repoUrl must match project.repo_url (same org/repo).' });
       }
     }
+    if (isRecoveryReview(card)) {
+      if (!webhookTaskRun?.agentId || webhookTaskRun.kind !== 'review') return reply.code(409).send({error:'recovery_authority_changed'});
+      let recovery;
+      try {
+        if(normalizedResult.outcome==='invalid')throw new Error(normalizedResult.reason ?? 'recovery_report_invalid');
+        recovery=await applyRecoveryReport(card,webhookTaskRun.agentId,normalizedResult.report!,taskRunId);
+      }
+      catch(error) {
+        const [actor]=await db.select().from(agents).where(and(eq(agents.id,webhookTaskRun.agentId),eq(agents.companyId,card.companyId),isNull(agents.deletedAt))).limit(1);
+        if(actor && card.reviewerId===actor.id)await sendAgentFeedbackAndRequeue({card,agent:actor,kind:'review',message:normalizedResult.reason??String(error),taskRunId,runId:webhookTaskRun.heartbeatRunId??card.activeHeartbeatRunId,result:{sessionId:actor.currentSessionId??''}});
+        return reply.code(409).send({error:'recovery_action_rejected',message:normalizedResult.reason??String(error)});
+      }
+      await completeTaskRun(taskRunId,{status:'success',preserveCard:true,output:body.output??body.summary});
+      if(recovery?.continueKind && recovery.sourceMessageId){const [source]=await db.select().from(cardComments).where(eq(cardComments.id,recovery.sourceMessageId)).limit(1);if(source)await enqueueMessageTaskRun(source,recovery.continueKind==='message_review'?'message_review':'message');}
+      else if(recovery?.continueKind==='dispatch'||recovery?.continueKind==='review')await enqueueTaskRun(card.id,recovery.continueKind,'queue');
+      return {ok:true,cardId:card.id,taskRunId,newStatus:recovery?.card.columnStatus??card.columnStatus,ignored:!recovery};
+    }
+    if (normalizedResult.report?.recovery) return reply.code(409).send({error:'recovery_context_required'});
     const protocolGuidance = webhookTaskRun?.kind === 'review' && Boolean(protocolHelpOrigin(card, webhookTaskRun.agentId ?? ''));
     if (normalizedResult.outcome === 'invalid' || (webhookTaskRun?.kind === 'review' && (normalizedResult.verdictError || (!protocolGuidance && normalizedResult.source === 'report' && normalizedResult.outcome === 'completed' && !normalizedResult.verdict)))) {
       const reason = normalizedResult.reason ?? normalizedResult.verdictError ?? 'review_verdict_missing: return one evidence-supported current verdict.';
@@ -3386,7 +3415,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (nextStatus === 'in_review' && fixRound && actorAgent) {
       await afterAuthorFix(updatedCard ?? { ...card, columnStatus: nextStatus }, actorAgent, fixRound, { escalation: fixEscalation, dispositions: body.report?.dispositions ?? [] });
     } else if (nextStatus === 'in_review' && humanGate) {
-      await ensureHumanGate(updatedCard ?? { ...card, columnStatus: nextStatus }, actorAgentId ?? card.assigneeId, 'Client approval required', { kind: 'client_approval' });
+      if(escalation)await requestCardRecovery(updatedCard ?? { ...card,columnStatus:nextStatus },{reason:normalizedResult.question ?? normalizedResult.reason ?? 'The original actor needs guidance before continuing.',eventKey:`help:${taskRunId ?? 'webhook'}`,actorId:actorAgentId??card.assigneeId,stage:'dispatch'});
+      else await ensureHumanGate(updatedCard ?? { ...card, columnStatus: nextStatus }, actorAgentId ?? card.assigneeId, 'Client approval required', { kind: 'client_approval' });
     } else if (nextStatus === 'in_review' && qualityReviewerId) {
       const gateCard = updatedCard ?? { ...card, columnStatus: nextStatus, reviewerId: qualityReviewerId };
       await createPendingApproval(gateCard, actorAgentId ?? card.assigneeId, 'Webhook completion requires quality review.');

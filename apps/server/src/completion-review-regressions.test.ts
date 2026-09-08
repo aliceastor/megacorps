@@ -145,7 +145,8 @@ for (const result of ['approved', 'invalid']) test(`protocol-help ${result} pres
   await reviewCard(card.id, { taskRunId: run.id });
   assert.notEqual(card.columnStatus, 'done'); assert.equal(card.protocolRepairState.dispatch.failures, 3);
   assert.equal(card.protocolRepairState.review, undefined, 'helper cannot receive a new repair budget');
-  assert.equal(card.columnStatus, result === 'approved' ? 'todo' : 'blocked');
+  assert.equal(card.columnStatus, result === 'approved' ? 'todo' : 'needs_review');
+  if (result === 'invalid') assert.equal(card.protocolRepairState.recovery.mode, 'awaiting_manager');
 });
 
 for (const outcome of ['valid', 'malformed']) test(`valid protocol help resumes original actor once: ${outcome} correction`, async (t) => {
@@ -166,10 +167,15 @@ for (const outcome of ['valid', 'malformed']) test(`valid protocol help resumes 
   card.columnStatus = 'in_progress'; card.executionLockId = continuation.id;
   const response = await complete({ report: outcome === 'valid' ? report({ workProducts: [{ type: 'report', title: 'Verified deliverable' }] }) : report({ status: 'bogus' }) });
   assert.equal(response.statusCode, 200, response.body);
-  assert.equal(card.columnStatus, outcome === 'valid' ? 'done' : 'blocked');
-  assert.equal(state.rows(taskRuns).filter((row) => row.status === 'queued').length, 0);
+  assert.equal(card.columnStatus, outcome === 'valid' ? 'done' : 'needs_review');
+  assert.equal(state.rows(taskRuns).filter((row) => row.status === 'queued').length, outcome === 'valid' ? 0 : 1);
   assert.equal(state.rows(cardComments).filter((row) => row.action === 'protocol_help_required').length, 0, 'no additional help request');
-  if (outcome === 'malformed') assert.equal(card.protocolRepairState.dispatch.failures, 3);
+  if (outcome === 'malformed') {
+    assert.equal(card.protocolRepairState.dispatch.failures, 3);
+    assert.equal(card.protocolRepairState.recovery.mode, 'awaiting_manager');
+    assert.equal(state.rows(taskRuns).filter(row => row.kind === 'dispatch' && row.status === 'queued').length, 0);
+    assert.equal(state.rows(workProducts).length, 0);
+  }
   else assert.equal(state.rows(workProducts).length, 1);
 });
 

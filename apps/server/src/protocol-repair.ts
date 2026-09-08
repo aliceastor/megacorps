@@ -4,10 +4,11 @@ import { agents, approvals, cardComments, departments, kanbanCards, positions, t
 import { normalizeAgentResult, type AgentResult } from './agent-results.ts';
 import { agentRuntimeAvailable } from './runner-availability.ts';
 import { completionCondition, guardedCompletionUpdate } from './completion-guard.ts';
+import { recoveryMutationAllowed, requestCardRecovery } from './card-recovery.ts';
 
 export type ProtocolKind = 'dispatch' | 'review';
 type Repair = { failures: number; mode: 'same_session' | 'fresh_context' | 'escalated' | 'helped' | 'blocked' | 'clear'; actorId: string; sessionId: string | null; runKeys: string[]; visitedActorIds: string[]; fallbackId: string | null; originalReviewerId?: string | null; helpAttempted?: boolean; updatedAt: string };
-export type ProtocolRepairState = Partial<Record<ProtocolKind, Repair>>;
+export type ProtocolRepairState = Partial<Record<ProtocolKind, Repair>> & { recovery?: import('./card-recovery.ts').RecoveryState };
 
 export function protocolHelpOrigin(card: { protocolRepairState?: ProtocolRepairState | null }, actorId: string): ProtocolKind | null {
   return (['dispatch', 'review'] as const).find((kind) => card.protocolRepairState?.[kind]?.mode === 'escalated' && card.protocolRepairState[kind]?.fallbackId === actorId) ?? null;
@@ -23,6 +24,10 @@ export async function finishProtocolHelp(card: Card, actorId: string, output: st
   const message = valid ? 'Department protocol guidance received. The original actor gets one correction using this guidance; another malformed reply stops automatic repair.' : 'Department help did not resolve the reporting blocker. Automatic repair has stopped; resolve the existing help request.';
   const updated = await guardedCompletionUpdate(card, { protocolRepairState: { ...card.protocolRepairState, [kind]: { ...old, mode: valid ? 'helped' : 'blocked', helpAttempted: true } }, columnStatus: valid ? kind === 'dispatch' ? 'todo' : 'in_review' : 'blocked', reviewerId: kind === 'review' ? old.actorId : old.originalReviewerId ?? null, completedAt: null, lastError: message, reviewFeedback: output, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() }, taskRunId);
   if (updated) await db.insert(cardComments).values({ cardId: card.id, agentId: actorId, authorType: 'agent', action: 'protocol_help_response', body: output, metadata: { kind, originalActorId: old.actorId, failures: old.failures } });
+  if(updated && !valid) {
+    const recovered=await requestCardRecovery(updated,{reason:message,eventKey:`protocol-help:${taskRunId??old.updatedAt}`,actorId,stage:kind,originalReviewerId:old.originalReviewerId});
+    if(recovered)return {card:recovered,continueKind:recovered.protocolRepairState.recovery?.mode==='awaiting_manager'?'review' as const:null};
+  }
   return updated ? { card: updated, continueKind: valid ? kind : null } : null;
 }
 type Card = typeof kanbanCards.$inferSelect;
@@ -61,12 +66,15 @@ export function protocolRepairSession(card: { protocolRepairState?: ProtocolRepa
 
 /** Persist the protocol budget, deduplicated by run, independently of transport retries. */
 export async function recordProtocolFailure(input: { card: Card; actor: Agent; kind: ProtocolKind; runKey: string; taskRunId?: string | null; sessionId?: string | null; reason: string }) {
+  const originalReviewerId = input.card.protocolRepairState?.[input.kind]?.originalReviewerId ?? input.card.reviewerId;
   return db.transaction(async (tx) => {
+  const result = await (async () => {
     const [card] = await tx.select().from(kanbanCards).where(and(eq(kanbanCards.id, input.card.id), isNull(kanbanCards.deletedAt))).for('update').limit(1);
     if (!card) throw new Error('card_not_found');
     const state: ProtocolRepairState = { ...card.protocolRepairState };
     const kind = protocolHelpOrigin(card, input.actor.id) ?? input.kind;
     const old = state[kind];
+    if (!(await recoveryMutationAllowed(card,tx)))return {card,duplicate:true,mode:old?.mode??'blocked',fallbackId:old?.fallbackId??null,feedback:input.reason};
     const [authorized] = await tx.select().from(kanbanCards).where(completionCondition(input.card)).limit(1);
     if (!authorized) return { card, duplicate: true, mode: old?.mode ?? 'blocked', fallbackId: old?.fallbackId ?? null, feedback: input.reason };
     const [run] = input.taskRunId ? await tx.select().from(taskRuns).where(eq(taskRuns.id, input.taskRunId)).for('update').limit(1) : [];
@@ -90,13 +98,10 @@ export async function recordProtocolFailure(input: { card: Card; actor: Agent; k
     const failures = Math.min(3, (old?.failures ?? 0) + 1);
     const fallbackId = failures >= 3 ? await protocolFallback(card, input.actor, old?.visitedActorIds ?? []) : null;
     const mode = failures === 1 ? 'same_session' : failures === 2 ? 'fresh_context' : fallbackId ? 'escalated' : 'blocked';
-    const example = input.kind === 'review'
-      ? '{"kind":"megacorps-report","status":"completed","summary":"Reviewed the provided evidence","verdict":"approved"}'
-      : '{"kind":"megacorps-report","status":"progress","summary":"Describe the concrete work completed and remaining work"}';
     const feedback = [
       mode === 'same_session' ? 'Send one corrected response in the same task session.' : mode === 'fresh_context' ? 'Send one corrected response using a fresh task context and the persisted card evidence.' : fallbackId ? `Protocol repair exhausted after three invalid replies. Department help requested from ${fallbackId}; resolve the concrete report blocker before resuming.` : 'Protocol repair exhausted after three invalid replies. No eligible alternate department head or manager can repair this reply. Provide the missing report/evidence or correct the agent configuration before resuming.',
       `Correction needed: ${input.reason.slice(0, 1500)}`,
-      `Valid example (use only an evidence-supported status/verdict): ${example}`,
+      'Correct only the reported field errors in one megacorps-report. Preserve the intended status, verdict, summary and evidence; do not infer approval or fabricate missing evidence. If the missing information requires work, request guidance or rework explicitly.',
     ].join('\n\n');
     state[input.kind] = { failures, mode, actorId: input.actor.id, sessionId: mode === 'same_session' ? input.sessionId ?? null : null, runKeys: [...(old?.runKeys ?? []), input.runKey].slice(-32), visitedActorIds: [...new Set([...(old?.visitedActorIds ?? []), input.actor.id])], fallbackId, originalReviewerId: old?.originalReviewerId ?? card.reviewerId, helpAttempted: Boolean(fallbackId), updatedAt: new Date().toISOString() };
     const nextStatus = failures >= 3 ? fallbackId ? 'needs_review' : 'blocked' : input.kind === 'dispatch' ? 'todo' : card.columnStatus ?? 'in_review';
@@ -105,6 +110,12 @@ export async function recordProtocolFailure(input: { card: Card; actor: Agent; k
     await tx.insert(cardComments).values({ cardId: card.id, authorType: 'system', action: failures >= 3 ? 'protocol_help_required' : 'protocol_correction', body: feedback, assigneeAgentId: fallbackId, metadata: { kind: input.kind, failures, mode, runKey: input.runKey, fallbackId } });
     await tx.insert(taskLogs).values({ cardId: card.id, agentId: input.actor.id, type: 'protocol', status: failures >= 3 ? 'failed' : 'warning', message: feedback });
     return { card: updated ?? card, duplicate: false, mode, fallbackId, feedback };
+  })();
+  if (!result.duplicate && ['blocked', 'escalated'].includes(result.mode)) {
+    const recovered = await requestCardRecovery(result.card, {reason:input.reason,eventKey:`protocol:${input.runKey}`,actorId:input.actor.id,stage:input.kind,originalReviewerId},tx);
+    if (recovered) return {...result,card:recovered,mode:recovered.protocolRepairState.recovery?.ownerId ? 'escalated' : 'blocked',fallbackId:recovered.protocolRepairState.recovery?.ownerId ?? null};
+  }
+  return result;
   });
 }
 

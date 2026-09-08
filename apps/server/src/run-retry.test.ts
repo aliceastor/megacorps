@@ -31,10 +31,12 @@ for (const kind of ['review', 'message', 'message_review']) {
         t.mock.timers.setTime(now);
       } else {
         assert.equal(retry.nextRunAt, null);
-        assert.equal(card.columnStatus, 'blocked');
+        assert.equal(card.columnStatus, 'in_review');
+        assert.equal(card.protocolRepairState.recovery.mode, 'awaiting_human');
+        assert.equal(state.rows(approvals).filter(a => a.payload?.humanGate).length,1);
         assert.match(card.lastError, /hermes timeout/);
         const priorCount = state.rows(taskRuns).length;
-        await assert.rejects(enqueue, /retry_exhausted|card_blocked/);
+        await assert.rejects(enqueue, /retry_exhausted|card_blocked|recovery_pending/);
         assert.equal(state.rows(taskRuns).length, priorCount);
       }
     }

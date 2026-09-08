@@ -10,7 +10,7 @@ import { getAdapter } from './adapters/registry.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { registerRoutes } from './routes.ts';
 import { db } from './db/client.ts';
-import { normalizeAgentResult } from './agent-results.ts';
+import { agentResultExecutionLog, normalizeAgentResult, persistAgentWorkProducts } from './agent-results.ts';
 import { apiHelpCatalog } from './api-help.ts';
 import { reviewPanelSlot } from './review-rounds.ts';
 import { readyCompany } from './test-support/ready-company.ts';
@@ -145,12 +145,13 @@ test('transport-level permission denial bypasses protocol and transport retries'
   const { card, run, state } = fixture(t);
   t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: false, output: JSON.stringify(report('input_required', { summary: 'Permission denied: repository write requires authorization.', request: { kind: 'permission', question: 'Authorize the repository write.' }, workProducts: [product] })), sessionId: 's', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
   await dispatchCard(card.id, 'manual', { taskRunId: run.id });
-  assert.equal(card.columnStatus, 'blocked');
+  assert.equal(card.columnStatus, 'needs_review');
+  assert.notEqual(card.columnStatus, 'done');
   assert.equal(card.retryCount, 0);
   assert.equal(card.protocolRepairState?.dispatch, undefined);
   assert.match(card.lastError, /permission/i);
   assert.equal(state.rows(taskRuns).filter((task) => task.status === 'queued').length, 0);
-  assert.equal(state.rows(workProducts).length, 1);
+  assert.equal(state.rows(workProducts).length, 0);
 });
 
 test('webhook malformed report consumes one persisted protocol attempt per run', async (t) => {
@@ -323,7 +324,7 @@ for (const [label, output, outcome] of unsafeOutputs) {
     await dispatchCard(card.id, 'manual', { taskRunId: run.id });
     assert.notEqual(card.columnStatus, 'done');
     assert.equal(state.rows(approvals).length, 0);
-    if (outcome === 'blocked') { assert.equal(card.columnStatus, 'blocked'); assert.match(card.lastError, /approval|permission/i); }
+    if (outcome === 'blocked') { assert.equal(card.columnStatus, 'needs_review'); assert.match(card.lastError, /approval|permission/i); assert.equal(state.rows(workProducts).length, 0); }
     if (outcome === 'repair') assert.ok(state.rows(cardComments).some((row) => /report.*invalid|report.*repair/.test(row.body)));
     if (outcome === 'failure') assert.equal(state.rows(taskRuns).find((row) => row.id === run.id)?.status, 'failed');
   });
@@ -471,6 +472,57 @@ test('normalizer keeps structured status authoritative and maps typed requests w
   assert.equal(normalizeAgentResult({ output: 'Completed', needsInput: { question: 'Which format?' } }).outcome, 'input_required');
 });
 
+test('persistence rejects a forged recovery report outside the recovery handler before evidence inserts', async (t) => {
+  const { card, agent, run, state } = fixture(t);
+  const forged = normalizeAgentResult({ report: report('completed', {
+    recovery: { action: 'rework', reason: 'Claimed recovery.', instructions: 'Retry outside recovery context.' },
+    workProducts: [product], artifactRefs: ['forged-reference'],
+  }) }).report!;
+  await assert.rejects(
+    persistAgentWorkProducts(card, agent.id, run.id, forged.workProducts ?? [], null, forged),
+    /recovery_context_required/,
+  );
+  assert.equal(state.rows(workProducts).length, 0);
+});
+
+test('normalizer applies optional-null repair and precise diagnostics to explicit reports', () => {
+  const input = report('progress', { children: [{ title: 'Child', body: 'Deliver a bounded result with concrete acceptance evidence.', assigneeSlug: 'worker', dependsOn: null }] });
+  const original = structuredClone(input);
+  const valid = normalizeAgentResult({ report: input });
+  assert.equal(valid.outcome, 'progress');
+  assert.equal(Object.hasOwn(valid.report!.children![0]!, 'dependsOn'), false);
+  assert.deepEqual(input, original);
+  assert.deepEqual(valid.corrections, ['Omitted optional null field children[0].dependsOn.']);
+  assert.match(agentResultExecutionLog('original output', valid), /report normalization: Omitted optional null field children\[0\]\.dependsOn\./);
+
+  const secret = 'secret-invalid-explicit-type';
+  const invalid = normalizeAgentResult({ report: report('completed', { workProducts: [{ type: secret, title: null }] }) });
+  assert.equal(invalid.outcome, 'invalid');
+  assert.match(invalid.reason!, /workProducts\[0\]\.type/);
+  assert.match(invalid.reason!, /workProducts\[0\]\.title/);
+  assert.match(invalid.reason!, /received string/i);
+  assert.match(invalid.reason!, /received null/i);
+  assert.doesNotMatch(invalid.reason!, new RegExp(secret));
+});
+
+test('normalizer rejects different simultaneous reports rather than combining their evidence', () => {
+  const embedded = report('completed', { summary: 'Embedded current result', workProducts: [{ type: 'report', title: 'Embedded evidence' }] });
+  const explicit = report('completed', { summary: 'Explicit current result', workProducts: [{ type: 'report', title: 'Explicit evidence' }] });
+  const result = normalizeAgentResult({ output: JSON.stringify(embedded), report: explicit });
+  assert.equal(result.outcome, 'invalid');
+  assert.match(result.reason!, /conflicting current reports/);
+  assert.deepEqual(result.workProducts, []);
+});
+
+test('normalizer audits a repair from either source when simultaneous reports agree', () => {
+  const corrected = report('progress', { children: [{ title: 'Child', body: 'Deliver a bounded result with concrete acceptance evidence.', assigneeSlug: 'worker' }] });
+  const embedded = structuredClone(corrected) as any;
+  embedded.children[0].dependsOn = null;
+  const result = normalizeAgentResult({ output: JSON.stringify(embedded), report: corrected });
+  assert.equal(result.outcome, 'progress');
+  assert.deepEqual(result.corrections, ['Omitted optional null field children[0].dependsOn.']);
+});
+
 test('conflicting current structured report verdicts require repair', () => {
   assert.equal(normalizeAgentResult({ output: JSON.stringify(report('completed', { verdict: 'revision_requested' })), report: report('completed', { verdict: 'approved' }) }).outcome, 'invalid');
 });
@@ -480,9 +532,11 @@ test('a reviewer permission blocker parks the actual review without creating app
   card.assigneeId = 'author'; card.reviewerId = agent.id; card.columnStatus = 'in_review'; run.kind = 'review';
   t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({ success: true, output: 'Clone pending approval', sessionId: 's', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }));
   await reviewCard(card.id, { taskRunId: run.id });
-  assert.equal(card.columnStatus, 'blocked');
+  assert.equal(card.columnStatus, 'needs_review');
+  assert.notEqual(card.columnStatus, 'done');
   assert.match(card.lastError, /permission|approval/);
   assert.equal(state.rows(approvals).length, 0);
+  assert.equal(state.rows(workProducts).length, 0);
 });
 
 test('a late reviewer permission blocker preserves a human gate created during the same review stage', async (t) => {

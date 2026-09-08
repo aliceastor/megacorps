@@ -76,3 +76,39 @@ test('a malformed final envelope cannot fall back to an earlier valid report', (
   const result = extractAgentReport(`${JSON.stringify(metadata)}\n${JSON.stringify({ ...metadata, report: { report: { children: [child] } } })}`);
   assert.ok(result && 'error' in result);
 });
+
+test('embedded reports normalize optional child nulls without changing required nulls', () => {
+  const optional = extractAgentReport(JSON.stringify({ ...metadata, children: [{ ...child, dependsOn: null }] }));
+  assert.ok(optional && 'report' in optional, JSON.stringify(optional));
+  assert.equal(Object.hasOwn(optional.report.children![0]!, 'dependsOn'), false);
+
+  const required = extractAgentReport(JSON.stringify({ ...metadata, summary: null }));
+  assert.ok(required && 'error' in required, JSON.stringify(required));
+  assert.match(required.error, /summary/);
+  assert.match(required.error, /received null/i);
+});
+
+test('embedded report diagnostics identify invalid product fields without exposing values', () => {
+  const secret = 'secret-invalid-product-type';
+  const result = extractAgentReport(JSON.stringify({ ...metadata, workProducts: [{ type: secret, title: null }] }));
+  assert.ok(result && 'error' in result, JSON.stringify(result));
+  assert.match(result.error, /workProducts\[0\]\.type/);
+  assert.match(result.error, /workProducts\[0\]\.title/);
+  assert.match(result.error, /received string/i);
+  assert.match(result.error, /received null/i);
+  assert.doesNotMatch(result.error, new RegExp(secret));
+});
+
+test('conflicting envelope diagnostics identify the nested field and received type', () => {
+  const result = extractAgentReport(JSON.stringify({ ...metadata, summary: 'Outer intent.', report: { summary: 'Nested intent.' } }));
+  assert.ok(result && 'error' in result, JSON.stringify(result));
+  assert.match(result.error, /report\.summary/);
+  assert.match(result.error, /received string/i);
+  assert.doesNotMatch(result.error, /Outer intent|Nested intent/);
+});
+
+test('embedded report extraction retains an audit record of optional-null corrections', () => {
+  const result = extractAgentReport(JSON.stringify({ ...metadata, children: [{ ...child, dependsOn: null }] }));
+  assert.ok(result && 'report' in result, JSON.stringify(result));
+  assert.deepEqual(result.corrections, ['Omitted optional null field children[0].dependsOn.']);
+});

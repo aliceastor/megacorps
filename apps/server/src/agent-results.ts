@@ -1,6 +1,8 @@
 import { agentReportSchema, reportedWorkProductSchema, type AgentReport, type ReportedWorkProduct } from '@megacorps/shared';
 import { and, eq, isNull, sql } from 'drizzle-orm';
+import { isDeepStrictEqual } from 'node:util';
 import { extractAgentReport } from './agent-report.ts';
+import { formatReportIssues, normalizeOptionalReportFields } from './report-validation.ts';
 import { db } from './db/client.ts';
 import { agents, approvals, cardComments, heartbeatRuns, kanbanCards, taskLogs, taskRuns, workProducts } from './db/schema.ts';
 import { publishLiveEvent } from './live.ts';
@@ -10,7 +12,8 @@ import { lockResultAuthority } from './completion-guard.ts';
 type Verdict = 'approved' | 'revision_requested' | 'escalate';
 /** Retain canonical evidence when the report arrived separately from prose. */
 export function agentResultExecutionLog(output: string, result: AgentResult): string {
-  return result.report ? `${output}\n\n${JSON.stringify(result.report)}`.trim() : output;
+  const audit = result.corrections.length ? `report normalization: ${result.corrections.join(' ')}` : '';
+  return result.report ? `${output}\n\n${audit ? `${audit}\n` : ''}${JSON.stringify(result.report)}`.trim() : `${output}${audit ? `\n\n${audit}` : ''}`.trim();
 }
 export type AgentResult = {
   source: 'report' | 'prose' | 'invalid';
@@ -22,6 +25,7 @@ export type AgentResult = {
   verdictExplicit: boolean;
   verdictError: string | null;
   workProducts: ReportedWorkProduct[];
+  corrections: string[];
 };
 
 function permissionBlocker(text: string): boolean {
@@ -53,16 +57,26 @@ function productKey(product: ReportedWorkProduct): string {
 export function normalizeAgentResult(input: { output?: string | null; report?: unknown; workProducts?: unknown[]; needsInput?: { question: string } | null }): AgentResult {
   const text = input.output ?? '';
   const embedded = extractAgentReport(text);
-  const explicit = input.report === undefined ? null : agentReportSchema.safeParse(input.report);
-  const error = embedded && 'error' in embedded ? embedded.error : explicit && !explicit.success ? `report_schema_invalid: ${explicit.error.message.slice(0, 500)}` : null;
+  const explicitInput = input.report === undefined ? null : normalizeOptionalReportFields(input.report);
+  const explicit = explicitInput ? agentReportSchema.safeParse(explicitInput.data) : null;
+  const error = embedded && 'error' in embedded ? embedded.error : explicit && !explicit.success ? formatReportIssues(explicitInput!.data, explicit.error.issues, 'report_schema_invalid') : null;
   const report = explicit?.success ? explicit.data : embedded && 'report' in embedded ? embedded.report : null;
-  const base: AgentResult = { source: report ? 'report' : 'prose', outcome: 'completed', report, reason: null, question: null, verdict: null, verdictExplicit: false, verdictError: null, workProducts: [] };
+  const corrections = [...new Set([
+    ...(explicit?.success ? explicitInput!.corrections : []),
+    ...(embedded && 'report' in embedded ? embedded.corrections : []),
+  ])];
+  const base: AgentResult = { source: report ? 'report' : 'prose', outcome: 'completed', report, reason: null, question: null, verdict: null, verdictExplicit: false, verdictError: null, workProducts: [], corrections };
   if (error) return { ...base, source: 'invalid', outcome: 'invalid', reason: `agent_report_invalid: ${error}. Return one corrected megacorps-report.` };
-  if (explicit?.success && embedded && 'report' in embedded && (explicit.data.status !== embedded.report.status || (explicit.data.verdict && embedded.report.verdict && explicit.data.verdict !== embedded.report.verdict))) {
+  if (explicit?.success && embedded && 'report' in embedded && !isDeepStrictEqual(explicit.data, embedded.report)) {
     return { ...base, source: 'invalid', outcome: 'invalid', reason: 'agent_report_invalid: conflicting current reports. Return one consistent status and verdict.' };
   }
-  const products = [...(report?.workProducts ?? []), ...(input.workProducts ?? [])].map((product) => reportedWorkProductSchema.safeParse(product));
-  if (products.some((product) => !product.success)) return { ...base, source: 'invalid', outcome: 'invalid', reason: 'agent_report_invalid: workProducts failed validation. Return corrected work products.' };
+  const productInputs = [...(report?.workProducts ?? []), ...(input.workProducts ?? [])];
+  const products = productInputs.map((product) => reportedWorkProductSchema.safeParse(product));
+  const invalidProduct = products.findIndex((product) => !product.success);
+  if (invalidProduct >= 0) {
+    const product = products[invalidProduct]!;
+    if (!product.success) return { ...base, source: 'invalid', outcome: 'invalid', reason: `agent_report_invalid: ${formatReportIssues({ workProducts: productInputs }, product.error.issues.map((issue) => ({ ...issue, path: ['workProducts', invalidProduct, ...issue.path] })), 'workProducts failed validation')}. Return corrected work products.` };
+  }
   base.workProducts = [...new Map(products.filter((p) => p.success).map((p) => [productKey(p.data), p.data])).values()];
   if (report?.request?.kind === 'checkpoint' && !report.checkpoint) {
     const { kind: _kind, checkpointKind, ...checkpoint } = report.request;
@@ -89,6 +103,7 @@ export async function persistAgentWorkProducts(
   products: ReportedWorkProduct[], project?: { repoProvider?: string | null; repoUrl?: string | null } | null,
   report?: AgentReport | null,
 ): Promise<boolean> {
+  if (report?.recovery) throw new Error('recovery_context_required: handle the recovery response in the current recovery review before persisting evidence');
   if (report?.artifactRefs?.length) products = [...products, { type: 'report', title: 'Agent report evidence references', metadata: { evidenceReport: report } }];
   products = await sanitizeCompanyOutput(card.companyId, products);
   const inserted = await db.transaction(async tx => {
@@ -134,6 +149,11 @@ export async function parkPermissionBlockedResult(original: typeof kanbanCards.$
   if (!preservedHumanGate) await db.insert(cardComments).values({ cardId, agentId, authorType: 'agent', action: 'agent_blocked', body: reason });
   await db.insert(taskLogs).values({ cardId, agentId, type: 'dispatch', status: 'failed', message: reason, output });
   if (!updated) throw new Error('card_update_failed');
+  if (!preservedHumanGate) {
+    const { requestCardRecovery } = await import('./card-recovery.ts');
+    const recovered = await requestCardRecovery(updated,{reason,eventKey:`permission:${taskRunId ?? heartbeatRunId ?? 'unkeyed'}`,actorId:agentId,stage:original.reviewerId===agentId?'review':'dispatch',permissionBlocked:true});
+    if(recovered)return {card:recovered,preservedHumanGate:false};
+  }
   if (!preservedHumanGate) publishLiveEvent({ type: 'card.updated', companyId: updated.companyId, entityType: 'card', entityId: cardId, cardId, projectId: updated.projectId, action: 'agent.permission_blocked' });
   return { card: updated, preservedHumanGate };
 }

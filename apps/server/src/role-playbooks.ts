@@ -38,7 +38,7 @@ export const DEPARTMENT_HEAD_PLAYBOOK = [
 export const MEMBER_PLAYBOOK = [
   '=== Your operating procedure as a team member ===',
   '1. Deliver exactly what the card describes; the acceptance criteria are the definition of done.',
-  '2. Stuck or missing information → ask a peer through report.mentions, or your reviewer through status "needs_review". Do not ask the client; that is your head\'s or the boss\'s call.',
+  '2. Stuck or missing information → ask a peer through report.mentions, or request your reviewer\'s help with status "input_required", request.kind "help" and request.question. Do not ask the client; that is your head\'s or the boss\'s call.',
   '3. Do not split or delegate unless the card explicitly allows it; finish, test, commit, push, report.',
   '4. Record decisions that will matter later as notes in Direct Chat; they come back to you in your digest.',
 ].join('\n');

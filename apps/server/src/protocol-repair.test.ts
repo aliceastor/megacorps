@@ -21,8 +21,9 @@ test('malformed review has persisted same-session then fresh-context repair, the
     assert.equal(card.protocolRepairState.review.mode, attempt === 1 ? 'same_session' : attempt === 2 ? 'fresh_context' : 'blocked');
     assert.deepEqual(card.runRetryState, {}, 'protocol errors do not consume transport retry budget');
   }
-  assert.equal(card.columnStatus, 'blocked');
-  assert.match(card.lastError, /report|reply/i);
+  assert.equal(card.columnStatus, 'in_review');
+  assert.equal(card.protocolRepairState.recovery.mode, 'awaiting_human');
+  assert.ok(card.lastError);
   assert.equal(state.rows(cardComments).filter((comment) => comment.action === 'protocol_help_required').length, 1);
 });
 
@@ -67,7 +68,8 @@ test('invalid escalated help stops with the existing actionable request', async 
   for (let n = 1; n <= 3; n++) await recordProtocolFailure({ card: structuredClone(card), actor, kind: 'review', runKey: `run-${n}`, reason: 'Invalid reply' });
   assert.equal(card.columnStatus, 'needs_review');
   assert.equal(card.reviewerId, head.id);
-  await recordProtocolFailure({ card: structuredClone(card), actor: head, kind: 'review', runKey: 'help-run', reason: 'Invalid help reply' });
-  assert.equal(card.columnStatus, 'blocked');
-  assert.equal(state.rows(cardComments).filter((comment) => comment.action === 'protocol_help_required').length, 1);
+  for (let n = 1; n <= 3; n++) await recordProtocolFailure({ card: structuredClone(card), actor: head, kind: 'review', runKey: `help-run-${n}`, reason: 'Invalid help reply' });
+  assert.equal(card.columnStatus, 'in_review');
+  assert.equal(card.protocolRepairState.recovery.mode,'awaiting_human');
+  assert.equal(state.rows(cardComments).filter((comment) => comment.action === 'recovery_requested').length, 2);
 });

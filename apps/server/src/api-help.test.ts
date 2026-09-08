@@ -2,6 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 
+test('native recovery help documents manager actions and authority boundaries', () => {
+  const help = apiHelpMarkdown();
+  assert.match(help, /fix_card/);
+  assert.match(help, /raise_to_human/);
+  assert.match(help, /recovery.*never.*approv/i);
+  assert.match(help, /format.*without repeating/i);
+  assert.match(JSON.stringify(apiHelpCatalog()), /raise_to_human/);
+});
+
 test('webhook help explains a structured review status conflict and its coherent correction', () => {
   const endpoint = apiHelpCatalog().endpoints.find(row => row.path === '/api/webhook/task-complete')!;
   const help = JSON.stringify(endpoint);
