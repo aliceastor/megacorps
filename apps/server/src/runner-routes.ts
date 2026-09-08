@@ -34,7 +34,7 @@ import { brainstormFromOutput } from './brainstorm.ts';
 import { admitUsage, attemptKey, resultUsage, settleTaskRunUsage } from './usage-ledger.ts';
 import { transportUsage } from './usage-facts.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
-import { applyRecoveryReport, isRecoveryReview } from './card-recovery.ts';
+import { applyRecoveryReport, isRecoveryReview, isStructuredReviewerHelp, requestCardRecovery } from './card-recovery.ts';
 
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
@@ -134,6 +134,14 @@ async function createRunnerTaskCompletion(input: {
   input.body = await sanitizeCompanyOutput(card.companyId, input.body);
   let output = [input.body.summary, input.body.output].filter(Boolean).join('\n\n');
   const normalized = normalizeAgentResult({ output, report: input.body.report, workProducts: input.body.workProducts });
+  if (input.run.kind==='review' && !isRecoveryReview(card) && isStructuredReviewerHelp(normalized) && ['success','done','needs_review','in_review'].includes(input.body.status)) {
+    if(!runAgentId || runAgentId!==card.reviewerId)throw httpError(409,'Reviewer authority changed.','review_actor_mismatch');
+    const recovery=await requestCardRecovery(card,{reason:normalized.question!,eventKey:`review-help:${input.run.id}`,actorId:runAgentId,stage:'review',taskRunId:input.run.id,requireCurrentRunAuthority:true});
+    await settleOriginalHeartbeat(card,runAgentId,input.run.heartbeatRunId,input.run.id);
+    await completeTaskRun(input.run.id,{status:'success',preserveCard:true,output:agentResultExecutionLog(output,normalized)});
+    if(recovery && isRecoveryReview(recovery))await enqueueTaskRun(card.id,'review','queue');
+    return recovery ?? (await db.select().from(kanbanCards).where(eq(kanbanCards.id,card.id)).limit(1))[0]!;
+  }
   if (isRecoveryReview(card) && normalized.outcome !== 'permission') {
     if (input.run.kind !== 'review' || !runAgentId || card.reviewerId !== runAgentId) throw httpError(409, 'Recovery owner or stage changed.', 'recovery_authority_changed');
     const [actor] = await db.select().from(agents).where(and(eq(agents.id,runAgentId),eq(agents.companyId,card.companyId),isNull(agents.deletedAt))).limit(1);
@@ -158,9 +166,10 @@ async function createRunnerTaskCompletion(input: {
   }
   if (normalized.report?.recovery && !isRecoveryReview(card)) throw httpError(409,'Recovery actions require the current recovery review.','recovery_context_required');
   const protocolGuidance = input.run.kind === 'review' && Boolean(protocolHelpOrigin(card, runAgentId ?? ''));
-  if (normalized.outcome === 'invalid' || (input.run.kind === 'review' && normalized.outcome === 'completed' && (normalized.verdictError || (!protocolGuidance && normalized.source === 'report' && !normalized.verdict)))) {
+  const conflictingReviewerHelp = input.run.kind === 'review' && normalized.outcome === 'input_required' && normalized.report?.request?.kind === 'help';
+  if (normalized.outcome === 'invalid' || conflictingReviewerHelp || (input.run.kind === 'review' && normalized.outcome === 'completed' && (normalized.verdictError || (!protocolGuidance && normalized.source === 'report' && !normalized.verdict)))) {
     const [actor] = runAgentId ? await db.select().from(agents).where(eq(agents.id, runAgentId)).limit(1) : [];
-    const reason = normalized.reason ?? normalized.verdictError ?? 'Return one evidence-supported current review verdict.';
+    const reason = normalized.reason ?? normalized.verdictError ?? (conflictingReviewerHelp ? 'review_help_conflict: Send one successful input_required help request without an artifact verdict or another work request.' : 'Return one evidence-supported current review verdict.');
     if (!actor || !['dispatch', 'review'].includes(input.run.kind)) throw httpError(409, reason, 'agent_report_invalid');
     return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: input.run.kind === 'review' ? 'review' : 'dispatch', message: reason, taskRunId: input.run.id, runId: input.run.heartbeatRunId, result: { sessionId: actor.currentSessionId ?? '' } });
   }

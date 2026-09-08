@@ -27,7 +27,7 @@ import { pollDecision, EXTERNAL_POLL_MAX } from './external-polling.ts';
 import { applyExternalEvent, rootCardId } from './external-events.ts';
 import { enqueueTaskRun } from './dispatch.ts';
 import { openPanelRound, panelRequiredForCard } from './review-rounds.ts';
-import { completionCondition, completionStillCurrent, guardedCompletionUpdate } from './completion-guard.ts';
+import { completionCondition, completionStillCurrent, guardedCompletionUpdate, lockResultAuthority } from './completion-guard.ts';
 import { acceptedDescendantEvidence } from './delivery-acceptance.ts';
 import { acceptedDelegatedProducts } from './delegated-acceptance.ts';
 import { structuralAssignment } from './company-workflow.ts';
@@ -488,7 +488,25 @@ export function mergeCompletionStatus(plan: MergeGatePlan): 'done' | 'blocked' |
 export async function noteMergeEvidenceRequired(card: CardRow, plan: Extract<MergeGatePlan, { disposition: 'not_required' | 'blocked' }>, taskRunId?: string | null): Promise<void> {
   if (plan.reason === 'not_required') return;
   const body = `Completion blocked: ${plan.detail}`;
-  const updated = await guardedCompletionUpdate(card, { columnStatus: plan.reason === 'head_drift' ? 'in_review' : 'blocked', completedAt: null, rollupStatus: null, lastError: body, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() }, taskRunId);
+  if (plan.reason === 'head_drift') {
+    // Another ordinary review can repeat the same stale-head approval forever.
+    // Recovery keeps the exact-head gate and returns to the original reviewer
+    // only after a bounded supervisor decision supplies concrete guidance.
+    const { isRecoveryReview, requestCardRecovery } = await import('./card-recovery.ts');
+    const actorId = card.reviewerId;
+    const eventKey = `merge:${taskRunId ?? card.reviewIdentity?.id ?? card.updatedAt?.toISOString() ?? 'unkeyed'}:head_drift`;
+    const recovery = await db.transaction(async tx => {
+      if (!(await lockResultAuthority(card, taskRunId, tx, actorId))) return null;
+      return requestCardRecovery(card, {reason:body,eventKey,actorId,stage:'review'}, tx);
+    });
+    if (!recovery) return;
+    await postMergeComment(recovery, 'merge_evidence_required', body, {reason:plan.reason});
+    await db.insert(taskLogs).values({cardId:card.id,agentId:actorId,type:'review',status:'warning',message:body});
+    await mergeActivity(recovery, 'merge_gate.blocked', {reason:plan.reason,detail:plan.detail}, {type:'system',id:'merge-gate'});
+    if (isRecoveryReview(recovery)) await enqueueTaskRun(recovery.id, 'review', 'queue');
+    return;
+  }
+  const updated = await guardedCompletionUpdate(card, { columnStatus: 'blocked', completedAt: null, rollupStatus: null, lastError: body, executionLockId: null, executionLockedByAgentId: null, executionLockedAt: null, executionLockExpiresAt: null, activeHeartbeatRunId: null, updatedAt: new Date() }, taskRunId);
   if (!updated) return;
   if (['no_candidate','no_repo','no_head','wrong_base','closed_unmerged'].includes(plan.reason)) {
     const { requestCardRecovery } = await import('./card-recovery.ts');
@@ -497,10 +515,6 @@ export async function noteMergeEvidenceRequired(card: CardRow, plan: Extract<Mer
   await postMergeComment(card, 'merge_evidence_required', body, { reason: plan.reason });
   await db.insert(taskLogs).values({ cardId: card.id, agentId: card.assigneeId, type: 'webhook', status: 'warning', message: body });
   await mergeActivity(card, 'merge_gate.blocked', { reason: plan.reason, detail: plan.detail }, { type: 'system', id: 'merge-gate' });
-  if (plan.reason === 'head_drift') {
-    if (await panelRequiredForCard(updated)) await openPanelRound(updated, { kind: 'panel' });
-    else await enqueueTaskRun(updated.id, 'review', 'queue');
-  }
 }
 
 /** Apply one reviewed completion plan; only not_required permits direct Done. */

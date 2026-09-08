@@ -3,6 +3,15 @@ import { agentRecoverySchema, type AgentReport } from '@megacorps/shared';
 import { db } from './db/client.ts';
 import { agents, approvals, cardComments, departments, kanbanCards, mergeIntents, positions, taskRuns } from './db/schema.ts';
 import { completionCondition } from './completion-guard.ts';
+import type { AgentResult } from './agent-results.ts';
+
+/** Only an unambiguous structured help request is a reviewer escalation. */
+export function isStructuredReviewerHelp(result: AgentResult): boolean {
+  const report = result.report;
+  return result.source === 'report' && result.outcome === 'input_required' && !result.verdict && !result.verdictError
+    && report?.status === 'input_required' && report.request?.kind === 'help'
+    && !report.verdict && !report.recovery && !report.children?.length && !report.delegations?.length;
+}
 
 type Card = typeof kanbanCards.$inferSelect;
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -114,6 +123,7 @@ export async function requestCardRecovery(
     taskRunId?: string | null;
     originalReviewerId?: string | null;
     permissionBlocked?: boolean;
+    requireCurrentRunAuthority?: boolean;
   },
   executor?: Tx,
 ) {
@@ -140,6 +150,14 @@ export async function requestCardRecovery(
         !['running', 'queued', 'failed'].includes(sourceRun.status)
       )
         return null;
+      if (failure.requireCurrentRunAuthority && (
+        failure.stage !== 'review' ||
+        !['in_review', 'needs_review'].includes(card.columnStatus ?? '') ||
+        card.reviewerId !== sourceRun.agentId ||
+        (card.activeHeartbeatRunId != null && card.activeHeartbeatRunId !== sourceRun.heartbeatRunId) ||
+        (card.executionLockId != null && card.executionLockId !== sourceRun.id && card.executionLockId !== sourceRun.heartbeatRunId) ||
+        (card.executionLockedByAgentId != null && card.executionLockedByAgentId !== sourceRun.agentId)
+      )) return null;
       const newer = await tx
         .select()
         .from(taskRuns)
@@ -375,7 +393,19 @@ export async function applyRecoveryReport(inputCard: Card, actorId: string, repo
       metadata: { round: r.round },
     });
     return { card: updated!, continueKind: human ? null : r.stage, sourceMessageId: r.sourceMessageId ?? null };
-  });
+  }).then(resumeRequiredRecoveryPanel);
+}
+
+async function resumeRequiredRecoveryPanel<T extends { card: Card; continueKind: RecoveryState['stage'] | null }>(result: T | null): Promise<T | null> {
+  if (result?.continueKind !== 'review') return result;
+  const { openPanelRound, panelRequiredForCard } = await import('./review-rounds.ts');
+  if (await panelRequiredForCard(result.card)) {
+    // Recovery guidance never substitutes for a required independent panel.
+    // Open after the recovery transaction commits, before callers queue a single review.
+    await openPanelRound(result.card, { kind: 'panel' });
+    return { ...result, continueKind: null };
+  }
+  return result;
 }
 
 export async function finishHumanRecovery(
@@ -478,5 +508,5 @@ export async function finishHumanRecovery(
       metadata: { userId, approvalId, round: r.round, status: input.status },
     });
     return { card: updated!, continueKind: cancelled ? null : r.stage, sourceMessageId: r.sourceMessageId ?? null };
-  });
+  }).then(resumeRequiredRecoveryPanel);
 }

@@ -40,7 +40,11 @@ function fixture(t: TestContext, candidate: 'url' | 'short' | 'branch' = 'url') 
     assert.equal(state.rows(externalWaits).some(wait => wait.authorizedHeadSha === B), false);
     assert.equal(state.rows(mergeIntents).some(intent => intent.headSha === B), false);
     if (!drift) assert.ok(state.rows(externalWaits).some(wait => wait.authorizedHeadSha === A));
-    else assert.equal(card.columnStatus, 'in_review', 'head drift requires a new review');
+    else {
+      assert.equal(card.columnStatus, 'needs_review', 'head drift requires bounded recovery before a new review');
+      assert.equal(card.protocolRepairState.recovery.stage, 'review');
+      assert.equal(card.protocolRepairState.recovery.originalReviewerId, 'reviewer');
+    }
   };
   return { card, run, state, approve, drift: () => { head = B; }, reads: () => reads, assertOutcome };
 }

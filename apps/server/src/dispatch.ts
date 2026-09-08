@@ -36,7 +36,7 @@ import { extractAgentReport, structuredDelegationPlan } from './agent-report.ts'
 import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts, settleOriginalHeartbeat } from './agent-results.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { finishProtocolHelp, protocolHelpOrigin, protocolRepairSession, recordProtocolFailure, resetProtocolRepair } from './protocol-repair.ts';
-import { applyRecoveryReport, isRecoveryReview, recoveryMutationAllowed, requestCardRecovery, recoveryPrompt } from './card-recovery.ts';
+import { applyRecoveryReport, isRecoveryReview, isStructuredReviewerHelp, recoveryMutationAllowed, requestCardRecovery, recoveryPrompt } from './card-recovery.ts';
 import { informationalProjectAuthority } from './informational-project.ts';
 import { agentReportGuidance } from './agent-report-guidance.ts';
 import { completionCondition, completionEvidenceReady, completionStillCurrent, guardedCompletionUpdate, lockResultAuthority } from './completion-guard.ts';
@@ -3825,6 +3825,13 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     // Transport/report failure cannot be overridden by an apparent approval.
     if (!result.success || normalizedReview.outcome === 'failed') {
       throw new Error(normalizedReview.reason ?? adapterFailureMessage('review', result.output));
+    }
+    if (!isRecoveryReview(card) && isStructuredReviewerHelp(normalizedReview)) {
+      const recovery = await requestCardRecovery(card, {reason:normalizedReview.question!,eventKey:`review-help:${options.taskRunId ?? run.id}`,actorId:reviewer.id,stage:'review',taskRunId:options.taskRunId,requireCurrentRunAuthority:true});
+      await settleOriginalHeartbeat(card,reviewer.id,run.id,options.taskRunId);
+      await completeTaskRun(options.taskRunId,{status:'success',preserveCard:true,output:result.output});
+      if(recovery && isRecoveryReview(recovery))await enqueueTaskRun(card.id,'review','queue');
+      return recovery ?? (await db.select().from(kanbanCards).where(eq(kanbanCards.id,card.id)).limit(1))[0]!;
     }
     if (normalizedReview.outcome === 'input_required' || normalizedReview.outcome === 'invalid') {
       return sendAgentFeedbackAndRequeue({ card, agent: reviewer, kind: 'review', message: normalizedReview.reason ?? normalizedReview.question ?? REVIEW_VERDICT_MISSING_MESSAGE, runId: run.id, taskRunId: options.taskRunId, output: result.output, result });

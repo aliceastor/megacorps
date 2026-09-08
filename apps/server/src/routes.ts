@@ -31,11 +31,11 @@ import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointFromOutput } from './client-
 import { registerChatRoutes } from './chat.ts';
 import { runAgentMaintenance } from './agent-maintenance.ts';
 import { delegationLineFromReportItem } from './agent-report.ts';
-import { agentResultExecutionLog, normalizeAgentResult, persistAgentWorkProducts } from './agent-results.ts';
+import { agentResultExecutionLog, normalizeAgentResult, persistAgentWorkProducts, settleOriginalHeartbeat } from './agent-results.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
 import { finishProtocolHelp, protocolHelpOrigin, protocolRepairResetState } from './protocol-repair.ts';
-import { applyRecoveryReport, finishHumanRecovery, isRecoveryReview, requestCardRecovery } from './card-recovery.ts';
+import { applyRecoveryReport, finishHumanRecovery, isRecoveryReview, isStructuredReviewerHelp, requestCardRecovery } from './card-recovery.ts';
 import { completionCondition, guardedCompletionUpdate } from './completion-guard.ts';
 import { inspectManagedProject, optInManagedBinding } from './managed-project-policy.ts';
 import { mergeIntents } from './db/schema.ts';
@@ -3062,6 +3062,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({ error: 'work_product_repo_mismatch', detail: 'workProduct.repoUrl must match project.repo_url (same org/repo).' });
       }
     }
+    if (webhookTaskRun?.kind==='review' && !isRecoveryReview(card) && isStructuredReviewerHelp(normalizedResult)) {
+      if(!webhookTaskRun.agentId || webhookTaskRun.agentId!==card.reviewerId)return reply.code(409).send({error:'review_actor_mismatch'});
+      const recovery=await requestCardRecovery(card,{reason:normalizedResult.question!,eventKey:`review-help:${taskRunId}`,actorId:webhookTaskRun.agentId,stage:'review',taskRunId,requireCurrentRunAuthority:true});
+      await settleOriginalHeartbeat(card,webhookTaskRun.agentId,webhookTaskRun.heartbeatRunId,taskRunId);
+      await completeTaskRun(taskRunId,{status:'success',preserveCard:true,output:agentResultExecutionLog(body.output??'',normalizedResult)});
+      if(recovery && isRecoveryReview(recovery))await enqueueTaskRun(card.id,'review','queue');
+      return {ok:true,cardId:card.id,taskRunId,newStatus:recovery?.columnStatus??card.columnStatus,ignored:!recovery};
+    }
     if (isRecoveryReview(card)) {
       if (!webhookTaskRun?.agentId || webhookTaskRun.kind !== 'review') return reply.code(409).send({error:'recovery_authority_changed'});
       let recovery;
@@ -3081,8 +3089,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     if (normalizedResult.report?.recovery) return reply.code(409).send({error:'recovery_context_required'});
     const protocolGuidance = webhookTaskRun?.kind === 'review' && Boolean(protocolHelpOrigin(card, webhookTaskRun.agentId ?? ''));
-    if (normalizedResult.outcome === 'invalid' || (webhookTaskRun?.kind === 'review' && (normalizedResult.verdictError || (!protocolGuidance && normalizedResult.source === 'report' && normalizedResult.outcome === 'completed' && !normalizedResult.verdict)))) {
-      const reason = normalizedResult.reason ?? normalizedResult.verdictError ?? 'review_verdict_missing: return one evidence-supported current verdict.';
+    const conflictingReviewerHelp = webhookTaskRun?.kind === 'review' && normalizedResult.outcome === 'input_required' && normalizedResult.report?.request?.kind === 'help';
+    if (normalizedResult.outcome === 'invalid' || conflictingReviewerHelp || (webhookTaskRun?.kind === 'review' && (normalizedResult.verdictError || (!protocolGuidance && normalizedResult.source === 'report' && normalizedResult.outcome === 'completed' && !normalizedResult.verdict)))) {
+      const reason = normalizedResult.reason ?? normalizedResult.verdictError ?? (conflictingReviewerHelp ? 'review_help_conflict: Send one input_required help request without an artifact verdict or another work request.' : 'review_verdict_missing: return one evidence-supported current verdict.');
       const actorId = webhookTaskRun?.agentId ?? callerAgent?.id ?? card.assigneeId;
       const [actor] = actorId ? await db.select().from(agents).where(and(eq(agents.id, actorId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
       if (actor && (!webhookTaskRun || ['dispatch', 'review'].includes(webhookTaskRun.kind))) await sendAgentFeedbackAndRequeue({ card, agent: actor, kind: webhookTaskRun?.kind === 'review' ? 'review' : 'dispatch', message: reason, taskRunId, runId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId, result: { sessionId: actor.currentSessionId ?? '' } });

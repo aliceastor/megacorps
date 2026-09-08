@@ -89,7 +89,10 @@ for (const kind of ['permission', 'failed', 'rejected', 'help', 'escalate', 'exp
   const report: any = { ...f.report, verdict: 'approved' };
   if (kind === 'permission') report.request = { kind: 'permission', question: 'The requested command needs explicit permission.' };
   if (kind === 'failed' || kind === 'rejected') report.status = kind;
-  if (kind === 'help') Object.assign(report, { status: 'input_required', request: { kind: 'help', question: 'A manager must decide the remaining scope question.' } });
+  if (kind === 'help') {
+    delete report.verdict;
+    Object.assign(report, { status: 'input_required', request: { kind: 'help', question: 'A manager must decide the remaining scope question.' } });
+  }
   if (kind === 'escalate') report.verdict = 'escalate';
   if (kind === 'explicit_escalation') report.escalation = { reason: 'A manager must decide the remaining scope question.' };
   const legacy = kind === 'legacy_help' || kind === 'legacy_approved';
