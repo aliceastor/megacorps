@@ -140,8 +140,15 @@ test('PostgreSQL whole-branch completion authority and review provenance', { ski
     }
     assert.ok(reached(), 'initial production card snapshot must be returned before winning commit');
     if (change !== 'unchanged') assert.deepEqual((await sql`SELECT column_status,assignee_id,execution_lock_id,active_heartbeat_run_id FROM kanban_cards WHERE id=${f.card.id}`)[0], winning);
-    else if (effect === 'permission') assert.equal((await db.select().from(s.kanbanCards).where(eq(s.kanbanCards.id, f.card.id)))[0]!.columnStatus, 'blocked');
-    assert.equal((await db.select().from(s.workProducts).where(eq(s.workProducts.cardId, f.card.id))).length, change === 'unchanged' && effect === 'permission' ? 1 : 0);
+    else if (effect === 'permission') {
+      const [recovery] = await db.select().from(s.kanbanCards).where(eq(s.kanbanCards.id, f.card.id));
+      assert.equal(recovery!.columnStatus, 'in_review');
+      assert.equal(recovery!.protocolRepairState.recovery!.mode, 'awaiting_human');
+      assert.equal(recovery!.protocolRepairState.recovery!.permissionBlocked, true);
+      const gates = await db.select().from(s.approvals).where(eq(s.approvals.cardId, f.card.id));
+      assert.equal(gates.filter(gate => gate.status === 'pending' && (gate.payload as any)?.humanGate === true).length, 1);
+    }
+    assert.equal((await db.select().from(s.workProducts).where(eq(s.workProducts.cardId, f.card.id))).length, 0, 'permission requests never persist partial evidence');
     assert.equal((await db.select().from(s.kanbanCards).where(eq(s.kanbanCards.parentCardId, f.card.id))).length, change === 'unchanged' && effect === 'split' ? 1 : 0);
     if (change === 'new_lock') assert.equal((await db.select().from(s.agents).where(eq(s.agents.id, f.boss.id)))[0]!.isBusy, true, 'new execution keeps its agent capacity');
     if (change === 'new_lock') assert.equal((await db.select().from(s.heartbeatRuns).where(eq(s.heartbeatRuns.id, newerLock)))[0]!.status, 'running', 'new heartbeat remains owned and running');

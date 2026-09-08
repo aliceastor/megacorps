@@ -82,7 +82,12 @@ test(
       try {
         await assert.rejects(
           () => requestCardRecovery(card, { reason: 'No owner', eventKey: 'gate-failure', actorId: worker!.id, stage: 'dispatch' }),
-          /recovery_gate_fixture_failure/,
+          (error: unknown) => {
+            assert.ok(error instanceof Error);
+            assert.ok(error.cause instanceof Error, 'Drizzle wraps the PostgreSQL trigger error');
+            assert.equal(error.cause.message, 'recovery_gate_fixture_failure');
+            return true;
+          },
         );
       } finally {
         await sql.unsafe('DROP TRIGGER reject_recovery_gate ON approvals');
