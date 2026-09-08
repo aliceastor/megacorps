@@ -49,9 +49,11 @@ export function ApprovalDecisionForm({ approval, disabled = false, onDecided, ap
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState<DecisionStatus | ''>('');
   const [error, setError] = useState('');
+  const recovery = approval.payload?.kind === 'recovery';
   const reason = !hideReason && approval.payload && typeof approval.payload.reason === 'string' ? approval.payload.reason : '';
 
   async function decide(status: DecisionStatus) {
+    if (recovery && status !== 'cancelled' && !note.trim()) return;
     setBusy(status);
     setError('');
     try {
@@ -72,14 +74,15 @@ export function ApprovalDecisionForm({ approval, disabled = false, onDecided, ap
 
   return <div className="approval-decision-form" style={{ display: 'grid', gap: 8 }}>
     {reason && <p className="field-hint" style={{ margin: 0 }}>{reason}</p>}
-    <label className="field-label">{t('kanban.decisionNote')}
+    {recovery && <p className="field-hint" style={{ margin: 0 }}>{t('kanban.recoveryGuidanceHint')}</p>}
+    <label className="field-label">{t(recovery ? 'kanban.recoveryGuidance' : 'kanban.decisionNote')}
       <textarea className="input" rows={2} value={note} disabled={Boolean(busy) || disabled} onChange={(event) => setNote(event.target.value)} />
     </label>
     {error && <p className="form-error">{error}</p>}
     <div className="action-row">
-      <button type="button" className="btn btn-primary" disabled={Boolean(busy) || disabled} onClick={() => void decide('approved')}><Check size={14} /> {approveLabel ?? t('kanban.approveTask')} → {statusLabels.done[locale] ?? 'done'}</button>
-      <button type="button" className="btn" disabled={Boolean(busy) || disabled} onClick={() => void decide('rejected')}><Undo2 size={14} /> {rejectLabel ?? t('kanban.rejectTask')} → {statusLabels.todo[locale] ?? 'todo'}</button>
-      {allowCancel && <button type="button" className="btn" disabled={Boolean(busy) || disabled} title={t('kanban.cancelGateHint')} onClick={() => void decide('cancelled')}><Ban size={14} /> {t('common.cancel')}</button>}
+      <button type="button" className="btn btn-primary" disabled={Boolean(busy) || disabled || (recovery && !note.trim())} onClick={() => void decide('approved')}><Check size={14} /> {recovery ? t('kanban.resumeRecovery') : <>{approveLabel ?? t('kanban.approveTask')} → {statusLabels.done[locale] ?? 'done'}</>}</button>
+      {!recovery && <button type="button" className="btn" disabled={Boolean(busy) || disabled} onClick={() => void decide('rejected')}><Undo2 size={14} /> {rejectLabel ?? t('kanban.rejectTask')} → {statusLabels.todo[locale] ?? 'todo'}</button>}
+      {(allowCancel || recovery) && <button type="button" className="btn" disabled={Boolean(busy) || disabled} title={t('kanban.cancelGateHint')} onClick={() => void decide('cancelled')}><Ban size={14} /> {t(recovery ? 'kanban.stopRecovery' : 'common.cancel')}</button>}
     </div>
   </div>;
 }

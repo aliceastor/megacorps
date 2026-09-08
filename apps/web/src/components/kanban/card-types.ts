@@ -41,6 +41,11 @@ export type Card = {
   requiresApproval?: boolean;
   retryCount?: number;
   maxRetries?: number;
+  protocolRepairState?: {
+    dispatch?: { mode: string; failures?: number };
+    review?: { mode: string; failures?: number };
+    recovery?: { mode: string; ownerId?: string | null; reason: string; round: number };
+  } | null;
   scheduleAt?: string | null;
   recurEveryMinutes?: number | null;
   recurNextAt?: string | null;

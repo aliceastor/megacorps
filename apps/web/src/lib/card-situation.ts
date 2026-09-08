@@ -64,6 +64,19 @@ export function describeSituation(card: Card, ctx: SituationContext): Situation 
   const agentName = (id: string | null | undefined): string | null => (id ? agents.find((agent) => agent.id === id)?.name ?? id.slice(0, 8) : null);
   const assigneeName = agentName(card.assigneeId) ?? ctx.tf('kanban.noneAssigned');
   const finish = (key: string, vars: Record<string, string | number>, tone: SituationTone): Situation => ({ key, vars, tone, text: ctx.tf(key, vars) });
+  const terminal = status === 'done' || status === 'cancelled';
+  const recovery = card.protocolRepairState?.recovery;
+  if (!terminal && status !== 'waiting_on_client') {
+    const gate = pendingHumanGate(approvals);
+    if (gate?.kind === 'fix_exhausted') return finish('kanban.situation.fixExhausted', {}, 'warning');
+    if (gate?.kind === 'review_unavailable') return finish('kanban.situation.reviewUnavailable', {}, 'warning');
+    if (recovery?.mode === 'awaiting_human') return finish('kanban.situation.recoveryHuman', { reason: clip(recovery.reason) }, 'warning');
+    if (gate) return finish('kanban.situation.awaitingClient', {}, 'warning');
+    if (recovery?.mode === 'awaiting_manager' && status === 'needs_review') return finish('kanban.situation.recoveryManager', { name: agentName(recovery.ownerId) ?? you, reason: clip(recovery.reason), round: recovery.round }, 'warning');
+    const repairing = [card.protocolRepairState?.dispatch, card.protocolRepairState?.review].some(repair => repair && ['same_session', 'fresh_context'].includes(repair.mode));
+    if (repairing && ['todo', 'in_review', 'needs_review'].includes(status)) return finish('kanban.situation.recoveryFormat', { name: assigneeName }, 'accent');
+    if (recovery?.mode === 'reworking' && ['todo', 'in_progress'].includes(status)) return finish('kanban.situation.recoveryRework', { name: assigneeName, reason: clip(recovery.reason) }, 'accent');
+  }
 
   if (status === 'waiting_on_client') {
     const pending = approvals.find((approval) => approval.type === 'client_checkpoint' && approval.status === 'pending');
@@ -84,7 +97,6 @@ export function describeSituation(card: Card, ctx: SituationContext): Situation 
     return finish('kanban.situation.brainstormNoCount', { round }, 'accent');
   }
 
-  const terminal = status === 'done' || status === 'cancelled';
   const children = ctx.children ?? null;
   const live = (children ?? []).filter((child) => !LIVE_CHILD_EXCLUDED.has(child.columnStatus));
   const splitRound = card.splitRound ?? 0;

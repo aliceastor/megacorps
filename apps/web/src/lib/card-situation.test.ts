@@ -39,6 +39,28 @@ test('todo / done / cancelled', () => {
   assert.equal(describeSituation(card({ columnStatus: 'cancelled' }), ctx()).key, 'kanban.situation.cancelled');
 });
 
+test('recovery names its owner, then shows rework or human responsibility', () => {
+  const recovery = { mode: 'awaiting_manager', ownerId: 'a-cara', reason: 'Missing project evidence', round: 1 };
+  const current = card({ columnStatus: 'needs_review', protocolRepairState: { recovery } } as any);
+  const waiting = describeSituation(current, ctx());
+  assert.equal(waiting.key, 'kanban.situation.recoveryManager');
+  assert.match(waiting.text, /Cara/);
+  assert.match(waiting.text, /Missing project evidence/);
+  recovery.mode = 'reworking'; current.columnStatus = 'todo';
+  assert.equal(describeSituation(current, ctx()).key, 'kanban.situation.recoveryRework');
+  recovery.mode = 'awaiting_human'; current.columnStatus = 'in_review';
+  assert.equal(describeSituation(current, ctx()).key, 'kanban.situation.recoveryHuman');
+  current.columnStatus = 'done';
+  assert.equal(describeSituation(current, ctx()).key, 'kanban.situation.doneNoAt');
+});
+
+test('protocol corrections are visible and an explicit human gate takes precedence', () => {
+  const current = card({ columnStatus: 'todo', protocolRepairState: { dispatch: { mode: 'same_session', failures: 1 } } } as any);
+  assert.equal(describeSituation(current, ctx()).key, 'kanban.situation.recoveryFormat');
+  current.columnStatus = 'in_review';
+  assert.equal(describeSituation(current, ctx({ approvals: [{ id: 'gate', type: 'task_review', status: 'pending', payload: { humanGate: true } }] })).key, 'kanban.situation.awaitingClient');
+});
+
 test('waiting_on_client quotes the pending approval question and how long it has waited', () => {
   const approvals = [{ id: 'ap-1', type: 'client_checkpoint', status: 'pending', createdAt: iso(4 * HOUR), payload: { question: '先做 CMS 還是先做設計稿？' } }];
   const situation = describeSituation(card({ columnStatus: 'waiting_on_client' }), ctx({ approvals }));
