@@ -59,12 +59,20 @@ Files: a focused a2a remote-reconciliation module, a2a-executions.ts, adapters/a
 - [x] Add bounded periodic read-only reconciliation of the original endpoint/context/task ID with backoff. Resume across restart; never SendMessage during reconciliation. Unknown acceptance or missing task keeps an explicit unresolved state instead of freeing capacity. Route changes cannot redirect old work to a new server.
 - [x] Natural remote completion permits dropping cancelled results, settling available actual usage to the original attempt and releasing only capacity no longer owned by other work. Timed-out execution retains required review/recovery handling; no late automatic merge.
 - [x] Expose waiting-for-remote status so UI/API do not claim an idle agent or stopped remote task. Do not register Hermes CancelTask as a guaranteed hard stop.
-- [ ] Run real PostgreSQL race tests in CI and local deterministic tests; verify one submission and original task identity across lifecycle transitions.
+- [x] Run real PostgreSQL race tests in CI and local deterministic tests; verify one submission and original task identity across lifecycle transitions. Branch CI 34573715866 and main CI 34574893431 passed.
 
 ## Integration and delivery
 
 - [x] Review all three diffs together for ordering, authority, retries, accounting and route identity.
-- [ ] Run npm run typecheck, npm run test, npm run build; retain logs. PostgreSQL and Chromium run in CI.
-- [ ] Push review branch; after full CI green, fast-forward main, push and await Docker jobs. Preserve source SHA evidence.
-- [ ] Snapshot production; redeploy stack 42 with existing compose/env; verify SHA, mounts, health, unchanged Hermes.
+- [x] Run npm run typecheck, npm run test, npm run build; retain logs. PostgreSQL and Chromium run in CI.
+- [x] Push review branch; after full CI green, fast-forward main, push and await Docker jobs. Preserve source SHA evidence.
+- [x] Snapshot production; redeploy stack 42 with existing compose/env; verify SHA, mounts, health, unchanged Hermes. Verified revision e81d507f2d35774ef77f6f192af25005f9ec89d9 on server and web.
 - [ ] Start one fresh small project through normal natural-goal submission. Observe no operator repair; independently verify repo/PR/test outcomes if reached. Stop repeated structural failures with evidence and fix remaining authorized defects rather than claiming success prematurely.
+
+## Follow-up: observed CLI verifier footer
+
+The fresh stock-check trial produced a valid terminal report followed by a Hermes file-mutation verifier warning. The source PR independently passes its 18 tests and 10 additional CLI cases; the platform nevertheless rejected the report boundary and retried the task. The automatic retry reached review without operator task intervention.
+
+- Recognize only the observed complete verifier footer immediately after a terminal answer, with count/line shape checks; never strip arbitrary trailing prose or select an older report.
+- Reproduce using the saved wire offline and synthetic fixtures; preserve normal schema, review and merge gates. No Hermes changes or additional model calls are needed to validate this transport fix.
+- Run focused regression tests, typecheck, CI including Docker, and verify the deployed revision. The active lifecycle remains under observation; an open PR is not completion evidence.

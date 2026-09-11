@@ -46,6 +46,26 @@ function projectStandaloneCandidate(candidate: string): string {
   return decodeChatEnvelope(candidate);
 }
 
+// Hermes appends this exact verifier diagnostic after the assistant answer.
+// Recognize only the observed write-safe-root denial format, including its file
+// count and repeated path. Other footers remain part of the ambiguous output.
+function withoutKnownVerifierFooter(text: string): string {
+  const tail = text.slice(-16_384);
+  const marker = '⚠️ File-mutation verifier: ';
+  const offset = tail.lastIndexOf(marker);
+  if (offset < 0) return text;
+  const start = text.length - tail.length + offset;
+  if (!/(?:\r?\n){2}$/.test(text.slice(0, start))) return text;
+  const lines = text.slice(start).split(/\r?\n/);
+  const header = /^⚠️ File-mutation verifier: ([1-9]\d*) file\(s\) were NOT modified this turn despite any wording above that may suggest otherwise\. Run `git status` or `read_file` to confirm\.$/.exec(lines[0]!);
+  if (!header || Number(header[1]) !== lines.length - 1) return text;
+  for (const line of lines.slice(1)) {
+    const denial = /^  • `([^`\r\n]+)` — \[write_file\] Write denied: '`([^`\r\n]+)`' is outside HERMES_WRITE_SAFE_ROOT \(([^()\r\n]+)\)\. Unset the variable or add this path's directory prefix\.$/.exec(line);
+    if (!denial || denial[1] !== denial[2]) return text;
+  }
+  return text.slice(0, start).trimEnd();
+}
+
 /** Project recognizable CLI output before report parsing or Direct Chat rendering.
  * Hermes currently prints an open Reasoning banner without a final delimiter.
  * Only an explicit terminal report or chat envelope is recoverable in that format;
@@ -53,7 +73,7 @@ function projectStandaloneCandidate(candidate: string): string {
  */
 export function projectFinalText(text: string): string {
   if (!/^(?:⚠️?[^\r\n]*\r?\n)*(?:\r?\n)*┌─ Reasoning ─+┐(?:\r?\n|$)/.test(text)) return decodeChatEnvelope(text);
-  const end = text.trimEnd();
+  const end = withoutKnownVerifierFooter(text.trimEnd());
   // Bound final-answer work independently of an arbitrarily large tool log.
   const tail = end.slice(-262_144);
   // Never reinterpret a chopped first line as a new standalone payload.

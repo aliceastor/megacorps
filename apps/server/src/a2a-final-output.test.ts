@@ -99,3 +99,39 @@ test('single invalid and truncated reports still reach normal report correction'
     }
   }
 });
+
+const verifierFooter = [
+  '⚠️ File-mutation verifier: 1 file(s) were NOT modified this turn despite any wording above that may suggest otherwise. Run `git status` or `read_file` to confirm.',
+  "  • `/tmp/helper.py` — [write_file] Write denied: '`/tmp/helper.py`' is outside HERMES_WRITE_SAFE_ROOT (/safe). Unset the variable or add this path's directory prefix.",
+].join('\n');
+
+test('known terminal file-mutation verifier footer does not obscure the immediate final report', () => {
+  const text = `${banner}\nprivate tool {\n${json}\n\n${verifierFooter}`;
+  assert.equal(projectFinalText(text), json);
+  assert.equal(projectFinalText(text.replaceAll('\n', '\r\n')), json);
+});
+
+test('verifier handling never searches past a newer malformed answer', () => {
+  for (const latest of ['{"kind":"megacorps-report","status":', '{"kind":"megacorps-report","status":"wrong"}']) {
+    assert.equal(projectFinalText(`${banner}\n${json}\n${latest}\n\n${verifierFooter}`), latest);
+  }
+  for (const latest of ['Newer unframed answer', `${json} {"status":"wrong"}`]) {
+    assert.match(projectFinalText(`${banner}\n${latest}\n\n${verifierFooter}`), /a2a_final_output_ambiguous/);
+  }
+});
+
+test('unknown or altered terminal warnings and extra output are not discarded', () => {
+  for (const footer of [
+    'Warning: something happened.',
+    `${verifierFooter}\n{"kind":"megacorps-report","status":`,
+    verifierFooter.replace('1 file(s)', '2 file(s)'),
+    verifierFooter.replace('Write denied:', 'Unrecognized diagnostic:'),
+    `${verifierFooter}\n  • {"status":"wrong"}`,
+    verifierFooter.replace('(/safe)', '(/safe) EXTRA'),
+  ]) {
+    const projected = projectFinalText(`${banner}\n${json}\n\n${footer}`);
+    assert.ok(projected !== json);
+    const parsed = extractAgentReport(projected);
+    assert.ok(!parsed || 'error' in parsed);
+  }
+});
