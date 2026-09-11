@@ -21,10 +21,10 @@
 
 Files: apps/server/src/a2a-client.ts, adapters/a2a.ts as needed, a focused final-output module and tests, agent-report tests only where required.
 
-- [ ] Reproduce the saved expense input locally (694,932-character A2A text fails; its final 2,108-character report validates). Inspect framing rather than copying raw transcript into source.
-- [ ] Add synthetic failing cases covering CLI banners/reasoning/tool braces and quoted JSON before a valid final, plain Direct Chat final text, genuine truncated last report, historical valid report plus later invalid final, and legitimate quoted/braced answer content.
-- [ ] Implement a bounded deterministic final-answer projection for recognizable Hermes output. A final structured DataPart remains authoritative. Never choose an earlier valid report merely because the newest fails schema. Ambiguous framing fails closed; preserve valid ordinary text.
-- [ ] Verify end-to-end extraction using production schema and the live fixture offline. Assert no reasoning/tool transcript in projected chat output, unchanged status/children/dependencies, and no synthetic approvals.
+- [x] Reproduce the saved expense input locally (694,932-character A2A text fails; its final 2,108-character report validates). Inspect framing rather than copying raw transcript into source.
+- [x] Add synthetic failing cases covering CLI banners/reasoning/tool braces and quoted JSON before a valid final, plain Direct Chat final text, genuine truncated last report, historical valid report plus later invalid final, and legitimate quoted/braced answer content.
+- [x] Implement a bounded deterministic final-answer projection for recognizable Hermes output. A final structured DataPart remains authoritative. Never choose an earlier valid report merely because the newest fails schema. Ambiguous framing fails closed; preserve valid ordinary text.
+- [x] Verify end-to-end extraction using production schema and the live fixture offline. Assert no reasoning/tool transcript in projected chat output, unchanged status/children/dependencies, and no synthetic approvals.
 
 Example regression expectation:
 ```ts
@@ -38,10 +38,10 @@ assert.equal(parsed.report.children?.length, 2);
 
 Files: apps/server/src/dispatch.ts completion transaction, a2a-executions.ts only if needed, a2a-task-recovery.test.ts plus true dispatch regression.
 
-- [ ] Add a red test that executes the actual main dispatch completion path; a successful run must leave its terminal journal inactive, and the next same-card/scope invocation must receive a new execution identity.
-- [ ] Add the acknowledgment inside the transaction that writes task success (the branch around dispatch.ts:3563), before returning the completed card. Audit other direct success writes for the same ordering hole.
-- [ ] Test rollback leaves both task/journal unconsumed, replaying one run does not resubmit, and genuine next-stage work does not reuse old output. Cover parent split then integration.
-- [ ] Run focused dispatch/recovery/usage tests; make no remote calls.
+- [x] Add a red test that executes the actual main dispatch completion path; a successful run must leave its terminal journal inactive, and the next same-card/scope invocation must receive a new execution identity.
+- [x] Add the acknowledgment inside the transaction that writes task success (the branch around dispatch.ts:3563), before returning the completed card. Audit other direct success writes for the same ordering hole.
+- [x] Test rollback leaves both task/journal unconsumed, replaying one run does not resubmit, and genuine next-stage work does not reuse old output. Cover parent split then integration.
+- [x] Run focused dispatch/recovery/usage tests; make no remote calls.
 
 Transaction invariant:
 ```ts
@@ -54,16 +54,16 @@ await acknowledgeA2aExecution(`task-run:${taskRunId}`, tx);
 
 Files: a focused a2a remote-reconciliation module, a2a-executions.ts, adapters/a2a.ts for reusable route resolution, dispatch capacity/loop hooks, routes.ts cancellation/archive/pause, chat-jobs admission/finish, relevant help/status UI as necessary.
 
-- [ ] Write red tests: cancel while remote working; timeout while remote working; restart with abandoned journal; task completion after cancellation; missing/wrong remote identity; concurrent claim versus stop; late result cannot create cards/merge/release another owner's capacity.
-- [ ] Record/derive remote work still outstanding from the durable journal. Local cancellation ends local card processing, but does not let another task or Direct Chat claim that agent while remote work is unresolved.
-- [ ] Add bounded periodic read-only reconciliation of the original endpoint/context/task ID with backoff. Resume across restart; never SendMessage during reconciliation. Unknown acceptance or missing task keeps an explicit unresolved state instead of freeing capacity. Route changes cannot redirect old work to a new server.
-- [ ] Natural remote completion permits dropping cancelled results, settling available actual usage to the original attempt and releasing only capacity no longer owned by other work. Timed-out execution retains required review/recovery handling; no late automatic merge.
-- [ ] Expose waiting-for-remote status so UI/API do not claim an idle agent or stopped remote task. Do not register Hermes CancelTask as a guaranteed hard stop.
+- [x] Write red tests: cancel while remote working; timeout while remote working; restart with abandoned journal; task completion after cancellation; missing/wrong remote identity; concurrent claim versus stop; late result cannot create cards/merge/release another owner's capacity.
+- [x] Record/derive remote work still outstanding from the durable journal. Local cancellation ends local card processing, but does not let another task or Direct Chat claim that agent while remote work is unresolved.
+- [x] Add bounded periodic read-only reconciliation of the original endpoint/context/task ID with backoff. Resume across restart; never SendMessage during reconciliation. Unknown acceptance or missing task keeps an explicit unresolved state instead of freeing capacity. Route changes cannot redirect old work to a new server.
+- [x] Natural remote completion permits dropping cancelled results, settling available actual usage to the original attempt and releasing only capacity no longer owned by other work. Timed-out execution retains required review/recovery handling; no late automatic merge.
+- [x] Expose waiting-for-remote status so UI/API do not claim an idle agent or stopped remote task. Do not register Hermes CancelTask as a guaranteed hard stop.
 - [ ] Run real PostgreSQL race tests in CI and local deterministic tests; verify one submission and original task identity across lifecycle transitions.
 
 ## Integration and delivery
 
-- [ ] Review all three diffs together for ordering, authority, retries, accounting and route identity.
+- [x] Review all three diffs together for ordering, authority, retries, accounting and route identity.
 - [ ] Run npm run typecheck, npm run test, npm run build; retain logs. PostgreSQL and Chromium run in CI.
 - [ ] Push review branch; after full CI green, fast-forward main, push and await Docker jobs. Preserve source SHA evidence.
 - [ ] Snapshot production; redeploy stack 42 with existing compose/env; verify SHA, mounts, health, unchanged Hermes.

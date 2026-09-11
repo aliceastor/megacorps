@@ -37,7 +37,9 @@ function fixture(t: Parameters<typeof memoryDb>[0]) {
 
 test('restart reuses occupied capacity, original heartbeat and reserved usage without a second admission', async t => {
   const f = fixture(t);
+  f.journal.active = false;
   await admitUsage(f.scope);
+  f.journal.active = true;
   let adapterReads = 0;
   const operation = async () => { adapterReads++; return { success: true, output: 'polled original task', sessionId: 'original-context', durationSeconds: 1, tokensUsed: 0, costUsd: 0.5, usage: { ...unknownUsage('fixture'), costStatus: 'actual' as const, costUsd: '0.5' } }; };
   await withA2aRecoveryRun(f.run, async () => {
@@ -54,12 +56,14 @@ test('restart reuses occupied capacity, original heartbeat and reserved usage wi
   assert.equal(f.record.deadlineAt, 1000);
 });
 
-test('a successor run consumes the original outstanding accounting attempt and does not reserve again', async t => {
+test('a successor run cannot consume an unresolved predecessor while remote work is outstanding', async t => {
   const f = fixture(t);
+  f.journal.active = false;
   await admitUsage(f.scope);
+  f.journal.active = true;
   const successor: any = { ...f.run, id: randomUUID() };
   f.state.rows(taskRuns).push(successor);
-  await executeUsage({ ...f.scope, taskRunId: successor.id, attemptKey: `task-run:${successor.id}` }, async () => ({ success: true, output: 'cached', sessionId: 'original-context', durationSeconds: 1, tokensUsed: 0, costUsd: 0, usage: unknownUsage('fixture') }), { a2aScope: f.record.scope });
+  await assert.rejects(executeUsage({ ...f.scope, taskRunId: successor.id, attemptKey: `task-run:${successor.id}` }, async () => ({ success: true, output: 'cached', sessionId: 'original-context', durationSeconds: 1, tokensUsed: 0, costUsd: 0, usage: unknownUsage('fixture') }), { a2aScope: f.record.scope }), /a2a_remote_work_pending/);
   assert.equal(f.state.rows(costEvents).length, 1);
   assert.equal(f.state.rows(costEvents)[0]!.attemptKey, f.scope.attemptKey);
 });
@@ -90,29 +94,33 @@ for (const kind of ['dispatch', 'review']) for (const phase of ['terminal', 'rec
 
 test('a distinct management scope cannot borrow an execution reservation', async t => {
   const f = fixture(t);
+  f.journal.active = false;
   await admitUsage(f.scope);
+  f.journal.active = true;
   const successor: any = { ...f.run, id: randomUUID() };
   f.state.rows(taskRuns).push(successor);
   let calls = 0;
-  await assert.rejects(executeUsage({ ...f.scope, taskRunId: successor.id, attemptKey: `task-run:${successor.id}` }, async () => { calls++; throw new Error('must not dispatch'); }, { a2aScope: JSON.stringify([f.agent.id, 'task', f.card.id, 'management']) } as any), /budget_exceeded_agent/);
+  await assert.rejects(executeUsage({ ...f.scope, taskRunId: successor.id, attemptKey: `task-run:${successor.id}` }, async () => { calls++; throw new Error('must not dispatch'); }, { a2aScope: JSON.stringify([f.agent.id, 'task', f.card.id, 'management']) } as any), /a2a_remote_work_pending/);
   assert.equal(calls, 0);
 });
 
 
-test('accounting pins the successor alias before a concurrent acknowledgment can release the scope', async t => {
+test('unresolved accounting cannot admit a successor before reconciliation', async t => {
   const f = fixture(t);
+  f.journal.active = false;
   await admitUsage(f.scope);
+  f.journal.active = true;
   const successor: any = { ...f.run, id: randomUUID() };
   f.state.rows(taskRuns).push(successor);
   const key = `task-run:${successor.id}`;
   const { createA2aExecutionStore } = await import('./a2a-executions.ts');
-  await executeUsage({ ...f.scope, taskRunId: successor.id, attemptKey: key }, async () => {
+  await assert.rejects(executeUsage({ ...f.scope, taskRunId: successor.id, attemptKey: key }, async () => {
     f.journal.active = false;
     const resumed = await createA2aExecutionStore(f.agent.id).begin({ ...f.record, key });
     assert.equal(resumed.created, false);
     assert.equal(resumed.record.key, f.record.key);
     return { success: true, output: 'replay', sessionId: 'original-context', durationSeconds: 1, tokensUsed: 0, costUsd: 0, usage: unknownUsage('fixture') };
-  }, { a2aScope: f.record.scope });
+  }, { a2aScope: f.record.scope }), /a2a_remote_work_pending/);
   assert.equal(f.state.rows(costEvents).length, 1);
 });
 
@@ -121,7 +129,9 @@ import { A2aTaskRunLease, withA2aTaskRunLease } from './a2a-task-recovery.ts';
 for (const loss of ['connection', 'owner', 'cancelled']) test(`a ${loss} loss during the remote call fences late projection and settlement`, async t => {
   const f = fixture(t);
   f.run.lockedBy = 'original-worker';
+  f.journal.active = false;
   await admitUsage(f.scope);
+  f.journal.active = true;
   const lease = new A2aTaskRunLease(f.run);
   let projected = false;
   await assert.rejects(withA2aTaskRunLease(lease, async () => {
@@ -142,7 +152,9 @@ for (const loss of ['connection', 'owner', 'cancelled']) test(`a ${loss} loss du
 test('connection loss fences failed operations before their ordinary failure handling', async t => {
   const f = fixture(t);
   f.run.lockedBy = 'original-worker';
+  f.journal.active = false;
   await admitUsage(f.scope);
+  f.journal.active = true;
   const lease = new A2aTaskRunLease(f.run);
   await assert.rejects(withA2aTaskRunLease(lease, () => executeUsage(f.scope, async () => {
     lease.markLost();

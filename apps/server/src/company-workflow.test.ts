@@ -6,6 +6,7 @@ import { collaborationDelegationRequirement, completionBlockedByChildren, dispat
 import { getAdapter } from './adapters/registry.ts';
 import { companyExecutionReadiness } from './company-workflow.ts';
 import { dispatchInternals, createMessageDelegations } from './dispatch.ts';
+import { withA2aRecoveryRun } from './a2a-task-recovery.ts';
 test('staffed-head message reports are idempotent and agent-generated children cannot grant coordination exemption', async t => {
   const state = fixture(t, [{ id: 'employee', companyId: 'company', name: 'Employee', slug: 'employee', departmentId: 'department', isActive: true, adapterType: 'webhook' }]);
   const parent: any = { ...card, assigneeId: 'head' };
@@ -37,6 +38,23 @@ const card: any = { id: 'card', companyId: 'company', title: 'Build the requeste
 function fixture(t: Parameters<typeof memoryDb>[0], staff: any[] = []) {
   return memoryDb(t, [[companies, [{ id: 'company', name: 'Acme' }]], [positions, [{ id: 'boss-position', companyId: 'company', isCompanyBoss: true }]], [departments, [{ id: 'department', companyId: 'company', name: 'Engineering', headAgentId: 'head' }]], [agents, [boss, head, ...staff]], [kanbanCards, [{ ...card }]]]);
 }
+
+test('readiness permits the busy original recovery actor while retaining other guards', async t => {
+  const state = fixture(t);
+  const index = state.rows(agents).findIndex(row => row.id === 'head');
+  const actor = { ...head, isBusy: true };
+  state.rows(agents)[index] = actor;
+  const run: any = { id: 'original-run', companyId: 'company', agentId: 'head', status: 'running' };
+  assert.equal((await companyExecutionReadiness('company', 'head')).ready, false);
+  assert.equal((await withA2aRecoveryRun(run, () => companyExecutionReadiness('company', 'head'))).ready, true);
+  for (const mismatch of [{ agentId: 'boss' }, { companyId: 'another-company' }, { status: 'cancelled' }]) {
+    assert.equal((await withA2aRecoveryRun({ ...run, ...mismatch }, () => companyExecutionReadiness('company', 'head'))).ready, false);
+  }
+  actor.isActive = false;
+  const paused = await withA2aRecoveryRun(run, () => companyExecutionReadiness('company', 'head'));
+  assert.equal(paused.ready, false);
+  assert.match(paused.runtimeIssues.join(' '), /Resume paused agent/);
+});
 test('Boss must delegate to structural department heads without numeric rank or bossId', async (t) => {
   fixture(t);
   const requirement = await collaborationDelegationRequirement(card, 'boss');

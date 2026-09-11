@@ -1,4 +1,5 @@
 import { acknowledgeA2aExecution } from './a2a-executions.ts';
+import { agentRemoteWork, refreshAgentRemoteCapacity } from './a2a-remote-reconciliation.ts';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from './db/client.ts';
@@ -16,6 +17,8 @@ export async function enqueueChatJob(session: typeof chatSessions.$inferSelect, 
     if (pending) return { error: 'chat_reply_pending', job: publicChatJob(pending) } as const;
     const [otherPending] = await tx.select().from(chatJobs).where(and(eq(chatJobs.agentId, session.agentId), inArray(chatJobs.status, ['queued', 'running']))).limit(1);
     if (otherPending) return { error: 'agent_busy' } as const;
+    await tx.select().from(agents).where(eq(agents.id, session.agentId)).for('update').limit(1);
+    if ((await agentRemoteWork(session.agentId, tx)).pending) return { error: 'a2a_remote_work_pending' } as const;
     const [agent] = await tx.update(agents).set({ isBusy: true }).where(and(eq(agents.id, session.agentId), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
     if (!agent) return { error: 'agent_busy' } as const;
     const [run] = await tx.insert(heartbeatRuns).values({ companyId: session.companyId, agentId: session.agentId, source: 'chat', status: 'running', startedAt: new Date() }).returning();
@@ -51,8 +54,8 @@ export async function projectChatJob<T>(job: ChatJob, project: () => Promise<T>,
     await acknowledge(`chat:${job.userMessageId}`, tx);
     const metadata = message?.metadata as Record<string, unknown> | null;
     await tx.update(heartbeatRuns).set({ status: message?.authorType === 'agent' ? 'success' : 'failed', completedAt: new Date(), durationSeconds: message?.durationSeconds, costUsd: message?.costUsd, outputTokens: typeof metadata?.tokensUsed === 'number' ? metadata.tokensUsed : undefined, error: message?.authorType === 'system' ? message.body : null }).where(eq(heartbeatRuns.id, job.heartbeatRunId));
-    await tx.update(agents).set({ isBusy: false }).where(eq(agents.id, job.agentId));
     await tx.update(chatJobs).set({ status: message?.authorType === 'agent' ? 'completed' : 'failed', error: message?.authorType === 'system' ? message.body : null, leaseToken: null, leaseExpiresAt: null, updatedAt: new Date() }).where(eq(chatJobs.id, job.id));
+    await refreshAgentRemoteCapacity(job.agentId, tx);
     return result;
   });
 }

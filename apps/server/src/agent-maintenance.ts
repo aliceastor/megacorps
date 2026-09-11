@@ -1,3 +1,4 @@
+import { claimAgentCapacity } from './dispatch.ts';
 import { and, desc, eq, gt, inArray, isNotNull, isNull, sql as drizzleSql } from 'drizzle-orm';
 import { acknowledgeA2aExecution } from './a2a-executions.ts';
 import { a2aExecutionScope } from './a2a-execution-scope.ts';
@@ -179,10 +180,7 @@ export async function runAgentMaintenance(app: FastifyInstance, agent: AgentRow,
   if (!MAINTENANCE_ADAPTER_TYPES.includes(agent.adapterType ?? 'hermes-ssh')) return { status: 'skipped', reason: 'adapter_not_supported' };
   if (!(await budgetOk(agent))) return { status: 'skipped', reason: 'agent_budget_exceeded' };
 
-  const [busyAgent] = await db.update(agents)
-    .set({ isBusy: true })
-    .where(and(eq(agents.id, agent.id), eq(agents.isBusy, false), eq(agents.isActive, true)))
-    .returning();
+  const busyAgent = await claimAgentCapacity(agent);
   if (!busyAgent) return { status: 'skipped', reason: 'agent_busy' };
 
   const [lastSuccess] = await db.select({ completedAt: heartbeatRuns.completedAt }).from(heartbeatRuns)

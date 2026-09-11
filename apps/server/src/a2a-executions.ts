@@ -3,6 +3,7 @@ import { db } from './db/client.ts';
 import { agents, a2aExecutions, a2aExecutionAliases } from './db/schema.ts';
 import type { A2aInvocationStore, A2aInvocationRecord } from './a2a-polling.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
+import { assertAgentRemoteAvailable, assertA2aSubmissionAuthority } from './a2a-remote-reconciliation.ts';
 
 type Executor = Pick<typeof db, 'select' | 'insert' | 'update'>;
 async function findExecution(key: string, tx: Executor) {
@@ -29,6 +30,8 @@ export function createA2aExecutionStore(agentId: string): A2aInvocationStore {
           await tx.insert(a2aExecutionAliases).values({ key: seed.key, executionKey: pending.key });
           return { record: pending.record, created: false };
         }
+        await assertA2aSubmissionAuthority(seed.key, agentId, tx);
+        await assertAgentRemoteAvailable(agentId, tx);
         const record: A2aInvocationRecord = { ...seed, revision: 0 };
         await tx.insert(a2aExecutions).values({ key: seed.key, agentId, companyId: agent.companyId, scope: seed.scope, active: true, record });
         await tx.insert(a2aExecutionAliases).values({ key: seed.key, executionKey: seed.key });
@@ -51,6 +54,7 @@ export function createA2aExecutionStore(agentId: string): A2aInvocationStore {
         ...(sanitized.usage ? { usage: { ...sanitized.usage, providerEventId: patch.outcome.usage?.providerEventId } } : {}),
       } } : patch;
       return db.transaction(async tx => {
+        if (patch.phase === 'sending') await assertA2aSubmissionAuthority(known.key, agentId, tx);
         const [row] = await tx.select().from(a2aExecutions).where(and(eq(a2aExecutions.key, known.key), eq(a2aExecutions.agentId, agentId))).limit(1).for('update');
         if (!row || row.record.revision !== revision) return null;
         const record = { ...row.record, ...safePatch, revision: revision + 1 };
@@ -67,7 +71,7 @@ export async function acknowledgeA2aExecution(key: string, executor?: Executor):
     const known = await findExecution(key, tx);
     if (!known) return;
     const [row] = await tx.select().from(a2aExecutions).where(eq(a2aExecutions.key, known.key)).limit(1).for('update');
-    if (row?.record.phase === 'terminal') await tx.update(a2aExecutions).set({ active: false, updatedAt: new Date() }).where(eq(a2aExecutions.key, row.key));
+    if (row?.record.phase === 'terminal' && row.record.outcome?.state !== 'canceled') await tx.update(a2aExecutions).set({ active: false, updatedAt: new Date() }).where(eq(a2aExecutions.key, row.key));
   };
   if (executor) await acknowledge(executor);
   else await db.transaction(acknowledge);

@@ -5,6 +5,7 @@ import { structuralRole } from './role-playbooks.ts';
 import { agentRuntimeAvailable, createRuntimeAvailabilityCache } from './runner-availability.ts';
 import { adapterRequiresRuntime } from './adapters/config.ts';
 import type { AgentResult } from './agent-results.ts';
+import { currentA2aRecoveryRun } from './a2a-task-recovery.ts';
 
 type Agent = typeof agents.$inferSelect;
 export async function companyStructure(companyId: string) {
@@ -49,9 +50,11 @@ export async function companyExecutionReadiness(companyId: string, actorId?: str
   const candidates = actorId ? structure.members.filter(a => a.id === actorId) : [...structure.bosses, ...structure.members.filter(a => structure.roleOf(a.id) === 'department_head')];
   if (actorId && !candidates.length) issues.push('Assignment must name a member of this company.');
   const cache = createRuntimeAvailabilityCache();
+  const recovery = currentA2aRecoveryRun();
   for (const agent of candidates) {
     if (agent.isActive === false) runtimeIssues.push(`Resume paused agent ${agent.name}.`);
-    if (agent.isBusy) runtimeIssues.push(`Agent ${agent.name} is busy; wait for its active run.`);
+    const resumesOwnRun = recovery?.agentId === agent.id && recovery.companyId === companyId && recovery.status === 'running';
+    if (agent.isBusy && !resumesOwnRun) runtimeIssues.push(`Agent ${agent.name} is busy; wait for its active run.`);
     if ((adapterRequiresRuntime(agent.adapterType) && !agent.runtimeId) || !(await agentRuntimeAvailable({ companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType }, cache))) runtimeIssues.push(`Configure an available same-company runtime for ${agent.name}.`);
   }
   return { ready: !issues.length && !runtimeIssues.length, structureReady: !issues.length, issues, setupIssues, runtimeIssues, repositoryWriteAccess: 'not_checked' as const };

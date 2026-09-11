@@ -20,10 +20,10 @@ test('A2A original task recovery and accounting', { skip: !process.env.TEST_DATA
     await db.update(kanbanCards).set({ executionLockId: heartbeat!.id, activeHeartbeatRunId: heartbeat!.id }).where(eq(kanbanCards.id, card!.id));
     const key = `task-run:${run!.id}`;
     const record = { key, scope: JSON.stringify([agent!.id, 'task', card!.id, 'execution']), route: 'original-route', contextId: 'original-context', baselineTaskIds: [], phase: 'polling' as const, taskId: 'remote-task', deadlineAt: Date.now() + 300_000, outcome: null, lastError: null, revision: 2 };
-    await db.insert(a2aExecutions).values({ key, companyId: company!.id, agentId: agent!.id, scope: record.scope, active: true, record });
-    await db.insert(a2aExecutionAliases).values({ key, executionKey: key });
     const usageScope = cardUsageScope(card!, agent!, heartbeat!.id, run!.id, 'dispatch');
     await admitUsage(usageScope);
+    await db.insert(a2aExecutions).values({ key, companyId: company!.id, agentId: agent!.id, scope: record.scope, active: true, record });
+    await db.insert(a2aExecutionAliases).values({ key, executionKey: key });
     return { company: company!, agent: agent!, card: card!, run: run!, heartbeat: heartbeat!, record, usageScope };
   }
   await t.test('restart claims the same run before old timeout and preserves remote deadline', async () => {

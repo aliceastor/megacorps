@@ -5,11 +5,12 @@ import { isolatedPostgres } from './test-support/postgres-db.ts';
 
 test('PostgreSQL serializes A2A submission ownership and durable aliases across independent stores', { skip: !process.env.TEST_DATABASE_URL && !process.env.CI, timeout: 60_000 }, async t => {
   const { db } = await isolatedPostgres(t);
-  const { companies, agents } = await import('./db/schema.ts');
+  const { companies, agents, costEvents } = await import('./db/schema.ts');
   const { createA2aExecutionStore, acknowledgeA2aExecution } = await import('./a2a-executions.ts');
   const [company] = await db.insert(companies).values({ name: 'Polling test', slug: `poll-${randomUUID()}` }).returning();
   const [agent] = await db.insert(agents).values({ companyId: company!.id, name: 'Worker', slug: 'worker', role: 'worker', adapterType: 'a2a' }).returning();
-  const make = (key: string) => ({ key, scope: `${agent!.id}:card:execution`, route: 'same-route', contextId: randomUUID(), baselineTaskIds: null, phase: 'preparing' as const, taskId: null, deadlineAt: Date.now() + 900_000, outcome: null, lastError: null });
+  await db.insert(costEvents).values(['one', 'two', 'three', 'four', 'five'].map(key => ({ attemptKey: `operation:${key}`, companyId: company!.id, agentId: agent!.id, source: 'test_connection', admittedAt: new Date() })));
+  const make = (key: string) => ({ key: `operation:${key}`, scope: `${agent!.id}:card:execution`, route: 'same-route', contextId: randomUUID(), baselineTaskIds: null, phase: 'preparing' as const, taskId: null, deadlineAt: Date.now() + 900_000, outcome: null, lastError: null });
   const submissions = await Promise.all(['one', 'two', 'three'].map(key => createA2aExecutionStore(agent!.id).begin(make(key))));
   assert.equal(submissions.filter(row => row.created).length, 1);
   assert.equal(new Set(submissions.map(row => row.record.key)).size, 1);
@@ -17,10 +18,10 @@ test('PostgreSQL serializes A2A submission ownership and durable aliases across 
   const original = submissions[0]!.record;
   const writers = await Promise.all([1, 2].map(() => createA2aExecutionStore(agent!.id).compareAndSet(original.key, 0, { phase: 'sending', baselineTaskIds: [] })));
   assert.equal(writers.filter(Boolean).length, 1);
-  await acknowledgeA2aExecution('two');
+  await acknowledgeA2aExecution('operation:two');
   assert.equal((await createA2aExecutionStore(agent!.id).begin(make('four'))).created, false);
   await createA2aExecutionStore(agent!.id).compareAndSet(original.key, 1, { phase: 'terminal' });
-  await acknowledgeA2aExecution('three');
+  await acknowledgeA2aExecution('operation:three');
   assert.equal((await createA2aExecutionStore(agent!.id).begin(make('five'))).created, true);
   assert.equal((await createA2aExecutionStore(agent!.id).begin(make('one'))).created, false);
   const { sql } = await import('./db/client.ts');

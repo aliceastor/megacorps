@@ -13,6 +13,7 @@ export type A2aInvocationRecord = {
   outcome: A2aSendOutcome | null;
   lastError: string | null;
   revision: number;
+  remoteReconciliation?: import('./a2a-remote-reconciliation.ts').A2aRemoteReconciliation;
 };
 
 export type A2aInvocationPatch = Partial<Omit<A2aInvocationRecord, 'key' | 'scope' | 'route' | 'revision'>>;

@@ -1,3 +1,4 @@
+import { claimAgentCapacity } from './dispatch.ts';
 import { z } from 'zod';
 import { readLimit, optionalReadId, optionalReadProject } from './read-query.ts';
 import { buildCommonCompanyContext } from './company-context.ts';
@@ -617,7 +618,7 @@ export async function registerChatRoutes(app: FastifyInstance, options: { acknow
       return reply.code(409).send({ error: 'agent_budget_exceeded', userMessage, systemMessage });
     }
 
-    const [busyAgent] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, agent.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
+    const busyAgent = await claimAgentCapacity(agent);
     if (!busyAgent) {
       const [systemMessage] = await db.insert(chatMessages).values({
         sessionId: session.id,

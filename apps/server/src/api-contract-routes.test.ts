@@ -3,7 +3,7 @@ import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
-import { users, companies, companyMemberships, apiEvents, agentRuntimes } from './db/schema.ts';
+import { users, companies, companyMemberships, apiEvents, agentRuntimes, agents, a2aExecutions, kanbanCards } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { signSession } from './auth.ts';
 import { registerRoutes } from './routes.ts';
@@ -16,6 +16,29 @@ async function fixture(t: any) {
   const app = Fastify(); t.after(() => app.close()); await app.register(cookie); registerRequestLogging(app); await registerRoutes(app);
   return { app, state, user, company, headers: { cookie: `session=${await signSession(user)}` } };
 }
+
+for (const action of ['pause', 'reset-session']) test(`${action} returns the current remote capacity instead of an idle agent`, async t => {
+  const { app, state, company, headers } = await fixture(t);
+  state.rows(users)[0]!.role = 'operator'; state.rows(companyMemberships)[0]!.role = 'operator';
+  const agentId = randomUUID();
+  state.rows(agents).push({ id: agentId, companyId: company.id, name: 'Worker', slug: 'worker', isActive: true, isBusy: false, adapterType: 'a2a' });
+  state.rows(a2aExecutions).push({ key: 'synthetic-remote', agentId, companyId: company.id, active: true, record: { phase: 'polling', outcome: null } });
+  const response = await app.inject({ method: 'POST', url: `/api/agents/${agentId}/${action}`, headers });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().isBusy, true);
+  assert.equal(response.json().remoteWork?.status, 'waiting_for_remote');
+});
+
+test('cancellation without outstanding remote work returns a null remoteWork field', async t => {
+  const { app, state, company, headers } = await fixture(t);
+  state.rows(users)[0]!.role = 'operator'; state.rows(companyMemberships)[0]!.role = 'operator';
+  const agentId = randomUUID(), cardId = randomUUID();
+  state.rows(agents).push({ id: agentId, companyId: company.id, name: 'Worker', isActive: true, isBusy: false });
+  state.rows(kanbanCards).push({ id: cardId, companyId: company.id, title: 'Cancelled task', assigneeId: agentId, columnStatus: 'cancelled' });
+  const response = await app.inject({ method: 'POST', url: `/api/cards/${cardId}/cancel`, headers, payload: {} });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().remoteWork, null);
+});
 
 for (const path of ['/api/dashboard', '/api/search', '/api/dashboard/timeseries', '/api/cron/status']) test(`Help describes the actual authenticated ${path} object envelope`, async t => {
   const { app, headers, state, user } = await fixture(t);

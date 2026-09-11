@@ -7,6 +7,7 @@ import { moneyString, moneyUnits, tokenFields, unknownUsage, type TokenField, ty
 import type { TaskResult } from './adapters/hermes.ts';
 import { withUsageAttempt } from './usage-context.ts';
 import { assertA2aTaskRunOwner } from './a2a-task-recovery.ts';
+import { assertAgentRemoteAvailable, remoteWorkPending } from './a2a-remote-reconciliation.ts';
 
 type Reader = Pick<typeof db, 'select' | 'insert' | 'update'>;
 type Entry = typeof costEvents.$inferSelect;
@@ -124,6 +125,7 @@ export async function admitUsage(scope: AttemptScope, options: { now?: Date; tim
       fail('usage_attempt_already_admitted');
     }
     if (agent.isActive === false || agent.deletedAt) fail('usage_agent_inactive');
+    await assertAgentRemoteAvailable(agent.id, tx);
     if (card && (card.deletedAt || ['cancelled', 'done'].includes(card.columnStatus ?? ''))) fail('usage_card_terminal');
     const rows = await tx.select().from(costEvents).where(eq(costEvents.companyId, scope.companyId));
     const rules = await rulesFor(tx, agent, card);
@@ -178,11 +180,11 @@ function reconcileTokens(previous: UsageFacts | null | undefined, incoming: Usag
   return { ...tokens, tokenProvenance };
 }
 
-type UsageReconciliationOptions = { now?: Date; phase?: 'progress' | 'terminal' };
+type UsageReconciliationOptions = { now?: Date; phase?: 'progress' | 'terminal'; transaction?: Reader };
 export async function settleUsage(scope: AttemptScope, facts: UsageFacts, options: UsageReconciliationOptions = {}) {
   scope = canonicalScope(scope);
   const now = options.now ?? new Date();
-  return retryMergeGateWrite(() => db.transaction(async tx => {
+  const settle = async (tx: Reader) => {
     const { agent, card } = await lockScope(tx, scope);
     let [entry] = await tx.select().from(costEvents).where(eq(costEvents.attemptKey, scope.attemptKey)).limit(1);
     if (entry) assertIdentity(entry, scope);
@@ -231,7 +233,8 @@ export async function settleUsage(scope: AttemptScope, facts: UsageFacts, option
     const rules = await rulesFor(tx, agent, card);
     await warnThresholds(tx, rules, rows, agent, card, now);
     return { entry: entry!, totals: agentTotals, stopped: rules.some(rule => rule.hard && units(totalsFor(rule, rows, agent, card, now).totalUsd) >= rule.limit) };
-  }));
+  };
+  return options.transaction ? settle(options.transaction) : retryMergeGateWrite(() => db.transaction(settle));
 }
 
 export async function releaseUsage(scope: AttemptScope) {
@@ -283,6 +286,7 @@ async function a2aUsageAttempt(scope: AttemptScope, executionScope?: string): Pr
     }
     if (execution && executionScope && execution.scope !== executionScope) fail('a2a_usage_identity_mismatch');
     if (!execution) return null;
+    if (execution.key !== scope.attemptKey && remoteWorkPending(execution)) fail('a2a_remote_work_pending');
     const [entry] = await tx.select().from(costEvents).where(eq(costEvents.attemptKey, execution.key)).limit(1);
     if (!entry) fail('a2a_usage_reconciliation_required');
     if (execution.agentId !== scope.agentId || execution.companyId !== scope.companyId ||

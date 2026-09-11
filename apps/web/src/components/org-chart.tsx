@@ -25,6 +25,7 @@ type Agent = {
   capabilities?: string[] | null;
   defaultTimeoutSeconds?: number | null;
   isBusy?: boolean;
+  remoteWork?: { status: string; reason: string; count: number } | null;
   isActive?: boolean;
   budgetPerTask?: string;
   budgetMonthly?: string;
@@ -406,7 +407,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const configuredOverrideAdapterConfig = Object.fromEntries(Object.entries(overrideAdapterConfig).filter(([, value]) => value !== null && value !== undefined && !(typeof value === 'string' && value.trim() === '')));
   const effectiveAdapterConfig = { ...inheritedAdapterConfig, ...configuredOverrideAdapterConfig };
   const selectedAdapterFields = visibleAdapterFields(selectedAdapterType, inheritedAdapterConfig, overrideAdapterConfig);
-  function agentStatus(agent: Agent): string { return agent.isBusy ? 'busy' : agent.isActive === false ? 'offline' : 'idle'; }
+  function agentStatus(agent: Agent): string { return agent.remoteWork ? agent.remoteWork.status === 'unresolved' ? 'Remote status unresolved' : 'Waiting for remote task' : agent.isBusy ? 'busy' : agent.isActive === false ? 'offline' : 'idle'; }
   function agentDepartment(agent: Agent): string { return companyDepartments.find((department) => department.id === agent.departmentId)?.name ?? 'Unassigned'; }
   function agentPosition(agent: Agent): string { return positions.find((position) => position.id === agent.positionId)?.name ?? 'No position'; }
   function agentManager(agent: Agent): string { return visibleAgents.find((item) => item.id === agent.bossId)?.name ?? 'Top-level'; }
@@ -644,7 +645,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
         {selected && (
           <motion.section className="card" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} style={{ padding: 18, display: 'grid', gap: 12 }}>
             <div className="panel-title">
-              <div><h2>{selected.name}</h2><span className="status-pill">{selected.isBusy ? t('common.busy') : selected.isActive ? 'idle' : t('common.offline')}</span></div>
+              <div><h2>{selected.name}</h2><span className="status-pill">{agentStatus(selected)}</span></div>
               <button className="btn" onClick={() => setSelected(null)}>{t('common.close')}</button>
             </div>
             <div className="meta-grid">

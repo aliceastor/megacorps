@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { agentRemoteWork, refreshAgentRemoteCapacity, sweepA2aRemoteReconciliation } from './a2a-remote-reconciliation.ts';
 import { a2aExecutionScope } from './a2a-execution-scope.ts';
 import { acknowledgeA2aExecution } from './a2a-executions.ts';
 import { assertA2aTaskRunOwner, isA2aTaskRunLeaseLost, claimRecoverableA2aTaskRun, currentA2aRecoveryRun, withA2aRecoveryRun, withTaskRunWorkerLease } from './a2a-task-recovery.ts';
@@ -2157,10 +2158,13 @@ async function finishWorkerTaskRun(run: TaskRunRow, work: () => Promise<CardRow>
     await recordUncaughtDispatchFailure(run, message);
     await addTaskRunLog(run, 'failed', `${run.kind} task run failed.`, message);
     await addActivity({ companyId: run.companyId, actorType: 'system', actorId: TASK_RUN_WORKER_ID, agentId: run.agentId, action: 'task_run.failed', entityType: 'task_run', entityId: run.id, details: { cardId: run.cardId, kind: run.kind, error: message } });
+  } finally {
+    if (run.agentId) await refreshAgentRemoteCapacity(run.agentId);
   }
 }
 
 export async function processTaskRunQueue(app: FastifyInstance): Promise<{ claimed: number; completed: number; failed: number }> {
+  void sweepA2aRemoteReconciliation(error => app.log.warn({ error }, 'A2A remote reconciliation delayed')).catch(error => app.log.warn({ error }, 'A2A remote sweep delayed'));
   if (taskRunWorkerClaiming) return { claimed: 0, completed: 0, failed: 0 };
   taskRunWorkerClaiming = true;
   const result = { claimed: 0, completed: 0, failed: 0 };
@@ -2386,23 +2390,17 @@ export async function openHeartbeatRun(card: CardRow, agent: AgentRow, source: s
 // and the claim counts running heartbeat runs against the configured limit.
 export async function claimAgentCapacity(agent: AgentRow): Promise<boolean> {
   if (currentA2aRecoveryRun()?.agentId === agent.id) return agent.isActive !== false;
-  const maxConcurrent = Math.max(1, agent.maxConcurrent ?? 1);
-  if (maxConcurrent === 1) {
-    const [row] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, agent.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
-    return Boolean(row);
-  }
-  const rows = await rawSql`
-    UPDATE agents SET is_busy = (
-      (SELECT count(*) FROM heartbeat_runs hr WHERE hr.agent_id = agents.id AND hr.status = 'running') + 1 >= ${maxConcurrent}
-    )
-    WHERE id = ${agent.id} AND is_active = true AND deleted_at IS NULL AND (
-      SELECT count(*) FROM heartbeat_runs hr WHERE hr.agent_id = agents.id AND hr.status = 'running'
-    ) < ${maxConcurrent}
-    RETURNING id
-  `;
-  return rows.length > 0;
+  return db.transaction(async tx => {
+    const [current] = await tx.select().from(agents).where(eq(agents.id, agent.id)).for('update').limit(1);
+    if (!current || !current.isActive || current.deletedAt || (await agentRemoteWork(agent.id, tx)).pending) return false;
+    const maxConcurrent = Math.max(1, current.maxConcurrent ?? 1);
+    if (maxConcurrent === 1 && current.isBusy) return false;
+    const running = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.agentId, agent.id), eq(heartbeatRuns.status, 'running')));
+    if (running.length >= maxConcurrent) return false;
+    await tx.update(agents).set({ isBusy: running.length + 1 >= maxConcurrent }).where(eq(agents.id, agent.id));
+    return true;
+  });
 }
-
 export const REVIEW_TASK_TIMEOUT_SECONDS = 1500;
 const REVIEW_TASK_KINDS = new Set(['review', 'message_review', 'panel_review']);
 
@@ -4396,11 +4394,15 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
 }
 
 export function startDispatchLoop(app: FastifyInstance): void {
-  if (process.env.TASK_RUN_WORKER_ENABLED !== 'false') {
-    const workerTimer = setInterval(() => { void processTaskRunQueue(app); }, TASK_RUN_WORKER_INTERVAL_MS);
-    app.addHook('onClose', async () => clearInterval(workerTimer));
-    void processTaskRunQueue(app);
-  }
+  const workerTick = () => {
+    if (process.env.TASK_RUN_WORKER_ENABLED !== 'false') void processTaskRunQueue(app);
+    else void sweepA2aRemoteReconciliation(error => app.log.error({ error }, 'A2A remote reconciliation failed')).catch(error => app.log.error({ error }, 'A2A remote reconciliation failed'));
+  };
+  // Direct Chat and connection checks can leave remote work even when local
+  // task workers are disabled. Reuse this timer for their read-only drainage.
+  const workerTimer = setInterval(workerTick, TASK_RUN_WORKER_INTERVAL_MS);
+  app.addHook('onClose', async () => clearInterval(workerTimer));
+  workerTick();
   if (!cronState.enabled) return;
   const timer = setInterval(() => { void runDispatchCronTick(app, 'loop'); }, LOOP_INTERVAL_MS);
   app.addHook('onClose', async () => clearInterval(timer));

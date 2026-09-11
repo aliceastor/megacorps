@@ -1,3 +1,4 @@
+import { agentRemoteWork, agentsWithRemoteStatus, refreshAgentRemoteCapacity, refreshCancelledCardCapacity } from './a2a-remote-reconciliation.ts';
 import { readLimit, readOffset, optionalReadId, optionalReadProject } from './read-query.ts';
 import { acknowledgeA2aExecution } from './a2a-executions.ts';
 import { a2aExecutionScope } from './a2a-execution-scope.ts';
@@ -1859,8 +1860,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       error: reason,
     }).where(and(eq(taskRuns.cardId, id), inArray(taskRuns.status, ['queued', 'running'])));
     if (existing.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', completedAt: now, error: reason }).where(eq(heartbeatRuns.id, existing.activeHeartbeatRunId));
-    if (existing.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, existing.assigneeId));
-    if (existing.executionLockedByAgentId && existing.executionLockedByAgentId !== existing.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, existing.executionLockedByAgentId));
+    if (existing.assigneeId) await refreshAgentRemoteCapacity(existing.assigneeId);
+    if (existing.executionLockedByAgentId && existing.executionLockedByAgentId !== existing.assigneeId) await refreshAgentRemoteCapacity(existing.executionLockedByAgentId);
     const [card] = await db.update(kanbanCards).set({
       columnStatus: 'cancelled',
       lastError: reason,
@@ -1873,6 +1874,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       updatedAt: now,
     }).where(eq(kanbanCards.id, id)).returning();
     await releaseCancelledCardUsage(existing.companyId, id);
+    await refreshCancelledCardCapacity(id);
     await db.insert(taskLogs).values({ cardId: id, agentId: existing.assigneeId, type: 'cancel', status: 'warning', message: reason });
     if (existing.columnStatus !== 'cancelled') {
       await recordStageAction({
@@ -1889,7 +1891,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: existing.assigneeId, action: 'card.cancelled', entityType: 'card', entityId: id, details: { title: existing.title, reason } });
     publishLiveEvent({ type: 'card.updated', companyId: existing.companyId, entityType: 'card', entityId: id, cardId: id, projectId: existing.projectId, action: 'card.cancelled' });
-    return card;
+    const remoteWork = existing.assigneeId ? await agentRemoteWork(existing.assigneeId) : null;
+    return { ...card, remoteWork: remoteWork?.pending ? remoteWork : null };
   });
 
   app.delete('/api/cards/:id', async (request, reply) => {
@@ -1901,8 +1904,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await db.update(kanbanCards).set({ parentCardId: null }).where(eq(kanbanCards.parentCardId, id));
     await db.update(taskRuns).set({ status: 'cancelled', completedAt: now, updatedAt: now, error: 'card_archived' }).where(and(eq(taskRuns.cardId, id), inArray(taskRuns.status, ['queued', 'running'])));
     if (existing.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', completedAt: now, error: 'card_archived' }).where(eq(heartbeatRuns.id, existing.activeHeartbeatRunId));
-    if (existing.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, existing.assigneeId));
-    if (existing.executionLockedByAgentId && existing.executionLockedByAgentId !== existing.assigneeId) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, existing.executionLockedByAgentId));
+    if (existing.assigneeId) await refreshAgentRemoteCapacity(existing.assigneeId);
+    if (existing.executionLockedByAgentId && existing.executionLockedByAgentId !== existing.assigneeId) await refreshAgentRemoteCapacity(existing.executionLockedByAgentId);
     await db.update(kanbanCards).set({
       deletedAt: now,
       executionLockId: null,
@@ -1913,6 +1916,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       updatedAt: now,
     }).where(eq(kanbanCards.id, id));
     await releaseCancelledCardUsage(existing.companyId, id);
+    await refreshCancelledCardCapacity(id);
     await db.insert(activityLog).values({ companyId: existing.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'card.deleted', entityType: 'card', entityId: id, details: { title: existing.title } });
     publishLiveEvent({ type: 'card.deleted', companyId: existing.companyId, entityType: 'card', entityId: id, cardId: id, projectId: existing.projectId });
     return { ok: true };
@@ -2144,6 +2148,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (card.activeHeartbeatRunId) await db.update(heartbeatRuns).set({ status: 'cancelled', error: `Paused by ${actorLabel(user)}`, completedAt: new Date() }).where(eq(heartbeatRuns.id, card.activeHeartbeatRunId));
       await db.update(taskRuns).set({ status: 'cancelled', error: `Paused by ${actorLabel(user)}`, completedAt: new Date(), updatedAt: new Date() }).where(and(eq(taskRuns.cardId, id), inArray(taskRuns.status, ['queued', 'running'])));
       await releaseCancelledCardUsage(card.companyId, id);
+      await refreshCancelledCardCapacity(id);
       await recordStageAction({
         cardId: id,
         agentId: card.assigneeId,
@@ -2212,6 +2217,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         metadata: { commentId: comment?.id, reviewerId, reason },
       });
       await releaseCancelledCardUsage(card.companyId, id);
+      await refreshCancelledCardCapacity(id);
       await db.insert(taskLogs).values({ cardId: id, agentId: reviewerId ?? card.assigneeId, type: 'escalation', status: reviewerId ? 'queued' : 'failed', message: reason, output: input.body });
       await db.insert(activityLog).values({ companyId: card.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: reviewerId ?? card.assigneeId, action: reviewerId ? 'card.escalated_to_reviewer' : 'card.escalation_blocked', entityType: 'card', entityId: card.id, details: { commentId: comment?.id, reviewerId, reason } });
       publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: reviewerId ? 'card.escalated_to_reviewer' : 'card.escalation_blocked' });
@@ -2269,7 +2275,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       query.companyId ? eq(agents.companyId, query.companyId) : inArray(agents.companyId, access.companyIds),
       isNull(agents.deletedAt),
     ));
-    return rows.map(redactAgent);
+    return (await agentsWithRemoteStatus(rows)).map(redactAgent);
   });
   app.post('/api/agents', async (request, reply) => {
     const input = createAgentSchema.parse(request.body);
@@ -2332,10 +2338,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const companyId = await agentCompanyId(id);
     if (!companyId) return reply.code(404).send({ error: 'agent_not_found' });
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
-    const [agent] = await db.update(agents).set({ isActive: false, isBusy: false }).where(eq(agents.id, id)).returning();
+    const [agent] = await db.update(agents).set({ isActive: false }).where(eq(agents.id, id)).returning();
+    await refreshAgentRemoteCapacity(id);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.paused', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
-    return redactAgent(agent);
+    const current = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
+    return redactAgent((await agentsWithRemoteStatus(current))[0]!);
   });
   app.post('/api/agents/:id/resume', async (request, reply) => {
     const id = (request.params as { id: string }).id;
@@ -2366,12 +2374,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const companyId = await agentCompanyId(id);
     if (!companyId) return reply.code(404).send({ error: 'agent_not_found' });
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
-    const [agent] = await db.update(agents).set({ currentSessionId: null, isBusy: false }).where(eq(agents.id, id)).returning();
+    const [agent] = await db.update(agents).set({ currentSessionId: null }).where(eq(agents.id, id)).returning();
+    await refreshAgentRemoteCapacity(id);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     await resetAdapterSessionsForAgent(id);
     await db.update(chatSessions).set({ agentSessionId: null, updatedAt: new Date() }).where(eq(chatSessions.agentId, id));
     await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.session_reset', entityType: 'agent', entityId: agent.id, details: { name: agent.name } });
-    return redactAgent(agent);
+    const current = await db.select().from(agents).where(eq(agents.id, id)).limit(1);
+    return redactAgent((await agentsWithRemoteStatus(current))[0]!);
   });
   app.put('/api/agents/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
