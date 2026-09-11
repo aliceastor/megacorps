@@ -154,7 +154,7 @@ test('normalizeA2aSendResult extracts a DataPart report (both part shapes)', () 
   assert.equal(cased.report?.verdict, 'approved');
 });
 
-test('normalizeA2aSendResult ignores invalid DataPart reports', () => {
+test('normalizeA2aSendResult retains invalid DataPart reports for downstream correction', () => {
   const outcome = normalizeA2aSendResult({
     task: {
       id: 't', contextId: 'c',
@@ -162,7 +162,7 @@ test('normalizeA2aSendResult ignores invalid DataPart reports', () => {
     },
   });
   assert.equal(outcome.report, null);
-  assert.equal(outcome.text, 'ok');
+  assert.equal(outcome.text, JSON.stringify({ kind: 'megacorps-report', status: 'nope' }));
 });
 
 test('normalizeA2aSendResult collects artifact references', () => {
@@ -238,12 +238,79 @@ test('normalizeA2aSendResult strips inline think tags in every half-open shape',
   assert.equal(orphanOpen.text, 'Applied the patch.');
 });
 
-test('normalizeA2aSendResult keeps the raw text when a reply is nothing but reasoning', () => {
+test('normalizeA2aSendResult suppresses a reply that is nothing but reasoning', () => {
   const outcome = normalizeA2aSendResult({ task: task('completed', '<think>still deciding</think>') });
-  assert.equal(outcome.text, '<think>still deciding</think>');
+  assert.equal(outcome.text, '');
 });
 
 test('stripInlineReasoning leaves ordinary text and unrelated tags alone', () => {
   assert.equal(stripInlineReasoning('Plain answer with no tags.'), 'Plain answer with no tags.');
   assert.equal(stripInlineReasoning('Use <div> for layout.'), 'Use <div> for layout.');
+});
+
+// Synthetic CLI output only: never check captured model transcripts into tests.
+const cliReasoningBanner = '┌─ Reasoning ──────────────────────────────────────────────────────────────────┐';
+const cliFinalReport = JSON.stringify({ kind: 'megacorps-report', status: 'progress', summary: 'Plan ready', children: [{ title: 'Build', body: 'Implement the feature and verify the result with tests.', assigneeSlug: 'builder' }, { title: 'Review', body: 'Review the implementation and verify the result with tests.', assigneeSlug: 'reviewer', dependsOn: [0] }] });
+
+test('CLI report projection ignores earlier reasoning, quoted JSON and unbalanced tool braces', () => {
+  const transcript = `⚠️  Normalized model 'example' to 'example-v2' for provider.\n\n${cliReasoningBanner}\nTool input: { \"unclosed\nQuoted example: ${JSON.stringify(cliFinalReport)}\n${cliFinalReport}`;
+  const outcome = normalizeA2aSendResult(task('completed', transcript));
+  assert.equal(outcome.text, cliFinalReport);
+});
+
+test('CLI report projection never falls back to a historical valid report', () => {
+  for (const final of ['{"kind":"megacorps-report","status":"wrong","summary":"bad"}', '{"kind":"megacorps-report","status":', 'A later answer without an identifiable boundary']) {
+    const outcome = normalizeA2aSendResult(task('completed', `${cliReasoningBanner}\n${cliFinalReport}\n${final}`));
+    assert.ok(!outcome.text.includes('Plan ready'));
+    assert.ok(!outcome.text.includes('Reasoning'));
+    if (final.startsWith('{')) assert.equal(outcome.text, final);
+    else assert.match(outcome.text, /a2a_final_output_ambiguous/);
+  }
+});
+
+test('ordinary chat keeps legitimate quotes, braces and inline banner mentions', () => {
+  for (const text of ['The object { "answer": 42 } is valid.', `A banner example is ${cliReasoningBanner}.`, 'Here is a plain final answer.']) {
+    assert.equal(normalizeA2aSendResult(task('completed', text)).text, text);
+  }
+});
+
+test('suppressed terminal reasoning must not fall back to a historical report', () => {
+  const outcome = normalizeA2aSendResult(task('completed', '<think>private</think>', { history: [{ parts: [{ text: cliFinalReport }] }] }));
+  assert.equal(outcome.text, '');
+});
+
+test('last structured report is authoritative even when invalid', () => {
+  const outcome = normalizeA2aSendResult(task('completed', '', { status: { state: 'completed', message: { parts: [{ data: reportData }, { data: { kind: 'megacorps-report', status: 'wrong' } }] } } }));
+  assert.equal(outcome.report, null);
+});
+
+
+test('reasoning DataParts cannot replace the actual final report or text', () => {
+  for (const reasoning of [{ data: reportData, metadata: { type: 'reasoning' } }, { content: { $case: 'data', value: reportData }, thought: true }]) {
+    const outcome = normalizeA2aSendResult({ message: { parts: [reasoning, { text: 'Actual final answer' }] } });
+    assert.equal(outcome.report, null);
+    assert.equal(outcome.text, 'Actual final answer');
+  }
+});
+
+test('new outcomes identify final projection version', () => {
+  assert.equal(normalizeA2aSendResult({ message: { parts: [{ text: 'final' }] } }).finalOutputVersion, 1);
+  assert.equal(normalizeA2aSendResult(task('completed', 'final')).finalOutputVersion, 1);
+  assert.equal(normalizeA2aSendResult({}).finalOutputVersion, 1);
+});
+
+test('legacy durable CLI outcomes upgrade without transport calls', () => {
+  const legacy = { text: `${cliReasoningBanner}\nprivate tool {\n${cliFinalReport}`, state: 'completed' as const, contextId: 'ctx', taskId: 'task', report: null, artifacts: [] };
+  const upgraded = client.normalizeStoredA2aOutcome(legacy);
+  assert.equal(upgraded.text, cliFinalReport);
+  assert.equal(upgraded.finalOutputVersion, 1);
+  assert.equal(upgraded.taskId, legacy.taskId);
+  assert.equal(upgraded.contextId, legacy.contextId);
+});
+
+test('already projected chat bodies are not decoded or interpreted twice on replay', () => {
+  for (const body of [`${cliReasoningBanner}\nA literal example`, '{"kind":"megacorps-chat-response","body":"literal envelope example"}']) {
+    const outcome = normalizeA2aSendResult({ message: { parts: [{ text: JSON.stringify({ kind: 'megacorps-chat-response', body }) }] } });
+    assert.equal(client.normalizeStoredA2aOutcome(outcome).text, body);
+  }
 });

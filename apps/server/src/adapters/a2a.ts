@@ -3,6 +3,8 @@ import { unknownUsage } from '../usage-facts.ts';
 import { currentUsageAttempt } from '../usage-context.ts';
 import { A2aPollingError, pollA2aMessage, type A2aInvocationStore } from '../a2a-polling.ts';
 import { a2aExecutionScope } from '../a2a-execution-scope.ts';
+import { wrapA2aPrompt } from '../a2a-final-output.ts';
+import { normalizeStoredA2aOutcome } from '../a2a-client.ts';
 import { ensureA2aTunnel, type TunnelTarget } from '../a2a-tunnel.ts';
 import { assertAdapterTargetAllowed, getAdapterNumberConfig, getAdapterOptionalStringConfig } from './config.ts';
 import { buildAgentPrompt, estimateTokens, megacorpsApiUrl, type AgentLike, type TaskContext, type TaskResult } from './hermes.ts';
@@ -30,7 +32,7 @@ export type A2aDispatchDeps = {
   rpcTimeoutMs?: number;
 };
 
-function routeIdentity(agent: AgentLike): string {
+export function routeIdentity(agent: AgentLike): string {
   const direct = getAdapterOptionalStringConfig(agent, 'a2aBaseUrl', 'A2A_BASE_URL');
   const endpoint = direct ? `${direct.replace(/\/+$/, '')}${agentPath(agent)}` : (() => {
     const ssh = resolveHermesSshConnectionConfig(agent);
@@ -39,7 +41,7 @@ function routeIdentity(agent: AgentLike): string {
   return createHash('sha256').update(JSON.stringify([agent.runtimeId ?? null, endpoint])).digest('hex');
 }
 
-function agentPath(agent: AgentLike): string {
+export function agentPath(agent: AgentLike): string {
   const configured = getAdapterOptionalStringConfig(agent, 'a2aAgentPath');
   if (configured) return configured.startsWith('/') ? configured : `/${configured}`;
   const slug = agent.hermesProfile?.trim();
@@ -47,7 +49,7 @@ function agentPath(agent: AgentLike): string {
   return slug ? `/${slug}` : '';
 }
 
-async function resolveBaseUrl(agent: AgentLike, deps: A2aDispatchDeps): Promise<string> {
+export async function resolveBaseUrl(agent: AgentLike, deps: A2aDispatchDeps): Promise<string> {
   const direct = getAdapterOptionalStringConfig(agent, 'a2aBaseUrl', 'A2A_BASE_URL');
   if (direct) return assertAdapterTargetAllowed(direct, 'a2aBaseUrl').replace(/\/+$/, '');
   const ssh = resolveHermesSshConnectionConfig(agent);
@@ -70,7 +72,7 @@ async function resolveBaseUrl(agent: AgentLike, deps: A2aDispatchDeps): Promise<
 export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
   return async function dispatchToA2a(agent: AgentLike, task: TaskContext): Promise<TaskResult> {
     const started = Date.now();
-    const prompt = buildAgentPrompt(agent, task);
+    const prompt = wrapA2aPrompt(buildAgentPrompt(agent, task), task.kind);
     const durationSeconds = () => Math.max(1, Math.round((Date.now() - started) / 1000));
     try {
       const executionKey = task.executionKey ?? (task.taskRunId ? `task-run:${task.taskRunId}` : currentUsageAttempt());
@@ -88,7 +90,7 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
       const pushSecret = getAdapterOptionalStringConfig(agent, 'a2aPushSecret') ?? getAdapterOptionalStringConfig(agent, 'a2aBearerToken');
       const accountingKey = pushSecret ? currentUsageAttempt() : undefined;
       const store = deps.store ?? (await import('../a2a-executions.ts')).createA2aExecutionStore(agent.id);
-      const outcome = await pollA2aMessage({
+      const outcome = normalizeStoredA2aOutcome(await pollA2aMessage({
         executionKey,
         scope: a2aExecutionScope(agent.id, task),
         route: routeIdentity(agent),
@@ -105,19 +107,20 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
         bearerToken: getAdapterOptionalStringConfig(agent, 'a2aBearerToken', 'A2A_BEARER_TOKEN') ?? null,
         timeoutMs: a2aSendTimeoutMs(task.timeoutSeconds),
         fetchImpl: deps.fetchImpl,
-      });
+      }));
       const failedState = outcome.state === 'failed' || outcome.state === 'canceled' || outcome.state === 'rejected' || outcome.state === 'auth_required';
       let output = outcome.state === 'auth_required'
         ? `a2a_task_auth_required${outcome.text ? `: ${outcome.text}` : ''}`
         : outcome.text || (failedState ? `a2a_task_${outcome.state}` : '');
-      // Surface a DataPart report to the Stage A extractor by embedding it as a
-      // fenced JSON block; dispatch-side parsing then needs no A2A awareness.
-      if (outcome.report && !output.includes('megacorps-report')) {
-        output = `${output}\n\n\`\`\`json\n${JSON.stringify(outcome.report)}\n\`\`\``.trim();
+      // A validated structured report is authoritative, including when replaying
+      // older journals whose text still contains historical reports.
+      if (outcome.report) {
+        output = `\`\`\`json\n${JSON.stringify(outcome.report)}\n\`\`\``;
       }
+      const ambiguousOutput = !outcome.report && output.startsWith('a2a_final_output_ambiguous:');
       const tokensUsed = estimateTokens(prompt) + estimateTokens(output);
       return {
-        success: !failedState,
+        success: !failedState && !ambiguousOutput,
         output,
         sessionId: outcome.contextId ?? priorContext ?? '',
         turnId: outcome.taskId,

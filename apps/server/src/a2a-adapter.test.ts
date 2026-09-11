@@ -3,6 +3,7 @@ import test from 'node:test';
 import { a2aSendTimeoutMs, createA2aDispatch } from './adapters/a2a.ts';
 import type { AgentLike, TaskContext } from './adapters/hermes.ts';
 import { a2aTestDeps } from './test-support/a2a-fixture.ts';
+import type { A2aInvocationRecord } from './a2a-polling.ts';
 
 const testDispatch = (deps: Parameters<typeof createA2aDispatch>[0] = {}) => createA2aDispatch({ ...deps, ...a2aTestDeps(deps.fetchImpl) });
 
@@ -110,20 +111,44 @@ test('a2a dispatch maps input-required to needsInput and stays successful', asyn
   assert.equal(result.turnId, 'task-q');
 });
 
-test('a2a dispatch embeds a DataPart report into the output as fenced JSON', async () => {
+test('a2a dispatch uses the authoritative DataPart report without historical text', async () => {
   const withReport = {
     task: {
       id: 't', contextId: 'c',
       status: {
         state: 'TASK_STATE_COMPLETED',
-        message: { parts: [{ text: 'all done' }, { data: { kind: 'megacorps-report', status: 'completed', summary: 'structured done' } }] },
+        message: { parts: [{ text: '{"kind":"megacorps-report","status":"completed","summary":"historical"}' }, { data: { kind: 'megacorps-report', status: 'completed', summary: 'structured done' } }] },
       },
     },
   };
   const dispatch = testDispatch({ fetchImpl: fakeRpcFetch(withReport), tunnelFn: async () => 45_678 });
   const result = await dispatch(agent, task);
-  assert.match(result.output, /all done/);
   assert.match(result.output, /```json\n\{"kind":"megacorps-report"/);
+  assert.match(result.output, /structured done/);
+  assert.doesNotMatch(result.output, /historical/);
+});
+
+test('a2a dispatch fails when a CLI transcript has no identifiable final answer', async () => {
+  const dispatch = testDispatch({
+    fetchImpl: fakeRpcFetch(completedTask('┌─ Reasoning ──────────────────┐\nprivate reasoning\nUnframed answer')),
+    tunnelFn: async () => 45_678,
+  });
+  const result = await dispatch(agent, task);
+  assert.equal(result.success, false);
+  assert.match(result.output, /^a2a_final_output_ambiguous:/);
+  assert.doesNotMatch(result.output, /private reasoning/);
+});
+
+test('a2a chat adds terminal framing and decodes only the final display answer', async () => {
+  const captured: Captured[] = [];
+  const dispatch = testDispatch({
+    fetchImpl: fakeRpcFetch(completedTask('┌─ Reasoning ──────────────────┐\nprivate reasoning\n{"kind":"megacorps-chat-response","body":"Final answer"}'), captured),
+    tunnelFn: async () => 45_678,
+  });
+  const result = await dispatch(agent, { ...task, kind: 'chat' });
+  assert.equal(result.success, true);
+  assert.equal(result.output, 'Final answer');
+  assert.match(captured[0]!.body.params.message.parts[0].text, /A2A final-response framing:/);
 });
 
 test('a2a dispatch passes artifact references through', async () => {
@@ -200,4 +225,31 @@ test('a2a dispatch refuses to submit without a stable invocation identity', asyn
   assert.equal(result.success, false);
   assert.match(result.output, /a2a_execution_key_missing/);
   assert.equal(captured.length, 0);
+});
+
+test('a2a dispatch safely replays legacy durable final output without another send', async () => {
+  for (const structured of [false, true]) {
+    let record: A2aInvocationRecord | null = null;
+    const report = { kind: 'megacorps-report' as const, version: 1 as const, status: 'progress' as const, summary: 'Current result' };
+    const finalText = JSON.stringify(report);
+    const dispatch = createA2aDispatch({
+      tunnelFn: async () => 45_678,
+      fetchImpl: async () => { throw new Error('Replay must not make a network call'); },
+      store: {
+        async begin(seed) {
+          record = { ...seed, revision: 0, phase: 'terminal', taskId: 'old-task', outcome: {
+            text: `┌─ Reasoning ──────────────────┐\n{"kind":"megacorps-report","status":"completed","summary":"Historical result"}\n${finalText}`,
+            contextId: seed.contextId, taskId: 'old-task', state: 'completed', artifacts: [], report: structured ? report : null,
+          } };
+          return { record, created: false };
+        },
+        async get() { return record; },
+        async compareAndSet() { throw new Error('Terminal replay must not resubmit'); },
+      },
+    });
+    const result = await dispatch(agent, task);
+    assert.equal(result.success, true);
+    assert.match(result.output, /Current result/);
+    assert.doesNotMatch(result.output, /Reasoning|Historical result/);
+  }
 });

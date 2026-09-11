@@ -1,4 +1,5 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { projectFinalText } from './a2a-final-output.ts';
 import { transportUsage, type UsageFacts } from './usage-facts.ts';
 import { agentReportSchema, type AgentReport } from '@megacorps/shared';
 
@@ -24,6 +25,7 @@ export type A2aArtifactRef = {
 };
 
 export type A2aSendOutcome = {
+  finalOutputVersion?: 1;
   usage?: UsageFacts;
   text: string;
   contextId: string | null;
@@ -101,13 +103,15 @@ export function stripInlineReasoning(text: string): string {
     stripped = stripped.replace(new RegExp(`<${name}\\b[^>]*>[\\s\\S]*$`, 'i'), '');
   }
   const trimmed = stripped.trim();
-  // Never trade a whole answer for an empty string: if a model replied with
-  // nothing but reasoning, the raw text is still more useful than silence.
-  return trimmed || text;
+  return trimmed;
 }
 
 function textFromParts(parts: unknown): string {
   if (!Array.isArray(parts)) return '';
+  // The newest structured report is authoritative, even when invalid. Keep
+  // its raw payload for the ordinary report validator to request correction.
+  const report = dataFromParts(parts).filter((data) => data.kind === 'megacorps-report').at(-1);
+  if (report) return JSON.stringify(report);
   const chunks: string[] = [];
   for (const part of parts) {
     if (!part || typeof part !== 'object') continue;
@@ -120,7 +124,22 @@ function textFromParts(parts: unknown): string {
     const content = record.content as Record<string, unknown> | undefined;
     if (content && content.$case === 'text' && typeof content.value === 'string') chunks.push(content.value);
   }
-  return stripInlineReasoning(chunks.join('\n').trim()).trim();
+  const joined = chunks.join('\n').trim();
+  const projected = projectFinalText(joined);
+  // An explicit envelope's body is already the final answer. Preserve literal
+  // tags/content inside it, including the existing chat-actions protocol.
+  return projected === joined ? stripInlineReasoning(projected).trim() : projected;
+}
+
+function hasTextParts(parts: unknown): boolean {
+  return Array.isArray(parts) && parts.some((part) => {
+    const record = asRecord(part);
+    if (!record) return false;
+    const content = asRecord(record.content);
+    return (typeof record.text === 'string' && Boolean(record.text.trim()))
+      || isReasoningPart(record)
+      || (content?.$case === 'text' && typeof content.value === 'string' && Boolean(content.value.trim()));
+  });
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -132,7 +151,7 @@ function dataFromParts(parts: unknown): Record<string, unknown>[] {
   const found: Record<string, unknown>[] = [];
   for (const part of parts) {
     const record = asRecord(part);
-    if (!record) continue;
+    if (!record || isReasoningPart(record)) continue;
     const flat = asRecord(record.data);
     if (flat) { found.push(flat); continue; }
     const content = asRecord(record.content);
@@ -145,10 +164,10 @@ function dataFromParts(parts: unknown): Record<string, unknown>[] {
 }
 
 function reportFromParts(parts: unknown): AgentReport | null {
-  for (const data of dataFromParts(parts)) {
+  for (const data of dataFromParts(parts).reverse()) {
     if (data.kind !== 'megacorps-report') continue;
     const parsed = agentReportSchema.safeParse(data);
-    if (parsed.success) return parsed.data;
+    return parsed.success ? parsed.data : null;
   }
   return null;
 }
@@ -190,6 +209,19 @@ function looksLikeMessage(record: Record<string, unknown>): boolean {
   return Array.isArray(record.parts);
 }
 
+/** Upgrade pre-projection durable outcomes without decoding new chat bodies twice. */
+export function normalizeStoredA2aOutcome(outcome: A2aSendOutcome): A2aSendOutcome {
+  if (outcome.finalOutputVersion === 1) return outcome;
+  return {
+    ...outcome,
+    finalOutputVersion: 1,
+    text: textFromParts([{ text: outcome.text }]),
+    artifacts: outcome.artifacts.map((artifact) => artifact.text === undefined ? artifact : {
+      ...artifact, text: textFromParts([{ text: artifact.text }]),
+    }),
+  };
+}
+
 export function normalizeA2aSendResult(result: unknown): A2aSendOutcome {
   const root = asRecord(result) ?? {};
   const task = asRecord(root.task) ?? (looksLikeTask(root) ? root : null);
@@ -199,18 +231,19 @@ export function normalizeA2aSendResult(result: unknown): A2aSendOutcome {
     const status = asRecord(task.status);
     const statusMessage = asRecord(status?.message);
     let text = textFromParts(statusMessage?.parts);
-    if (!text && Array.isArray(task.artifacts)) {
+    if (!text && !hasTextParts(statusMessage?.parts) && Array.isArray(task.artifacts)) {
       text = task.artifacts
         .map((artifact) => textFromParts(asRecord(artifact)?.parts))
         .filter(Boolean)
         .join('\n')
         .trim();
     }
-    if (!text && Array.isArray(task.history)) {
+    if (!text && !hasTextParts(statusMessage?.parts) && !(Array.isArray(task.artifacts) && task.artifacts.length) && Array.isArray(task.history)) {
       const last = asRecord(task.history[task.history.length - 1]);
       text = textFromParts(last?.parts);
     }
     return {
+      finalOutputVersion: 1,
       text,
       contextId: typeof task.contextId === 'string' && task.contextId ? task.contextId : null,
       taskId: typeof task.id === 'string' && task.id ? task.id : null,
@@ -223,6 +256,7 @@ export function normalizeA2aSendResult(result: unknown): A2aSendOutcome {
 
   if (message) {
     return {
+      finalOutputVersion: 1,
       text: textFromParts(message.parts),
       contextId: typeof message.contextId === 'string' && message.contextId ? message.contextId : null,
       taskId: typeof message.taskId === 'string' && message.taskId ? message.taskId : null,
@@ -233,7 +267,7 @@ export function normalizeA2aSendResult(result: unknown): A2aSendOutcome {
     };
   }
 
-  return { text: '', contextId: null, taskId: null, state: null, report: null, artifacts: [] };
+  return { finalOutputVersion: 1, text: '', contextId: null, taskId: null, state: null, report: null, artifacts: [] };
 }
 
 // Python json.dumps(value, sort_keys=True, ensure_ascii=False) equivalent —
