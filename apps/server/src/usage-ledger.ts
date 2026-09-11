@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { db } from './db/client.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
-import { activityLog, agents, agentRuntimes, budgetPolicies, budgetThresholds, companies, costEvents, heartbeatRuns, kanbanCards, projects, taskRuns } from './db/schema.ts';
+import { activityLog, agents, agentRuntimes, budgetPolicies, budgetThresholds, companies, costEvents, heartbeatRuns, kanbanCards, projects, taskRuns, a2aExecutions, a2aExecutionAliases } from './db/schema.ts';
 import { moneyString, moneyUnits, tokenFields, unknownUsage, type TokenField, type UsageFacts } from './usage-facts.ts';
 import type { TaskResult } from './adapters/hermes.ts';
 import { withUsageAttempt } from './usage-context.ts';
+import { assertA2aTaskRunOwner } from './a2a-task-recovery.ts';
 
 type Reader = Pick<typeof db, 'select' | 'insert' | 'update'>;
 type Entry = typeof costEvents.$inferSelect;
@@ -270,18 +271,51 @@ export async function deferDeniedUsage(scope: AttemptScope, error: unknown): Pro
   return true;
 }
 
-export async function executeUsage(scope: AttemptScope, operation: () => Promise<TaskResult>, options: { timeoutSeconds?: number; boundUsd?: string | null } = {}) {
-  await admitUsage(scope, options);
+async function a2aUsageAttempt(scope: AttemptScope, executionScope?: string): Promise<Entry | null> {
+  const [agent] = await db.select().from(agents).where(eq(agents.id, scope.agentId)).limit(1);
+  if (agent?.adapterType !== 'a2a') return null;
+  return db.transaction(async tx => {
+    await tx.select().from(agents).where(eq(agents.id, scope.agentId)).limit(1).for('update');
+    const [alias] = await tx.select().from(a2aExecutionAliases).where(eq(a2aExecutionAliases.key, scope.attemptKey)).limit(1);
+    let [execution] = alias ? await tx.select().from(a2aExecutions).where(eq(a2aExecutions.key, alias.executionKey)).limit(1).for('update') : [];
+    if (!execution && executionScope) {
+      [execution] = await tx.select().from(a2aExecutions).where(and(eq(a2aExecutions.agentId, scope.agentId), eq(a2aExecutions.active, true), eq(a2aExecutions.scope, executionScope))).limit(1).for('update');
+    }
+    if (execution && executionScope && execution.scope !== executionScope) fail('a2a_usage_identity_mismatch');
+    if (!execution) return null;
+    const [entry] = await tx.select().from(costEvents).where(eq(costEvents.attemptKey, execution.key)).limit(1);
+    if (!entry) fail('a2a_usage_reconciliation_required');
+    if (execution.agentId !== scope.agentId || execution.companyId !== scope.companyId ||
+        entry.agentId !== scope.agentId || entry.companyId !== scope.companyId || entry.cardId !== (scope.cardId ?? null) ||
+        entry.projectId !== (scope.projectId ?? null) || entry.runtimeId !== (scope.runtimeId ?? null) || entry.source !== scope.source) fail('a2a_usage_identity_mismatch');
+    // Pin the replay before releasing the row lock. A concurrent completion may
+    // acknowledge this scope before adapter.begin, but cannot authorize a new
+    // SendMessage against the already admitted predecessor's budget.
+    if (!alias) await tx.insert(a2aExecutionAliases).values({ key: scope.attemptKey, executionKey: execution.key });
+    return entry;
+  });
+}
+export async function executeUsage(scope: AttemptScope, operation: () => Promise<TaskResult>, options: { timeoutSeconds?: number; boundUsd?: string | null; a2aScope?: string } = {}) {
+  await assertA2aTaskRunOwner();
+  // Recover accounting before invoking the adapter: journal aliases are created
+  // only inside dispatch, which is too late to prevent a second reservation.
+  const original = await a2aUsageAttempt(scope, options.a2aScope);
+  if (original) scope = scopeFromEntry(original);
+  else await admitUsage(scope, options);
   let result: TaskResult;
   try {
+    await assertA2aTaskRunOwner();
     result = await withUsageAttempt(scope.attemptKey, operation);
   } catch (error) {
+    await assertA2aTaskRunOwner();
     await settleUsage(scope, unknownUsage('operation_threw_usage_unavailable'));
     throw error;
   }
+  await assertA2aTaskRunOwner();
   // A DB error after provider return is a pending settlement, not evidence that
   // the provider threw or that its reported cost should become unknown.
   const settled = await settleUsage(scope, resultUsage(result));
+  await assertA2aTaskRunOwner();
   return { ...result, usage: settled.entry.usage ?? resultUsage(result), costUsd: Number(settled.entry.costUsd ?? 0) };
 }
 

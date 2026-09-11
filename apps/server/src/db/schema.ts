@@ -2,6 +2,7 @@ import { boolean, integer, jsonb, numeric, pgTable, primaryKey, text, timestamp,
 import type { RunRetryState } from '../run-retry.ts';
 import type { ProtocolRepairState } from '../protocol-repair.ts';
 import type { UsageFacts } from '../usage-facts.ts';
+import type { A2aInvocationRecord } from '../a2a-polling.ts';
 
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -875,3 +876,18 @@ export const notificationReads = pgTable('notification_reads', {
   userId: uuid('user_id').notNull().references(() => users.id),
   readAt: timestamp('read_at', { withTimezone: true }).defaultNow(),
 }, (table) => ({ pk: primaryKey({ columns: [table.notificationId, table.userId] }) }));
+
+export const a2aExecutions = pgTable('a2a_executions', {
+  key: text('key').primaryKey(),
+  agentId: uuid('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+  companyId: uuid('company_id').notNull().references(() => companies.id, { onDelete: 'cascade' }),
+  scope: text('scope').notNull(),
+  active: boolean('active').notNull().default(true),
+  record: jsonb('record').$type<A2aInvocationRecord>().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const a2aExecutionAliases = pgTable('a2a_execution_aliases', {
+  key: text('key').primaryKey(),
+  executionKey: text('execution_key').notNull().references(() => a2aExecutions.key, { onDelete: 'cascade' }),
+});

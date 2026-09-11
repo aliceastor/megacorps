@@ -1,4 +1,6 @@
 import { readLimit, readOffset, optionalReadId, optionalReadProject } from './read-query.ts';
+import { acknowledgeA2aExecution } from './a2a-executions.ts';
+import { a2aExecutionScope } from './a2a-execution-scope.ts';
 import { registerCompanySetupRoutes, setupConnectionFingerprint, recordSetupConnectionCheck } from './company-setup.ts';
 import { registerCompanyRetirementRoutes } from './company-retirement.ts';
 import { companyDeletionInventory, deletionBlockers, lockCompanyInventory } from './company-inventory.ts';
@@ -2543,8 +2545,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         prompt: promptSnapshotForAdapter(executionAgent, task),
         metadata: { requestedByUserId: user.id, megacorpsPromptChars: task.body.length },
       });
-      const result = await executeUsage({ companyId: agent.companyId, agentId: agent.id, runtimeId: agent.runtimeId, attemptKey: attemptKey({}), source: 'test_connection' }, () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds });
+      const executionKey = attemptKey({});
+      const result = await executeUsage({ companyId: agent.companyId, agentId: agent.id, runtimeId: agent.runtimeId, attemptKey: executionKey, source: 'test_connection' }, () => adapter.dispatch(executionAgent, { ...task, executionKey }), { timeoutSeconds: task.timeoutSeconds, a2aScope: a2aExecutionScope(agent.id, task) });
       if (fingerprint) await recordSetupConnectionCheck(id, fingerprint, result.success === true && !result.needsInput, 'execution');
+      await acknowledgeA2aExecution(executionKey);
       return result;
     }
     catch (error) { if (fingerprint) await recordSetupConnectionCheck(id, fingerprint, false, 'execution'); return reply.code(502).send({ error: error instanceof Error ? error.message : 'connection_failed' }); }

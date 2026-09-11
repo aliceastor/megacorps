@@ -43,7 +43,11 @@ type ChatMessage = {
   createdAt?: string;
 };
 
+type ChatJob = { id: string; sessionId: string; userMessageId: string; status: 'queued' | 'running' | 'completed' | 'failed'; error?: string | null };
+const pendingChatJob = (job: ChatJob) => job.status === 'queued' || job.status === 'running';
+
 type ChatSendResult = {
+  job?: ChatJob;
   session?: ChatSession;
   userMessage?: ChatMessage;
   agentMessage?: ChatMessage;
@@ -173,6 +177,20 @@ export function ChatPage() {
   const selectedProject = projectFilter !== 'all' && projectFilter !== '__none' ? projects.find((project) => project.id === projectFilter) ?? null : null;
   const selectedAgent = companyAgents.find((agent) => agent.id === agentId) ?? null;
   const selectedSession = sessions.find((session) => session.id === sessionId) ?? null;
+  const jobsQuery = useQuery({
+    queryKey: ['chatJobs', selectedSession?.id],
+    queryFn: () => api<ChatJob[]>(`/api/chat/sessions/${selectedSession!.id}/jobs`, { signal: AbortSignal.timeout(15_000) }),
+    enabled: Boolean(selectedSession && selectedAgent?.adapterType === 'a2a'),
+    refetchInterval: query => query.state.data?.some(pendingChatJob) || query.state.error ? 2_000 : false,
+    retry: 1,
+  });
+  const jobPending = Boolean(jobsQuery.data?.some(pendingChatJob));
+  const jobReadError = jobsQuery.error instanceof Error ? jobsQuery.error.message : '';
+  const checkingJob = Boolean(selectedSession && selectedAgent?.adapterType === 'a2a' && (jobsQuery.isLoading || jobReadError));
+  useEffect(() => {
+    if (!selectedSession || !jobsQuery.data) return;
+    void queryClient.invalidateQueries({ queryKey: ['chatMessages', selectedSession.id] });
+  }, [jobsQuery.dataUpdatedAt, selectedSession?.id, queryClient]);
   const messagesQuery = useQuery({
     queryKey: ['chatMessages', selectedSession?.id],
     queryFn: () => fetchChatMessages(selectedSession!.id),
@@ -187,9 +205,10 @@ export function ChatPage() {
   const creationError = creationErrors[activeDraftKey] ?? '';
   const sessionReadError = sessionReadErrors[creationScopeKey] ?? '';
   const messageReadError = selectedSession ? messageReadErrors[selectedSession.id] ?? '' : '';
-  const readError = sessionReadError || messageReadError;
+  const readError = sessionReadError || messageReadError || jobReadError;
   const messages = selectedSession ? messagesBySession[selectedSession.id] ?? [] : [];
-  const reply = selectedSession ? repliesBySession[selectedSession.id] : undefined;
+  const localReply = selectedSession ? repliesBySession[selectedSession.id] : undefined;
+  const reply = { partial: localReply?.partial ?? '', pending: Boolean(localReply?.pending || jobPending) };
   const sessionProject = selectedSession?.projectId ? projects.find((project) => project.id === selectedSession.projectId) ?? null : null;
   const headerProjectName = selectedSession
     ? selectedSession.projectId ? sessionProject?.name ?? t('chat.project') : t('chat.noProject')
@@ -263,6 +282,7 @@ export function ChatPage() {
   }
 
   async function retryRead() {
+    if (jobReadError) { await jobsQuery.refetch(); return; }
     if (sessionReadError) {
       await sessionsQuery.refetch();
       return;
@@ -346,6 +366,7 @@ export function ChatPage() {
         if (text) updateReply(targetSessionId, true, text);
         return;
       }
+      void queryClient.invalidateQueries({ queryKey: ['chatJobs', targetSessionId] });
       if (detail.type === 'chat.reply.finished') updateReply(targetSessionId, false);
       if (detail.type === 'chat.message.created') {
         setRepliesBySession((current) => ({ ...current, [targetSessionId]: { pending: current[targetSessionId]?.pending ?? false, partial: '' } }));
@@ -412,7 +433,7 @@ export function ChatPage() {
 
   async function sendMessage() {
     const body = draft.trim();
-    if (!body || sending || creationPendingRef.current.has(creationScopeKey) || !selectedAgent || selectedAgent.isActive === false || (sessionId && !selectedSession)) return;
+    if (!body || sending || reply.pending || checkingJob || creationPendingRef.current.has(creationScopeKey) || !selectedAgent || selectedAgent.isActive === false || (sessionId && !selectedSession)) return;
     const submittedDraftKey = activeDraftKey;
     const submittedScope: NewSessionScope | null = selectedAgent ? {
       companyId,
@@ -447,6 +468,7 @@ export function ChatPage() {
         method: 'POST',
         body: JSON.stringify({ body }),
       });
+      if (result.job) queryClient.setQueryData<ChatJob[]>(['chatJobs', target.id], (current = []) => [result.job!, ...current.filter(job => job.id !== result.job!.id)]);
       const nextMessages = [result.userMessage, result.agentMessage, result.systemMessage].filter(Boolean) as ChatMessage[];
       updateSessionMessages(target.id, (current) => mergeMessages(current, nextMessages, optimisticId));
       if (result.session) queryClient.setQueriesData<ChatSession[]>({ queryKey: ['chatSessions'] }, (current) => current?.map((session) => session.id === result.session?.id ? result.session : session));
@@ -461,6 +483,8 @@ export function ChatPage() {
     } catch (err) {
       const apiError = err instanceof ApiError ? err : null;
       const data = apiError?.data as Partial<ChatSendResult> | undefined;
+      if (data?.job && targetSessionId) queryClient.setQueryData<ChatJob[]>(['chatJobs', targetSessionId], (current = []) => [data.job!, ...current.filter(job => job.id !== data.job!.id)]);
+      if (targetSessionId) void queryClient.invalidateQueries({ queryKey: ['chatJobs', targetSessionId] });
       const nextMessages = [data?.userMessage, data?.agentMessage, data?.systemMessage].filter(Boolean) as ChatMessage[];
       if (nextMessages.length) updateSessionMessages(targetSessionId ?? sessionId, (current) => mergeMessages(current, nextMessages, optimisticId));
       else if (targetSessionId && optimisticId) updateSessionMessages(targetSessionId, (current) => current.filter((message) => message.id !== optimisticId));
@@ -589,7 +613,7 @@ export function ChatPage() {
               void sendMessage();
             }
           }} placeholder={t('chat.messagePlaceholder')} aria-label={t('chat.messagePlaceholder')} disabled={!selectedAgent || selectedAgent.isActive === false} />
-          <button className="btn btn-primary icon-btn" aria-label={t('chat.send')} onClick={() => void sendMessage()} disabled={sending || creating || !draft.trim() || !selectedAgent || selectedAgent.isActive === false}>
+          <button className="btn btn-primary icon-btn" aria-label={t('chat.send')} onClick={() => void sendMessage()} disabled={sending || reply.pending || checkingJob || creating || !draft.trim() || !selectedAgent || selectedAgent.isActive === false}>
             {sending ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
           </button>
         </footer>

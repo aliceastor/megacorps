@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { a2aExecutionScope } from './a2a-execution-scope.ts';
+import { acknowledgeA2aExecution } from './a2a-executions.ts';
+import { assertA2aTaskRunOwner, isA2aTaskRunLeaseLost, claimRecoverableA2aTaskRun, currentA2aRecoveryRun, withA2aRecoveryRun, withTaskRunWorkerLease } from './a2a-task-recovery.ts';
 import { buildCommonCompanyContext, buildCompanyContextParts } from './company-context.ts';
 import { routeDelegatedQuestion, resumeDelegatedQuestion, blockDelegatedAssignment } from './delegated-help.ts';
 import { acceptedDescendantEvidence, sealDeliveryAcceptance } from './delivery-acceptance.ts';
@@ -1088,7 +1091,7 @@ export async function sweepBrainstormRounds(app: FastifyInstance): Promise<numbe
     await addCardMessage({ cardId: card.id, authorType: 'system', action: 'brainstorm_closed', body: formatBrainstormClosed(round, verdict.reason, answered, silent), metadata: { round, reason: verdict.reason } });
     await addTaskLog({ cardId: card.id, agentId: card.assigneeId, type: 'decomposition', status: verdict.reason === 'timeout' ? 'warning' : 'success', message: `Brainstorm round ${round} closed (${verdict.reason}); owner resumes to synthesize.` });
     publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'brainstorm.closed' });
-    try { await enqueueTaskRun(card.id, 'dispatch', 'queue'); } catch (error) { app.log.warn({ error, cardId: card.id }, 'brainstorm resume dispatch skipped'); }
+    try { await enqueueTaskRun(card.id, 'dispatch', 'queue'); } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error; app.log.warn({ error, cardId: card.id }, 'brainstorm resume dispatch skipped'); }
     closed += 1;
   }
   return closed;
@@ -1339,7 +1342,7 @@ export async function processChildSplits(card: CardRow, splitter: AgentRow, chil
       await tx.update(kanbanCards).set({ splitRound: evaluation.round, requiredChildPolicy: current.requiredChildPolicy && current.requiredChildPolicy !== 'manual' ? current.requiredChildPolicy : 'all_required_accepted', rollupStatus: 'waiting_on_children', updatedAt: new Date() }).where(eq(kanbanCards.id, card.id));
       return { rows, round: evaluation.round, candidates: evaluation.candidates, repeated: false };
     });
-  } catch (error) {
+  } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
     const message = error instanceof Error ? error.message : 'split_insert_failed';
     if (!message.startsWith('split_authority_changed')) await addCardMessage({ cardId: card.id, authorType: 'system', action: 'split_rejected', body: message });
     return { created: [], errors: [message] };
@@ -1552,7 +1555,7 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
       comment.body,
       'Reply with the answer text only. Your reply is posted back to the same message board thread automatically — do not call any webhook, do not create or update cards, and do not delegate. If you genuinely do not know, say so and name who or what might.',
     ].filter(Boolean).join('\n\n');
-    const task = { id: `peer-${comment.id}`, title: `Peer question on: ${card.title}`, body: prompt, timeoutSeconds: await readChatTaskTimeoutSeconds(), kind: 'chat' as const, informationalOnly: true };
+    const task = { executionKey: attemptKey({ heartbeatRunId: run.id }), id: `peer-${comment.id}`, title: `Peer question on: ${card.title}`, body: prompt, timeoutSeconds: await readChatTaskTimeoutSeconds(), kind: 'chat' as const, informationalOnly: true };
     await recordPromptLog({
       companyId: card.companyId,
       agentId: target.id,
@@ -1565,7 +1568,7 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { peerQuestionCommentId: comment.id, megacorpsPromptChars: prompt.length, contextMode: 'full_bootstrap' },
     });
-    const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, target, run.id, null, 'peer'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds }));
+    const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, target, run.id, null, 'peer'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds, a2aScope: a2aExecutionScope(target.id, task) }));
     const normalizedAnswer = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
     if (!result.success || !result.output.trim() || ['failed', 'rejected', 'invalid', 'permission', 'input_required'].includes(normalizedAnswer.outcome)) throw new Error(normalizedAnswer.reason ?? result.output ?? 'peer_answer_failed');
     await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: target.id, action: 'peer_answer', body: result.output, delegationStatus: 'done' });
@@ -1577,9 +1580,10 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
 
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, target.id));
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: target.id, agentId: target.id, action: 'peer_question.answered', entityType: 'card_comment', entityId: comment.id, details: { cardId: card.id } });
+    await acknowledgeA2aExecution(attemptKey({ heartbeatRunId: run.id }));
     publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'peer_question.answered' });
     return true;
-  } catch (error) {
+  } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
     const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'peer_answer_failed');
     // One failed attempt ends the question rather than retrying forever; the
     // asking agent sees the failure in the thread and can re-ask.
@@ -1588,6 +1592,7 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
     await addCardMessage({ cardId: card.id, parentCommentId: comment.id, authorType: 'system', action: 'peer_question_failed', body: `Peer answer from ${target.name} failed: ${clipText(message, 1000)}` });
     await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, target.id));
+    await acknowledgeA2aExecution(attemptKey({ heartbeatRunId: run.id }));
     app.log.warn({ error: message, cardId: card.id, commentId: comment.id }, 'peer question answer failed');
     return false;
   }
@@ -1651,7 +1656,7 @@ export async function expireStaleDelegations(app: FastifyInstance): Promise<numb
         await enqueueMessageTaskRun({ ...parentRequest, delegationStatus: 'queued' }, 'message');
       }
     } else if (!isTerminalCardStatus(card.columnStatus)) {
-      try { await enqueueTaskRun(card.id, 'dispatch', 'queue'); } catch (error) { app.log.warn({ error, cardId: card.id }, 'delegation timeout re-dispatch skipped'); }
+      try { await enqueueTaskRun(card.id, 'dispatch', 'queue'); } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error; app.log.warn({ error, cardId: card.id }, 'delegation timeout re-dispatch skipped'); }
     }
     expired += 1;
   }
@@ -1854,19 +1859,23 @@ async function addTaskRunLog(run: TaskRunRow, status: LogStatus, message: string
 
 export async function completeTaskRun(runId: string | null | undefined, input: RunCompletion) {
   if (!runId) return;
+  await assertA2aTaskRunOwner();
   const [accounting] = await db.select().from(costEvents).where(eq(costEvents.taskRunId, runId)).limit(1);
   if (accounting) input = { ...input, costUsd: accounting.costUsd == null ? undefined : Number(accounting.costUsd) };
   if (await completeRetryableRun(runId, input)) return;
-  await db.update(taskRuns).set({
-    status: input.status,
-    error: input.error ?? null,
-    output: input.output ?? null,
-    costUsd: input.costUsd === undefined ? undefined : input.costUsd.toString(),
-    durationSeconds: input.durationSeconds,
-    ...(input.releaseLock ? { lockedBy: null, lockedAt: null } : {}),
-    completedAt: new Date(),
-    updatedAt: new Date(),
-  }).where(and(eq(taskRuns.id, runId), inArray(taskRuns.status, ['queued', 'running'])));
+  await db.transaction(async tx => {
+    const [finished] = await tx.update(taskRuns).set({
+      status: input.status,
+      error: input.error ?? null,
+      output: input.output ?? null,
+      costUsd: input.costUsd === undefined ? undefined : input.costUsd.toString(),
+      durationSeconds: input.durationSeconds,
+      ...(input.releaseLock ? { lockedBy: null, lockedAt: null } : {}),
+      completedAt: new Date(),
+      updatedAt: new Date(),
+    }).where(and(eq(taskRuns.id, runId), inArray(taskRuns.status, ['queued', 'running']))).returning();
+    if (finished) await acknowledgeA2aExecution(`task-run:${runId}`, tx);
+  });
 }
 
 function terminalMessageTaskReason(run: Pick<TaskRunRow, 'kind'>, card: Pick<CardRow, 'columnStatus'>): string {
@@ -2141,7 +2150,7 @@ async function finishWorkerTaskRun(run: TaskRunRow, work: () => Promise<CardRow>
         durationSeconds: Math.round((Date.now() - started) / 1000),
       });
     }
-  } catch (error) {
+  } catch (error) { if (isA2aTaskRunLeaseLost(error)) return;
     const message = error instanceof Error ? error.message : 'task_run_failed';
     if (await requeueBackpressuredTaskRun(run, message)) return;
     await completeTaskRun(run.id, { status: 'failed', retryableFailure: true, error: message, durationSeconds: Math.round((Date.now() - started) / 1000) });
@@ -2159,7 +2168,8 @@ export async function processTaskRunQueue(app: FastifyInstance): Promise<{ claim
     await recoverStaleTaskRuns(app);
     const capacity = Math.max(0, Math.max(1, TASK_RUN_WORKER_BATCH_SIZE) - activeTaskRunIds.size);
     for (let index = 0; index < capacity; index += 1) {
-      const run = await claimNextTaskRun();
+      const recovered = await claimRecoverableA2aTaskRun(TASK_RUN_WORKER_ID);
+      const run = recovered ?? await claimNextTaskRun();
       if (!run) break;
       result.claimed += 1;
       activeTaskRunIds.add(run.id);
@@ -2172,11 +2182,13 @@ export async function processTaskRunQueue(app: FastifyInstance): Promise<{ claim
             : run.kind === 'panel_review'
               ? () => reviewPanelSlot(run.cardId, { taskRunId: run.id })
               : () => dispatchCard(run.cardId, run.source === 'manual' ? 'manual' : 'loop', { taskRunId: run.id });
-      void finishWorkerTaskRun(run, work)
+      void withTaskRunWorkerLease(run, () => recovered
+        ? withA2aRecoveryRun(run, () => finishWorkerTaskRun(run, work))
+        : finishWorkerTaskRun(run, work))
         .catch((error) => app.log.error({ error, taskRunId: run.id }, 'task run worker failed unexpectedly'))
         .finally(() => activeTaskRunIds.delete(run.id));
     }
-  } catch (error) {
+  } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
     app.log.error({ error }, 'task run queue processing failed');
   } finally {
     taskRunWorkerClaiming = false;
@@ -2207,6 +2219,7 @@ export async function getBudgetGuard(agent: AgentRow, preloadedPolicies?: Budget
 
 export async function budgetOk(agent: AgentRow, preloadedPolicies?: BudgetPolicyRow[], card?: CardRow): Promise<boolean> {
   if (agent.isActive === false) return false;
+  if (currentA2aRecoveryRun()?.agentId === agent.id) return true;
   const guard = await getBudgetGuard(agent, preloadedPolicies);
   if (!guard.hardStop && card?.taskBudgetLimit == null) return true;
   return !(await usageBudgetState(agent, card)).blocked;
@@ -2348,6 +2361,13 @@ async function ensureAssigned(card: CardRow, source: string): Promise<CardRow | 
 }
 
 export async function openHeartbeatRun(card: CardRow, agent: AgentRow, source: string, taskRunId?: string | null): Promise<HeartbeatRunRow> {
+  const recovered = currentA2aRecoveryRun();
+  if (recovered) {
+    if (recovered.id !== taskRunId || recovered.cardId !== card.id || recovered.agentId !== agent.id || !recovered.heartbeatRunId) throw new Error('a2a_recovery_identity_mismatch');
+    const [original] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, recovered.heartbeatRunId), eq(heartbeatRuns.agentId, agent.id), eq(heartbeatRuns.cardId, card.id), eq(heartbeatRuns.status, 'running'))).limit(1);
+    if (!original) throw new Error('a2a_recovery_heartbeat_missing');
+    return original;
+  }
   const [run] = await db.insert(heartbeatRuns).values({
     companyId: card.companyId,
     cardId: card.id,
@@ -2365,6 +2385,7 @@ export async function openHeartbeatRun(card: CardRow, agent: AgentRow, source: s
 // the original atomic isBusy flip. With maxConcurrent>1, isBusy means "at capacity"
 // and the claim counts running heartbeat runs against the configured limit.
 export async function claimAgentCapacity(agent: AgentRow): Promise<boolean> {
+  if (currentA2aRecoveryRun()?.agentId === agent.id) return agent.isActive !== false;
   const maxConcurrent = Math.max(1, agent.maxConcurrent ?? 1);
   if (maxConcurrent === 1) {
     const [row] = await db.update(agents).set({ isBusy: true }).where(and(eq(agents.id, agent.id), eq(agents.isBusy, false), eq(agents.isActive, true))).returning();
@@ -2440,6 +2461,11 @@ function startExecutionLockRenewal(cardId: string, runId: string): () => void {
 async function acquireExecutionLock(card: CardRow, agent: AgentRow, run: HeartbeatRunRow, source: string): Promise<CardRow> {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + EXECUTION_LOCK_TTL_MS);
+  if (currentA2aRecoveryRun()) {
+    const [original] = await db.update(kanbanCards).set({ executionLockExpiresAt: expiresAt }).where(and(eq(kanbanCards.id, card.id), eq(kanbanCards.executionLockId, run.id), eq(kanbanCards.activeHeartbeatRunId, run.id), eq(kanbanCards.assigneeId, agent.id), eq(kanbanCards.columnStatus, 'in_progress'), isNull(kanbanCards.deletedAt))).returning();
+    if (!original) throw new Error('a2a_recovery_lock_superseded');
+    return original;
+  }
   const [locked] = await db.update(kanbanCards).set({
     executionLockId: run.id,
     executionLockedByAgentId: agent.id,
@@ -2694,7 +2720,7 @@ async function messageRunContext(cardId: string, taskRunId: string | null | unde
   const [agent] = await db.select().from(agents).where(and(eq(agents.id, agentId), isNull(agents.deletedAt))).limit(1);
   if (!agent) throw new Error('agent_not_found');
   if (!agent.isActive) throw new Error('agent_paused');
-  if (agent.isBusy) throw new Error('agent_busy');
+  if (agent.isBusy && currentA2aRecoveryRun()?.agentId !== agent.id) throw new Error('agent_busy');
   if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'hermes-ssh' }))) throw new Error('agent_runtime_unavailable');
   if (!(await budgetOk(agent, undefined, card))) {
     throw new Error('agent_budget_exceeded');
@@ -2819,7 +2845,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { adapterSessionId, messageCommentId: comment.id, megacorpsPromptChars: prompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
-    const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, agent, run.id, taskRun.id, 'message'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds }));
+    const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, agent, run.id, taskRun.id, 'message'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds, a2aScope: a2aExecutionScope(agent.id, task) }));
     const [latestTaskRun] = await db.select().from(taskRuns).where(eq(taskRuns.id, taskRun.id)).limit(1);
     if (latestTaskRun && latestTaskRun.status !== 'running') {
       if (result.success) await rememberTaskAdapterSession(card, agent, 'message', result, taskRun.id);
@@ -2922,7 +2948,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       await continueAfterMessageReportApproval(card, comment);
     }
     return card;
-  } catch (error) {
+  } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
     if (await deferDeniedUsage(cardUsageScope(card, agent, run.id, taskRun.id, 'message'), error)) return card;
     const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'message_delegation_failed');
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
@@ -2962,7 +2988,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { adapterSessionId, reportCommentId: report.id, requestCommentId: request?.id ?? null, megacorpsPromptChars: prompt.length },
     });
-    const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, reviewer, run.id, taskRun.id, 'message_review'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds }));
+    const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, reviewer, run.id, taskRun.id, 'message_review'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds, a2aScope: a2aExecutionScope(reviewer.id, task) }));
     const [latestTaskRun] = await db.select().from(taskRuns).where(eq(taskRuns.id, taskRun.id)).limit(1);
     if (latestTaskRun && latestTaskRun.status !== 'running') {
       if (result.success) await rememberTaskAdapterSession(card, reviewer, 'message_review', result, taskRun.id);
@@ -3020,7 +3046,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
     await db.update(heartbeatRuns).set({ status: 'success', completedAt: new Date(), error: null, durationSeconds: result.durationSeconds, costUsd: result.costUsd.toString() }).where(eq(heartbeatRuns.id, run.id));
     await completeTaskRun(taskRun.id, { status: decision === 'revision_requested' ? 'failed' : 'success', error: decision === 'revision_requested' ? result.output : null, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     return card;
-  } catch (error) {
+  } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
     if (await deferDeniedUsage(cardUsageScope(card, reviewer, run.id, taskRun.id, 'message_review'), error)) return card;
     const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'message_review_failed');
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
@@ -3208,7 +3234,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
   const [agent] = await db.select().from(agents).where(and(eq(agents.id, card.assigneeId), isNull(agents.deletedAt))).limit(1);
   if (!agent) throw new Error('agent_not_found');
   if (!agent.isActive) throw new Error('agent_paused');
-  if (agent.isBusy) throw new Error('agent_busy');
+  if (agent.isBusy && currentA2aRecoveryRun()?.agentId !== agent.id) throw new Error('agent_busy');
   if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: agent.runtimeId, adapterType: agent.adapterType ?? 'hermes-ssh' }))) throw new Error('agent_runtime_unavailable');
   if (!(await budgetOk(agent, undefined, card))) {
     await addTaskLog({ cardId: card.id, agentId: agent.id, type: 'budget', status: 'failed', message: `Agent ${agent.name} is over budget; admission waits for available allowance.` });
@@ -3226,7 +3252,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     lockedCard = await acquireExecutionLock(card, agent, run, source);
     if (card.columnStatus !== 'in_progress') await addStageLog(card.id, agent.id, card.columnStatus, 'in_progress', source);
     await addTaskLog({ cardId: card.id, agentId: agent.id, type: source, status: 'running', message: `Dispatch started via ${source}.` });
-  } catch (error) {
+  } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
     throw error;
   }
@@ -3262,7 +3288,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const stopLockRenewal = startExecutionLockRenewal(card.id, run.id);
     let result: Awaited<ReturnType<typeof adapter.dispatch>>;
     try {
-      result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, agent, run.id, options.taskRunId, 'dispatch'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds }));
+      result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, agent, run.id, options.taskRunId, 'dispatch'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds, a2aScope: a2aExecutionScope(agent.id, task) }));
     } finally {
       stopLockRenewal();
     }
@@ -3322,7 +3348,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       try {
         const split = await processChildSplits(lockedCard, agent, dispatchChildren, options.taskRunId);
         if (split.errors.length) return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: split.errors.join('\n'), runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
-      } catch (error) {
+      } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
         return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: String(error), runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
       }
     }
@@ -3335,7 +3361,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       let handoffTarget: AgentRow;
       try {
         handoffTarget = await resolveHandoffTarget(card, agent, structuredPlan.handoff);
-      } catch (error) {
+      } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
         return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: error instanceof Error ? error.message : 'handoff_target_not_found', runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
       }
       const updated = await db.transaction(async (tx) => {
@@ -3372,7 +3398,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     let delegatedRows: Awaited<ReturnType<typeof createMessageDelegations>>;
     try {
       delegatedRows = await createMessageDelegations(card, agent, structuredPlan ? structuredPlan.subroutineLines : delegationItems(actionableOutput), { reviewerScope: 'final', sourceTaskRunId: options.taskRunId ?? null, sourceOutput: result.output });
-    } catch (error) {
+    } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
       await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
       return sendAgentFeedbackAndRequeue({
         card: lockedCard,
@@ -3596,7 +3622,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     if (effectiveNextStatus === 'done') { await sealDeliveryAcceptance(updated.id); await cascadeParentStatus(updated.parentCardId); }
     if (effectiveNextStatus === 'in_progress' && normalizedResult.outcome === 'progress' && !childBlock) await enqueueTaskRun(updated.id, 'dispatch', 'queue');
     return updated;
-  } catch (error) {
+  } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
     return handleDispatchFailure(lockedCard, agent, error, run.id, options.taskRunId);
   }
 }
@@ -3747,7 +3773,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
 
   const [reviewer] = await db.select().from(agents).where(and(eq(agents.id, reviewerId), isNull(agents.deletedAt))).limit(1);
   if (!reviewer) throw new Error('reviewer_not_found');
-  if (reviewer.isBusy) throw new Error('reviewer_busy');
+  if (reviewer.isBusy && currentA2aRecoveryRun()?.agentId !== reviewer.id) throw new Error('reviewer_busy');
   if (!(await budgetOk(reviewer, undefined, card))) throw new Error('agent_budget_exceeded');
   if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: reviewer.runtimeId, adapterType: reviewer.adapterType ?? 'hermes-ssh' }))) throw new Error('reviewer_runtime_unavailable');
 
@@ -3782,7 +3808,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       prompt: promptSnapshotForAdapter(executionAgent, reviewTask),
       metadata: { adapterSessionId, reviewMode, megacorpsPromptChars: reviewPrompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
-    const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, reviewer, run.id, options.taskRunId, 'review'), () => adapter.dispatch(executionAgent, reviewTask), { timeoutSeconds: reviewTask.timeoutSeconds }));
+    const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, reviewer, run.id, options.taskRunId, 'review'), () => adapter.dispatch(executionAgent, reviewTask), { timeoutSeconds: reviewTask.timeoutSeconds, a2aScope: a2aExecutionScope(reviewer.id, reviewTask) }));
     const [latest] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, card.id), isNull(kanbanCards.deletedAt))).limit(1);
     if (latest && isTerminalCardStatus(latest.columnStatus) && latest.columnStatus !== card.columnStatus && latest.activeHeartbeatRunId !== run.id) {
       if (result.success) await rememberTaskAdapterSession(card, reviewer, 'review', result, options.taskRunId);
@@ -3839,7 +3865,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     if (isRecoveryReview(card)) {
       let recovery;
       try { recovery = await applyRecoveryReport(card, reviewer.id, normalizedReview.report!, options.taskRunId); }
-      catch (error) { return sendAgentFeedbackAndRequeue({card,agent:reviewer,kind:'review',message:String(error),runId:run.id,taskRunId:options.taskRunId,output:result.output,result}); }
+      catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error; return sendAgentFeedbackAndRequeue({card,agent:reviewer,kind:'review',message:String(error),runId:run.id,taskRunId:options.taskRunId,output:result.output,result}); }
       await settleOriginalHeartbeat(card,reviewer.id,run.id,options.taskRunId);
       await completeTaskRun(options.taskRunId,{status:'success',preserveCard:true,output:result.output});
       if(recovery?.continueKind && recovery.sourceMessageId) { const [source]=await db.select().from(cardComments).where(eq(cardComments.id,recovery.sourceMessageId)).limit(1); if(source)await enqueueMessageTaskRun(source,recovery.continueKind==='message_review'?'message_review':'message'); }
@@ -4009,7 +4035,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     if (mergePlan) await applyMergeGatePlan(updated, mergePlan, { approvedBy: reviewer.id, fromStatus: card.columnStatus });
     if (effectiveNextStatus === 'done') { await sealDeliveryAcceptance(updated.id); await cascadeParentStatus(updated.parentCardId); }
     return updated;
-  } catch (error) {
+  } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
     if (await deferDeniedUsage(cardUsageScope(card, reviewer, run.id, options.taskRunId, 'review'), error)) return card;
     const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'review_failed');
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));
@@ -4104,7 +4130,12 @@ async function spawnDueScheduledCards(app: FastifyInstance, companyIds: string[]
 }
 
 async function recoverStaleExecutionLocks(app: FastifyInstance) {
-  const stale = await db.select().from(kanbanCards).where(drizzleSql`${kanbanCards.executionLockExpiresAt} IS NOT NULL AND ${kanbanCards.executionLockExpiresAt} < now()`);
+  const stale = await db.select().from(kanbanCards).where(drizzleSql`${kanbanCards.executionLockExpiresAt} IS NOT NULL AND ${kanbanCards.executionLockExpiresAt} < now()
+    AND NOT EXISTS (
+      SELECT 1 FROM task_runs tr JOIN a2a_execution_aliases alias ON alias.key = 'task-run:' || tr.id::text
+      JOIN a2a_executions execution ON execution.key = alias.execution_key
+      WHERE tr.heartbeat_run_id = ${kanbanCards.executionLockId} AND tr.status = 'running' AND execution.active = true
+    )`);
   for (const card of stale) {
     const expiredLockKey=card.executionLockId ?? card.activeHeartbeatRunId ?? card.updatedAt?.toISOString();
     const agentId = card.executionLockedByAgentId;
@@ -4271,12 +4302,12 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
     if (activeCompanyIds.length > 0) {
       await expireStaleDelegations(app);
       await spawnDueScheduledCards(app, activeCompanyIds);
-      try { await sweepPeerQuestions(app); } catch (error) { app.log.warn({ error }, 'peer question sweep failed'); }
-      try { await sweepClientCheckpointReminders(app); } catch (error) { app.log.warn({ error }, 'client checkpoint reminder sweep failed'); }
-      try { await sweepBrainstormRounds(app); } catch (error) { app.log.warn({ error }, 'brainstorm round sweep failed'); }
-      try { await sweepReviewRounds(app); } catch (error) { app.log.warn({ error }, 'review round sweep failed'); }
-      try { await sweepExternalWaitTimeouts(app); } catch (error) { app.log.warn({ error }, 'external wait timeout sweep failed'); }
-      try { await sweepExternalWaitPolls(app); } catch (error) { app.log.warn({ error }, 'external wait poll sweep failed'); }
+      try { await sweepPeerQuestions(app); } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error; app.log.warn({ error }, 'peer question sweep failed'); }
+      try { await sweepClientCheckpointReminders(app); } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error; app.log.warn({ error }, 'client checkpoint reminder sweep failed'); }
+      try { await sweepBrainstormRounds(app); } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error; app.log.warn({ error }, 'brainstorm round sweep failed'); }
+      try { await sweepReviewRounds(app); } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error; app.log.warn({ error }, 'review round sweep failed'); }
+      try { await sweepExternalWaitTimeouts(app); } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error; app.log.warn({ error }, 'external wait timeout sweep failed'); }
+      try { await sweepExternalWaitPolls(app); } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error; app.log.warn({ error }, 'external wait poll sweep failed'); }
       // Only statuses the loop can act on; done/blocked/cancelled/in_progress cards
       // used to be loaded and skipped one by one, which scales badly with board size.
       const cards = await db.select().from(kanbanCards).where(and(
@@ -4293,7 +4324,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
       let reviewGated = new Set<string>();
       try {
         reviewGated = await cardIdsAwaitingPanelOrHuman(cards.filter((card) => card.columnStatus === 'in_review').map((card) => card.id));
-      } catch (error) {
+      } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
         app.log.warn({ error }, 'review gate lookup failed');
       }
       for (const card of cards) {
@@ -4310,7 +4341,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
             } else {
               result.skipped += 1;
             }
-          } catch (error) {
+          } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
             result.errors += 1;
             app.log.warn({ error, cardId: card.id }, 'dispatch cron skipped card');
           }
@@ -4319,7 +4350,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
           try {
             await enqueueTaskRun(card.id, 'review', source === 'manual' ? 'manual' : 'loop');
             result.reviewed += 1;
-          } catch (error) {
+          } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
             result.errors += 1;
             app.log.warn({ error, cardId: card.id }, 'review cron skipped card');
           }
@@ -4328,7 +4359,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
         }
       }
     }
-  } catch (error) {
+  } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
     result.status = 'failed';
     result.errors += 1;
     result.error = error instanceof Error ? error.message : 'dispatch_cron_failed';

@@ -1,4 +1,6 @@
 import { cleanupUnusedDefault } from './companyless-migration.ts';
+import { a2aPollingMigrationSql } from './a2a-polling-migration.ts';
+import { chatJobsMigrationSql } from './chat-jobs-migration.ts';
 import { usageLedgerMigration } from './usage-ledger-migration.ts';
 import { sql } from './client.ts';
 import { CEO_POSITION_PROMPT, LEGACY_CEO_POSITION_PROMPT } from '../role-playbooks.ts';
@@ -16,6 +18,8 @@ const MIGRATION_LOCK_KEY = 727274001;
 // created before the version table will re-run v1 exactly once to get recorded.
 // Never edit an applied migration's statements — add the change as a new version.
 const migrations: Migration[] = [
+  { version: 33, name: 'durable-async-chat-jobs', run: async () => { await sql.unsafe(chatJobsMigrationSql); } },
+  { version: 32, name: 'durable-a2a-polling', run: async () => { await sql.unsafe(a2aPollingMigrationSql); } },
   { version: 31, name: 'pre-review-evidence-identity', run: async () => { await sql.unsafe(`ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS review_identity JSONB;
 ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS review_identity JSONB;`); } },
   { version: 30, name: 'truthful-usage-ledger', run: async () => { await sql.unsafe(usageLedgerMigration); } },

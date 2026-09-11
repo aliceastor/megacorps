@@ -1,5 +1,11 @@
 # A2A 合約層與 Adapter 設計
 
+> **2026-09-11 實作更新：長任務採持久化輪詢。** 下文保留原始分階段設計；目前的傳輸與恢復合約以 [輪詢設計](./superpowers/specs/2026-09-11-a2a-polling-design.md) 為準。
+>
+> MegaCorps 先記錄原始截止時間與 context，再只送一次 `SendMessage`；Hermes 接受後透過 `ListTasks` 對照提交前的任務清單，取得確切 task ID，再用 `GetTask` 查詢。每次 HTTP 請求預設最多 10 秒，查詢間隔由 5 秒退避至 15 秒。HTTP 失敗不會重新派工，整體期限也不會隨重啟延長。無法確認接受、任務消失或身份不一致會進入恢復處理。
+>
+> A2A Direct Chat 的送訊息 API 回傳 `202` 與 job；介面顯示處理中，重新載入後可繼續追蹤。`GET /api/chat/sessions/:id/jobs` 與 `/jobs/:jobId` 提供公司權限範圍內的狀態。這不要求修改 Hermes 或放寬 push callback 的 URL 安全限制。
+
 > 2026-08-04 · 目標:以 A2A protocol v1.0 作為 MegaCorps ↔ agent 的合約層,一次解決 P0 全部(結構化報告、單一結果通道、廢 regex verdict)、P1 #4(`input-required`)、P2 #9(artifact 一等公民),並為 P1 #5–8、P2 #10–11 鋪路。
 > 前情:[multi-agent-workflow-review.md](./multi-agent-workflow-review.md) · [roadmap-status.md](./roadmap-status.md)。
 > Server 側:Hermes 0.20+ 內建 A2A gateway(規格已確認,見 roadmap);MegaCorps 只實作 client 側。

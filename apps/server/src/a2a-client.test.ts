@@ -2,6 +2,30 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizeA2aSendResult, parseA2aPushPayload, pythonSortedJson, sendA2aMessage, stripInlineReasoning, verifyA2aPushSignature } from './a2a-client.ts';
 import { createHmac } from 'node:crypto';
+import * as client from './a2a-client.ts';
+
+test('task reads use short history and request complete terminal artifacts explicitly', async () => {
+  const calls: any[] = [];
+  const options = { baseUrl: 'http://gateway', timeoutMs: 100, fetchImpl: (async (_url: unknown, init: any) => {
+    const request = JSON.parse(init.body);
+    calls.push(request);
+    return Response.json({ result: request.method === 'ListTasks' ? { tasks: [task('working', '')], nextPageToken: 'next' } : task('completed', 'done') });
+  }) as typeof fetch };
+  assert.equal((await client.listA2aTasks({ ...options, contextId: 'ctx-1', pageToken: 'page' })).nextPageToken, 'next');
+  assert.deepEqual(calls[0].params, { contextId: 'ctx-1', historyLength: 0, includeArtifacts: false, pageToken: 'page' });
+  assert.equal((await client.getA2aTask({ ...options, taskId: 'task-1' })).state, 'completed');
+  assert.deepEqual(calls[1].params, { id: 'task-1', historyLength: 0 });
+  await client.getA2aTask({ ...options, taskId: 'task-1', full: true });
+  assert.deepEqual(calls[2].params, { id: 'task-1' });
+});
+
+test('RPC timeout bounds a gateway that ignores fetch abort', async () => {
+  await assert.rejects(client.a2aRpc('GetTask', { id: 'x' }, { baseUrl: 'http://gateway', timeoutMs: 5, fetchImpl: (() => new Promise(() => {})) as typeof fetch }), /a2a_rpc_timeout/);
+});
+
+test('malformed remote RPC error codes do not become durable transport categories', async () => {
+  await assert.rejects(client.a2aRpc('GetTask', {}, { baseUrl: 'http://gateway', timeoutMs: 100, fetchImpl: (async () => Response.json({ error: { code: 'Bearer sensitive-value', message: 'bad' } })) as typeof fetch }), (error: any) => error.code === 'a2a_rpc_error');
+});
 
 const task = (state: string, text: string, extra: Record<string, unknown> = {}) => ({
   id: 'task-1',

@@ -287,29 +287,66 @@ export type A2aRpcOptions = {
   bearerToken?: string | null;
   timeoutMs: number;
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
 };
+
+export class A2aRpcError extends Error {
+  constructor(public readonly code: string | number, message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'A2aRpcError';
+  }
+}
 
 export async function a2aRpc(method: string, params: unknown, options: A2aRpcOptions): Promise<unknown> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Math.max(1_000, options.timeoutMs));
+  let rejectInterrupted: (reason: Error) => void;
+  const interrupted = new Promise<never>((_resolve, reject) => { rejectInterrupted = reject; });
+  const interrupt = (code: string) => {
+    rejectInterrupted(new A2aRpcError(code, `${code}: ${method} request interrupted`));
+    controller.abort();
+  };
+  const onAbort = () => interrupt('a2a_rpc_aborted');
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => interrupt('a2a_rpc_timeout'), Math.max(1, options.timeoutMs));
   try {
-    const response = await fetchImpl(options.baseUrl, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(options.bearerToken ? { authorization: `Bearer ${options.bearerToken}` } : {}),
-      },
-      body: JSON.stringify({ jsonrpc: '2.0', id: randomUUID(), method, params }),
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`a2a_http_${response.status}: ${method} request to A2A gateway failed`);
-    const payload = await response.json() as { result?: unknown; error?: { code?: number; message?: string } };
-    if (payload.error) throw new Error(`a2a_rpc_error${payload.error.code !== undefined ? ` ${payload.error.code}` : ''}: ${payload.error.message ?? 'unknown A2A error'}`);
-    return payload.result;
+    if (options.signal?.aborted) onAbort();
+    return await Promise.race([interrupted, (async () => {
+      if (controller.signal.aborted) throw new A2aRpcError('a2a_rpc_aborted', 'a2a_rpc_aborted');
+      const response = await fetchImpl(options.baseUrl, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(options.bearerToken ? { authorization: `Bearer ${options.bearerToken}` } : {}),
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: randomUUID(), method, params }),
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new A2aRpcError(`a2a_http_${response.status}`, `a2a_http_${response.status}: ${method} request to A2A gateway failed`);
+      const payload = await response.json() as { result?: unknown; error?: { code?: number; message?: string } };
+      if (payload.error) {
+        const code = typeof payload.error.code === 'number' && Number.isFinite(payload.error.code) ? payload.error.code : 'a2a_rpc_error';
+        throw new A2aRpcError(code, `a2a_rpc_error ${code}: ${payload.error.message ?? 'unknown A2A error'}`);
+      }
+      return payload.result;
+    })()]);
   } finally {
     clearTimeout(timer);
+    options.signal?.removeEventListener('abort', onAbort);
   }
+}
+
+export async function getA2aTask(options: A2aRpcOptions & { taskId: string; full?: boolean }): Promise<A2aSendOutcome> {
+  return normalizeA2aSendResult(await a2aRpc('GetTask', { id: options.taskId, ...(options.full ? {} : { historyLength: 0 }) }, options));
+}
+
+export async function listA2aTasks(options: A2aRpcOptions & { contextId: string; pageToken?: string }): Promise<{ tasks: A2aSendOutcome[]; nextPageToken: string | null }> {
+  const result = asRecord(await a2aRpc('ListTasks', {
+    contextId: options.contextId, historyLength: 0, includeArtifacts: false,
+    ...(options.pageToken ? { pageToken: options.pageToken } : {}),
+  }, options));
+  if (!result || !Array.isArray(result.tasks)) throw new A2aRpcError('a2a_invalid_list', 'a2a_invalid_list: gateway omitted task list');
+  return { tasks: result.tasks.map(normalizeA2aSendResult), nextPageToken: typeof result.nextPageToken === 'string' && result.nextPageToken ? result.nextPageToken : null };
 }
 
 export type SendA2aMessageOptions = A2aRpcOptions & {

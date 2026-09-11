@@ -40,19 +40,24 @@ async function fulfillJson(route: Route, json: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(json) });
 }
 
-async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirstCreate?: boolean; busyAgents?: string[]; holdAgentSessions?: string; holdCompanyRefresh?: boolean; failSessionGetsForAgents?: string[]; failMessageGetsForSessions?: string[]; sendDelayMs?: number; sessionDelayMs?: number; locale?: 'en' | 'zh-TW' | 'ja' } = {}) {
+async function mockChat(page: Page, options: { asyncA2a?: boolean; failFirstSend?: boolean; failFirstCreate?: boolean; busyAgents?: string[]; holdAgentSessions?: string; holdCompanyRefresh?: boolean; failSessionGetsForAgents?: string[]; failMessageGetsForSessions?: string[]; sendDelayMs?: number; sessionDelayMs?: number; locale?: 'en' | 'zh-TW' | 'ja' } = {}) {
   let releaseSessions!: () => void;
   const sessionsGate = new Promise<void>((resolve) => { releaseSessions = resolve; });
   let releaseCompanies!: () => void;
   const companiesGate = new Promise<void>((resolve) => { releaseCompanies = resolve; });
   const companyStore = companies.map((company) => ({ ...company }));
   const projectStore = projects.map((project) => ({ ...project }));
-  const agentStore = agents.map((agent) => ({ ...agent }));
+  const agentStore = agents.map((agent) => ({ ...agent, ...(options.asyncA2a && agent.id === 'agent-ada' ? { adapterType: 'a2a' } : {}) }));
+  const jobs: Record<string, any[]> = {};
   const messageStore = Object.fromEntries(Object.entries(messages).map(([sessionId, rows]) => [sessionId, rows.map((row) => ({ ...row }))])) as typeof messages;
   const sessionStore = sessions.map((session) => ({ ...session }));
   const failingSessionGets = new Set(options.failSessionGetsForAgents ?? []);
   const failingMessageGets = new Set(options.failMessageGetsForSessions ?? []);
   const state = {
+    finishJob(sessionId: string) {
+      jobs[sessionId]![0].status = 'completed';
+      messageStore[sessionId]!.push({ id: 'async-answer', sessionId, companyId: 'company-acme', agentId: 'agent-ada', authorType: 'agent', body: 'The durable reply arrived.', createdAt: '2026-09-05T12:03:00.000Z' });
+    },
     releaseSessions,
     releaseCompanies,
     companyGetCount: 0,
@@ -118,6 +123,8 @@ async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirs
       messageStore[session.id] = [];
       return fulfillJson(route, session, 201);
     }
+    const jobMatch = path.match(/^\/api\/chat\/sessions\/([^/]+)\/jobs$/);
+    if (jobMatch) return fulfillJson(route, jobs[jobMatch[1]!] ?? []);
     const messageMatch = path.match(/^\/api\/chat\/sessions\/([^/]+)\/messages$/);
     if (messageMatch && request.method() === 'GET') {
       const messageSessionId = messageMatch[1]!;
@@ -135,6 +142,12 @@ async function mockChat(page: Page, options: { failFirstSend?: boolean; failFirs
       const session = sessionStore.find((row) => row.id === messageMatch[1]);
       if (!session) return fulfillJson(route, { message: 'Unknown synthetic session' }, 404);
       const userMessage = { id: `confirmed-user-${state.sendAttempts}`, sessionId: session.id, companyId: session.companyId, agentId: session.agentId, authorType: 'user', body: body.body, createdAt: '2026-09-05T12:02:00.000Z' };
+      if (options.asyncA2a) {
+        messageStore[session.id]!.push(userMessage);
+        const job = { id: 'async-job', sessionId: session.id, userMessageId: userMessage.id, status: 'queued' };
+        jobs[session.id] = [job];
+        return fulfillJson(route, { session, userMessage, job }, 202);
+      }
       const agentMessage = { id: `confirmed-agent-${state.sendAttempts}`, sessionId: session.id, companyId: session.companyId, agentId: session.agentId, authorType: 'agent', body: `Reply to: ${body.body}`, createdAt: '2026-09-05T12:03:00.000Z' };
       messageStore[session.id] = [...(messageStore[session.id] ?? []), userMessage, agentMessage];
       return fulfillJson(route, { session: { ...session, updatedAt: '2026-09-05T12:03:00.000Z' }, userMessage, agentMessage });
@@ -818,3 +831,27 @@ for (const width of [320, 390, 768, 900, 1158, 1440]) {
     writeFileSync(testInfo.outputPath(`chat-${width}-geometry.json`), JSON.stringify(samples, null, 2));
   });
 }
+
+
+test('A2A accepted chat stays pending across reload and receives the polled reply once', async ({ page }) => {
+  const state = await mockChat(page, { asyncA2a: true });
+  await page.goto('/chat');
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  const composer = page.getByPlaceholder('Message');
+  await composer.fill('Run the durable task');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(composer).toHaveValue('');
+  await expect(page.locator('.typing-bubble')).toBeVisible();
+  await composer.fill('Do not submit twice');
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled();
+  await composer.press('Enter');
+  expect(state.sendAttempts).toBe(1);
+  await page.reload();
+  await expect(page.locator('.typing-bubble')).toBeVisible();
+  state.finishJob('session-ada-orbit');
+  await expect(page.getByText('The durable reply arrived.')).toHaveCount(1);
+  await expect(page.locator('.typing-bubble')).toHaveCount(0);
+  await page.getByPlaceholder('Message').fill('Next turn');
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeEnabled();
+  expect(state.sendAttempts).toBe(1);
+});

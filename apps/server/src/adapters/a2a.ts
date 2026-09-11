@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { unknownUsage } from '../usage-facts.ts';
 import { currentUsageAttempt } from '../usage-context.ts';
-import { sendA2aMessage } from '../a2a-client.ts';
+import { A2aPollingError, pollA2aMessage, type A2aInvocationStore } from '../a2a-polling.ts';
+import { a2aExecutionScope } from '../a2a-execution-scope.ts';
 import { ensureA2aTunnel, type TunnelTarget } from '../a2a-tunnel.ts';
 import { assertAdapterTargetAllowed, getAdapterNumberConfig, getAdapterOptionalStringConfig } from './config.ts';
 import { buildAgentPrompt, estimateTokens, megacorpsApiUrl, type AgentLike, type TaskContext, type TaskResult } from './hermes.ts';
@@ -13,7 +14,6 @@ import { resolveHermesSshConnectionConfig } from './hermes-ssh.ts';
 // DataPart reports, input-required handling) is Stage C.
 
 const FALLBACK_CONTEXT_PREFIX = 'a2a-fallback-';
-const GENERATED_CONTEXT_PREFIX = 'a2a-ctx-';
 const DEFAULT_A2A_PORT = 9900;
 const TIMEOUT_MARGIN_MS = 10_000;
 
@@ -24,7 +24,20 @@ export function a2aSendTimeoutMs(timeoutSeconds: number | null | undefined): num
 export type A2aDispatchDeps = {
   fetchImpl?: typeof fetch;
   tunnelFn?: (target: TunnelTarget) => Promise<number>;
+  store?: A2aInvocationStore;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  rpcTimeoutMs?: number;
 };
+
+function routeIdentity(agent: AgentLike): string {
+  const direct = getAdapterOptionalStringConfig(agent, 'a2aBaseUrl', 'A2A_BASE_URL');
+  const endpoint = direct ? `${direct.replace(/\/+$/, '')}${agentPath(agent)}` : (() => {
+    const ssh = resolveHermesSshConnectionConfig(agent);
+    return JSON.stringify([ssh.host, ssh.user, ssh.port, getAdapterNumberConfig(agent, 'a2aPort', 'A2A_PORT', DEFAULT_A2A_PORT), agentPath(agent)]);
+  })();
+  return createHash('sha256').update(JSON.stringify([agent.runtimeId ?? null, endpoint])).digest('hex');
+}
 
 function agentPath(agent: AgentLike): string {
   const configured = getAdapterOptionalStringConfig(agent, 'a2aAgentPath');
@@ -60,23 +73,32 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
     const prompt = buildAgentPrompt(agent, task);
     const durationSeconds = () => Math.max(1, Math.round((Date.now() - started) / 1000));
     try {
+      const executionKey = task.executionKey ?? (task.taskRunId ? `task-run:${task.taskRunId}` : currentUsageAttempt());
+      if (!executionKey) throw new Error('a2a_execution_key_missing');
+      if (!agent.id) throw new Error('a2a_agent_identity_missing');
       const baseUrl = await resolveBaseUrl(agent, deps);
       const url = `${baseUrl}${agentPath(agent)}`;
-      // Pre-generate the contextId when there is no resumable one: it is the
-      // correlation key for push reconciliation even when SendMessage times out.
+      // The journal owns generated contexts and restores them across restart.
       const priorContext = agent.currentSessionId && !agent.currentSessionId.startsWith(FALLBACK_CONTEXT_PREFIX)
         ? agent.currentSessionId
         : null;
-      const contextId = priorContext ?? `${GENERATED_CONTEXT_PREFIX}${randomUUID()}`;
       const pushEnabled = agent.adapterConfig?.a2aPushEnabled !== false;
       // Only register accounting callbacks when the receiver can authenticate them.
       // Unconfigured gateways retain context-only reconciliation hints.
       const pushSecret = getAdapterOptionalStringConfig(agent, 'a2aPushSecret') ?? getAdapterOptionalStringConfig(agent, 'a2aBearerToken');
       const accountingKey = pushSecret ? currentUsageAttempt() : undefined;
-      const outcome = await sendA2aMessage({
+      const store = deps.store ?? (await import('../a2a-executions.ts')).createA2aExecutionStore(agent.id);
+      const outcome = await pollA2aMessage({
+        executionKey,
+        scope: a2aExecutionScope(agent.id, task),
+        route: routeIdentity(agent),
+        store,
+        now: deps.now,
+        sleep: deps.sleep,
+        rpcTimeoutMs: deps.rpcTimeoutMs,
         baseUrl: url,
         text: prompt,
-        contextId,
+        contextId: priorContext,
         configuration: pushEnabled
           ? { taskPushNotificationConfig: { url: `${megacorpsApiUrl(agent)}/api/a2a/push${accountingKey ? `?usageAttemptKey=${encodeURIComponent(accountingKey)}` : ''}` } }
           : null,
@@ -84,8 +106,10 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
         timeoutMs: a2aSendTimeoutMs(task.timeoutSeconds),
         fetchImpl: deps.fetchImpl,
       });
-      const failedState = outcome.state === 'failed' || outcome.state === 'canceled' || outcome.state === 'rejected';
-      let output = outcome.text || (failedState ? `a2a_task_${outcome.state}` : '');
+      const failedState = outcome.state === 'failed' || outcome.state === 'canceled' || outcome.state === 'rejected' || outcome.state === 'auth_required';
+      let output = outcome.state === 'auth_required'
+        ? `a2a_task_auth_required${outcome.text ? `: ${outcome.text}` : ''}`
+        : outcome.text || (failedState ? `a2a_task_${outcome.state}` : '');
       // Surface a DataPart report to the Stage A extractor by embedding it as a
       // fenced JSON block; dispatch-side parsing then needs no A2A awareness.
       if (outcome.report && !output.includes('megacorps-report')) {
@@ -95,7 +119,7 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
       return {
         success: !failedState,
         output,
-        sessionId: outcome.contextId ?? contextId,
+        sessionId: outcome.contextId ?? priorContext ?? '',
         turnId: outcome.taskId,
         tokensUsed,
         costUsd: Number(outcome.usage?.costUsd ?? 0),
@@ -108,7 +132,8 @@ export function createA2aDispatch(deps: A2aDispatchDeps = {}) {
       return {
         success: false,
         output: `a2a_transport_error: ${error instanceof Error ? error.message : 'unknown A2A failure'}`,
-        sessionId: agent.currentSessionId ?? '',
+        sessionId: error instanceof A2aPollingError ? error.record.contextId : agent.currentSessionId ?? '',
+        turnId: error instanceof A2aPollingError ? error.record.taskId : null,
         tokensUsed: 0,
         costUsd: 0,
         usage: unknownUsage('a2a_transport_error'),

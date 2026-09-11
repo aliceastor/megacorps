@@ -7,12 +7,15 @@ import { dispatchToWebhook, dispatchToOpenClaw } from './adapters/webhook.ts';
 import { dispatchToHermesGateway } from './adapters/hermes-gateway.ts';
 import { dispatchToCodexApp } from './adapters/codex-app.ts';
 import { fileURLToPath } from 'node:url';
+import { a2aTestDeps } from './test-support/a2a-fixture.ts';
+
+const testDispatch = (deps: Parameters<typeof createA2aDispatch>[0] = {}) => createA2aDispatch({ ...deps, ...a2aTestDeps(deps.fetchImpl) });
 
 const agent = { id: 'synthetic-agent', hermesProfile: 'configured-profile', currentSessionId: 'reused-context', adapterConfig: { a2aBaseUrl: 'http://usage-fixture.internal:9900' } };
-const task = { id: 'synthetic-card', title: 'Usage fixture', body: 'Synthetic prompt' };
+const task = { id: 'synthetic-card', taskRunId: 'synthetic-run', title: 'Usage fixture', body: 'Synthetic prompt' };
 
 test('A2A timeout is unknown usage, never an authoritative free attempt', async () => {
-  const result = await createA2aDispatch({ fetchImpl: async () => { throw new Error('synthetic timeout'); } })(agent, task);
+  const result = await testDispatch({ fetchImpl: async () => { throw new Error('synthetic timeout'); } })(agent, task);
   assert.equal(result.success, false);
   assert.equal((result as any).usage?.costStatus, 'unknown');
   assert.equal((result as any).usage?.costUsd, null);
@@ -30,7 +33,7 @@ test('A2A retains only the versioned transport metadata usage contract', () => {
 });
 
 test('A2A prompt plus output heuristics do not invent output tokens, model or price', async () => {
-  const result = await createA2aDispatch({ fetchImpl: async () => new Response(JSON.stringify({ jsonrpc: '2.0', id: 'fixture', result: { kind: 'task', id: 'real-turn-1', contextId: 'reused-context', status: { state: 'completed', message: { parts: [{ kind: 'text', text: 'Synthetic answer' }] } } } }), { headers: { 'content-type': 'application/json' } }) })(agent, task);
+  const result = await testDispatch({ fetchImpl: async () => new Response(JSON.stringify({ jsonrpc: '2.0', id: 'fixture', result: { kind: 'task', id: 'real-turn-1', contextId: 'reused-context', status: { state: 'completed', message: { parts: [{ kind: 'text', text: 'Synthetic answer' }] } } } }), { headers: { 'content-type': 'application/json' } }) })(agent, task);
   assert.equal(result.success, true);
   assert.equal(result.costUsd, 0, 'Compatibility subtotal must not invent a fixed model price');
   assert.equal((result as any).usage?.costStatus, 'unknown');

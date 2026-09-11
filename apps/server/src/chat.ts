@@ -5,15 +5,15 @@ import { companyOutputSanitizer, sanitizeCompanyOutput } from './output-secrets.
 import { createHash } from 'node:crypto';
 import { createChatMessageSchema, createChatSessionSchema } from '@megacorps/shared';
 import { and, desc, eq, inArray, isNull, sql as drizzleSql } from 'drizzle-orm';
-import type { FastifyInstance } from 'fastify';
-import { requireAuth } from './auth.ts';
-import { requireAnyVisibleCompany, requireCompanyRole } from './access.ts';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { requireAuth, type AuthUser } from './auth.ts';
+import { hasCompanyRole, membershipRole, requireAnyVisibleCompany, requireCompanyRole } from './access.ts';
 import { getAdapter } from './adapters/registry.ts';
 import { stripHermesSessionMetadata } from './adapters/hermes.ts';
 import { db } from './db/client.ts';
-import { activityLog, agentRuntimes, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, kanbanCards, positions, projects } from './db/schema.ts';
+import { activityLog, agentRuntimes, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, kanbanCards, positions, projects, users } from './db/schema.ts';
 import { budgetOk, buildCompanyKanbanContext, buildExecutionAgent, getBudgetGuard } from './dispatch.ts';
-import { attemptKey, executeUsage, usageBudgetState } from './usage-ledger.ts';
+import { attemptKey, executeUsage, usageBudgetState, resultUsage, scopeFromEntry, settleUsage } from './usage-ledger.ts';
 import { publishLiveEvent } from './live.ts';
 import { findAdapterSession, rememberAdapterSession } from './adapter-sessions.ts';
 import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
@@ -23,6 +23,10 @@ import { readChatTaskTimeoutSeconds } from './runtime-settings.ts';
 import { applyChatWorkItems, extractChatWorkItems, formatChatWorkItemOutcomes } from './chat-work-items.ts';
 import { buildAgentDigest } from './agent-digest.ts';
 import { giteaAuthenticatedCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv } from './gitea.ts';
+
+import { chatJobs, type ChatJob } from './db/chat-jobs-schema.ts';
+import { createChatJobWorker, enqueueChatJob, projectChatJob, publicChatJob, type ChatJobAcknowledger } from './chat-jobs.ts';
+import { withUsageAttempt } from './usage-context.ts';
 
 type ChatMessageRow = typeof chatMessages.$inferSelect;
 type AgentRow = typeof agents.$inferSelect;
@@ -225,7 +229,266 @@ async function addChatActivity(input: {
   });
 }
 
-export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
+
+async function chatUserStillAuthorized(user: AuthUser, companyId: string) {
+  const [current] = await db.select().from(users).where(eq(users.id, user.id)).limit(1);
+  return Boolean(current && current.status !== 'disabled' && hasCompanyRole(await membershipRole(user, companyId), 'operator'));
+}
+
+async function performChatReply(session: typeof chatSessions.$inferSelect, agent: AgentRow, company: CompanyRow | undefined, user: AuthUser, userMessage: ChatMessageRow, run: typeof heartbeatRuns.$inferSelect, reply?: FastifyReply, job?: ChatJob, acknowledge?: ChatJobAcknowledger): Promise<unknown> {
+  const project = async <T>(action: () => Promise<T>): Promise<T | undefined> => job ? projectChatJob(job, action, acknowledge) : action();
+    try {
+      publishLiveEvent({
+        type: 'chat.reply.started',
+        companyId: session.companyId,
+        entityType: 'chat_session',
+        entityId: session.id,
+        sessionId: session.id,
+        projectId: session.projectId,
+        data: { agentId: agent.id, runId: run.id },
+      });
+      const adapter = getAdapter(agent.adapterType ?? 'hermes-ssh');
+      const adapterSession = supportsScopedDirectChatAdapterSession(agent.adapterType)
+        ? await findAdapterSession({
+          companyId: session.companyId,
+          agentId: agent.id,
+          runtimeId: agent.runtimeId,
+          adapterType: agent.adapterType,
+          scopeType: 'chat',
+          scopeId: session.id,
+          kind: 'chat',
+        })
+        : null;
+      const existingChatSessionId = adapterSession?.adapterSessionId ?? session.agentSessionId ?? null;
+      const handOffContextToAdapter = Boolean(existingChatSessionId);
+      const recentLimit = handOffContextToAdapter ? DIRECT_CHAT_CONTINUATION_MESSAGE_LIMIT : DIRECT_CHAT_BOOTSTRAP_MESSAGE_LIMIT;
+      const recent = await db.select().from(chatMessages).where(eq(chatMessages.sessionId, session.id)).orderBy(desc(chatMessages.createdAt)).limit(recentLimit);
+      const history = recent.reverse();
+      const kanbanContext = handOffContextToAdapter ? '' : await buildCompanyKanbanContext(session.companyId, {
+        focusAgentId: agent.id,
+        projectId: session.projectId ?? null,
+        budgetChars: 20_000,
+        includeGoals: false,
+        includeInvocationPositionPrompt: false,
+      });
+      // Standing context is built on every turn but injected only when it is
+      // new to this session: once at bootstrap, and again whenever the company
+      // mission, goals, project config, or position prompt actually change.
+      // The Kanban board snapshot is deliberately not part of the hash — it
+      // moves constantly, and the card index below already keeps it current.
+      const standingContext = await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
+      const standingContextHash = contextHash(standingContext);
+      const contextStale = session.bootstrapContextHash !== null && session.bootstrapContextHash !== standingContextHash;
+      const goalContext = handOffContextToAdapter ? '' : standingContext;
+      const refreshedContext = handOffContextToAdapter && contextStale ? standingContext : '';
+      const cardIndex = handOffContextToAdapter ? await buildChatCardIndex(session.companyId, session.projectId ?? null) : '';
+      // Cross-surface digest: injected at bootstrap, and again on a
+      // continuation only when its hash moved — i.e. when the agent's world
+      // outside this chat (cards, reviews, its own notes) actually changed.
+      const agentDigest = await buildAgentDigest(agent.id, session.companyId);
+      const digestStale = session.digestHash !== null && session.digestHash !== agentDigest.hash;
+      const digestForPrompt = handOffContextToAdapter ? (digestStale ? agentDigest.text : '') : agentDigest.text;
+      const prompt = buildChatPrompt(company, agent, history, kanbanContext, goalContext, handOffContextToAdapter, cardIndex, refreshedContext, digestForPrompt);
+      const contextMode = handOffContextToAdapter
+        ? refreshedContext || digestForPrompt ? 'adapter_session_continuation_refresh' : 'adapter_session_continuation'
+        : 'full_bootstrap';
+      const executionAgent = await buildExecutionAgent(agent, existingChatSessionId);
+      const chatTask = { ...(job ? { executionKey: `chat:${userMessage.id}` } : {}), id: `chat-${session.id}`, title: session.title, body: prompt, timeoutSeconds: await readChatTaskTimeoutSeconds(), kind: 'chat' as const };
+      await recordPromptLog({
+        companyId: session.companyId,
+        agentId: agent.id,
+        projectId: session.projectId,
+        heartbeatRunId: run.id,
+        chatSessionId: session.id,
+        source: 'chat',
+        adapterType: agent.adapterType ?? 'hermes-ssh',
+        title: session.title,
+        prompt: promptSnapshotForAdapter(executionAgent, chatTask),
+        metadata: { adapterSessionId: existingChatSessionId, userMessageId: userMessage.id, megacorpsPromptChars: prompt.length, contextMode, standingContextHash, chatHistoryMessages: history.length },
+      });
+      // Stream partial output to the requesting user only (targeted live event);
+      // throttled so a chatty adapter cannot flood the socket.
+      const sanitizeOutput = await companyOutputSanitizer(session.companyId);
+      let partialBuffer = '';
+      let lastPartialSentAt = 0;
+      const PARTIAL_THROTTLE_MS = 700;
+      const PARTIAL_MAX_CHARS = 12_000;
+      const publishPartial = (chunk: string) => {
+        partialBuffer = `${partialBuffer}${chunk}`.slice(-PARTIAL_MAX_CHARS);
+        const now = Date.now();
+        if (now - lastPartialSentAt < PARTIAL_THROTTLE_MS) return;
+        lastPartialSentAt = now;
+        publishLiveEvent({
+          type: 'chat.reply.partial',
+          companyId: session.companyId,
+          userId: user.id,
+          entityType: 'chat_session',
+          entityId: session.id,
+          sessionId: session.id,
+          projectId: session.projectId,
+          data: { agentId: agent.id, runId: run.id, text: stripHermesSessionMetadata(sanitizeOutput.partial(partialBuffer)) },
+        });
+      };
+      const usageScope = { companyId: session.companyId, agentId: agent.id, projectId: session.projectId, heartbeatRunId: run.id, runtimeId: agent.runtimeId, attemptKey: attemptKey({ heartbeatRunId: run.id }), source: 'chat' };
+      const [priorUsage] = job ? await db.select().from(costEvents).where(eq(costEvents.attemptKey, usageScope.attemptKey)).limit(1) : [];
+      const dispatch = () => adapter.dispatch(executionAgent, chatTask, { onOutput: publishPartial });
+      const result = sanitizeOutput(priorUsage ? await (async () => {
+        const resumed = await withUsageAttempt(usageScope.attemptKey, dispatch);
+        const settled = await settleUsage(scopeFromEntry(priorUsage), resultUsage(resumed));
+        return { ...resumed, usage: settled.entry.usage ?? resultUsage(resumed), costUsd: Number(settled.entry.costUsd ?? 0) };
+      })() : await executeUsage(usageScope, dispatch, { timeoutSeconds: chatTask.timeoutSeconds }));
+      if (!result.success) throw new Error(result.output || 'agent_chat_failed');
+      return await project(async () => {
+      if (supportsScopedDirectChatAdapterSession(agent.adapterType)) {
+        await rememberAdapterSession({
+          companyId: session.companyId,
+          agentId: agent.id,
+          runtimeId: agent.runtimeId,
+          adapterType: agent.adapterType ?? 'hermes-ssh',
+          scopeType: 'chat',
+          scopeId: session.id,
+          kind: 'chat',
+          adapterSessionId: result.sessionId,
+          lastTurnId: result.turnId ?? null,
+          metadata: { heartbeatRunId: run.id },
+        });
+      }
+
+      const overBudget = (await usageBudgetState(agent)).blocked;
+      const monthlyExceeded = overBudget;
+      const taskExceeded = false;
+      if (!job) await db.update(agents).set({
+        isBusy: false,
+      }).where(eq(agents.id, agent.id));
+      if (!job) await db.update(heartbeatRuns).set({
+        status: 'success',
+        completedAt: new Date(),
+        durationSeconds: result.durationSeconds,
+        outputTokens: result.tokensUsed,
+        costUsd: result.costUsd.toString(),
+      }).where(eq(heartbeatRuns.id, run.id));
+      const [agentMessage] = await db.insert(chatMessages).values({
+        ...(job ? { id: job.responseMessageId } : {}),
+        sessionId: session.id,
+        companyId: session.companyId,
+        agentId: session.agentId,
+        authorType: 'agent',
+        body: result.output,
+        metadata: { runId: run.id, adapterType: agent.adapterType, sessionId: result.sessionId, tokensUsed: result.tokensUsed, overBudget, ...(job && extractChatWorkItems(result.output) ? { chatActionsPending: true } : {}) },
+        costUsd: result.costUsd.toString(),
+        durationSeconds: result.durationSeconds,
+      }).returning();
+      const [updatedSession] = await db.update(chatSessions).set({
+        agentSessionId: result.sessionId,
+        // Only record the hashes once the turn actually reached the agent, so
+        // a failed run does not mark stale context as delivered.
+        bootstrapContextHash: standingContextHash,
+        digestHash: agentDigest.hash,
+        updatedAt: new Date(),
+      }).where(eq(chatSessions.id, session.id)).returning();
+      await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: overBudget ? 'chat.budget_hard_stop' : 'chat.reply_received', sessionId: session.id, details: { runId: run.id, costUsd: result.costUsd, overBudget, monthlyExceeded, taskExceeded } });
+      if (agentMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: agentMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'agent', agentId: session.agentId, runId: run.id } });
+
+      // The agent cannot reach the board itself from a chat turn, so a
+      // megacorps-chat-actions block in its reply is applied here on the
+      // chatting user's authority. Failures are reported back into the thread
+      // rather than thrown: the reply itself is already saved and valid.
+      const workItems = extractChatWorkItems(result.output);
+      let workItemMessage: ChatMessageRow | undefined;
+      if (workItems) {
+        const body = 'error' in workItems
+          ? `The agent proposed Kanban updates but the block could not be read: ${workItems.error}`
+          : !await chatUserStillAuthorized(user, session.companyId)
+            ? 'Kanban updates were not applied because your company operator access was revoked.'
+          : formatChatWorkItemOutcomes(await applyChatWorkItems({
+            companyId: session.companyId,
+            projectId: session.projectId ?? null,
+            chatSessionId: session.id,
+            user,
+            agentId: agent.id,
+            agentName: agent.name,
+          }, workItems.actions));
+        [workItemMessage] = await db.insert(chatMessages).values({
+          sessionId: session.id,
+          companyId: session.companyId,
+          agentId: session.agentId,
+          userId: user.id,
+          authorType: 'system',
+          body,
+          metadata: { runId: run.id, chatActions: true },
+        }).returning();
+        if (workItemMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: workItemMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'system', agentId: session.agentId, runId: run.id } });
+      }
+
+      if (job && agentMessage) await db.update(chatMessages).set({ metadata: { ...(agentMessage.metadata as Record<string, unknown>), chatActionsPending: false } }).where(eq(chatMessages.id, agentMessage.id));
+      publishLiveEvent({ type: 'chat.reply.finished', companyId: session.companyId, entityType: 'chat_session', entityId: session.id, sessionId: session.id, projectId: session.projectId, data: { agentId: agent.id, runId: run.id, status: 'success' } });
+      return { session: updatedSession, userMessage, agentMessage, ...(workItemMessage ? { workItemMessage } : {}) };
+      });
+    } catch (error) {
+      return project(async () => {
+      const message = await sanitizeCompanyOutput(session.companyId, error instanceof Error ? error.message : 'agent_chat_failed');
+      if (!job) await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
+      if (!job) await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
+      const [systemMessage] = await db.insert(chatMessages).values({
+        ...(job ? { id: job.responseMessageId } : {}),
+        sessionId: session.id,
+        companyId: session.companyId,
+        agentId: session.agentId,
+        userId: user.id,
+        authorType: 'system',
+        body: `Agent chat failed: ${message}`,
+        metadata: { runId: run.id, error: message },
+      }).returning();
+      await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: 'chat.failed', sessionId: session.id, details: { runId: run.id, error: message } });
+      if (systemMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: systemMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'system', agentId: session.agentId, runId: run.id, error: message } });
+      publishLiveEvent({ type: 'chat.reply.finished', companyId: session.companyId, entityType: 'chat_session', entityId: session.id, sessionId: session.id, projectId: session.projectId, data: { agentId: agent.id, runId: run.id, status: 'failed', error: message } });
+      const failure = { error: message, userMessage, systemMessage };
+      return reply ? reply.code(502).send(failure) : failure;
+      });
+    }
+}
+
+export async function registerChatRoutes(app: FastifyInstance, options: { acknowledgeExecution?: ChatJobAcknowledger } = {}): Promise<void> {
+  const acknowledge: ChatJobAcknowledger = options.acknowledgeExecution ?? (async (key, tx) => (await import('./a2a-executions.ts')).acknowledgeA2aExecution(key, tx));
+  const worker = createChatJobWorker(async job => {
+    const [session] = await db.select().from(chatSessions).where(eq(chatSessions.id, job.sessionId)).limit(1);
+    const [agent] = await db.select().from(agents).where(eq(agents.id, job.agentId)).limit(1);
+    const [company] = await db.select().from(companies).where(eq(companies.id, job.companyId)).limit(1);
+    const [userRow] = await db.select().from(users).where(eq(users.id, job.userId)).limit(1);
+    const [userMessage] = await db.select().from(chatMessages).where(eq(chatMessages.id, job.userMessageId)).limit(1);
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, job.heartbeatRunId)).limit(1);
+    if (!session || !agent || !userMessage || !run) throw new Error('chat_job_identity_missing');
+    const [existingReply] = await db.select().from(chatMessages).where(eq(chatMessages.id, job.responseMessageId)).limit(1);
+    if (existingReply) {
+      const metadata = existingReply.metadata as Record<string, unknown> | null;
+      // A process may exit after saving a reply but before marking the job done.
+      // Never dispatch again or replay chat actions in that window.
+      await projectChatJob(job, async () => {
+        if (metadata?.chatActionsPending) await db.insert(chatMessages).values({ id: job.id, sessionId: job.sessionId, companyId: job.companyId, agentId: job.agentId, userId: job.userId, authorType: 'system', body: 'This reply was recovered after an interruption. Its proposed Kanban updates may be incomplete. Review the board before requesting further changes; the updates were not replayed.', metadata: { error: 'chat_actions_recovery_required', runId: run.id } }).onConflictDoNothing();
+        if (typeof metadata?.sessionId === 'string') await db.update(chatSessions).set({ agentSessionId: metadata.sessionId, updatedAt: new Date() }).where(eq(chatSessions.id, session.id));
+      }, acknowledge);
+    } else if (!userRow || !await chatUserStillAuthorized({ id: userRow.id, email: userRow.email, role: userRow.role ?? 'viewer' }, session.companyId) || agent.deletedAt || agent.isActive === false || agent.adapterType !== 'a2a') {
+      await projectChatJob(job, async () => {
+        await db.insert(chatMessages).values({ id: job.responseMessageId, sessionId: job.sessionId, companyId: job.companyId, agentId: job.agentId, userId: job.userId, authorType: 'system', body: 'Agent chat stopped: operator access or agent availability changed.', metadata: { error: 'chat_authority_changed', runId: run.id } });
+      }, acknowledge);
+    } else {
+      await performChatReply(session, agent, company, { id: userRow.id, email: userRow.email, role: userRow.role ?? 'viewer' }, userMessage, run, undefined, job, acknowledge);
+    }
+  }, error => app.log.error({ err: error }, 'Chat job worker failed; durable lease will permit recovery'));
+  app.addHook('onReady', async () => { worker.wake(); });
+  app.addHook('onClose', async () => { worker.stop(); });
+
+  const readChatJobs = async (request: FastifyRequest, reply: FastifyReply) => {
+    const params = z.object({ id: z.string().uuid(), jobId: z.string().uuid().optional() }).parse(request.params);
+    const [session] = await db.select().from(chatSessions).where(eq(chatSessions.id, params.id)).limit(1);
+    if (!session) return reply.code(404).send({ error: 'chat_session_not_found' });
+    if (!await requireCompanyRole(request, reply, session.companyId, 'viewer')) return reply;
+    const rows = await db.select().from(chatJobs).where(and(eq(chatJobs.sessionId, session.id), params.jobId ? eq(chatJobs.id, params.jobId) : undefined)).orderBy(desc(chatJobs.createdAt)).limit(params.jobId ? 1 : 20);
+    if (params.jobId) return rows[0] ? publicChatJob(rows[0]) : reply.code(404).send({ error: 'chat_job_not_found' });
+    return rows.map(publicChatJob);
+  };
+  app.get('/api/chat/sessions/:id/jobs', readChatJobs);
+  app.get('/api/chat/sessions/:id/jobs/:jobId', readChatJobs);
   app.get('/api/chat/sessions', async (request, reply) => {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = z.object({ companyId: optionalReadId, agentId: optionalReadId, projectId: optionalReadProject, limit: readLimit(100, 300) }).parse(request.query);
@@ -286,6 +549,16 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     const [agent] = await db.select().from(agents).where(and(eq(agents.id, session.agentId), isNull(agents.deletedAt))).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     const [company] = await db.select().from(companies).where(eq(companies.id, session.companyId)).limit(1);
+
+    if (agent.adapterType === 'a2a') {
+      if (agent.isActive === false) return reply.code(409).send({ error: 'agent_paused' });
+      if (!await budgetOk(agent)) return reply.code(409).send({ error: 'agent_budget_exceeded' });
+      const admitted = await enqueueChatJob(session, user.id, input.body);
+      if ('error' in admitted) return reply.code(409).send(admitted);
+      publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: admitted.userMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'user', agentId: session.agentId } });
+      worker.wake();
+      return reply.code(202).send(admitted);
+    }
 
     const now = new Date();
     const [userMessage] = await db.insert(chatMessages).values({
@@ -372,198 +645,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(500).send({ error: 'heartbeat_run_create_failed' });
     }
 
-    try {
-      publishLiveEvent({
-        type: 'chat.reply.started',
-        companyId: session.companyId,
-        entityType: 'chat_session',
-        entityId: session.id,
-        sessionId: session.id,
-        projectId: session.projectId,
-        data: { agentId: agent.id, runId: run.id },
-      });
-      const adapter = getAdapter(agent.adapterType ?? 'hermes-ssh');
-      const adapterSession = supportsScopedDirectChatAdapterSession(agent.adapterType)
-        ? await findAdapterSession({
-          companyId: session.companyId,
-          agentId: agent.id,
-          runtimeId: agent.runtimeId,
-          adapterType: agent.adapterType,
-          scopeType: 'chat',
-          scopeId: session.id,
-          kind: 'chat',
-        })
-        : null;
-      const existingChatSessionId = adapterSession?.adapterSessionId ?? session.agentSessionId ?? null;
-      const handOffContextToAdapter = Boolean(existingChatSessionId);
-      const recentLimit = handOffContextToAdapter ? DIRECT_CHAT_CONTINUATION_MESSAGE_LIMIT : DIRECT_CHAT_BOOTSTRAP_MESSAGE_LIMIT;
-      const recent = await db.select().from(chatMessages).where(eq(chatMessages.sessionId, session.id)).orderBy(desc(chatMessages.createdAt)).limit(recentLimit);
-      const history = recent.reverse();
-      const kanbanContext = handOffContextToAdapter ? '' : await buildCompanyKanbanContext(session.companyId, {
-        focusAgentId: agent.id,
-        projectId: session.projectId ?? null,
-        budgetChars: 20_000,
-        includeGoals: false,
-        includeInvocationPositionPrompt: false,
-      });
-      // Standing context is built on every turn but injected only when it is
-      // new to this session: once at bootstrap, and again whenever the company
-      // mission, goals, project config, or position prompt actually change.
-      // The Kanban board snapshot is deliberately not part of the hash — it
-      // moves constantly, and the card index below already keeps it current.
-      const standingContext = await buildDirectChatGoalContext(session.companyId, agent, session.projectId);
-      const standingContextHash = contextHash(standingContext);
-      const contextStale = session.bootstrapContextHash !== null && session.bootstrapContextHash !== standingContextHash;
-      const goalContext = handOffContextToAdapter ? '' : standingContext;
-      const refreshedContext = handOffContextToAdapter && contextStale ? standingContext : '';
-      const cardIndex = handOffContextToAdapter ? await buildChatCardIndex(session.companyId, session.projectId ?? null) : '';
-      // Cross-surface digest: injected at bootstrap, and again on a
-      // continuation only when its hash moved — i.e. when the agent's world
-      // outside this chat (cards, reviews, its own notes) actually changed.
-      const agentDigest = await buildAgentDigest(agent.id, session.companyId);
-      const digestStale = session.digestHash !== null && session.digestHash !== agentDigest.hash;
-      const digestForPrompt = handOffContextToAdapter ? (digestStale ? agentDigest.text : '') : agentDigest.text;
-      const prompt = buildChatPrompt(company, agent, history, kanbanContext, goalContext, handOffContextToAdapter, cardIndex, refreshedContext, digestForPrompt);
-      const contextMode = handOffContextToAdapter
-        ? refreshedContext || digestForPrompt ? 'adapter_session_continuation_refresh' : 'adapter_session_continuation'
-        : 'full_bootstrap';
-      const executionAgent = await buildExecutionAgent(agent, existingChatSessionId);
-      const chatTask = { id: `chat-${session.id}`, title: session.title, body: prompt, timeoutSeconds: await readChatTaskTimeoutSeconds(), kind: 'chat' as const };
-      await recordPromptLog({
-        companyId: session.companyId,
-        agentId: agent.id,
-        projectId: session.projectId,
-        heartbeatRunId: run.id,
-        chatSessionId: session.id,
-        source: 'chat',
-        adapterType: agent.adapterType ?? 'hermes-ssh',
-        title: session.title,
-        prompt: promptSnapshotForAdapter(executionAgent, chatTask),
-        metadata: { adapterSessionId: existingChatSessionId, userMessageId: userMessage.id, megacorpsPromptChars: prompt.length, contextMode, standingContextHash, chatHistoryMessages: history.length },
-      });
-      // Stream partial output to the requesting user only (targeted live event);
-      // throttled so a chatty adapter cannot flood the socket.
-      const sanitizeOutput = await companyOutputSanitizer(session.companyId);
-      let partialBuffer = '';
-      let lastPartialSentAt = 0;
-      const PARTIAL_THROTTLE_MS = 700;
-      const PARTIAL_MAX_CHARS = 12_000;
-      const publishPartial = (chunk: string) => {
-        partialBuffer = `${partialBuffer}${chunk}`.slice(-PARTIAL_MAX_CHARS);
-        const now = Date.now();
-        if (now - lastPartialSentAt < PARTIAL_THROTTLE_MS) return;
-        lastPartialSentAt = now;
-        publishLiveEvent({
-          type: 'chat.reply.partial',
-          companyId: session.companyId,
-          userId: user.id,
-          entityType: 'chat_session',
-          entityId: session.id,
-          sessionId: session.id,
-          projectId: session.projectId,
-          data: { agentId: agent.id, runId: run.id, text: stripHermesSessionMetadata(sanitizeOutput.partial(partialBuffer)) },
-        });
-      };
-      const result = sanitizeOutput(await executeUsage({ companyId: session.companyId, agentId: agent.id, projectId: session.projectId, heartbeatRunId: run.id, runtimeId: agent.runtimeId, attemptKey: attemptKey({ heartbeatRunId: run.id }), source: 'chat' }, () => adapter.dispatch(executionAgent, chatTask, { onOutput: publishPartial }), { timeoutSeconds: chatTask.timeoutSeconds }));
-      if (!result.success) throw new Error(result.output || 'agent_chat_failed');
-      if (supportsScopedDirectChatAdapterSession(agent.adapterType)) {
-        await rememberAdapterSession({
-          companyId: session.companyId,
-          agentId: agent.id,
-          runtimeId: agent.runtimeId,
-          adapterType: agent.adapterType ?? 'hermes-ssh',
-          scopeType: 'chat',
-          scopeId: session.id,
-          kind: 'chat',
-          adapterSessionId: result.sessionId,
-          lastTurnId: result.turnId ?? null,
-          metadata: { heartbeatRunId: run.id },
-        });
-      }
-
-      const overBudget = (await usageBudgetState(agent)).blocked;
-      const monthlyExceeded = overBudget;
-      const taskExceeded = false;
-      await db.update(agents).set({
-        isBusy: false,
-      }).where(eq(agents.id, agent.id));
-      await db.update(heartbeatRuns).set({
-        status: 'success',
-        completedAt: new Date(),
-        durationSeconds: result.durationSeconds,
-        outputTokens: result.tokensUsed,
-        costUsd: result.costUsd.toString(),
-      }).where(eq(heartbeatRuns.id, run.id));
-      const [agentMessage] = await db.insert(chatMessages).values({
-        sessionId: session.id,
-        companyId: session.companyId,
-        agentId: session.agentId,
-        authorType: 'agent',
-        body: result.output,
-        metadata: { runId: run.id, adapterType: agent.adapterType, sessionId: result.sessionId, tokensUsed: result.tokensUsed, overBudget },
-        costUsd: result.costUsd.toString(),
-        durationSeconds: result.durationSeconds,
-      }).returning();
-      const [updatedSession] = await db.update(chatSessions).set({
-        agentSessionId: result.sessionId,
-        // Only record the hashes once the turn actually reached the agent, so
-        // a failed run does not mark stale context as delivered.
-        bootstrapContextHash: standingContextHash,
-        digestHash: agentDigest.hash,
-        updatedAt: new Date(),
-      }).where(eq(chatSessions.id, session.id)).returning();
-      await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: overBudget ? 'chat.budget_hard_stop' : 'chat.reply_received', sessionId: session.id, details: { runId: run.id, costUsd: result.costUsd, overBudget, monthlyExceeded, taskExceeded } });
-      if (agentMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: agentMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'agent', agentId: session.agentId, runId: run.id } });
-
-      // The agent cannot reach the board itself from a chat turn, so a
-      // megacorps-chat-actions block in its reply is applied here on the
-      // chatting user's authority. Failures are reported back into the thread
-      // rather than thrown: the reply itself is already saved and valid.
-      const workItems = extractChatWorkItems(result.output);
-      let workItemMessage: ChatMessageRow | undefined;
-      if (workItems) {
-        const body = 'error' in workItems
-          ? `The agent proposed Kanban updates but the block could not be read: ${workItems.error}`
-          : formatChatWorkItemOutcomes(await applyChatWorkItems({
-            companyId: session.companyId,
-            projectId: session.projectId ?? null,
-            chatSessionId: session.id,
-            user,
-            agentId: agent.id,
-            agentName: agent.name,
-          }, workItems.actions));
-        [workItemMessage] = await db.insert(chatMessages).values({
-          sessionId: session.id,
-          companyId: session.companyId,
-          agentId: session.agentId,
-          userId: user.id,
-          authorType: 'system',
-          body,
-          metadata: { runId: run.id, chatActions: true },
-        }).returning();
-        if (workItemMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: workItemMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'system', agentId: session.agentId, runId: run.id } });
-      }
-
-      publishLiveEvent({ type: 'chat.reply.finished', companyId: session.companyId, entityType: 'chat_session', entityId: session.id, sessionId: session.id, projectId: session.projectId, data: { agentId: agent.id, runId: run.id, status: 'success' } });
-      return { session: updatedSession, userMessage, agentMessage, ...(workItemMessage ? { workItemMessage } : {}) };
-    } catch (error) {
-      const message = await sanitizeCompanyOutput(session.companyId, error instanceof Error ? error.message : 'agent_chat_failed');
-      await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
-      await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
-      const [systemMessage] = await db.insert(chatMessages).values({
-        sessionId: session.id,
-        companyId: session.companyId,
-        agentId: session.agentId,
-        userId: user.id,
-        authorType: 'system',
-        body: `Agent chat failed: ${message}`,
-        metadata: { runId: run.id, error: message },
-      }).returning();
-      await addChatActivity({ companyId: session.companyId, agentId: agent.id, userId: user.id, action: 'chat.failed', sessionId: session.id, details: { runId: run.id, error: message } });
-      if (systemMessage) publishLiveEvent({ type: 'chat.message.created', companyId: session.companyId, entityType: 'chat_message', entityId: systemMessage.id, sessionId: session.id, projectId: session.projectId, data: { authorType: 'system', agentId: session.agentId, runId: run.id, error: message } });
-      publishLiveEvent({ type: 'chat.reply.finished', companyId: session.companyId, entityType: 'chat_session', entityId: session.id, sessionId: session.id, projectId: session.projectId, data: { agentId: agent.id, runId: run.id, status: 'failed', error: message } });
-      return reply.code(502).send({ error: message, userMessage, systemMessage });
-    }
+    return performChatReply(session, agent, company, user, userMessage, run, reply);
   });
 }
 

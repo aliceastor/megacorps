@@ -6,6 +6,7 @@ import { notify } from './notifications.ts';
 import { publishLiveEvent } from './live.ts';
 import { completionCondition } from './completion-guard.ts';
 import { requestCardRecovery } from './card-recovery.ts';
+import { acknowledgeA2aExecution } from './a2a-executions.ts';
 
 export type RetryKind = 'review' | 'message' | 'message_review';
 export type RunRetryState = Partial<Record<RetryKind, { failures: number; nextRunAt: string | null }>>;
@@ -68,6 +69,7 @@ export async function completeRetryableRun(runId: string, input: RunCompletion):
       durationSeconds: input.durationSeconds, completedAt: now, updatedAt: now,
       ...(input.releaseLock ? { lockedBy: null, lockedAt: null } : {}),
     }).where(and(eq(taskRuns.id, runId), inArray(taskRuns.status, ['queued', 'running']))).returning();
+    if (finished) await acknowledgeA2aExecution(`task-run:${runId}`, tx);
     if (!finished || input.status === 'cancelled' || input.preserveCard) return null;
     const [mergeInFlight] = await tx.select().from(mergeIntents).where(and(eq(mergeIntents.cardId, card.id), inArray(mergeIntents.state, ['in_flight', 'accepted', 'uncertain']))).limit(1);
     // parkForMerge may accept the external request before the original review

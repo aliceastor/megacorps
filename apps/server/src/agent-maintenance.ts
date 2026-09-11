@@ -1,4 +1,6 @@
 import { and, desc, eq, gt, inArray, isNotNull, isNull, sql as drizzleSql } from 'drizzle-orm';
+import { acknowledgeA2aExecution } from './a2a-executions.ts';
+import { a2aExecutionScope } from './a2a-execution-scope.ts';
 import type { FastifyInstance } from 'fastify';
 import { getAdapter } from './adapters/registry.ts';
 import { db } from './db/client.ts';
@@ -207,7 +209,7 @@ export async function runAgentMaintenance(app: FastifyInstance, agent: AgentRow,
     // Fresh adapter session on purpose: cross-task continuity lives in the
     // agent's own memory files, not in a resumed session.
     const executionAgent = await buildExecutionAgent(agent, null);
-    const task = { id: `maintenance-${agent.id}`, title: 'Shift-end memory consolidation', body: prompt, timeoutSeconds, kind: 'maintenance' as const };
+    const task = { id: `maintenance-${agent.id}`, title: 'Shift-end memory consolidation', body: prompt, timeoutSeconds, kind: 'maintenance' as const, executionKey: attemptKey({ heartbeatRunId: run.id }) };
     await recordPromptLog({
       companyId: agent.companyId,
       agentId: agent.id,
@@ -219,20 +221,23 @@ export async function runAgentMaintenance(app: FastifyInstance, agent: AgentRow,
       metadata: { trigger: options.source, since: since?.toISOString() ?? null },
     });
     const adapter = getAdapter(agent.adapterType ?? 'hermes-ssh');
-    const result = await executeUsage({ companyId: agent.companyId, agentId: agent.id, heartbeatRunId: run.id, runtimeId: agent.runtimeId, attemptKey: attemptKey({ heartbeatRunId: run.id }), source: 'maintenance' }, () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds });
+    const result = await executeUsage({ companyId: agent.companyId, agentId: agent.id, heartbeatRunId: run.id, runtimeId: agent.runtimeId, attemptKey: attemptKey({ heartbeatRunId: run.id }), source: 'maintenance' }, () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds, a2aScope: a2aExecutionScope(agent.id, task) });
     if (!result.success) throw new Error(result.output || 'maintenance_run_failed');
 
     const overBudget = (await usageBudgetState(agent)).blocked;
     await db.update(agents).set({
       isBusy: false,
     }).where(eq(agents.id, agent.id));
-    await db.update(heartbeatRuns).set({
-      status: 'success',
-      completedAt: new Date(),
-      durationSeconds: result.durationSeconds,
-      outputTokens: result.tokensUsed,
-      costUsd: result.costUsd.toString(),
-    }).where(eq(heartbeatRuns.id, run.id));
+    await db.transaction(async tx => {
+      await tx.update(heartbeatRuns).set({
+        status: 'success',
+        completedAt: new Date(),
+        durationSeconds: result.durationSeconds,
+        outputTokens: result.tokensUsed,
+        costUsd: result.costUsd.toString(),
+      }).where(eq(heartbeatRuns.id, run.id));
+      await acknowledgeA2aExecution(attemptKey({ heartbeatRunId: run.id }), tx);
+    });
     await db.insert(activityLog).values({
       companyId: agent.companyId,
       actorType: 'agent',
@@ -248,7 +253,10 @@ export async function runAgentMaintenance(app: FastifyInstance, agent: AgentRow,
   } catch (error) {
     const message = error instanceof Error ? error.message : 'maintenance_run_failed';
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, agent.id));
-    await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
+    await db.transaction(async tx => {
+      await tx.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: message }).where(eq(heartbeatRuns.id, run.id));
+      await acknowledgeA2aExecution(attemptKey({ heartbeatRunId: run.id }), tx);
+    });
     await db.insert(activityLog).values({
       companyId: agent.companyId,
       actorType: 'agent',

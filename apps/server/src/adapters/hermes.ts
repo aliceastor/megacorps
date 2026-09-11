@@ -2,7 +2,7 @@ import { unknownUsage, type UsageFacts } from '../usage-facts.ts';
 import { currentUsageAttempt } from '../usage-context.ts';
 import { agentReportGuidance, type ReportingMode } from '../agent-report-guidance.ts';
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
-export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' | 'maintenance'; taskRunId?: string | null; reportingMode?: ReportingMode; informationalOnly?: boolean };
+export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' | 'maintenance'; taskRunId?: string | null; executionKey?: string; reportingMode?: ReportingMode; informationalOnly?: boolean };
 export type TaskResult = {
   success: boolean;
   output: string;

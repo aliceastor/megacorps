@@ -1,4 +1,6 @@
 import { sealDeliveryAcceptance } from './delivery-acceptance.ts';
+import { a2aExecutionScope } from './a2a-execution-scope.ts';
+import { isA2aTaskRunLeaseLost } from './a2a-task-recovery.ts';
 import { buildCommonCompanyContext } from './company-context.ts';
 import { managedMergePolicyForCard } from './managed-project-policy.ts';
 // Blind review rounds (company pipeline design §17): the database side of the
@@ -524,7 +526,7 @@ export async function reviewPanelSlot(cardId: string, options: { taskRunId?: str
       prompt: promptSnapshotForAdapter(executionAgent, task),
       metadata: { adapterSessionId, roundId: round.id, round: round.round, kind: round.kind, megacorpsPromptChars: prompt.length, contextMode: adapterSessionId ? 'adapter_session_delta' : 'full_bootstrap' },
     });
-    const result = await executeUsage(cardUsageScope(card, reviewer, run.id, taskRun.id, round.kind === 'verify' ? 'verify' : 'panel_review'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds });
+    const result = await executeUsage(cardUsageScope(card, reviewer, run.id, taskRun.id, round.kind === 'verify' ? 'verify' : 'panel_review'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds, a2aScope: a2aExecutionScope(reviewer.id, task) });
     const [latestRun] = await db.select().from(taskRuns).where(eq(taskRuns.id, taskRun.id)).limit(1);
     if (latestRun && latestRun.status !== 'running') {
       // The webhook answered this slot (or the round closed) while the adapter ran.
@@ -551,6 +553,7 @@ export async function reviewPanelSlot(cardId: string, options: { taskRunId?: str
     }
     return card;
   } catch (error) {
+    if (isA2aTaskRunLeaseLost(error)) throw error;
     if (await deferDeniedUsage(cardUsageScope(card, reviewer, run.id, taskRun.id, round.kind === 'verify' ? 'verify' : 'panel_review'), error)) return card;
     const message = error instanceof Error ? error.message : 'panel_review_failed';
     await db.update(agents).set({ isBusy: false }).where(eq(agents.id, reviewer.id));

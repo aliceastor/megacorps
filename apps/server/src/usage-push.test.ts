@@ -10,6 +10,9 @@ import { unknownUsage } from './usage-facts.ts';
 import { pythonSortedJson, parseA2aPushPayload } from './a2a-client.ts';
 import { withUsageAttempt } from './usage-context.ts';
 import { createA2aDispatch } from './adapters/a2a.ts';
+import { a2aTestDeps } from './test-support/a2a-fixture.ts';
+
+const testDispatch = (deps: Parameters<typeof createA2aDispatch>[0] = {}) => createA2aDispatch({ ...deps, ...a2aTestDeps(deps.fetchImpl) });
 
 test('signed A2A working token usage keeps exposure until the held provider operation returns', async t => {
   const company: any = { id: randomUUID() }, agent: any = { id: randomUUID(), companyId: company.id, isActive: true, adapterConfig: { a2aPushSecret: 'synthetic-working-secret' } };
@@ -43,7 +46,7 @@ test('signed A2A working token usage keeps exposure until the held provider oper
 
 test('A2A callback URL carries logical attempt identity independently of reused context', async () => {
   const urls: string[] = [];
-  const dispatch = createA2aDispatch({ fetchImpl: async (_url, init) => {
+  const dispatch = testDispatch({ fetchImpl: async (_url, init) => {
     urls.push(JSON.parse(String(init?.body)).params.configuration.taskPushNotificationConfig.url);
     return new Response(JSON.stringify({ result: { task: { id: 'turn', contextId: 'same-session', status: { state: 'completed' } } } }));
   } });
@@ -109,7 +112,7 @@ test('unsigned adapter callbacks retain context hints without settling ledger ac
   const scope = { companyId: company.id, agentId: agent.id, cardId: card.id, attemptKey: randomUUID(), source: 'dispatch' };
   await admitUsage(scope);
   let callback = '';
-  const dispatch = createA2aDispatch({ fetchImpl: async (_url, init) => {
+  const dispatch = testDispatch({ fetchImpl: async (_url, init) => {
     callback = JSON.parse(String(init?.body)).params.configuration.taskPushNotificationConfig.url;
     return new Response(JSON.stringify({ result: { task: { id: 'turn', contextId: 'unsigned-context', status: { state: 'completed' } } } }));
   } });
