@@ -23,4 +23,11 @@ test('PostgreSQL serializes A2A submission ownership and durable aliases across 
   await acknowledgeA2aExecution('three');
   assert.equal((await createA2aExecutionStore(agent!.id).begin(make('five'))).created, true);
   assert.equal((await createA2aExecutionStore(agent!.id).begin(make('one'))).created, false);
+  const { sql } = await import('./db/client.ts');
+  const { companyDeletionInventory, deletionBlockers } = await import('./company-inventory.ts');
+  const inventory = await companyDeletionInventory(sql, company!.id);
+  assert.equal(inventory.a2a_executions?.count, 2);
+  assert.equal(inventory.a2a_execution_aliases?.count, 5);
+  assert.ok(inventory.a2a_executions?.ids.includes(original.key));
+  assert.equal(deletionBlockers(inventory).a2a_execution_aliases, 5);
 });

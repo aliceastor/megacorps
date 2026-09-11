@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { collectCompanyRows, deletionBlockers } from './company-inventory.ts';
+import { collectCompanyRows, deletionBlockers, companyInventoryCatalog } from './company-inventory.ts';
 
 test('company inventory follows every direct/indirect/logical link including archived and foreign-company rows', async () => {
   const records: Record<string, any[]> = {
@@ -46,4 +46,18 @@ test('catalog retains FK link tables identified by composite primary keys', asyn
     return [{name:'test_schema'}];
   }});
   for(const table of ['card_dependencies','agent_tool_bindings','card_tool_bindings','notification_recipients'])assert.ok(catalog.tables.includes(table),table);
+});
+
+test('catalog follows a durable journal text primary key without rejecting all companies', async () => {
+  const tables = { companies: ['id'], a2a_executions: ['key', 'company_id'], a2a_execution_aliases: ['key', 'execution_key'] };
+  const catalog = await companyInventoryCatalog({ unsafe: async query => {
+    if (query.includes('pg_constraint')) return [
+      { table_name: 'a2a_executions', column_name: 'company_id', target_name: 'companies', target_column: 'id', key_count: 1 },
+      { table_name: 'a2a_execution_aliases', column_name: 'execution_key', target_name: 'a2a_executions', target_column: 'key', key_count: 1 },
+    ];
+    if (query.includes('pg_index')) return Object.keys(tables).map(table_name => ({ table_name, column_name: table_name === 'companies' ? 'id' : 'key' }));
+    if (query.includes('pg_class')) return Object.entries(tables).flatMap(([table_name, columns]) => columns.map(column_name => ({ table_name, column_name })));
+    return [{ name: 'test_schema' }];
+  } });
+  assert.deepEqual(catalog.tables, ['a2a_execution_aliases', 'a2a_executions', 'companies']);
 });

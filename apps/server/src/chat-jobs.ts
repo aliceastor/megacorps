@@ -30,7 +30,9 @@ export async function claimChatJob(now = new Date(), leaseMs = 30_000): Promise<
   return db.transaction(async tx => {
     // Row locks fence concurrent consumers. The persisted lease permits recovery
     // after a process exits; the remote execution key remains the user message.
-    const candidates = await tx.select().from(chatJobs).where(and(inArray(chatJobs.status, ['queued', 'running']), sql`(status = 'queued' OR lease_expires_at IS NULL OR lease_expires_at <= ${now})`)).orderBy(asc(chatJobs.createdAt)).for('update', { skipLocked: true }).limit(100);
+    // Raw SQL parameters do not use Drizzle's timestamp column encoder.
+    // postgres-js receives an ISO string, never an unencoded Date object.
+    const candidates = await tx.select().from(chatJobs).where(and(inArray(chatJobs.status, ['queued', 'running']), sql`(status = 'queued' OR lease_expires_at IS NULL OR lease_expires_at <= ${now.toISOString()})`)).orderBy(asc(chatJobs.createdAt)).for('update', { skipLocked: true }).limit(100);
     const job = candidates.find(row => row.status === 'queued' || !row.leaseExpiresAt || row.leaseExpiresAt <= now);
     if (!job) return null;
     const [claimed] = await tx.update(chatJobs).set({ status: 'running', leaseToken: randomUUID(), leaseExpiresAt: new Date(now.getTime() + leaseMs), updatedAt: now }).where(eq(chatJobs.id, job.id)).returning();

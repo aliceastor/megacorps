@@ -156,3 +156,30 @@ test('durable chat jobs follow parent retention and do not block retirement', as
   assert.ok(keys.every(key => key.onDelete === 'cascade'), 'job foreign keys must cascade when their retained parent is deleted');
   assert.equal((chatJobsMigrationSql.match(/REFERENCES \w+\(id\) ON DELETE CASCADE/g) ?? []).length, keys.length);
 });
+
+test('claimChatJob encodes its lease deadline as a driver-safe timestamp parameter', async t => {
+  const { db } = await import('./db/client.ts');
+  const { PgDialect } = await import('drizzle-orm/pg-core');
+  memoryDb(t, [[chatJobs, []]]);
+  const select = db.select.bind(db);
+  const params: unknown[] = [];
+  t.mock.method(db, 'select', (() => {
+    const query = select();
+    const from = query.from.bind(query);
+    query.from = ((table: any) => {
+      const chain: any = from(table);
+      const where = chain.where.bind(chain);
+      chain.where = (condition: any) => {
+        if (table === chatJobs) params.push(...new PgDialect().sqlToQuery(condition).params);
+        return where(condition);
+      };
+      return chain;
+    }) as any;
+    return query;
+  }) as any);
+  const now = new Date('2026-09-11T01:28:32.000Z');
+  await claimChatJob(now);
+  assert.ok(params.length > 0, 'capture the production claim predicate');
+  assert.ok(!params.some(value => value instanceof Date), 'raw Date bypasses Drizzle column encoding and cannot enter postgres-js timestamp serialization');
+  assert.ok(params.includes(now.toISOString()));
+});

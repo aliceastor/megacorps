@@ -64,7 +64,8 @@ export async function companyInventoryCatalog(tx: InventorySql) {
   for(const key of keys) { const list=primaryKeys.get(key.table_name)??[];list.push(key.column_name);primaryKeys.set(key.table_name,list); }
   const rows = await tx.unsafe(`SELECT child.relname AS table_name, ca.attname AS column_name, parent.relname AS target_name, pa.attname AS target_column, cardinality(f.conkey) AS key_count FROM pg_constraint f JOIN pg_class child ON child.oid=f.conrelid JOIN pg_class parent ON parent.oid=f.confrelid JOIN pg_namespace n ON n.oid=child.relnamespace JOIN pg_namespace pn ON pn.oid=parent.relnamespace JOIN pg_attribute ca ON ca.attrelid=child.oid AND ca.attnum=f.conkey[1] JOIN pg_attribute pa ON pa.attrelid=parent.oid AND pa.attnum=f.confkey[1] WHERE f.contype='f' AND n.nspname=current_schema() AND pn.nspname=current_schema()`);
   const links: CompanyLink[] = rows.map(row => {
-    if (Number(row.key_count) !== 1 || row.target_column !== 'id' || !primaryKeys.get(row.table_name)?.length) throw new Error('company_inventory_unsupported_reference');
+    const targetKeys = primaryKeys.get(row.target_name);
+    if (Number(row.key_count) !== 1 || targetKeys?.length !== 1 || row.target_column !== targetKeys[0] || !primaryKeys.get(row.table_name)?.length) throw new Error('company_inventory_unsupported_reference');
     return { table: row.table_name, column: row.column_name, target: row.target_name };
   });
   links.push(...logicalLinks.filter(link => fields.get(link.table)?.has(link.column) && fields.has(link.target)));
@@ -82,7 +83,7 @@ export async function companyDeletionInventory(tx: InventorySql, companyId: stri
     const column = quote(link.column);
     const predicate = link.array ? `${column}::text[] && ARRAY(SELECT jsonb_array_elements_text($1::jsonb))` : `${column}::text IN (SELECT jsonb_array_elements_text($1::jsonb))`;
     const keys=source.primaryKeys.get(link.table)!;
-    const identity=keys.length===1&&keys[0]==='id'?'id::text':`jsonb_build_array(${keys.map(key=>`${quote(key)}::text`).join(',')})::text`;
+    const identity=keys.length===1?`${quote(keys[0]!)}::text`:`jsonb_build_array(${keys.map(key=>`${quote(key)}::text`).join(',')})::text`;
     return tx.unsafe(`SELECT ${identity} AS id, ${source.fields.get(link.table)?.has('company_id') ? 'company_id::text' : 'NULL::text AS company_id'} FROM ${quote(source.schema)}.${quote(link.table)} WHERE ${predicate}`, [JSON.stringify(ids)]);
   });
 }
