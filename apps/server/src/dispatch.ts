@@ -3560,7 +3560,8 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       }).where(eq(heartbeatRuns.id, run.id));
       if (options.taskRunId) {
         const [accounting] = await tx.select().from(costEvents).where(eq(costEvents.taskRunId, options.taskRunId)).limit(1);
-        await tx.update(taskRuns).set({ status: 'success', output: result.output, error: null, costUsd: accounting?.costUsd ?? undefined, durationSeconds: result.durationSeconds, completedAt: new Date(), updatedAt: new Date() }).where(and(eq(taskRuns.id, options.taskRunId), inArray(taskRuns.status, ['queued', 'running'])));
+        const [finished] = await tx.update(taskRuns).set({ status: 'success', output: result.output, error: null, costUsd: accounting?.costUsd ?? undefined, durationSeconds: result.durationSeconds, completedAt: new Date(), updatedAt: new Date() }).where(and(eq(taskRuns.id, options.taskRunId), inArray(taskRuns.status, ['queued', 'running']))).returning({ id: taskRuns.id });
+        if (finished) await acknowledgeA2aExecution(`task-run:${options.taskRunId}`, tx);
       }
       return row;
     })).catch(error => { if (error === completionSuperseded) return undefined; throw error; });
