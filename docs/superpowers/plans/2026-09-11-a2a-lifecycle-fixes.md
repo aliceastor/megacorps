@@ -67,7 +67,7 @@ Files: a focused a2a remote-reconciliation module, a2a-executions.ts, adapters/a
 - [x] Run npm run typecheck, npm run test, npm run build; retain logs. PostgreSQL and Chromium run in CI.
 - [x] Push review branch; after full CI green, fast-forward main, push and await Docker jobs. Preserve source SHA evidence.
 - [x] Snapshot production; redeploy stack 42 with existing compose/env; verify SHA, mounts, health, unchanged Hermes. Verified revision e81d507f2d35774ef77f6f192af25005f9ec89d9 on server and web.
-- [ ] Start one fresh small project through normal natural-goal submission. Observe no operator repair; independently verify repo/PR/test outcomes if reached. Stop repeated structural failures with evidence and fix remaining authorized defects rather than claiming success prematurely.
+- [x] Start one fresh small project through normal natural-goal submission. Stock-check completed three cards, review and merge autonomously; merged code passed 18 shipped tests and 10 independent cases. Two output-footer retries and a missing root receipt were identified for the follow-ups below, so the original revision did not pass strict acceptance.
 
 ## Follow-up: observed CLI verifier footer
 
@@ -76,3 +76,14 @@ The fresh stock-check trial produced a valid terminal report followed by a Herme
 - Recognize only the observed complete verifier footer immediately after a terminal answer, with count/line shape checks; never strip arbitrary trailing prose or select an older report.
 - Reproduce using the saved wire offline and synthetic fixtures; preserve normal schema, review and merge gates. No Hermes changes or additional model calls are needed to validate this transport fix.
 - Run focused regression tests, typecheck, CI including Docker, and verify the deployed revision. The active lifecycle remains under observation; an open PR is not completion evidence.
+
+## Follow-up: finish root acceptance after the successful dispatch
+
+The stock-check project autonomously completed all three cards and merged its reviewed artifact. Strict final verification found the root receipt absent. Main dispatch had already atomically marked the original task run successful and acknowledged its journal, then called `completeTaskRun` again. The real worker lease rejects that second call because the run is no longer running, interrupting receipt sealing. Existing child merge and manager review receipts remain valid.
+
+- Remove the duplicate completion call without relaxing worker authority. Exercise the main dispatch under a real A2A task-run lease and require the inherited receipt, released journal, and fresh next invocation.
+- Recover already affected root receipts automatically through a bounded, conservative sweep. Only unchanged completed roots with no receipt, an original same-actor successful dispatch within five seconds of card completion, matching inactive terminal A2A evidence, an explicit completed final report, no later run, and currently accepted required descendants qualify.
+- Recheck eligibility under canonical transaction locks; preserve the full timestamp, card assignment and gate-version fences. Recompute current acceptance, write only its receipt and an audit event, and never submit model work, modify delivery content, create approval, or merge anything.
+- A receipt deliberately revoked by a later gate change must never qualify, even after descendants become valid again. Require the root, successful run and inactive journal to retain the same original PostgreSQL row-version transaction (`xmin`), rechecked under locks and in the write fence. Bound eligibility to recent completion and transaction age, reject system transaction IDs, and disable this historical recovery after transaction-ID wrap; this is a conservative repair of the original atomic completion boundary, not general resealing.
+- Negative tests must reject edited cards, newer or active runs, missing/pending gates, ambiguous output, wrong/active journals and absent accepted children. A repeat sweep must do nothing after success.
+- Verify the existing project's receipt is repaired by the deployed platform itself. Report the original receipt gap and deployment-assisted recovery explicitly; do not describe the original version as having passed the strict first-run check.

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { agentRemoteWork, refreshAgentRemoteCapacity, sweepA2aRemoteReconciliation } from './a2a-remote-reconciliation.ts';
+import { sweepMissingA2aDeliveryReceipts } from './a2a-delivery-recovery.ts';
 import { a2aExecutionScope } from './a2a-execution-scope.ts';
 import { acknowledgeA2aExecution } from './a2a-executions.ts';
 import { assertA2aTaskRunOwner, isA2aTaskRunLeaseLost, claimRecoverableA2aTaskRun, currentA2aRecoveryRun, withA2aRecoveryRun, withTaskRunWorkerLease } from './a2a-task-recovery.ts';
@@ -3597,7 +3598,6 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     });
     await addCardMessage({ cardId: card.id, agentId: agent.id, action: needsHelpReview && nextStatus === 'needs_review' ? 'agent_escalated' : 'agent_update', body: result.output });
     await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: agent.id, agentId: agent.id, action: childBlock ? 'dispatch.waiting_on_children' : dispatchMergePlan?.disposition === 'blocked' ? 'dispatch.evidence_required' : needsHelpReview && nextStatus === 'needs_review' ? 'dispatch.needs_review' : 'dispatch.completed', entityType: 'card', entityId: card.id, details: { runId: run.id, requestedStatus: nextStatus, nextStatus: effectiveNextStatus, costUsd: result.costUsd, budgetPaused, reviewerId: effectiveReviewerId, escalation: needsHelpReview, topLevelGuidanceAccepted, childBlock } });
-    await completeTaskRun(options.taskRunId, { status: 'success', output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
     if (effectiveNextStatus === 'in_review') {
       if (fixRound) {
@@ -4395,6 +4395,7 @@ export async function runDispatchCronTick(app: FastifyInstance, source: 'loop' |
 
 export function startDispatchLoop(app: FastifyInstance): void {
   const workerTick = () => {
+    void sweepMissingA2aDeliveryReceipts(error => app.log.error({ error }, 'A2A delivery acceptance recovery failed')).catch(error => app.log.error({ error }, 'A2A delivery acceptance recovery failed'));
     if (process.env.TASK_RUN_WORKER_ENABLED !== 'false') void processTaskRunQueue(app);
     else void sweepA2aRemoteReconciliation(error => app.log.error({ error }, 'A2A remote reconciliation failed')).catch(error => app.log.error({ error }, 'A2A remote reconciliation failed'));
   };
