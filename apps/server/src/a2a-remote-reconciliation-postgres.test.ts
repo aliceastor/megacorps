@@ -57,9 +57,12 @@ test('PostgreSQL remote drainage preserves submission fences, claim fairness, an
     const f = await fixture();
     const older = new Date(Date.now() - 60_000);
     for (let index = 0; index < 32; index++) {
-      const [run] = await db.insert(taskRuns).values({ companyId: f.company.id, agentId: f.agent.id, cardId: f.card.id, heartbeatRunId: f.heartbeat.id, kind: 'dispatch', status: 'running' }).returning();
+      const [busyAgent] = await db.insert(agents).values({ companyId: f.company.id, name: `Busy ${index}`, slug: `busy-${index}`, role: 'worker', adapterType: 'a2a' }).returning();
+      const [busyCard] = await db.insert(kanbanCards).values({ companyId: f.company.id, title: `Running ${index}`, body: '', assigneeId: busyAgent!.id, columnStatus: 'in_progress' }).returning();
+      const [busyHeartbeat] = await db.insert(heartbeatRuns).values({ companyId: f.company.id, agentId: busyAgent!.id, cardId: busyCard!.id, source: 'dispatch', status: 'running' }).returning();
+      const [run] = await db.insert(taskRuns).values({ companyId: f.company.id, agentId: busyAgent!.id, cardId: busyCard!.id, heartbeatRunId: busyHeartbeat!.id, kind: 'dispatch', status: 'running' }).returning();
       const key = `task-run:${run!.id}`;
-      await db.insert(a2aExecutions).values({ key, companyId: f.company.id, agentId: f.agent.id, scope: key, active: true, updatedAt: older, record: { ...f.record, key, scope: key } });
+      await db.insert(a2aExecutions).values({ key, companyId: f.company.id, agentId: busyAgent!.id, scope: key, active: true, updatedAt: older, record: { ...f.record, key, scope: key } });
     }
     await db.update(taskRuns).set({ status: 'cancelled' }).where(eq(taskRuns.id, f.run.id));
     await db.update(heartbeatRuns).set({ status: 'cancelled' }).where(eq(heartbeatRuns.id, f.heartbeat.id));
