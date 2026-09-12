@@ -5587,6 +5587,13 @@ button.agent-node-card {
   color: color-mix(in srgb, var(--foreground) 58%, var(--primary));
 }
 
+.company-o-department-edge {
+  stroke: var(--primary);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: .9;
+}
+
 .company-o-legend {
   margin: 0;
   font-size: 13px;
@@ -6627,6 +6634,8 @@ button.card:hover {
 .runtime-details { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 .runtime-details > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .runtime-details[open] > summary { margin-bottom: 8px; }
+.conv-report-raw { min-width: 0; max-width: 100%; }
+.conv-report-raw pre { max-width: 100%; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* Card detail panel v2: the overview zone that sits outside the tabs.
    Whole-panel scrolling; no sticky header in this iteration. Do not touch

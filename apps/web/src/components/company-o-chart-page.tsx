@@ -7,8 +7,8 @@ import { layoutOrgChart } from '@/lib/org-layout';
 import { useLocale } from '@/lib/locale-context';
 
 type Company = { id: string; name: string; slug: string };
-type Department = { id: string; companyId: string; name: string; slug: string };
-type Position = { id: string; companyId: string; name: string; slug: string; rank?: number | null };
+type Department = { id: string; companyId: string; name: string; slug: string; headAgentId?: string | null };
+type Position = { id: string; companyId: string; name: string; slug: string; rank?: number | null; isCompanyBoss?: boolean };
 type Runtime = { id: string; companyId?: string | null; name: string; adapterType: string; config?: Record<string, unknown>; isActive?: boolean };
 type Agent = {
   id: string;
@@ -54,6 +54,7 @@ function MeasuredOrgChart({ agents, departments, positions, selectedId, onSelect
   const layout = useMemo(() => layoutOrgChart({ departments, nodes: agents.map(agent => ({
     id: agent.id, name: agent.name, bossId: agent.bossId, departmentId: agent.departmentId,
     rank: positions.find(position => position.id === agent.positionId)?.rank ?? null,
+    isCompanyBoss: positions.find(position => position.id === agent.positionId)?.isCompanyBoss === true,
     width: sizes[agent.id]?.width ?? cardWidth, height: sizes[agent.id]?.height ?? 128,
   })) }), [agents, departments, positions, sizes, cardWidth]);
 
@@ -85,6 +86,7 @@ function MeasuredOrgChart({ agents, departments, positions, selectedId, onSelect
       {layout.groups.map(group => <div key={group.id} className="company-o-group" data-org-group={group.id} data-members={JSON.stringify(group.memberIds)} style={{ left: group.x, top: group.y, width: group.width, height: group.height }}><h3>{group.name}</h3></div>)}
       <svg className="company-o-edges" width={layout.width} height={layout.height} aria-hidden="true">
         <defs><marker id="org-report-arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 6 4 L 0 8" fill="none" stroke="currentColor" strokeWidth="1.5" /></marker></defs>
+        {layout.departmentEdges.map(edge => <path key={edge.id} className="company-o-department-edge" data-org-department-edge={edge.id} data-source={edge.sourceId} data-target-group={edge.targetGroupId} d={edge.path} fill="none" strokeWidth={edge.strokeWidth} />)}
         {layout.edges.map(edge => <g key={edge.id}>
           <path d={edge.path} fill="none" stroke="var(--card)" strokeWidth="6" />
           <path data-org-edge={edge.id} data-source={edge.sourceId} data-target={edge.targetId} d={edge.path} fill="none" stroke="currentColor" strokeWidth={edge.strokeWidth} markerEnd="url(#org-report-arrow)" />
@@ -94,7 +96,7 @@ function MeasuredOrgChart({ agents, departments, positions, selectedId, onSelect
         const agent = agents.find(a => a.id === node.id)!;
         const position = positions.find(p => p.id === agent.positionId);
         const manager = agents.find(a => a.id === agent.bossId);
-        return <button key={node.id} ref={element => { if (element) cardRefs.current.set(node.id, element); else cardRefs.current.delete(node.id); }} type="button" className={`company-o-card ${selectedId === node.id ? 'active' : ''}`} data-org-agent={node.id} data-rank={node.rank ?? ''} aria-pressed={selectedId === node.id} style={{ left: node.x, top: node.y, width: cardWidth }} onClick={() => onSelect(agent)}>
+        return <button key={node.id} ref={element => { if (element) cardRefs.current.set(node.id, element); else cardRefs.current.delete(node.id); }} type="button" className={`company-o-card ${node.groupId === '__company_leadership__' ? 'company-o-card-leadership' : ''} ${selectedId === node.id ? 'active' : ''}`} data-org-agent={node.id} data-org-group-id={node.groupId} data-rank={node.rank ?? ''} aria-pressed={selectedId === node.id} style={{ left: node.x, top: node.y, width: cardWidth }} onClick={() => onSelect(agent)}>
           <span className="company-o-copy"><span className={`org-agent-dot ${agentStatus(agent)}`} /><span className="company-o-copy-text">
             <b>{agent.name}</b>
             <small>{position?.name ?? 'No position'} · {node.rank == null ? 'Unassigned rank' : `Rank ${node.rank}`}</small>

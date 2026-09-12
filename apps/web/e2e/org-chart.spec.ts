@@ -20,8 +20,13 @@ async function geometry(page: Page) {
       for (let i = 0; i < values.length; i += 2) { const p = new DOMPoint(values[i], values[i + 1]).matrixTransform(matrix); points.push({ x: p.x, y: p.y }); }
       return { id: e.dataset.orgEdge!, sourceId: e.dataset.source!, targetId: e.dataset.target!, path, matrix: { a: matrix.a, b: matrix.b, c: matrix.c, d: matrix.d, e: matrix.e, f: matrix.f }, strokeWidth: parseFloat(getComputedStyle(e).strokeWidth), points };
     });
+    const departmentEdges = [...document.querySelectorAll<SVGPathElement>('path[data-org-department-edge]')].map(e => {
+      const path = e.getAttribute('d')!, matrix = e.getScreenCTM()!, values = path.match(/-?\d+(?:\.\d+)?/g)!.map(Number), points = [];
+      for (let i = 0; i < values.length; i += 2) { const p = new DOMPoint(values[i], values[i + 1]).matrixTransform(matrix); points.push({ x: p.x, y: p.y }); }
+      return { id: e.dataset.orgDepartmentEdge!, sourceId: e.dataset.source!, targetGroupId: e.dataset.targetGroup!, path, points };
+    });
     const scroll = document.querySelector<HTMLElement>('.company-o-scroll')!;
-    return { nodes, groups, edges, documentWidth: document.documentElement.scrollWidth, viewport: innerWidth, sidebarExpanded: document.querySelector('[aria-label="Toggle sidebar"]')?.getAttribute('aria-expanded'), scroll: { left: scroll.scrollLeft, top: scroll.scrollTop, width: scroll.clientWidth, height: scroll.clientHeight, scrollWidth: scroll.scrollWidth, scrollHeight: scroll.scrollHeight }, documentScroll: { x: scrollX, y: scrollY } };
+    return { nodes, groups, edges, departmentEdges, documentWidth: document.documentElement.scrollWidth, viewport: innerWidth, sidebarExpanded: document.querySelector('[aria-label="Toggle sidebar"]')?.getAttribute('aria-expanded'), scroll: { left: scroll.scrollLeft, top: scroll.scrollTop, width: scroll.clientWidth, height: scroll.clientHeight, scrollWidth: scroll.scrollWidth, scrollHeight: scroll.scrollHeight }, documentScroll: { x: scrollX, y: scrollY } };
   });
 }
 
@@ -29,7 +34,19 @@ function audit(g: Awaited<ReturnType<typeof geometry>>) {
   expect(g.documentWidth).toBeLessThanOrEqual(g.viewport);
   expect(new Set(g.nodes.map(n => n.id)).size).toBe(10);
   expect(g.nodes).toHaveLength(10);
-  expect(g.groups).toHaveLength(3);
+  expect(g.groups).toHaveLength(4);
+  const boss = g.nodes.find(n => n.id === 'boss')!;
+  const laneLeft = Math.min(...g.groups.map(group => group.x));
+  const laneRight = Math.max(...g.groups.map(group => group.x + group.width));
+  expect(boss.x + boss.width / 2).toBeCloseTo((laneLeft + laneRight) / 2, 1);
+  expect(g.groups.every(group => group.y >= boss.y + boss.height + 10)).toBe(true);
+  expect(g.groups.find(group => group.id === '__unassigned__')!.memberIds).toEqual(['unassigned']);
+  expect(g.departmentEdges.map(edge => `${edge.sourceId}:${edge.targetGroupId}`).sort()).toEqual(['boss:engineering', 'boss:operations', 'boss:product']);
+  for (const edge of g.departmentEdges) {
+    const group = g.groups.find(candidate => candidate.id === edge.targetGroupId)!;
+    expect(edge.points.at(-1)!.x).toBeCloseTo(group.x + group.width / 2, 1);
+    expect(edge.points.at(-1)!.y).toBeCloseTo(group.y, 1);
+  }
   for (const a of g.nodes) for (const b of g.nodes) {
     if (a.rank != null && b.rank != null) {
       if (a.rank < b.rank) expect(a.y).toBeLessThan(b.y);

@@ -15,7 +15,7 @@ async function layout(input: any): Promise<any> {
 
 const departments = [{ id: 'engineering', name: 'Engineering' }, { id: 'research', name: 'Research' }];
 const nodes = [
-  { id: 'boss', rank: 0 },
+  { id: 'boss', rank: 0, isCompanyBoss: true },
   { id: 'manager', departmentId: 'engineering', rank: 100, bossId: 'boss' },
   { id: 'report', departmentId: 'engineering', rank: 10, bossId: 'manager' },
   { id: 'peer', departmentId: 'engineering', rank: 10, bossId: 'manager' },
@@ -26,6 +26,83 @@ const nodes = [
   { id: 'orphan', departmentId: 'research', rank: 30, bossId: 'missing' },
   { id: 'unassigned', departmentId: 'unknown', rank: null },
 ].map((n, i) => ({ name: `Measured name ${i}`, width: 220 + (i % 3) * 17, height: i === 2 ? 187 : 93 + i * 2, ...n }));
+
+test('company Boss is centered above department lanes while stored reporting edges remain authoritative', async () => {
+  const result = await layout({
+    departments: [
+      { id: 'engineering', name: 'Engineering', headAgentId: 'engineering-head' },
+      { id: 'legacy', name: 'Legacy', headAgentId: 'legacy-head' },
+      { id: 'operations', name: 'Operations' },
+      { id: 'product', name: 'Product', headAgentId: 'product-head' },
+    ],
+    nodes: [
+      { id: 'boss', name: 'Alice Astor', rank: 0, isCompanyBoss: true, width: 264, height: 128 },
+      { id: 'engineering-head', name: 'CTO Vale', departmentId: 'engineering', rank: 10, bossId: 'boss', width: 264, height: 128 },
+      { id: 'legacy-head', name: 'Legacy head', departmentId: 'legacy', rank: 10, bossId: 'missing-manager', width: 264, height: 128 },
+      { id: 'product-head', name: 'David Alden', departmentId: 'product', rank: 10, width: 264, height: 128 },
+    ],
+  });
+  const boss = result.nodes.find((node: any) => node.id === 'boss');
+  const laneLeft = Math.min(...result.groups.map((group: any) => group.x));
+  const laneRight = Math.max(...result.groups.map((group: any) => group.x + group.width));
+  assert.equal(boss.groupId, '__company_leadership__');
+  assert.equal(boss.x + boss.width / 2, (laneLeft + laneRight) / 2);
+  assert.ok(result.groups.every((group: any) => group.y > boss.y + boss.height));
+  assert.deepEqual(result.groups.map((group: any) => group.id), ['engineering', 'legacy', 'operations', 'product']);
+  assert.deepEqual(result.edges.map((edge: any) => `${edge.sourceId}:${edge.targetId}`).sort(), ['boss:engineering-head']);
+  assert.match(result.nodes.find((node: any) => node.id === 'legacy-head').relationshipIssue, /unavailable/i);
+  assert.equal(result.groups.find((group: any) => group.id === 'operations').memberIds.length, 0, 'Empty departments remain visible');
+});
+
+test('company Boss authority is never inferred from name or numeric rank and ordinary unassigned members keep their lane', async () => {
+  const result = await layout({
+    departments: [{ id: 'engineering', name: 'Engineering' }],
+    nodes: [
+      { id: 'named-ceo', name: 'CEO', rank: 0, width: 220, height: 100 },
+      { id: 'unassigned', name: 'Colleague', rank: null, width: 220, height: 100 },
+    ],
+  });
+  const unassigned = result.groups.find((group: any) => group.id === '__unassigned__');
+  assert.deepEqual(unassigned.memberIds.sort(), ['named-ceo', 'unassigned']);
+  assert.ok(result.nodes.every((node: any) => node.groupId === '__unassigned__'));
+});
+
+test('company leadership connects to every real department, including two headless lanes, without inventing agent reporting', async () => {
+  const result = await layout({
+    departments: [
+      { id: 'engineering', name: 'Engineering', headAgentId: 'engineering-head' },
+      { id: 'operations', name: 'Operations' },
+      { id: 'product', name: 'Product' },
+    ],
+    nodes: [
+      { id: 'boss', name: 'Boss', isCompanyBoss: true, rank: 0, width: 220, height: 100 },
+      { id: 'engineering-head', name: 'CTO', departmentId: 'engineering', bossId: 'boss', rank: 10, width: 220, height: 100 },
+      { id: 'product-member', name: 'Product member', departmentId: 'product', rank: 10, width: 220, height: 100 },
+    ],
+  });
+  assert.deepEqual(result.departmentEdges.map((edge: any) => `${edge.sourceId}:${edge.targetGroupId}`).sort(), [
+    'boss:engineering', 'boss:operations', 'boss:product',
+  ]);
+  assert.deepEqual(result.edges.map((edge: any) => `${edge.sourceId}:${edge.targetId}`), ['boss:engineering-head']);
+  for (const edge of result.departmentEdges) {
+    const group = result.groups.find((candidate: any) => candidate.id === edge.targetGroupId);
+    assert.deepEqual(edge.points.at(-1), { x: group.x + group.width / 2, y: group.y });
+  }
+});
+
+test('Boss sharing a department rank routes reporting edges above department cards', async () => {
+  const result = await layout({
+    departments: [{ id: 'engineering', name: 'Engineering' }],
+    nodes: [
+      { id: 'boss', name: 'Boss', isCompanyBoss: true, rank: 10, width: 220, height: 100 },
+      { id: 'head', name: 'Head', departmentId: 'engineering', bossId: 'boss', rank: 10, width: 220, height: 100 },
+    ],
+  });
+  const edge = result.edges[0];
+  const firstHorizontal = edge.points.slice(1).find((point: any, i: number) => point.y === edge.points[i].y && point.x !== edge.points[i].x);
+  assert.ok(firstHorizontal, 'Reporting edge must leave the Boss through a horizontal gutter');
+  assert.ok(firstHorizontal.y < result.groups[0].y, 'Boss departure stays above department groups even when ranks coincide');
+});
 
 test('measured rank rows contain every agent once, including orphan and disconnected cycle beside normal roots', async () => {
   const result = await layout({ nodes, departments });
