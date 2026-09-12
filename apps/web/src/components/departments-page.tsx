@@ -2,12 +2,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Pencil, Plus, Target, Users, X } from 'lucide-react';
+import { PositionsPage } from './positions-page';
+import { positionAssignment, type AuthorityPosition } from '@/lib/position-assignment';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
 type Company = { id: string; name: string; slug: string };
 type Department = { id: string; companyId: string; name: string; slug: string; headAgentId?: string | null; description?: string | null; headRolePrompt?: string | null };
-type Agent = { id: string; companyId: string; departmentId?: string | null; bossId?: string | null; name: string; role: string; adapterType?: string | null; isActive?: boolean; isBusy?: boolean };
+type Agent = { id: string; companyId: string; departmentId?: string | null; positionId?: string | null; bossId?: string | null; name: string; role: string; adapterType?: string | null; isActive?: boolean; isBusy?: boolean };
 type Goal = { id: string; companyId: string; departmentId?: string | null; projectId?: string | null; title: string; body?: string | null };
 
 function slugify(value: string): string {
@@ -20,6 +22,9 @@ export function DepartmentsPage() {
   const companiesQuery = useQuery({ queryKey: ['companies'], queryFn: () => api<Company[]>('/api/companies') });
   const departmentsQuery = useQuery({ queryKey: ['departments'], queryFn: () => api<Department[]>('/api/departments') });
   const agentsQuery = useQuery({ queryKey: ['agents'], queryFn: () => api<Agent[]>('/api/agents') });
+  const positionsQuery = useQuery({ queryKey: ['positions'], queryFn: () => api<(AuthorityPosition & {companyId: string; name: string; isActive?: boolean})[]>('/api/positions') });
+  const [tab, setTab] = useState('members');
+  useEffect(() => { if (new URLSearchParams(window.location.search).get('tab') === 'positions') setTab('positions'); }, []);
   const goalsQuery = useQuery({ queryKey: ['goals'], queryFn: () => api<Goal[]>('/api/goals') });
   const [companyId, setCompanyId] = useState('');
   const [departmentId, setDepartmentId] = useState('');
@@ -43,17 +48,21 @@ export function DepartmentsPage() {
   const companies = companiesQuery.data ?? [];
   const departments = departmentsQuery.data ?? [];
   const agents = agentsQuery.data ?? [];
+  const positions = positionsQuery.data ?? [];
+  const companyPositions = positions.filter(position => position.companyId === companyId);
+  const bossAgentId = agents.find(agent => agent.companyId === companyId && agent.isActive !== false && companyPositions.some(position => position.id === agent.positionId && position.isCompanyBoss))?.id;
+  const leadershipLocked = (agent: Agent) => companyPositions.some(position => position.id === agent.positionId && (position.isCompanyBoss || position.isDepartmentHead));
   const goals = goalsQuery.data ?? [];
-  const loadError = companiesQuery.error ?? departmentsQuery.error ?? agentsQuery.error ?? goalsQuery.error;
+  const loadError = companiesQuery.error ?? departmentsQuery.error ?? agentsQuery.error ?? positionsQuery.error ?? goalsQuery.error;
   const companyDepartments = useMemo(() => departments.filter((department) => department.companyId === companyId), [departments, companyId]);
   const companyAgents = useMemo(() => agents.filter((agent) => agent.companyId === companyId), [agents, companyId]);
-  const selectedDepartment = departmentId === '__unassigned' ? null : companyDepartments.find((department) => department.id === departmentId) ?? companyDepartments[0] ?? null;
-  const unassignedAgents = companyAgents.filter((agent) => !agent.departmentId);
+  const selectedDepartment = departmentId === '__unassigned' || departmentId === '__leadership' ? null : companyDepartments.find((department) => department.id === departmentId) ?? companyDepartments[0] ?? null;
+  const unassignedAgents = companyAgents.filter((agent) => !agent.departmentId && !companyPositions.some(position => position.id === agent.positionId && position.isCompanyBoss));
   const selectedAgent = companyAgents.find((agent) => agent.id === selectedAgentId) ?? null;
   const departmentGoals = useMemo(() => goals.filter((goal) => goal.departmentId === selectedDepartment?.id), [goals, selectedDepartment?.id]);
 
   async function refreshQueries() {
-    await Promise.all([['companies'], ['departments'], ['agents'], ['goals']]
+    await Promise.all([['companies'], ['departments'], ['agents'], ['positions'], ['goals']]
       .map((queryKey) => queryClient.invalidateQueries({ queryKey })));
   }
 
@@ -61,8 +70,9 @@ export function DepartmentsPage() {
     if (!companiesQuery.data || !departmentsQuery.data) return;
     const activeCompanyId = companiesQuery.data.some((company) => company.id === companyId) ? companyId : companiesQuery.data[0]?.id ?? '';
     const activeDepartments = departmentsQuery.data.filter((department) => department.companyId === activeCompanyId);
+    const preserveVirtualSelection = activeCompanyId === companyId && (departmentId === '__leadership' || departmentId === '__unassigned');
     setCompanyId(activeCompanyId);
-    setDepartmentId(activeDepartments.some((department) => department.id === departmentId) ? departmentId : activeDepartments[0]?.id ?? '');
+    setDepartmentId(preserveVirtualSelection || activeDepartments.some((department) => department.id === departmentId) ? departmentId : activeDepartments[0]?.id ?? '');
   }, [companiesQuery.data, departmentsQuery.data]);
   useEffect(() => {
     if (loadError) setError(loadError instanceof Error ? loadError.message : t('departments.loadFailed'));
@@ -82,7 +92,7 @@ export function DepartmentsPage() {
     setBusy(true);
     setError('');
     try {
-      const department = await api<Department>('/api/departments', { method: 'POST', body: JSON.stringify({ companyId, name: deptName.trim(), slug: deptSlug.trim(), headAgentId: deptHead || null, description: deptDescription.trim() || null, headRolePrompt: headRolePrompt.trim() || null }) });
+      const department = await api<Department>('/api/departments', { method: 'POST', body: JSON.stringify({ companyId, name: deptName.trim(), slug: deptSlug.trim(), description: deptDescription.trim() || null, headRolePrompt: headRolePrompt.trim() || null }) });
       setDeptName('');
       setDeptSlug('');
       setDeptHead('');
@@ -116,13 +126,14 @@ export function DepartmentsPage() {
     }
   }
 
-  async function updateAgentOrg(agent: Agent, patch: Pick<Agent, 'departmentId' | 'bossId'>) {
+  async function updateAgentOrg(agent: Agent, patch: Pick<Agent, 'positionId' | 'bossId'>) {
     setBusyAgentId(agent.id);
     setError('');
     try {
-      const updated = await api<Agent>(`/api/agents/${agent.id}`, { method: 'PUT', body: JSON.stringify(patch) });
+      const updated = await api<Agent>(`/api/agents/${agent.id}`, { method: 'PUT', body: JSON.stringify(patch.positionId !== undefined ? { ...patch, ...positionAssignment(companyPositions.find(position => position.id === patch.positionId), agent.bossId, bossAgentId) } : patch) });
       queryClient.setQueryData<Agent[]>(['agents'], (current) => current?.map((item) => item.id === updated.id ? updated : item));
       setSelectedAgentId(updated.id);
+      await refreshQueries();
       setToast(`${updated.name} ${t('departments.agentUpdated')}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : t('departments.agentUpdateFailed'));
@@ -136,7 +147,7 @@ export function DepartmentsPage() {
     setBusy(true);
     setError('');
     try {
-      await api<Department>(`/api/departments/${selectedDepartment.id}`, { method: 'PUT', body: JSON.stringify({ headAgentId: settingsHead || null, description: settingsDescription.trim() || null, headRolePrompt: settingsRolePrompt.trim() || null }) });
+      await api<Department>(`/api/departments/${selectedDepartment.id}`, { method: 'PUT', body: JSON.stringify({ description: settingsDescription.trim() || null, headRolePrompt: settingsRolePrompt.trim() || null }) });
       setToast(t('departments.settingsSaved'));
       await refreshQueries();
     } catch (err) {
@@ -179,7 +190,7 @@ export function DepartmentsPage() {
           <label className="field-label">{t('common.slug')}<input className="input" value={deptSlug} onChange={(event) => setDeptSlug(slugify(event.target.value))} disabled={!companyId} /></label>
           <label className="field-label">{t('departments.head')}
             <span className="field-hint">{t('departments.headHint')}</span>
-            <select className="input" value={deptHead} onChange={(event) => setDeptHead(event.target.value)} disabled={!companyId}>
+            <select className="input" value={deptHead} onChange={(event) => setDeptHead(event.target.value)} disabled>
               <option value="">{t('departments.noHead')}</option>
               {companyAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
             </select>
@@ -204,6 +215,7 @@ export function DepartmentsPage() {
           {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
         </select></label>
         <div className="table-list">
+          <button className={`list-row selectable-row ${departmentId === '__leadership' ? 'active' : ''}`} onClick={() => { setDepartmentId('__leadership'); setTab('positions'); }}>{t('departments.leadership')}</button>
           {companyDepartments.map((department) => <button className={`list-row selectable-row ${department.id === selectedDepartment?.id ? 'active' : ''}`} key={department.id} onClick={() => setDepartmentId(department.id)}>
             <b>{department.name}</b>
             <p>{department.slug} / {companyAgents.filter((agent) => agent.departmentId === department.id).length} {t('departments.agentsCount')}</p>
@@ -217,19 +229,26 @@ export function DepartmentsPage() {
       </aside>
 
       <main className="page-stack">
+        <div role="tablist" aria-label="Department views" className="action-row">
+          <button role="tab" aria-selected={tab === 'members'} className="btn" onClick={() => setTab('members')}>{t('departments.membersSettings')}</button>
+          <button role="tab" aria-selected={tab === 'positions'} className="btn" onClick={() => setTab('positions')}>{t('nav.positions')}</button>
+        </div>
+        {tab === 'positions' ? (selectedDepartment || departmentId === '__leadership' ? <PositionsPage key={`${companyId}:${departmentId}`} scopeCompanyId={companyId} scopeDepartmentId={selectedDepartment?.id} leadership={departmentId === '__leadership'} /> : <p className="chat-empty">Choose a department to manage its positions.</p>) : <>
+
         <section className="card section-card">
           <div className="panel-title"><div><h2><Users size={18} /> {t('departments.memberAssignment')}</h2><span className="status-pill">{companyAgents.length} {t('departments.companyAgentsCount')}</span></div></div>
           <div className="table-wrap">
             <table className="data-table org-assignment-table">
-              <thead><tr><th>{t('common.agent')}</th><th>{t('common.department')}</th><th>{t('common.reportsTo')}</th><th>{t('common.status')}</th></tr></thead>
+              <thead><tr><th>{t('common.agent')}</th><th>Position</th><th>{t('common.department')}</th><th>{t('common.reportsTo')}</th><th>{t('common.status')}</th></tr></thead>
               <tbody>
                 {companyAgents.map((agent) => <tr key={agent.id}>
                   <td><button type="button" className="text-button agent-name-button" onClick={() => setSelectedAgentId(agent.id)}><b>{agent.name}</b><small>{agent.role} / {agent.adapterType ?? 'hermes-ssh'}</small></button></td>
-                  <td><select className="input compact" disabled={busyAgentId === agent.id} value={agent.departmentId ?? ''} onChange={(event) => void updateAgentOrg(agent, { departmentId: event.target.value || null })}>
-                    <option value="">{t('common.noDepartment')}</option>
-                    {companyDepartments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
+                  <td><select aria-label={`Position for ${agent.name}`} className="input compact" disabled={busyAgentId === agent.id} value={agent.positionId ?? ''} onChange={(event) => void updateAgentOrg(agent, { positionId: event.target.value || null })}>
+                    <option value="">No position</option>
+                    {companyPositions.filter(position => position.isActive !== false || position.id === agent.positionId).map(position => <option key={position.id} value={position.id}>{position.name}</option>)}
                   </select></td>
-                  <td><select className="input compact" disabled={busyAgentId === agent.id} value={agent.bossId ?? ''} onChange={(event) => void updateAgentOrg(agent, { bossId: event.target.value || null })}>
+                  <td><span title="Department is determined by position">{companyDepartments.find(department => department.id === agent.departmentId)?.name ?? (leadershipLocked(agent) ? 'Company leadership' : 'Unconfigured')}</span></td>
+                  <td><select className="input compact" aria-label={`Reports to for ${agent.name}`} disabled={busyAgentId === agent.id || leadershipLocked(agent)} value={agent.bossId ?? ''} onChange={(event) => void updateAgentOrg(agent, { bossId: event.target.value || null })}>
                     <option value="">{t('departments.topLevelAgent')}</option>
                     {companyAgents.filter((candidate) => candidate.id !== agent.id).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
                   </select></td>
@@ -248,11 +267,11 @@ export function DepartmentsPage() {
             <span>{selectedAgent.adapterType ?? 'hermes-ssh'} / {selectedAgent.isBusy ? t('common.busy') : selectedAgent.isActive === false ? t('common.offline') : t('common.ready')}</span>
           </div>
           <div className="form-grid department-agent-edit-grid">
-            <label className="field-label">{t('common.department')}<select className="input compact" disabled={busyAgentId === selectedAgent.id} value={selectedAgent.departmentId ?? ''} onChange={(event) => void updateAgentOrg(selectedAgent, { departmentId: event.target.value || null })}>
-              <option value="">{t('common.noDepartment')}</option>
-              {companyDepartments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
-            </select></label>
-            <label className="field-label">{t('common.reportsTo')}<select className="input compact" disabled={busyAgentId === selectedAgent.id} value={selectedAgent.bossId ?? ''} onChange={(event) => void updateAgentOrg(selectedAgent, { bossId: event.target.value || null })}>
+            <label className="field-label">Position<select className="input compact" disabled={busyAgentId === selectedAgent.id} value={selectedAgent.positionId ?? ''} onChange={(event) => void updateAgentOrg(selectedAgent, { positionId: event.target.value || null })}>
+              <option value="">No position</option>
+              {companyPositions.filter(position => position.isActive !== false || position.id === selectedAgent.positionId).map(position => <option key={position.id} value={position.id}>{position.name}</option>)}
+            </select><span className="field-hint">Department is determined by position.</span></label>
+            <label className="field-label">{t('common.reportsTo')}<select className="input compact" disabled={busyAgentId === selectedAgent.id || leadershipLocked(selectedAgent)} value={selectedAgent.bossId ?? ''} onChange={(event) => void updateAgentOrg(selectedAgent, { bossId: event.target.value || null })}>
               <option value="">{t('departments.topLevelAgent')}</option>
               {companyAgents.filter((candidate) => candidate.id !== selectedAgent.id).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
             </select></label>
@@ -264,7 +283,7 @@ export function DepartmentsPage() {
           <div className="form-grid">
             <label className="field-label">{t('departments.head')}
               <span className="field-hint">{t('departments.headHint')}</span>
-              <select className="input" value={settingsHead} onChange={(event) => setSettingsHead(event.target.value)}>
+              <select className="input" disabled value={settingsHead} onChange={(event) => setSettingsHead(event.target.value)}>
                 <option value="">{t('departments.noHead')}</option>
                 {companyAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
               </select>
@@ -291,6 +310,7 @@ export function DepartmentsPage() {
             {selectedDepartment && departmentGoals.length === 0 && <p className="chat-empty">{t('departments.noGoals')}</p>}
           </div>
         </section>
+      </>}
       </main>
     </div>
   </div>;

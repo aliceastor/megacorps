@@ -14,6 +14,7 @@ type Position = {
   description?: string | null;
   rank?: number | null;
   isCompanyBoss?: boolean | null;
+  isDepartmentHead?: boolean | null;
   canDelegateAcrossDepartments?: boolean | null;
   defaultDepartmentId?: string | null;
   managerPositionId?: string | null;
@@ -28,18 +29,19 @@ function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
-export function PositionsPage() {
+export function PositionsPage({ scopeCompanyId, scopeDepartmentId, leadership = false }: { scopeCompanyId?: string; scopeDepartmentId?: string; leadership?: boolean } = {}) {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [companyId, setCompanyId] = useState('');
+  const [companyId, setCompanyId] = useState(scopeCompanyId ?? '');
   const [selectedId, setSelectedId] = useState('');
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');
   const [description, setDescription] = useState('');
-  const [rank, setRank] = useState(100);
-  const [isCompanyBoss, setIsCompanyBoss] = useState(false);
+  const [rank, setRank] = useState(2);
+  const [isCompanyBoss, setIsCompanyBoss] = useState(leadership);
+  const [isDepartmentHead, setIsDepartmentHead] = useState(false);
   const [canDelegateAcrossDepartments, setCanDelegateAcrossDepartments] = useState(false);
   const [isActive, setIsActive] = useState(true);
   const [defaultDepartmentId, setDefaultDepartmentId] = useState('');
@@ -56,6 +58,8 @@ export function PositionsPage() {
   const selectedPosition = positions.find((position) => position.id === selectedId) ?? null;
   const selectedCompany = companies.find((company) => company.id === companyId) ?? null;
   const assignedAgents = useMemo(() => agents.filter((agent) => agent.positionId === selectedId), [agents, selectedId]);
+  const scopedPositions = companyPositions.filter(position => leadership ? position.isCompanyBoss : scopeDepartmentId ? position.defaultDepartmentId === scopeDepartmentId && !position.isCompanyBoss : !position.isCompanyBoss);
+  const headConflict = companyPositions.some(position => position.id !== selectedId && position.isDepartmentHead && position.defaultDepartmentId === defaultDepartmentId);
   const companyHasBoss = companyPositions.some((position) => position.isCompanyBoss && position.isActive !== false);
 
   useEffect(() => {
@@ -71,7 +75,7 @@ export function PositionsPage() {
     if (selectedPosition) return;
     if (!name.trim()) { setName(template.name); setSlug(template.slug); }
     if (!description.trim()) setDescription(template.description);
-    if (template.isCompanyBoss && !companyHasBoss) setIsCompanyBoss(true);
+    if (template.isCompanyBoss && !companyHasBoss && leadership) { setIsCompanyBoss(true); setIsDepartmentHead(false); setRank(0); }
   }
 
   async function refresh(nextCompanyId = companyId, nextSelectedId = selectedId) {
@@ -89,7 +93,7 @@ export function PositionsPage() {
       setAgents(agentRows);
       const activeCompanyId = companyRows.some((company) => company.id === nextCompanyId) ? nextCompanyId : companyRows[0]?.id ?? '';
       setCompanyId(activeCompanyId);
-      const activePositions = positionRows.filter((position) => position.companyId === activeCompanyId);
+      const activePositions = positionRows.filter((position) => position.companyId === activeCompanyId && (leadership ? position.isCompanyBoss : scopeDepartmentId ? position.defaultDepartmentId === scopeDepartmentId && !position.isCompanyBoss : !position.isCompanyBoss));
       const activePosition = activePositions.find((position) => position.id === nextSelectedId) ?? activePositions[0] ?? null;
       if (activePosition) selectPosition(activePosition);
       else startNewPosition(false);
@@ -114,8 +118,9 @@ export function PositionsPage() {
     setName(position.name);
     setSlug(position.slug);
     setDescription(position.description ?? '');
-    setRank(position.rank ?? 100);
+    setRank(position.rank ?? 2);
     setIsCompanyBoss(Boolean(position.isCompanyBoss));
+    setIsDepartmentHead(Boolean(position.isDepartmentHead));
     setCanDelegateAcrossDepartments(Boolean(position.canDelegateAcrossDepartments));
     setIsActive(position.isActive !== false);
     setDefaultDepartmentId(position.defaultDepartmentId ?? '');
@@ -129,11 +134,12 @@ export function PositionsPage() {
     setName('');
     setSlug('');
     setDescription('');
-    setRank(100);
-    setIsCompanyBoss(false);
+    setIsCompanyBoss(leadership);
+    setIsDepartmentHead(false);
+    setRank(leadership ? 0 : 2);
     setCanDelegateAcrossDepartments(false);
     setIsActive(true);
-    setDefaultDepartmentId('');
+    setDefaultDepartmentId(scopeDepartmentId ?? '');
     setManagerPositionId('');
     setPrompt('');
     setError('');
@@ -145,6 +151,9 @@ export function PositionsPage() {
       setError('Company, position name, and slug are required.');
       return;
     }
+    if (!isCompanyBoss && !defaultDepartmentId) { setError('Choose a department for this position.'); return; }
+    if (isDepartmentHead && headConflict) { setError('This department already has a Department Head position (including inactive positions).'); return; }
+    if (!Number.isInteger(rank) || (!isCompanyBoss && !isDepartmentHead && (rank < 2 || rank > 9))) { setError('Staff rank must be an integer from 2 to 9.'); return; }
     setBusy(true);
     setError('');
     try {
@@ -153,12 +162,13 @@ export function PositionsPage() {
         name: name.trim(),
         slug: slug.trim(),
         description,
-        rank,
+        rank: isCompanyBoss ? 0 : isDepartmentHead ? 1 : rank,
         isCompanyBoss,
+        isDepartmentHead,
         canDelegateAcrossDepartments,
         isActive,
-        defaultDepartmentId: defaultDepartmentId || null,
-        managerPositionId: isCompanyBoss ? null : managerPositionId || null,
+        defaultDepartmentId: isCompanyBoss ? null : defaultDepartmentId || null,
+        managerPositionId: isCompanyBoss || isDepartmentHead ? null : managerPositionId || null,
         prompt,
       };
       const saved = selectedPosition
@@ -199,16 +209,16 @@ export function PositionsPage() {
 
     <div className="split-layout position-workbench">
       <aside className="card section-card">
-        <div className="panel-title"><h2>Position List</h2><span className="status-pill">{companyPositions.length}</span></div>
-        <label className="field-label">Company<select className="input" value={companyId} onChange={(event) => selectCompany(event.target.value)}>
+        <div className="panel-title"><h2>Position List</h2><span className="status-pill">{scopedPositions.length}</span></div>
+        <label className="field-label">Company<select className="input" value={companyId} disabled={Boolean(scopeCompanyId)} onChange={(event) => selectCompany(event.target.value)}>
           {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
         </select></label>
         <div className="table-list">
-          {companyPositions.map((position) => <button className={`list-row selectable-row ${position.id === selectedId ? 'active' : ''}`} key={position.id} onClick={() => selectPosition(position)}>
+          {scopedPositions.map((position) => <button className={`list-row selectable-row ${position.id === selectedId ? 'active' : ''}`} key={position.id} onClick={() => selectPosition(position)}>
             <b>{position.name} {position.isCompanyBoss ? <span className="status-pill">boss</span> : null} {position.isActive === false ? <span className="status-pill">inactive</span> : null}</b>
-            <p>{position.slug} / rank {position.rank ?? 100} / {agents.filter((agent) => agent.positionId === position.id).length} agents</p>
+            <p>{position.slug} / rank {position.rank ?? 2} / {agents.filter((agent) => agent.positionId === position.id).length} agents</p>
           </button>)}
-          {companyPositions.length === 0 && <p className="chat-empty">No positions yet.</p>}
+          {scopedPositions.length === 0 && <p className="chat-empty">No positions yet.</p>}
         </div>
       </aside>
 
@@ -221,21 +231,24 @@ export function PositionsPage() {
           <div className="form-grid">
             <label className="field-label">Position name<input ref={nameRef} className="input" value={name} onChange={(event) => setName(event.target.value)} /></label>
             <label className="field-label">Slug<input className="input" value={slug} onChange={(event) => setSlug(slugify(event.target.value))} /></label>
-            <label className="field-label">Rank<input className="input" type="number" min={0} max={10000} value={rank} onChange={(event) => setRank(Number(event.target.value) || 0)} /></label>
-            <label className="field-label">Default department<select className="input" value={defaultDepartmentId} onChange={(event) => setDefaultDepartmentId(event.target.value)}>
+            <label className="field-label">Rank<input className="input" type="number" min={isCompanyBoss ? 0 : isDepartmentHead ? 1 : 2} max={9} step={1} disabled={isCompanyBoss || isDepartmentHead} value={isCompanyBoss ? 0 : isDepartmentHead ? 1 : rank} onChange={(event) => setRank(Number(event.target.value) || 0)} /></label>
+            <label className="field-label">Department<select className="input" disabled={isCompanyBoss || Boolean(scopeDepartmentId)} value={isCompanyBoss ? '' : defaultDepartmentId} onChange={(event) => setDefaultDepartmentId(event.target.value)}>
               <option value="">None</option>
               {companyDepartments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
             </select></label>
-            <label className="field-label">Manager position<select className="input" value={managerPositionId} disabled={isCompanyBoss} onChange={(event) => setManagerPositionId(event.target.value)}>
+            <label className="field-label">Manager position<select className="input" value={managerPositionId} disabled={isCompanyBoss || isDepartmentHead} onChange={(event) => setManagerPositionId(event.target.value)}>
               <option value="">None</option>
               {companyPositions.filter((position) => position.id !== selectedId).map((position) => <option key={position.id} value={position.id}>{position.name}</option>)}
             </select></label>
           </div>
           <div className="form-grid">
-            <label className="check-row"><input type="checkbox" checked={isCompanyBoss} onChange={(event) => setIsCompanyBoss(event.target.checked)} /> <ShieldCheck size={15} /> Company boss position</label>
+            <label className="check-row"><input type="checkbox" checked={isCompanyBoss} disabled={!leadership} onChange={(event) => { setIsCompanyBoss(event.target.checked); setIsDepartmentHead(false); setRank(event.target.checked ? 0 : 2); setDefaultDepartmentId(''); setManagerPositionId(''); }} /> <ShieldCheck size={15} /> Company boss position</label>
+            <label className="check-row"><input type="checkbox" checked={isDepartmentHead} disabled={isCompanyBoss || (!isDepartmentHead && headConflict)} onChange={(event) => { setIsDepartmentHead(event.target.checked); setRank(event.target.checked ? 1 : 2); setManagerPositionId(''); }} /> Department Head</label>
             <label className="check-row"><input type="checkbox" checked={canDelegateAcrossDepartments} onChange={(event) => setCanDelegateAcrossDepartments(event.target.checked)} /> Cross-department delegation</label>
             <label className="check-row"><input type="checkbox" checked={isActive} onChange={(event) => setIsActive(event.target.checked)} /> Active position</label>
           </div>
+          {headConflict && !isDepartmentHead && !isCompanyBoss && <p className="field-hint">This department already has a Department Head position. Edit that position to change its leadership role.</p>}
+          <p className="field-hint">{isCompanyBoss ? 'Company Boss has no department or superior.' : isDepartmentHead ? 'The head reports to the current Company Boss. One head position is allowed per department.' : 'Staff ranks are 2–9. The position determines each assigned Agent’s department.'}</p>
           <label className="field-label">Description<textarea className="input" rows={3} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Operational authority, scope, and how this position fits into the company hierarchy." /></label>
           <label className="field-label">Start from a template
             <span className="field-hint">Fills the prompt with a ready-made role. The operating procedure for a boss, department head, member or reviewer is injected automatically from the org chart, so the prompt only needs personality, expertise and house rules.</span>
@@ -267,7 +280,7 @@ export function PositionsPage() {
           <div className="panel-title"><h2>Assigned agents</h2><span className="status-pill">{assignedAgents.length}</span></div>
           <div className="table-list">
             {assignedAgents.map((agent) => <div className="list-row" key={agent.id}><b>{agent.name}</b><p>{agent.role}</p></div>)}
-            {selectedPosition && assignedAgents.length === 0 && <p className="chat-empty">No agents use this position yet.</p>}
+            {selectedPosition && assignedAgents.length === 0 && <p className="chat-empty">Vacant — no Agent currently occupies this position.</p>}
             {!selectedPosition && <p className="chat-empty">Select or create a position to see assigned agents.</p>}
           </div>
         </section>

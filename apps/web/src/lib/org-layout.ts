@@ -94,10 +94,23 @@ export function layoutOrgChart(input: { nodes: OrgLayoutInput[]; departments: { 
     const departure=sourceBand ? sourceBand.y+sourceBand.height+margin : groupTop-margin;
     const arrival=targetBand.y-margin;
     const lane=outerGutter+margin;
-    // A private vertical gutter per manager and separate row entry/exit levels
-    // make cycles and upward relationships as routable as ordinary trees.
-    // Only branches from the same manager may share a visible bus.
-    const points=compactPoints([start,{x:start.x,y:departure},{x:lane,y:departure},{x:lane,y:arrival},{x:end.x,y:arrival},end]);
+    // Prefer a short bend in either free row corridor (or a straight aligned link).
+    // Card clearance is measured against the complete chart, including other lanes.
+    // Obstructed, upward and cyclic links retain their private manager gutter.
+    const localRoutes = departure <= arrival ? [
+      [start, {x:start.x,y:departure}, {x:end.x,y:departure}, end],
+      [start, {x:start.x,y:arrival}, {x:end.x,y:arrival}, end],
+    ].map(compactPoints) : [];
+    const local = localRoutes.find(points => points.slice(1).every((b, index) => {
+      const a = points[index]!;
+      return nodes.every(node => {
+        if (node.id === manager.id || node.id === target.id) return true;
+        const dx = Math.max(node.x-Math.max(a.x,b.x), Math.min(a.x,b.x)-node.x-node.width, 0);
+        const dy = Math.max(node.y-Math.max(a.y,b.y), Math.min(a.y,b.y)-node.y-node.height, 0);
+        return Math.hypot(dx,dy) >= CLEARANCE;
+      });
+    }));
+    const points=local ?? compactPoints([start,{x:start.x,y:departure},{x:lane,y:departure},{x:lane,y:arrival},{x:end.x,y:arrival},end]);
     return { id:`${manager.id}:${target.id}`, sourceId:manager.id, targetId:target.id, points, strokeWidth:2, path:points.map((p,i)=>`${i?'L':'M'} ${p.x} ${p.y}`).join(' ') };
   });
   return { width:Math.max(320,outerGutter+maxMargin+16), height:height+16, nodes, groups, departmentEdges, edges };

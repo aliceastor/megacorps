@@ -130,3 +130,43 @@ test('organization paths settle again after live viewport and card text-size cha
   writeFileSync(info.outputPath('org-live-resize-geometry.json'), JSON.stringify(resized, null, 2));
   await page.screenshot({ path: info.outputPath('org-live-resize.png'), fullPage: true });
 });
+
+test('Alice CTO Ribel Digby reporting links stay local across department boxes', async ({ page }, info) => {
+  await fixture(page, 1440);
+  const companyId = 'company-chart';
+  const positions = [
+    { id: 'boss-position', rank: 0, isCompanyBoss: true },
+    { id: 'cto-position', rank: 1, isDepartmentHead: true, defaultDepartmentId: 'engineering' },
+    { id: 'senior-position', rank: 2, defaultDepartmentId: 'engineering' },
+    { id: 'intern-position', rank: 9, defaultDepartmentId: 'engineering' },
+  ].map(position => ({ companyId, name: position.id, slug: position.id, ...position }));
+  const agents = [
+    { id: 'alice', name: 'Alice Astor', positionId: 'boss-position' },
+    { id: 'cto', name: 'CTO Vale', positionId: 'cto-position', departmentId: 'engineering', bossId: 'alice' },
+    { id: 'ribel', name: 'Ribel', positionId: 'senior-position', departmentId: 'engineering', bossId: 'cto' },
+    { id: 'digby', name: 'Digby', positionId: 'intern-position', departmentId: 'engineering', bossId: 'ribel' },
+  ].map(agent => ({ companyId, slug: agent.id, role: 'custom', adapterType: 'a2a', isActive: true, ...agent }));
+  await page.route('**/api/proxy/api/positions', route => route.fulfill({ json: positions }));
+  await page.route('**/api/proxy/api/agents', route => route.fulfill({ json: agents }));
+  await page.route('**/api/proxy/api/departments', route => route.fulfill({ json: [
+    { id: 'engineering', companyId, name: 'Engineering', slug: 'engineering', headAgentId: 'cto' },
+    { id: 'operations', companyId, name: 'Operations', slug: 'operations', headAgentId: null },
+    { id: 'product', companyId, name: 'Product', slug: 'product', headAgentId: null },
+  ] }));
+  await page.reload();
+  await expect(page.locator('[data-org-agent]')).toHaveCount(4);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const g = await geometry(page);
+    expect(g.edges.map(edge => edge.id).sort()).toEqual(['alice:cto', 'cto:ribel', 'ribel:digby']);
+    expect(g.departmentEdges).toHaveLength(3);
+    for (const edge of g.edges) {
+      const start = edge.points[0]!, end = edge.points.at(-1)!;
+      const length = edge.points.slice(1).reduce((sum, point, index) => sum + Math.abs(point.x-edge.points[index]!.x) + Math.abs(point.y-edge.points[index]!.y), 0);
+      expect(length, `${edge.id} must avoid redundant outer loops`).toBeCloseTo(Math.abs(start.x-end.x)+Math.abs(start.y-end.y), 1);
+      if (edge.sourceId !== 'alice') expect(edge.points).toHaveLength(2);
+    }
+    writeFileSync(info.outputPath(`org-aligned-chain-${width}.json`), JSON.stringify(g, null, 2));
+    await page.screenshot({ path: info.outputPath(`org-aligned-chain-${width}.png`), fullPage: true });
+  }
+});

@@ -17,7 +17,6 @@ const nav: NavItem[] = [
   { href: '/companies', labelKey: 'nav.companies', fallback: 'Companies', icon: Building2 },
   { href: '/departments', labelKey: 'nav.departments', fallback: 'Departments', icon: Network, exact: true },
   { href: '/departments/o-chart', labelKey: 'nav.oChart', fallback: 'O-Chart', icon: ChartGantt, level: 1 },
-  { href: '/positions', labelKey: 'nav.positions', fallback: 'Positions', icon: BriefcaseBusiness },
   { href: '/agents', labelKey: 'nav.agents', fallback: 'Agents', icon: Network },
   { href: '/projects', labelKey: 'nav.projects', fallback: 'Projects', icon: FolderGit2 },
   { href: '/knowledge', labelKey: 'nav.knowledge', fallback: 'Knowledge', icon: BookOpen },

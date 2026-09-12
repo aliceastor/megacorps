@@ -100,8 +100,8 @@ test('Boss sharing a department rank routes reporting edges above department car
   });
   const edge = result.edges[0];
   const firstHorizontal = edge.points.slice(1).find((point: any, i: number) => point.y === edge.points[i].y && point.x !== edge.points[i].x);
-  assert.ok(firstHorizontal, 'Reporting edge must leave the Boss through a horizontal gutter');
-  assert.ok(firstHorizontal.y < result.groups[0].y, 'Boss departure stays above department groups even when ranks coincide');
+  if (firstHorizontal) assert.ok(firstHorizontal.y < result.groups[0].y, 'Boss departure stays above department groups even when ranks coincide');
+  else assert.equal(edge.points.length, 2, 'Aligned Boss and head connect directly');
 });
 
 test('measured rank rows contain every agent once, including orphan and disconnected cycle beside normal roots', async () => {
@@ -170,4 +170,26 @@ test('a wide equal-rank legacy cycle preserves all nodes while giving every mana
   const peers=Array.from({length:12},(_,i)=>({id:`n${i}`,name:`Node ${i}`,departmentId:i%2?'a':'b',rank:10,width:240,height:100,bossId:i?`n${i-1}`:'n11'}));
   const result=await layout({nodes:peers,departments:[{id:'a',name:'A'},{id:'b',name:'B'}]});
   assert.equal(result.nodes.length,12);assert.equal(result.edges.length,12);
+});
+
+test('Alice CTO Ribel Digby chain uses short local links beside empty departments', async () => {
+  for (const width of [220, 264, 340]) {
+    const result = await layout({
+      departments: [{ id: 'engineering', name: 'Engineering' }, { id: 'operations', name: 'Operations' }, { id: 'product', name: 'Product' }],
+      nodes: [
+        { id: 'alice', name: 'Alice', rank: 0, isCompanyBoss: true },
+        { id: 'cto', name: 'CTO Vale', rank: 1, departmentId: 'engineering', bossId: 'alice' },
+        { id: 'ribel', name: 'Ribel', rank: 2, departmentId: 'engineering', bossId: 'cto' },
+        { id: 'digby', name: 'Digby', rank: 9, departmentId: 'engineering', bossId: 'ribel' },
+      ].map(node => ({ ...node, width, height: 128 })),
+    });
+    assert.equal(result.edges.length, 3);
+    for (const edge of result.edges) {
+      const start = edge.points[0], end = edge.points.at(-1);
+      const length = edge.points.slice(1).reduce((sum: number, point: any, index: number) => sum + Math.abs(point.x-edge.points[index].x) + Math.abs(point.y-edge.points[index].y), 0);
+      assert.equal(length, Math.abs(start.x-end.x)+Math.abs(start.y-end.y), `${edge.id} must take a shortest unobstructed route`);
+      if (edge.sourceId !== 'alice') assert.equal(edge.points.length, 2, `${edge.id} must be straight down the aligned chain`);
+    }
+    assert.equal(result.departmentEdges.length, 3);
+  }
 });

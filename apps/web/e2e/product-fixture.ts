@@ -122,9 +122,9 @@ export async function waitForProductPage(page: Page, state: Awaited<ReturnType<t
   const catalogs: Record<string, string[]> = {
     '/dashboard': ['dashboard', 'dashboard/timeseries'],
     '/companies': ['companies', 'departments', 'agents', 'projects', 'cards', 'goals'],
-    '/departments': ['companies', 'departments', 'agents', 'goals'],
+    '/departments': ['companies', 'departments', 'agents', 'goals', 'positions'],
     '/departments/o-chart': ['companies', 'departments', 'positions', 'agent-runtimes', 'agents'],
-    '/positions': ['companies', 'positions', 'positions/templates', 'agents', 'departments'],
+    '/positions': ['companies', 'positions', 'agents', 'departments', 'goals', ...(populated ? ['positions/templates'] : [])],
     '/agents': ['companies', 'agents', 'departments', 'positions', 'agent-runtimes', 'cards', 'approvals'],
     '/projects': ['companies', ...(populated ? ['projects', 'goals'] : [])],
     '/knowledge': ['companies', ...(populated ? ['knowledge-docs'] : [])],
@@ -154,7 +154,7 @@ export async function waitForProductPage(page: Page, state: Awaited<ReturnType<t
     case '/companies': await text(populated ? 'Company Alpha ' + longText : 'Set up your company'); break;
     case '/departments': await text(populated ? 'Engineering ' + longText : 'No departments yet.'); break;
     case '/departments/o-chart': await text(populated ? 'Boss Alpha' : 'No agents in this company'); break;
-    case '/positions': if (populated) await check(content.locator('.selectable-row').filter({ hasText: 'Strategy Boss' })).toBeVisible(); else await text('No positions yet.'); break;
+    case '/positions': await check(content.getByRole('tab', { name: 'Positions', exact: true })).toBeVisible(); await text(populated ? 'No positions yet.' : 'Choose a department to manage its positions.'); break;
     case '/agents': await text(populated ? 'Head Alpha ' + longText : 'No agents match this filter.'); break;
     case '/projects': await text(populated ? 'Project Alpha ' + longText : 'Create a company before adding projects.'); break;
     case '/knowledge':

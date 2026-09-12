@@ -2,7 +2,7 @@ import { expect, type Page } from '@playwright/test';
 
 export async function fixture(page: Page, width = 1158) {
   const companyId = 'company-chart';
-  const positions = [0, 10, 20, 30, 50, 60, 100].map(rank => ({ id: `rank-${rank}`, companyId, name: `Position ${rank}`, slug: `rank-${rank}`, rank, isCompanyBoss: rank === 0 }));
+  const positions = [0, 10, 20, 30, 50, 60, 100].map(rank => ({ id: `rank-${rank}`, companyId, name: `Position ${rank}`, slug: `rank-${rank}`, rank: ({0: 0, 10: 2, 20: 3, 30: 4, 50: 5, 60: 6, 100: 1} as Record<number, number>)[rank], isCompanyBoss: rank === 0, isDepartmentHead: rank === 100, defaultDepartmentId: rank === 0 ? null : rank === 50 ? 'product' : 'engineering' }));
   const departments = [
     { id: 'engineering', companyId, name: 'Engineering', slug: 'engineering', headAgentId: 'manager' },
     { id: 'operations', companyId, name: 'Operations', slug: 'operations', headAgentId: null },

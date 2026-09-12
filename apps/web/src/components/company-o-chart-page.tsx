@@ -2,13 +2,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Building2, CheckCircle2, Loader2, Network, Pause, Save, Users, Wifi } from 'lucide-react';
+import { positionAssignment, positionEditPatch } from '@/lib/position-assignment';
 import { api } from '@/lib/api';
 import { layoutOrgChart } from '@/lib/org-layout';
 import { useLocale } from '@/lib/locale-context';
 
 type Company = { id: string; name: string; slug: string };
 type Department = { id: string; companyId: string; name: string; slug: string; headAgentId?: string | null };
-type Position = { id: string; companyId: string; name: string; slug: string; rank?: number | null; isCompanyBoss?: boolean };
+type Position = { id: string; companyId: string; name: string; slug: string; rank?: number | null; isCompanyBoss?: boolean; isDepartmentHead?: boolean; defaultDepartmentId?: string | null };
 type Runtime = { id: string; companyId?: string | null; name: string; adapterType: string; config?: Record<string, unknown>; isActive?: boolean };
 type Agent = {
   id: string;
@@ -152,6 +153,9 @@ export function CompanyOChartPage() {
   const selectedAgent = companyAgents.find((agent) => agent.id === selectedAgentId) ?? null;
   const selectedDepartment = selectedAgent ? companyDepartments.find((department) => department.id === selectedAgent.departmentId) : null;
   const selectedPosition = selectedAgent ? companyPositions.find((position) => position.id === selectedAgent.positionId) : null;
+  const draftPosition = companyPositions.find(position => position.id === agentDraft?.positionId);
+  const companyBossId = companyAgents.find(agent => agent.isActive !== false && companyPositions.some(position => position.id === agent.positionId && position.isCompanyBoss))?.id;
+  const draftOrg = positionAssignment(draftPosition, agentDraft?.bossId as string | null, companyBossId);
   const directReports = selectedAgent ? companyAgents.filter((agent) => agent.bossId === selectedAgent.id) : [];
   const selectedAdapterType = String(agentDraft?.adapterType ?? selectedAgent?.adapterType ?? 'hermes-ssh');
 
@@ -187,10 +191,11 @@ export function CompanyOChartPage() {
         const value = String(agentDraft[field] ?? selectedAgent[field] ?? '');
         if (value !== selectedAgent[field]) payload[field] = value;
       }
-      for (const field of ['departmentId', 'positionId', 'bossId', 'runtimeId', 'hermesProfile'] as const) {
+      for (const field of ['runtimeId', 'hermesProfile'] as const) {
         const value = agentDraft[field] || null;
         if (value !== (selectedAgent[field] || null)) payload[field] = value;
       }
+      Object.assign(payload, positionEditPatch(selectedAgent, draftPosition, agentDraft.positionId, agentDraft.bossId, companyBossId));
       for (const field of ['budgetPerTask', 'budgetMonthly'] as const) {
         const value = agentDraft[field] === '' || agentDraft[field] == null ? null : Number(agentDraft[field]);
         const original = selectedAgent[field] == null || selectedAgent[field] === '' ? null : Number(selectedAgent[field]);
@@ -257,9 +262,9 @@ export function CompanyOChartPage() {
       <div className="form-grid">
         <label className="field-label">Name<input className="input" value={String(agentDraft.name ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, name: event.target.value })} /></label>
         <label className="field-label">Slug<input className="input" value={String(agentDraft.slug ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, slug: event.target.value })} /></label>
-        <label className="field-label">Department<select className="input" value={String(agentDraft.departmentId ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, departmentId: event.target.value || null })}><option value="">No department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
+        <label className="field-label">Department<select className="input" disabled title="Department is determined by position" value={draftOrg.departmentId ?? ''}><option value="">No department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
         <label className="field-label">Position<select className="input" value={String(agentDraft.positionId ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, positionId: event.target.value || null })}><option value="">No position</option>{companyPositions.map((position) => <option value={position.id} key={position.id}>{position.name}</option>)}</select></label>
-        <label className="field-label">Reports to<select className="input" value={String(agentDraft.bossId ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, bossId: event.target.value || null })}><option value="">Top-level</option>{companyAgents.filter((agent) => agent.id !== selectedAgent.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
+        <label className="field-label">Reports to<select className="input" disabled={Boolean(draftPosition?.isCompanyBoss || draftPosition?.isDepartmentHead)} value={draftOrg.bossId ?? ''} onChange={(event) => setAgentDraft({ ...agentDraft, bossId: event.target.value || null })}><option value="">Top-level</option>{companyAgents.filter((agent) => agent.id !== selectedAgent.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
         <label className="field-label">Profile<input className="input" value={String(agentDraft.hermesProfile ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, hermesProfile: event.target.value })} /></label>
         <label className="field-label">Adapter<select className="input" value={String(agentDraft.adapterType ?? 'hermes-ssh')} onChange={(event) => setAgentDraft({ ...agentDraft, adapterType: event.target.value, runtimeId: '' })}>
           <option value="a2a">A2A</option>{selectedAgent.adapterType === 'hermes-ssh' && <option value="hermes-ssh">Hermes SSH ({t('setup.legacy')})</option>}
