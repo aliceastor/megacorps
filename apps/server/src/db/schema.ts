@@ -96,6 +96,7 @@ export const positions = pgTable('positions', {
   rank: integer('rank').notNull().default(2),
   isCompanyBoss: boolean('is_company_boss').default(false),
   isDepartmentHead: boolean('is_department_head').notNull().default(false),
+  isCompanyLeadership: boolean('is_company_leadership').notNull().default(false),
   canDelegateAcrossDepartments: boolean('can_delegate_across_departments').default(false),
   defaultDepartmentId: uuid('default_department_id').references(() => departments.id),
   managerPositionId: uuid('manager_position_id'),

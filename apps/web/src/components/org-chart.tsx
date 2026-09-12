@@ -4,7 +4,8 @@ import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowUpDown, Ban, CheckCircle2, FileText, Loader2, Pause, Pencil, Plus, Save, Search, Trash2, Wifi, X } from 'lucide-react';
 import Link from 'next/link';
-import { positionAssignment, positionEditPatch } from '@/lib/position-assignment';
+import { AgentPromptPreview } from './agent-prompt-preview';
+import { positionAssignment, positionEditPatch, eligibleSupervisors, selectSupervisor, supervisorHint } from '@/lib/position-assignment';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 import { formatUsd } from '@/lib/usage';
@@ -34,7 +35,7 @@ type Agent = {
 };
 type Company = { id: string; name: string; slug: string; mission?: string | null; dispatchIntervalSeconds?: number; autoDispatchEnabled?: boolean };
 type Department = { id: string; companyId: string; name: string; slug: string };
-type Position = { id: string; companyId: string; name: string; slug: string; prompt?: string | null; isCompanyBoss?: boolean; isDepartmentHead?: boolean; defaultDepartmentId?: string | null };
+type Position = { id: string; companyId: string; name: string; slug: string; prompt?: string | null; isCompanyBoss?: boolean; isDepartmentHead?: boolean; isCompanyLeadership?: boolean; isActive?: boolean; managerPositionId?: string | null; defaultDepartmentId?: string | null };
 type Runtime = { id: string; companyId?: string | null; name: string; adapterType: string; config?: Record<string, unknown>; isActive?: boolean };
 type Card = { id: string; companyId?: string; title: string; columnStatus?: string; assigneeId?: string | null; reviewerId?: string | null; parentCardId?: string | null };
 type Approval = { id: string; companyId: string; cardId?: string | null; status: string; type: string };
@@ -127,6 +128,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const cardsQuery = useQuery({ queryKey: ['cards'], queryFn: () => api<Card[]>('/api/cards') });
   const approvalsQuery = useQuery({ queryKey: ['approvals', 'pending'], queryFn: () => api<Approval[]>('/api/approvals?status=pending&limit=200') });
   const [companyId, setCompanyId] = useState('');
+  const previewProjectsQuery = useQuery({ queryKey: ['promptPreviewProjects', companyId], queryFn: () => api<{ id: string; name: string; companyId: string }[]>(`/api/projects?companyId=${companyId}`), enabled: Boolean(companyId) });
   const [companyName, setCompanyName] = useState('');
   const [companyMission, setCompanyMission] = useState('');
   const [companyInterval, setCompanyInterval] = useState(10);
@@ -158,11 +160,17 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const companies = companiesQuery.data ?? [];
   const departments = departmentsQuery.data ?? [];
   const positions = positionsQuery.data ?? [];
+  const isLeadershipAgent = (agent: Agent) => positions.some(position => position.id === agent.positionId && (position.isCompanyBoss || position.isCompanyLeadership));
+  const leadershipAgents = agents.filter(agent => agent.companyId === companyId && isLeadershipAgent(agent));
   const companyBossId = agents.find(agent => agent.companyId === companyId && agent.isActive !== false && positions.some(position => position.id === agent.positionId && position.isCompanyBoss))?.id;
   const createPosition = positions.find(position => position.id === positionId);
   const draftPosition = positions.find(position => position.id === agentDraft?.positionId);
-  const createOrg = positionAssignment(createPosition, bossId, companyBossId);
-  const draftOrg = positionAssignment(draftPosition, agentDraft?.bossId, companyBossId);
+  const createCandidates = eligibleSupervisors(createPosition, undefined, companyId, agents, positions);
+  const draftCandidates = eligibleSupervisors(draftPosition, selected?.id, selected?.companyId ?? companyId, agents, positions);
+  const createSupervisorId = selectSupervisor(createCandidates, bossId);
+  const draftSupervisorId = draftPosition ? selectSupervisor(draftCandidates, agentDraft?.bossId) : agentDraft?.bossId ?? null;
+  const createOrg = positionAssignment(createPosition, createSupervisorId, companyBossId);
+  const draftOrg = positionAssignment(draftPosition, draftSupervisorId, companyBossId);
   const runtimes = runtimesQuery.data ?? [];
   const cards = cardsQuery.data ?? [];
   const approvals = approvalsQuery.data ?? [];
@@ -220,6 +228,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
 
   async function create() {
     if (!name.trim() || !slug.trim()) { setToast({ message: t('agents.nameSlugRequired'), type: 'error' }); return; }
+    if (createCandidates.length > 1 && !createSupervisorId) { setToast({ message: 'Choose an eligible supervisor from the manager position.', type: 'error' }); return; }
     setCreating(true);
     try {
       const agent = await api<Agent>('/api/agents', {
@@ -359,6 +368,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
 
   async function saveAgent() {
     if (!selected || !agentDraft) return;
+    if (draftCandidates.length > 1 && !draftSupervisorId) { setToast({ message: 'Choose an eligible supervisor from the manager position.', type: 'error' }); return; }
     setTesting(selected.id);
     try {
       const payload = {
@@ -372,7 +382,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
         adapterConfig: agentDraft.adapterConfig ?? {},
         runtimeId: agentDraft.runtimeId || null,
         hermesProfile: agentDraft.hermesProfile ? String(agentDraft.hermesProfile) : undefined,
-        ...positionEditPatch(selected, draftPosition, agentDraft.positionId, agentDraft.bossId, companyBossId),
+        ...positionEditPatch(selected, draftPosition, agentDraft.positionId, draftSupervisorId, companyBossId),
         budgetPerTask: agentDraft.budgetPerTask ? Number(agentDraft.budgetPerTask) : undefined,
         budgetMonthly: agentDraft.budgetMonthly ? Number(agentDraft.budgetMonthly) : undefined,
       };
@@ -412,7 +422,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   const effectiveAdapterConfig = { ...inheritedAdapterConfig, ...configuredOverrideAdapterConfig };
   const selectedAdapterFields = visibleAdapterFields(selectedAdapterType, inheritedAdapterConfig, overrideAdapterConfig);
   function agentStatus(agent: Agent): string { return agent.remoteWork ? agent.remoteWork.status === 'unresolved' ? 'Remote status unresolved' : 'Waiting for remote task' : agent.isBusy ? 'busy' : agent.isActive === false ? 'offline' : 'idle'; }
-  function agentDepartment(agent: Agent): string { return companyDepartments.find((department) => department.id === agent.departmentId)?.name ?? 'Unassigned'; }
+  function agentDepartment(agent: Agent): string { if (isLeadershipAgent(agent)) return 'Company leadership'; return companyDepartments.find((department) => department.id === agent.departmentId)?.name ?? 'Unassigned'; }
   function agentPosition(agent: Agent): string { return positions.find((position) => position.id === agent.positionId)?.name ?? 'No position'; }
   function agentManager(agent: Agent): string { return visibleAgents.find((item) => item.id === agent.bossId)?.name ?? 'Top-level'; }
   function sortValue(agent: Agent, key: AgentSortKey): string | number {
@@ -556,7 +566,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
                 }}>{companies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}</select></label>
                 <label className="field-label">{t('common.department')}<select className="input" disabled title="Department is determined by position" value={createOrg.departmentId ?? ''}><option value="">{t('common.noDepartment')}</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
                 <label className="field-label">{t('agents.position')}<select className="input" value={positionId} onChange={(event) => setPositionId(event.target.value)}><option value="">{t('agents.noPositionPrompt')}</option>{companyPositions.map((position) => <option value={position.id} key={position.id}>{position.name}</option>)}</select></label>
-                <label className="field-label">{t('common.reportsTo')}<select className="input" disabled={Boolean(createPosition?.isCompanyBoss || createPosition?.isDepartmentHead)} value={createOrg.bossId ?? ''} onChange={(event) => setBossId(event.target.value)}><option value="">{t('agents.topLevelMember')}</option>{visibleAgents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
+                <label className="field-label">{t('common.reportsTo')}<select aria-label={t('common.reportsTo')} className="input" disabled={Boolean(createPosition?.isCompanyBoss || createPosition?.isDepartmentHead)} value={createOrg.bossId ?? ''} onChange={(event) => setBossId(event.target.value)}><option value="">{createCandidates.length ? 'Choose supervisor' : 'No eligible supervisor'}</option>{createCandidates.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select><span className="field-hint">{supervisorHint(createPosition, createCandidates)}</span></label>
                 <label className="field-label">{t('agents.profile')}<input className="input" value={profile} onChange={(event) => setProfile(event.target.value)} /></label>
               </div>
             </div>}
@@ -616,6 +626,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
                     <td>{t('agents.monthlyBudget')} {formatUsd(agent.budgetMonthly)}<small>{t('agents.perTaskBudget')} {formatUsd(agent.budgetPerTask)}</small></td>
                     <td>
                       <div className="action-row compact">
+                        <AgentPromptPreview agentId={agent.id} agentName={agent.name} projects={(previewProjectsQuery.data ?? []).filter(project => project.companyId === agent.companyId)} />
                         <button className="btn icon-btn" aria-label={`${t('common.edit')} ${agent.name}`} title={t('common.edit')} onClick={() => selectAgent(agent)}><Pencil size={14} /></button>
                         <button className="btn icon-btn" aria-label={`${t('agents.test')} ${agent.name}`} title={t('agents.testConnection')} disabled={testing === agent.id} onClick={() => agentAction(agent.id, `/api/agents/${agent.id}/test-connection`, t('agents.connectionSuccessful'))}><Wifi size={14} /></button>
                         <Link className="btn icon-btn" aria-label={`Injected context for ${agent.name}`} title="Injected context: what this agent was actually sent" href={`/logs?agentId=${agent.id}`}><FileText size={14} /></Link>
@@ -639,10 +650,16 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
           </section>)}
         </div>}
         {isCompanySurface && <section className="card org-chart-lane">
-          <div className="panel-title"><h3>{t('companies.unassignedDepartment')}</h3><span className="status-pill">{visibleAgents.filter((agent) => !agent.departmentId).length} {t('companies.membersCount')}</span></div>
+          <div className="panel-title"><h3>Company leadership</h3><span className="status-pill">{leadershipAgents.length} {t('companies.membersCount')}</span></div>
+          <div className="org-chart-scroll" aria-label="Company leadership organization chart">
+            {leadershipAgents.filter(agent => !leadershipAgents.some(candidate => candidate.id === agent.bossId)).map(agent => <AgentNode key={agent.id} agent={agent} agents={leadershipAgents} departments={companyDepartments} positions={companyPositions} selectedId={selected?.id} onSelect={selectAgent} />)}
+          </div>
+        </section>}
+        {isCompanySurface && <section className="card org-chart-lane">
+          <div className="panel-title"><h3>{t('companies.unassignedDepartment')}</h3><span className="status-pill">{visibleAgents.filter((agent) => !agent.departmentId && !isLeadershipAgent(agent)).length} {t('companies.membersCount')}</span></div>
           <div className="org-chart-scroll" aria-label="Unassigned department organization chart">
           <AnimatePresence>
-            {(roots.filter((agent) => !agent.departmentId).length ? roots.filter((agent) => !agent.departmentId) : visibleAgents.filter((agent) => !agent.departmentId)).map((agent) => <AgentNode key={agent.id} agent={agent} agents={visibleAgents} departments={companyDepartments} positions={companyPositions} selectedId={selected?.id} onSelect={selectAgent} />)}
+            {(roots.filter((agent) => !agent.departmentId && !isLeadershipAgent(agent)).length ? roots.filter((agent) => !agent.departmentId && !isLeadershipAgent(agent)) : visibleAgents.filter((agent) => !agent.departmentId && !isLeadershipAgent(agent))).map((agent) => <AgentNode key={agent.id} agent={agent} agents={visibleAgents} departments={companyDepartments} positions={companyPositions} selectedId={selected?.id} onSelect={selectAgent} />)}
           </AnimatePresence>
           </div>
         </section>}
@@ -692,7 +709,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
                <label className="field-label">{t('agents.runtimePreset')}<select className="input" value={String(agentDraft?.runtimeId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), runtimeId: e.target.value || null })}><option value="">{t('agents.runtimeRequired')}</option>{runtimes.filter((runtime) => runtime.adapterType === String(agentDraft?.adapterType ?? selected.adapterType ?? 'hermes-ssh') && runtime.companyId === selected.companyId).map((runtime) => <option value={runtime.id} key={runtime.id}>{runtime.name}</option>)}</select></label>
               <label className="field-label">{t('common.department')}<select className="input" disabled title="Department is determined by position" value={draftOrg.departmentId ?? ''}><option value="">{t('common.noDepartment')}</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
               <label className="field-label">{t('agents.position')}<select className="input" value={String(agentDraft?.positionId ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), positionId: e.target.value || null })}><option value="">{t('agents.noPositionPrompt')}</option>{positions.filter((position) => position.companyId === selected.companyId).map((position) => <option value={position.id} key={position.id}>{position.name}</option>)}</select></label>
-              <label className="field-label">{t('common.reportsTo')}<select className="input" disabled={Boolean(draftPosition?.isCompanyBoss || draftPosition?.isDepartmentHead)} value={draftOrg.bossId ?? ''} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), bossId: e.target.value || null })}><option value="">{t('agents.topLevelMember')}</option>{visibleAgents.filter((agent) => agent.id !== selected.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
+              <label className="field-label">{t('common.reportsTo')}<select aria-label={t('common.reportsTo')} className="input" disabled={Boolean(draftPosition?.isCompanyBoss || draftPosition?.isDepartmentHead)} value={draftOrg.bossId ?? ''} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), bossId: e.target.value || null })}><option value="">{draftCandidates.length ? 'Choose supervisor' : 'No eligible supervisor'}</option>{draftCandidates.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select><span className="field-hint">{supervisorHint(draftPosition, draftCandidates)}</span></label>
               <label className="field-label">{t('agents.perTaskBudget')}<input className="input" type="number" min={0} step="0.01" value={String(agentDraft?.budgetPerTask ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), budgetPerTask: e.target.value })} /></label>
               <label className="field-label">{t('agents.monthlyBudget')}<input className="input" type="number" min={0} step="0.01" value={String(agentDraft?.budgetMonthly ?? '')} onChange={(e) => setAgentDraft({ ...(agentDraft ?? {}), budgetMonthly: e.target.value })} /></label>
               {selectedAdapterFields.map((field) => {

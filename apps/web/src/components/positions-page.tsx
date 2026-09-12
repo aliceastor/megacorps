@@ -15,6 +15,7 @@ type Position = {
   rank?: number | null;
   isCompanyBoss?: boolean | null;
   isDepartmentHead?: boolean | null;
+  isCompanyLeadership?: boolean | null;
   canDelegateAcrossDepartments?: boolean | null;
   defaultDepartmentId?: string | null;
   managerPositionId?: string | null;
@@ -58,8 +59,9 @@ export function PositionsPage({ scopeCompanyId, scopeDepartmentId, leadership = 
   const selectedPosition = positions.find((position) => position.id === selectedId) ?? null;
   const selectedCompany = companies.find((company) => company.id === companyId) ?? null;
   const assignedAgents = useMemo(() => agents.filter((agent) => agent.positionId === selectedId), [agents, selectedId]);
-  const scopedPositions = companyPositions.filter(position => leadership ? position.isCompanyBoss : scopeDepartmentId ? position.defaultDepartmentId === scopeDepartmentId && !position.isCompanyBoss : !position.isCompanyBoss);
+  const scopedPositions = companyPositions.filter(position => leadership ? (position.isCompanyBoss || position.isCompanyLeadership) : scopeDepartmentId ? position.defaultDepartmentId === scopeDepartmentId && !position.isCompanyBoss && !position.isCompanyLeadership : !position.isCompanyBoss && !position.isCompanyLeadership);
   const headConflict = companyPositions.some(position => position.id !== selectedId && position.isDepartmentHead && position.defaultDepartmentId === defaultDepartmentId);
+  const bossPosition = companyPositions.find(position => position.isCompanyBoss && position.isActive !== false);
   const companyHasBoss = companyPositions.some((position) => position.isCompanyBoss && position.isActive !== false);
 
   useEffect(() => {
@@ -93,7 +95,7 @@ export function PositionsPage({ scopeCompanyId, scopeDepartmentId, leadership = 
       setAgents(agentRows);
       const activeCompanyId = companyRows.some((company) => company.id === nextCompanyId) ? nextCompanyId : companyRows[0]?.id ?? '';
       setCompanyId(activeCompanyId);
-      const activePositions = positionRows.filter((position) => position.companyId === activeCompanyId && (leadership ? position.isCompanyBoss : scopeDepartmentId ? position.defaultDepartmentId === scopeDepartmentId && !position.isCompanyBoss : !position.isCompanyBoss));
+      const activePositions = positionRows.filter((position) => position.companyId === activeCompanyId && (leadership ? (position.isCompanyBoss || position.isCompanyLeadership) : scopeDepartmentId ? position.defaultDepartmentId === scopeDepartmentId && !position.isCompanyBoss && !position.isCompanyLeadership : !position.isCompanyBoss && !position.isCompanyLeadership));
       const activePosition = activePositions.find((position) => position.id === nextSelectedId) ?? activePositions[0] ?? null;
       if (activePosition) selectPosition(activePosition);
       else startNewPosition(false);
@@ -134,9 +136,9 @@ export function PositionsPage({ scopeCompanyId, scopeDepartmentId, leadership = 
     setName('');
     setSlug('');
     setDescription('');
-    setIsCompanyBoss(leadership);
+    setIsCompanyBoss(leadership && !companyHasBoss);
     setIsDepartmentHead(false);
-    setRank(leadership ? 0 : 2);
+    setRank(leadership && !companyHasBoss ? 0 : 2);
     setCanDelegateAcrossDepartments(false);
     setIsActive(true);
     setDefaultDepartmentId(scopeDepartmentId ?? '');
@@ -151,7 +153,7 @@ export function PositionsPage({ scopeCompanyId, scopeDepartmentId, leadership = 
       setError('Company, position name, and slug are required.');
       return;
     }
-    if (!isCompanyBoss && !defaultDepartmentId) { setError('Choose a department for this position.'); return; }
+    if (!leadership && !isCompanyBoss && !defaultDepartmentId) { setError('Choose a department for this position.'); return; }
     if (isDepartmentHead && headConflict) { setError('This department already has a Department Head position (including inactive positions).'); return; }
     if (!Number.isInteger(rank) || (!isCompanyBoss && !isDepartmentHead && (rank < 2 || rank > 9))) { setError('Staff rank must be an integer from 2 to 9.'); return; }
     setBusy(true);
@@ -165,10 +167,11 @@ export function PositionsPage({ scopeCompanyId, scopeDepartmentId, leadership = 
         rank: isCompanyBoss ? 0 : isDepartmentHead ? 1 : rank,
         isCompanyBoss,
         isDepartmentHead,
+        isCompanyLeadership: leadership || isCompanyBoss,
         canDelegateAcrossDepartments,
         isActive,
-        defaultDepartmentId: isCompanyBoss ? null : defaultDepartmentId || null,
-        managerPositionId: isCompanyBoss || isDepartmentHead ? null : managerPositionId || null,
+        defaultDepartmentId: leadership || isCompanyBoss ? null : defaultDepartmentId || null,
+        managerPositionId: isCompanyBoss ? null : isDepartmentHead ? bossPosition?.id ?? null : managerPositionId || null,
         prompt,
       };
       const saved = selectedPosition
@@ -232,23 +235,20 @@ export function PositionsPage({ scopeCompanyId, scopeDepartmentId, leadership = 
             <label className="field-label">Position name<input ref={nameRef} className="input" value={name} onChange={(event) => setName(event.target.value)} /></label>
             <label className="field-label">Slug<input className="input" value={slug} onChange={(event) => setSlug(slugify(event.target.value))} /></label>
             <label className="field-label">Rank<input className="input" type="number" min={isCompanyBoss ? 0 : isDepartmentHead ? 1 : 2} max={9} step={1} disabled={isCompanyBoss || isDepartmentHead} value={isCompanyBoss ? 0 : isDepartmentHead ? 1 : rank} onChange={(event) => setRank(Number(event.target.value) || 0)} /></label>
-            <label className="field-label">Department<select className="input" disabled={isCompanyBoss || Boolean(scopeDepartmentId)} value={isCompanyBoss ? '' : defaultDepartmentId} onChange={(event) => setDefaultDepartmentId(event.target.value)}>
+            <p className="field-hint">{leadership ? 'Company leadership — outside departments' : `Department: ${companyDepartments.find(department => department.id === scopeDepartmentId)?.name ?? 'Choose a department'}`}</p>
+            <label className="field-label">Manager position<select className="input" value={isCompanyBoss ? '' : isDepartmentHead ? bossPosition?.id ?? '' : managerPositionId} disabled={isCompanyBoss || isDepartmentHead} onChange={(event) => setManagerPositionId(event.target.value)}>
               <option value="">None</option>
-              {companyDepartments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
-            </select></label>
-            <label className="field-label">Manager position<select className="input" value={managerPositionId} disabled={isCompanyBoss || isDepartmentHead} onChange={(event) => setManagerPositionId(event.target.value)}>
-              <option value="">None</option>
-              {companyPositions.filter((position) => position.id !== selectedId).map((position) => <option key={position.id} value={position.id}>{position.name}</option>)}
+              {companyPositions.filter((position) => position.id !== selectedId && position.isActive !== false).map((position) => <option key={position.id} value={position.id}>{position.name}</option>)}
             </select></label>
           </div>
           <div className="form-grid">
-            <label className="check-row"><input type="checkbox" checked={isCompanyBoss} disabled={!leadership} onChange={(event) => { setIsCompanyBoss(event.target.checked); setIsDepartmentHead(false); setRank(event.target.checked ? 0 : 2); setDefaultDepartmentId(''); setManagerPositionId(''); }} /> <ShieldCheck size={15} /> Company boss position</label>
-            <label className="check-row"><input type="checkbox" checked={isDepartmentHead} disabled={isCompanyBoss || (!isDepartmentHead && headConflict)} onChange={(event) => { setIsDepartmentHead(event.target.checked); setRank(event.target.checked ? 1 : 2); setManagerPositionId(''); }} /> Department Head</label>
+            <label className="check-row"><input type="checkbox" checked={isCompanyBoss} disabled={!leadership || (!isCompanyBoss && companyHasBoss)} onChange={(event) => { setIsCompanyBoss(event.target.checked); setIsDepartmentHead(false); setRank(event.target.checked ? 0 : 2); setDefaultDepartmentId(''); setManagerPositionId(''); }} /> <ShieldCheck size={15} /> Company boss position</label>
+            <label className="check-row"><input type="checkbox" checked={isDepartmentHead} disabled={leadership || isCompanyBoss || (!isDepartmentHead && headConflict)} onChange={(event) => { setIsDepartmentHead(event.target.checked); setRank(event.target.checked ? 1 : 2); setManagerPositionId(''); }} /> Department Head</label>
             <label className="check-row"><input type="checkbox" checked={canDelegateAcrossDepartments} onChange={(event) => setCanDelegateAcrossDepartments(event.target.checked)} /> Cross-department delegation</label>
             <label className="check-row"><input type="checkbox" checked={isActive} onChange={(event) => setIsActive(event.target.checked)} /> Active position</label>
           </div>
           {headConflict && !isDepartmentHead && !isCompanyBoss && <p className="field-hint">This department already has a Department Head position. Edit that position to change its leadership role.</p>}
-          <p className="field-hint">{isCompanyBoss ? 'Company Boss has no department or superior.' : isDepartmentHead ? 'The head reports to the current Company Boss. One head position is allowed per department.' : 'Staff ranks are 2–9. The position determines each assigned Agent’s department.'}</p>
+          <p className="field-hint">{isCompanyBoss ? 'Company Boss has no department or superior.' : isDepartmentHead ? 'The head reports to the current Company Boss. One head position is allowed per department.' : leadership ? 'Company-direct Staff use ranks 2–9 and remain outside departments. Choose their manager position below.' : 'Staff ranks are 2–9. The position determines each assigned Agent’s department.'}</p>
           <label className="field-label">Description<textarea className="input" rows={3} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Operational authority, scope, and how this position fits into the company hierarchy." /></label>
           <label className="field-label">Start from a template
             <span className="field-hint">Fills the prompt with a ready-made role. The operating procedure for a boss, department head, member or reviewer is injected automatically from the org chart, so the prompt only needs personality, expertise and house rules.</span>
@@ -258,13 +258,13 @@ export function PositionsPage({ scopeCompanyId, scopeDepartmentId, leadership = 
             </select>
           </label>
           <label className="field-label">Position prompt
-            <span className="field-hint">Injected after: You are {name || 'xxxxx'} in agent department of firm {selectedCompany?.name ?? 'yyyy'}.</span>
+            <span className="field-hint">Injected after the {leadership || isCompanyBoss ? 'company leadership' : 'department'} role context for {name || 'this position'} at {selectedCompany?.name ?? 'the company'}.</span>
             <textarea className="input" rows={9} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Define authority, responsibilities, decision style, escalation rules, and limits for this position." />
           </label>
           <section className="config-summary">
-            <div className="panel-title"><h3>Prompt preview</h3><span className="status-pill">{isCompanyBoss ? 'company boss' : 'runtime department'}</span></div>
+            <div className="panel-title"><h3>Prompt preview</h3><span className="status-pill">{isCompanyBoss ? 'company boss' : leadership ? 'company leadership' : 'department'}</span></div>
             <pre className="log-block">{[
-              `You are ${name || 'xxxxx'} in {agent.department} department of firm ${selectedCompany?.name ?? 'yyyy'}.`,
+              leadership || isCompanyBoss ? `You are ${name || 'xxxxx'} in the company leadership of ${selectedCompany?.name ?? 'yyyy'}, outside departments.` : `You are ${name || 'xxxxx'} in the ${companyDepartments.find(department => department.id === defaultDepartmentId)?.name ?? '{agent.department}'} department of ${selectedCompany?.name ?? 'yyyy'}.`,
               `Authority: rank ${rank}; boss=${isCompanyBoss ? 'yes' : 'no'}; active=${isActive ? 'yes' : 'no'}; cross-department delegation=${canDelegateAcrossDepartments ? 'yes' : 'no'}.`,
               description ? `Description: ${description}` : '',
               prompt || '{custom position prompt}',

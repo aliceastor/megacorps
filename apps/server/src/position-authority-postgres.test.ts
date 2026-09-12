@@ -30,8 +30,10 @@ test('PostgreSQL Position authority covers raw writes, leadership uniqueness and
  await assert.rejects(sql`INSERT INTO agents(company_id,name,slug,role,position_id) VALUES(${c!.id},'Duplicate','duplicate','Head',${head!.id})`,/organization_|unique/);
  await assert.rejects(sql`UPDATE agents SET is_active=false WHERE id=${a!.id}`,/organization_boss_required/);
  const [staff]=await sql`INSERT INTO positions(company_id,name,slug,rank,default_department_id) VALUES(${c!.id},'Staff','staff',3,${d!.id}) RETURNING id`;
+ await sql`UPDATE positions SET manager_position_id=${head!.id} WHERE id=${staff!.id}`;
  const [r]=await sql`INSERT INTO agents(company_id,name,slug,role,position_id,boss_id) VALUES(${c!.id},'Ribel','ribel','Staff',${staff!.id},${h!.id}) RETURNING id`;
- const [digby]=await sql`INSERT INTO agents(company_id,name,slug,role,position_id,boss_id,department_id) VALUES(${c!.id},'Digby','digby','Staff',${staff!.id},${r!.id},null) RETURNING *`;
+ const [internPosition]=await sql`INSERT INTO positions(company_id,name,slug,rank,default_department_id,manager_position_id) VALUES(${c!.id},'Intern','intern',4,${d!.id},${staff!.id}) RETURNING id`;
+ const [digby]=await sql`INSERT INTO agents(company_id,name,slug,role,position_id,boss_id,department_id) VALUES(${c!.id},'Digby','digby','Staff',${internPosition!.id},${r!.id},null) RETURNING *`;
  assert.equal(digby!.boss_id,r!.id);assert.equal(digby!.department_id,d!.id);
  await sql`UPDATE agents SET organization_role='boss' WHERE id=${digby!.id}`;
  assert.equal((await sql`SELECT organization_role FROM agents WHERE id=${digby!.id}`)[0]!.organization_role,null);
@@ -52,6 +54,7 @@ test('PostgreSQL Position authority covers raw writes, leadership uniqueness and
   await assert.rejects(sql`DELETE FROM agents WHERE id=${digby!.id}`,/organization_busy/);
   await tx`UPDATE positions SET rank=4 WHERE id=${staff!.id}`;
  });
+ await sql`UPDATE agents SET boss_id=null WHERE id=${r!.id}`;
  await sql`UPDATE agents SET is_active=false WHERE id=${h!.id}`;
  assert.equal((await sql`SELECT head_agent_id FROM departments WHERE id=${d!.id}`)[0]!.head_agent_id,null);
  await sql`UPDATE agents SET is_active=false WHERE id=${a!.id}`;

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Pencil, Plus, Target, Users, X } from 'lucide-react';
 import { PositionsPage } from './positions-page';
-import { positionAssignment, type AuthorityPosition } from '@/lib/position-assignment';
+import { positionAssignment, eligibleSupervisors, selectSupervisor, supervisorHint, type AuthorityPosition } from '@/lib/position-assignment';
 import { api } from '@/lib/api';
 import { useLocale } from '@/lib/locale-context';
 
@@ -23,7 +23,9 @@ export function DepartmentsPage() {
   const departmentsQuery = useQuery({ queryKey: ['departments'], queryFn: () => api<Department[]>('/api/departments') });
   const agentsQuery = useQuery({ queryKey: ['agents'], queryFn: () => api<Agent[]>('/api/agents') });
   const positionsQuery = useQuery({ queryKey: ['positions'], queryFn: () => api<(AuthorityPosition & {companyId: string; name: string; isActive?: boolean})[]>('/api/positions') });
-  const [tab, setTab] = useState('members');
+  const [tab, setTab] = useState('settings');
+  const [pendingPositions, setPendingPositions] = useState<Record<string, string | null>>({});
+  const [pendingBosses, setPendingBosses] = useState<Record<string, string | null>>({});
   useEffect(() => { if (new URLSearchParams(window.location.search).get('tab') === 'positions') setTab('positions'); }, []);
   const goalsQuery = useQuery({ queryKey: ['goals'], queryFn: () => api<Goal[]>('/api/goals') });
   const [companyId, setCompanyId] = useState('');
@@ -51,14 +53,32 @@ export function DepartmentsPage() {
   const positions = positionsQuery.data ?? [];
   const companyPositions = positions.filter(position => position.companyId === companyId);
   const bossAgentId = agents.find(agent => agent.companyId === companyId && agent.isActive !== false && companyPositions.some(position => position.id === agent.positionId && position.isCompanyBoss))?.id;
-  const leadershipLocked = (agent: Agent) => companyPositions.some(position => position.id === agent.positionId && (position.isCompanyBoss || position.isDepartmentHead));
   const goals = goalsQuery.data ?? [];
   const loadError = companiesQuery.error ?? departmentsQuery.error ?? agentsQuery.error ?? positionsQuery.error ?? goalsQuery.error;
   const companyDepartments = useMemo(() => departments.filter((department) => department.companyId === companyId), [departments, companyId]);
   const companyAgents = useMemo(() => agents.filter((agent) => agent.companyId === companyId), [agents, companyId]);
   const selectedDepartment = departmentId === '__unassigned' || departmentId === '__leadership' ? null : companyDepartments.find((department) => department.id === departmentId) ?? companyDepartments[0] ?? null;
-  const unassignedAgents = companyAgents.filter((agent) => !agent.departmentId && !companyPositions.some(position => position.id === agent.positionId && position.isCompanyBoss));
-  const selectedAgent = companyAgents.find((agent) => agent.id === selectedAgentId) ?? null;
+  const unassignedAgents = companyAgents.filter((agent) => !agent.departmentId && !companyPositions.some(position => position.id === agent.positionId && (position.isCompanyBoss || position.isCompanyLeadership)));
+  const isLeadershipAgent = (agent: Agent) => companyPositions.some(position => position.id === agent.positionId && (position.isCompanyBoss || position.isCompanyLeadership));
+  const leadershipAgents = companyAgents.filter(isLeadershipAgent);
+  const visibleMembers = departmentId === '__leadership' ? leadershipAgents : departmentId === '__unassigned' ? unassignedAgents : companyAgents.filter(agent => agent.departmentId === selectedDepartment?.id);
+  function memberAssignment(agent: Agent) {
+    const positionId = Object.hasOwn(pendingPositions, agent.id) ? pendingPositions[agent.id] : agent.positionId;
+    const position = companyPositions.find(position => position.id === positionId);
+    const candidates = eligibleSupervisors(position, agent.id, companyId, companyAgents, companyPositions);
+    const bossId = selectSupervisor(candidates, Object.hasOwn(pendingBosses, agent.id) ? pendingBosses[agent.id] : agent.bossId);
+    return { positionId, position, candidates, bossId, pending: Object.hasOwn(pendingPositions, agent.id) };
+  }
+  function stagePosition(agent: Agent, positionId: string | null) {
+    const candidates = eligibleSupervisors(companyPositions.find(position => position.id === positionId), agent.id, companyId, companyAgents, companyPositions);
+    setPendingPositions(current => ({ ...current, [agent.id]: positionId }));
+    setPendingBosses(current => ({ ...current, [agent.id]: selectSupervisor(candidates, agent.bossId) }));
+  }
+  function chooseSupervisor(agent: Agent, bossId: string | null) {
+    if (memberAssignment(agent).pending) setPendingBosses(current => ({ ...current, [agent.id]: bossId }));
+    else void updateAgentOrg(agent, { bossId });
+  }
+  const selectedAgent = visibleMembers.find((agent) => agent.id === selectedAgentId) ?? null;
   const departmentGoals = useMemo(() => goals.filter((goal) => goal.departmentId === selectedDepartment?.id), [goals, selectedDepartment?.id]);
 
   async function refreshQueries() {
@@ -130,9 +150,11 @@ export function DepartmentsPage() {
     setBusyAgentId(agent.id);
     setError('');
     try {
-      const updated = await api<Agent>(`/api/agents/${agent.id}`, { method: 'PUT', body: JSON.stringify(patch.positionId !== undefined ? { ...patch, ...positionAssignment(companyPositions.find(position => position.id === patch.positionId), agent.bossId, bossAgentId) } : patch) });
+      const updated = await api<Agent>(`/api/agents/${agent.id}`, { method: 'PUT', body: JSON.stringify(patch.positionId !== undefined ? { ...patch, ...positionAssignment(companyPositions.find(position => position.id === patch.positionId), patch.bossId === undefined ? agent.bossId : patch.bossId, bossAgentId) } : patch) });
       queryClient.setQueryData<Agent[]>(['agents'], (current) => current?.map((item) => item.id === updated.id ? updated : item));
       setSelectedAgentId(updated.id);
+      setPendingPositions(current => { const next = { ...current }; delete next[agent.id]; return next; });
+      setPendingBosses(current => { const next = { ...current }; delete next[agent.id]; return next; });
       await refreshQueries();
       setToast(`${updated.name} ${t('departments.agentUpdated')}`);
     } catch (err) {
@@ -215,12 +237,12 @@ export function DepartmentsPage() {
           {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
         </select></label>
         <div className="table-list">
-          <button className={`list-row selectable-row ${departmentId === '__leadership' ? 'active' : ''}`} onClick={() => { setDepartmentId('__leadership'); setTab('positions'); }}>{t('departments.leadership')}</button>
+          <button aria-label={t('departments.leadership')} className={`list-row selectable-row ${departmentId === '__leadership' ? 'active' : ''}`} onClick={() => { setDepartmentId('__leadership'); setTab('positions'); }}><b>{t('departments.leadership')}</b><p>{leadershipAgents.length} {t('departments.agentsCount')}</p></button>
           {companyDepartments.map((department) => <button className={`list-row selectable-row ${department.id === selectedDepartment?.id ? 'active' : ''}`} key={department.id} onClick={() => setDepartmentId(department.id)}>
             <b>{department.name}</b>
             <p>{department.slug} / {companyAgents.filter((agent) => agent.departmentId === department.id).length} {t('departments.agentsCount')}</p>
           </button>)}
-          <button className={`list-row selectable-row ${departmentId === '__unassigned' ? 'active' : ''}`} onClick={() => setDepartmentId('__unassigned')}>
+          <button className={`list-row selectable-row ${departmentId === '__unassigned' ? 'active' : ''}`} onClick={() => { setDepartmentId('__unassigned'); if (tab === 'settings' || tab === 'goals') setTab('members'); }}>
             <b>{t('common.noDepartment')}</b>
             <p>{unassignedAgents.length} {t('departments.agentsCount')}</p>
           </button>
@@ -230,34 +252,37 @@ export function DepartmentsPage() {
 
       <main className="page-stack">
         <div role="tablist" aria-label="Department views" className="action-row">
-          <button role="tab" aria-selected={tab === 'members'} className="btn" onClick={() => setTab('members')}>{t('departments.membersSettings')}</button>
+          <button role="tab" aria-selected={tab === 'settings'} disabled={!selectedDepartment} className="btn" onClick={() => setTab('settings')}>{t('nav.settings')}</button>
+          <button role="tab" aria-selected={tab === 'goals'} disabled={!selectedDepartment} className="btn" onClick={() => setTab('goals')}>{t('departments.goalsTab')}</button>
+          <button role="tab" aria-selected={tab === 'members'} className="btn" onClick={() => setTab('members')}>{t('departments.membersTab')}</button>
           <button role="tab" aria-selected={tab === 'positions'} className="btn" onClick={() => setTab('positions')}>{t('nav.positions')}</button>
         </div>
         {tab === 'positions' ? (selectedDepartment || departmentId === '__leadership' ? <PositionsPage key={`${companyId}:${departmentId}`} scopeCompanyId={companyId} scopeDepartmentId={selectedDepartment?.id} leadership={departmentId === '__leadership'} /> : <p className="chat-empty">Choose a department to manage its positions.</p>) : <>
 
-        <section className="card section-card">
-          <div className="panel-title"><div><h2><Users size={18} /> {t('departments.memberAssignment')}</h2><span className="status-pill">{companyAgents.length} {t('departments.companyAgentsCount')}</span></div></div>
+        {tab === 'members' && <><section className="card section-card">
+          <div className="panel-title"><div><h2><Users size={18} /> {t('departments.memberAssignment')}</h2><span className="status-pill">{visibleMembers.length} {t('departments.agentsCount')}</span></div></div>
           <div className="table-wrap">
             <table className="data-table org-assignment-table">
-              <thead><tr><th>{t('common.agent')}</th><th>Position</th><th>{t('common.department')}</th><th>{t('common.reportsTo')}</th><th>{t('common.status')}</th></tr></thead>
+              <thead><tr><th>{t('common.agent')}</th><th>Position</th><th>{t('common.department')}</th><th>{t('common.reportsTo')}</th><th>{t('common.status')}</th><th>Assignment</th></tr></thead>
               <tbody>
-                {companyAgents.map((agent) => <tr key={agent.id}>
+                {visibleMembers.map((agent) => <tr key={agent.id}>
                   <td><button type="button" className="text-button agent-name-button" onClick={() => setSelectedAgentId(agent.id)}><b>{agent.name}</b><small>{agent.role} / {agent.adapterType ?? 'hermes-ssh'}</small></button></td>
-                  <td><select aria-label={`Position for ${agent.name}`} className="input compact" disabled={busyAgentId === agent.id} value={agent.positionId ?? ''} onChange={(event) => void updateAgentOrg(agent, { positionId: event.target.value || null })}>
+                  <td><select aria-label={`Position for ${agent.name}`} className="input compact" disabled={busyAgentId === agent.id} value={memberAssignment(agent).positionId ?? ''} onChange={(event) => stagePosition(agent, event.target.value || null)}>
                     <option value="">No position</option>
                     {companyPositions.filter(position => position.isActive !== false || position.id === agent.positionId).map(position => <option key={position.id} value={position.id}>{position.name}</option>)}
                   </select></td>
-                  <td><span title="Department is determined by position">{companyDepartments.find(department => department.id === agent.departmentId)?.name ?? (leadershipLocked(agent) ? 'Company leadership' : 'Unconfigured')}</span></td>
-                  <td><select className="input compact" aria-label={`Reports to for ${agent.name}`} disabled={busyAgentId === agent.id || leadershipLocked(agent)} value={agent.bossId ?? ''} onChange={(event) => void updateAgentOrg(agent, { bossId: event.target.value || null })}>
-                    <option value="">{t('departments.topLevelAgent')}</option>
-                    {companyAgents.filter((candidate) => candidate.id !== agent.id).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
+                  <td><span title="Department is determined by position">{companyDepartments.find(department => department.id === agent.departmentId)?.name ?? (isLeadershipAgent(agent) ? 'Company leadership' : 'Unconfigured')}</span></td>
+                  <td><select className="input compact" aria-label={`Reports to for ${agent.name}`} disabled={busyAgentId === agent.id || Boolean(memberAssignment(agent).position?.isCompanyBoss || memberAssignment(agent).position?.isDepartmentHead)} value={memberAssignment(agent).bossId ?? ''} onChange={(event) => chooseSupervisor(agent, event.target.value || null)}>
+                    <option value="">{memberAssignment(agent).candidates.length ? 'Choose supervisor' : 'No eligible supervisor'}</option>
+                    {memberAssignment(agent).candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
                   </select></td>
                   <td><span className="badge">{agent.isBusy ? t('common.busy') : agent.isActive === false ? t('common.offline') : t('common.ready')}</span></td>
+                  <td>{memberAssignment(agent).pending && <button className="btn" disabled={busyAgentId === agent.id || (memberAssignment(agent).candidates.length > 1 && !memberAssignment(agent).bossId)} onClick={() => void updateAgentOrg(agent, { positionId: memberAssignment(agent).positionId || null, bossId: memberAssignment(agent).bossId })}>Save assignment</button>}<small>{supervisorHint(memberAssignment(agent).position, memberAssignment(agent).candidates)}</small></td>
                 </tr>)}
               </tbody>
             </table>
           </div>
-          {companyAgents.length === 0 && <p className="chat-empty">{t('chat.noAgents')}</p>}
+          {visibleMembers.length === 0 && <p className="chat-empty">{t('chat.noAgents')}</p>}
         </section>
 
         {selectedAgent && <section className="card section-card agent-inline-editor">
@@ -267,18 +292,21 @@ export function DepartmentsPage() {
             <span>{selectedAgent.adapterType ?? 'hermes-ssh'} / {selectedAgent.isBusy ? t('common.busy') : selectedAgent.isActive === false ? t('common.offline') : t('common.ready')}</span>
           </div>
           <div className="form-grid department-agent-edit-grid">
-            <label className="field-label">Position<select className="input compact" disabled={busyAgentId === selectedAgent.id} value={selectedAgent.positionId ?? ''} onChange={(event) => void updateAgentOrg(selectedAgent, { positionId: event.target.value || null })}>
+            <label className="field-label">Position<select className="input compact" disabled={busyAgentId === selectedAgent.id} value={memberAssignment(selectedAgent).positionId ?? ''} onChange={(event) => stagePosition(selectedAgent, event.target.value || null)}>
               <option value="">No position</option>
               {companyPositions.filter(position => position.isActive !== false || position.id === selectedAgent.positionId).map(position => <option key={position.id} value={position.id}>{position.name}</option>)}
             </select><span className="field-hint">Department is determined by position.</span></label>
-            <label className="field-label">{t('common.reportsTo')}<select className="input compact" disabled={busyAgentId === selectedAgent.id || leadershipLocked(selectedAgent)} value={selectedAgent.bossId ?? ''} onChange={(event) => void updateAgentOrg(selectedAgent, { bossId: event.target.value || null })}>
-              <option value="">{t('departments.topLevelAgent')}</option>
-              {companyAgents.filter((candidate) => candidate.id !== selectedAgent.id).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
+            <label className="field-label">{t('common.reportsTo')}<select className="input compact" disabled={busyAgentId === selectedAgent.id || Boolean(memberAssignment(selectedAgent).position?.isCompanyBoss || memberAssignment(selectedAgent).position?.isDepartmentHead)} value={memberAssignment(selectedAgent).bossId ?? ''} onChange={(event) => chooseSupervisor(selectedAgent, event.target.value || null)}>
+              <option value="">{memberAssignment(selectedAgent).candidates.length ? 'Choose supervisor' : 'No eligible supervisor'}</option>
+              {memberAssignment(selectedAgent).candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
             </select></label>
           </div>
+          <p className="field-hint">{supervisorHint(memberAssignment(selectedAgent).position, memberAssignment(selectedAgent).candidates)}</p>
+          {memberAssignment(selectedAgent).pending && <button className="btn" disabled={busyAgentId === selectedAgent.id || (memberAssignment(selectedAgent).candidates.length > 1 && !memberAssignment(selectedAgent).bossId)} onClick={() => void updateAgentOrg(selectedAgent, { positionId: memberAssignment(selectedAgent).positionId || null, bossId: memberAssignment(selectedAgent).bossId })}>Save assignment</button>}
         </section>}
 
-        {selectedDepartment && <section className="card section-card">
+        </>}
+        {tab === 'settings' && selectedDepartment && <section className="card section-card">
           <div className="panel-title"><div><h2><Users size={18} /> {t('departments.settings')}</h2><span className="status-pill">{selectedDepartment.name}</span></div></div>
           <div className="form-grid">
             <label className="field-label">{t('departments.head')}
@@ -300,7 +328,7 @@ export function DepartmentsPage() {
           <button className="btn btn-primary" disabled={busy} onClick={() => void saveDepartmentSettings()}>{t('departments.saveSettings')}</button>
         </section>}
 
-        <section className="card section-card">
+        {tab === 'goals' && selectedDepartment && <section className="card section-card">
           <div className="panel-title"><div><h2><Target size={18} /> {t('departments.goals')}</h2><span className="status-pill">{selectedDepartment?.name ?? t('departments.noneSelected')}</span></div></div>
           <label className="field-label">{t('companies.goalTitle')}<input className="input" value={goalTitle} onChange={(event) => setGoalTitle(event.target.value)} disabled={!selectedDepartment} /></label>
           <label className="field-label">{t('companies.goalBody')}<textarea className="input" rows={3} value={goalBody} onChange={(event) => setGoalBody(event.target.value)} disabled={!selectedDepartment} /></label>
@@ -309,7 +337,7 @@ export function DepartmentsPage() {
             {departmentGoals.map((goal) => <div className="list-row" key={goal.id}><b>{goal.title}</b><p>{goal.body || t('companies.noGoalBody')}</p></div>)}
             {selectedDepartment && departmentGoals.length === 0 && <p className="chat-empty">{t('departments.noGoals')}</p>}
           </div>
-        </section>
+        </section>}
       </>}
       </main>
     </div>

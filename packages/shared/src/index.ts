@@ -291,6 +291,7 @@ export const createPositionSchema = z.object({
   rank: z.number().int().min(0).max(9).default(2),
   isCompanyBoss: z.boolean().default(false),
   isDepartmentHead: z.boolean().default(false),
+  isCompanyLeadership: z.boolean().default(false),
   canDelegateAcrossDepartments: z.boolean().default(false),
   defaultDepartmentId: z.string().uuid().nullable().optional(),
   managerPositionId: z.string().uuid().nullable().optional(),

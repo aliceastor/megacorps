@@ -79,6 +79,8 @@ type CardCommentRow = typeof cardComments.$inferSelect;
 type AdapterSessionRow = NonNullable<Awaited<ReturnType<typeof findAdapterSession>>>;
 type KanbanContextOptions = {
   focusCardId?: string;
+  /** Read-only draft context when the invocation has not created a card yet. */
+  draftFocusCard?: CardRow;
   focusAgentId?: string | null;
   budgetChars?: number;
   projectId?: string | null;
@@ -4550,7 +4552,8 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
   const scopedProjects = scopedToProject ? (options.projectId ? companyProjects.filter((project) => project.id === options.projectId) : []) : companyProjects;
   const scopedGoals = scopedToProject ? companyGoals.filter((goal) => !goal.projectId || goal.projectId === options.projectId) : companyGoals;
   const scopedCards = scopedToProject ? companyCards.filter((card) => options.projectId ? card.projectId === options.projectId : !card.projectId) : companyCards;
-  const focusCard = options.focusCardId ? companyCards.find((card) => card.id === options.focusCardId) : undefined;
+  const focusCard = (options.focusCardId ? companyCards.find((card) => card.id === options.focusCardId) : undefined)
+    ?? (options.draftFocusCard?.companyId === companyId ? options.draftFocusCard : undefined);
   const focusAgent = options.focusAgentId ? agentById.get(options.focusAgentId) : undefined;
   const includeGoals = options.includeGoals !== false;
   const includeInvocationPositionPrompt = options.includeInvocationPositionPrompt !== false;
@@ -4590,7 +4593,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
     const runtime = focusAgent.runtimeId ? runtimeById.get(focusAgent.runtimeId) : undefined;
     const department = focusAgent.departmentId ? departmentById.get(focusAgent.departmentId) : undefined;
     const position = focusAgent.positionId ? positionById.get(focusAgent.positionId) : undefined;
-    const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt });
+    const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt, isCompanyLeadership: Boolean(position?.isCompanyLeadership || position?.isCompanyBoss) });
     const reports = visibleAgents
       .filter((agent) => agent.bossId === focusAgent.id && agent.isActive !== false)
       .map((agent) => ({
@@ -5075,7 +5078,7 @@ async function buildTaskPromptCore(card: CardRow, options: PromptBuildOptions = 
   const reports = await activeDirectReportsForCard(card);
   const delegationAlreadySatisfied = card.assigneeId ? await actorHasDelegatedInScope(card.id, card.assigneeId, null) : false;
 
-  const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, focusAgentId: card.assigneeId, includeFocusProjectRepo: false });
+  const kanbanContext = await buildCompanyKanbanContext(card.companyId, { focusCardId: card.id, draftFocusCard: card, focusAgentId: card.assigneeId, includeFocusProjectRepo: false });
   // Cross-surface digest: what this agent did and concluded elsewhere (other
   // cards, Direct Chat notes) so a fresh Kanban session starts with the same
   // memory the chat sessions see. Continuation turns skip it — the adapter
@@ -5179,7 +5182,7 @@ async function buildReviewPromptCore(card: CardRow, options: PromptBuildOptions 
   ].join('\n\n');
 }
 
-async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+export async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
  const { role: common, reference } = await buildCompanyContextParts(card.companyId, card.assigneeId, card.tags ?? []);
  const assignment = card.assigneeId ? await structuralAssignment(card.companyId, card.assigneeId) : null;
  if (assignment?.delegationRequired) return [common, agentOperationGuide('management'),

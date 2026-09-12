@@ -9,7 +9,7 @@ test('positions redirect to department tabs and company leadership keeps Boss ou
   await page.getByRole('button', { name: 'Company leadership', exact: true }).click();
   await expect(page.getByLabel('Department Head', { exact: true })).toBeDisabled();
   await expect(page.getByLabel('Rank', { exact: true })).toHaveValue('0');
-  await expect(page.getByRole('combobox', { name: 'Department', exact: true })).toBeDisabled();
+  await expect(page.getByRole('combobox', { name: 'Department', exact: true })).toHaveCount(0);
   await expect(page.getByRole('combobox', { name: 'Manager position', exact: true })).toBeDisabled();
 });
 
@@ -25,8 +25,8 @@ test('department head position fixes rank and prevents a duplicate head even in 
   await page.getByRole('button', { name: 'New Position', exact: true }).click();
   await expect(page.getByLabel('Department Head', { exact: true })).toBeDisabled();
   await expect(page.getByLabel('Rank', { exact: true })).toHaveValue('2');
-  await expect(page.getByRole('combobox', { name: 'Department', exact: true })).toHaveValue('engineering');
-  await expect(page.getByRole('combobox', { name: 'Department', exact: true })).toBeDisabled();
+  await expect(page.getByText('Department: Engineering', { exact: true })).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'Department', exact: true })).toHaveCount(0);
 });
 test('Agent editor locks membership and leadership reports but keeps staff reporting editable on mobile', async ({ page }) => {
   await fixture(page, 390);
@@ -55,8 +55,11 @@ test('company leadership selection survives organization refetch', async ({ page
   await page.goto('/departments');
   const leadership = page.getByRole('button', { name: 'Company leadership', exact: true });
   await leadership.click();
-  await page.getByRole('tab', { name: 'Members & settings', exact: true }).click();
-  await page.getByRole('combobox', { name: 'Reports to for Design specialist', exact: true }).selectOption('boss');
+  await page.getByRole('tab', { name: 'Members', exact: true }).click();
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true }); document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true }); document.dispatchEvent(new Event('visibilitychange'));
+  });
   await expect.poll(() => reads).toBeGreaterThan(1);
   await expect(leadership).toHaveClass(/active/);
 });

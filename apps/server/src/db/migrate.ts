@@ -1,3 +1,4 @@
+import { managerPositionMigrationSql } from './manager-position-migration.ts';
 import { positionAuthorityMigrationSql } from './position-authority-migration.ts';
 import { cleanupUnusedDefault } from './companyless-migration.ts';
 import { a2aPollingMigrationSql } from './a2a-polling-migration.ts';
@@ -19,6 +20,12 @@ const MIGRATION_LOCK_KEY = 727274001;
 // created before the version table will re-run v1 exactly once to get recorded.
 // Never edit an applied migration's statements — add the change as a new version.
 const migrations: Migration[] = [
+  { version: 35, name: 'manager-position-company-leadership', run: async () => {
+    await sql.begin(async tx => {
+      const complete=await tx`SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='positions' AND column_name='is_company_leadership'`;
+      if (!complete.length) await tx.unsafe(managerPositionMigrationSql);
+    });
+  } },
   { version: 34, name: 'position-department-authority', run: async () => {
     await sql.begin(async tx => {
       // DDL is atomic. A completed constraint also handles a crash between the

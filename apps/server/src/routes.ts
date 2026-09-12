@@ -5,6 +5,7 @@ import { acknowledgeA2aExecution } from './a2a-executions.ts';
 import { a2aExecutionScope } from './a2a-execution-scope.ts';
 import { registerCompanySetupRoutes, setupConnectionFingerprint, recordSetupConnectionCheck } from './company-setup.ts';
 import { registerCompanyRetirementRoutes } from './company-retirement.ts';
+import { registerPromptPreviewRoutes } from './prompt-preview.ts';
 import { companyDeletionInventory, deletionBlockers, lockCompanyInventory } from './company-inventory.ts';
 import { structuralCompletionIssue, companyExecutionReadiness, structuralReviewer } from './company-workflow.ts';
 import { workerRepositoryReadiness } from './worker-readiness.ts';
@@ -534,6 +535,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await registerCompanySetupRoutes(app);
   registerCompanyRetirementRoutes(app);
   await registerChatRoutes(app);
+  await registerPromptPreviewRoutes(app);
   await registerCronRoutes(app);
   await registerRunnerRoutes(app);
   await registerLifecycleRoutes(app);
@@ -1501,6 +1503,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       rank: input.rank,
       isCompanyBoss: input.isCompanyBoss,
       isDepartmentHead: input.isDepartmentHead,
+      isCompanyLeadership: input.isCompanyBoss ? true : input.isCompanyLeadership,
       canDelegateAcrossDepartments: input.canDelegateAcrossDepartments,
       defaultDepartmentId: input.defaultDepartmentId ?? null,
       managerPositionId: input.isCompanyBoss ? null : input.managerPositionId ?? null,
@@ -1547,6 +1550,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       rank: input.rank,
       isCompanyBoss: input.isCompanyBoss,
       isDepartmentHead: input.isDepartmentHead,
+      isCompanyLeadership: input.isCompanyBoss ? true : input.isCompanyLeadership,
       canDelegateAcrossDepartments: input.canDelegateAcrossDepartments,
       defaultDepartmentId: input.defaultDepartmentId === undefined ? undefined : input.defaultDepartmentId ?? null,
       managerPositionId: nextIsCompanyBoss ? null : input.managerPositionId === undefined ? undefined : input.managerPositionId ?? null,
@@ -2292,7 +2296,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     try { await ensureCompanyReferences(companyId, { departmentId: input.departmentId, positionId: input.positionId, bossId: input.bossId, runtimeId: input.runtimeId, adapterType: input.adapterType }); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
-    const organization = await resolveAgentOrganization(db, companyId, input);
+    const organization = await resolveAgentOrganization(db, companyId, { ...input, autoSelect: true });
     const [agent] = await db.insert(agents).values({ companyId, departmentId: organization.departmentId ?? null, positionId: input.positionId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: organization.bossId ?? null, capabilities: input.capabilities ?? [], memoryConfig: input.memoryConfig ?? {}, maxConcurrent: input.maxConcurrent ?? 1, defaultTimeoutSeconds: input.defaultTimeoutSeconds ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
     if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
     // Best-effort Gitea identity at birth; a failure here is recoverable later
@@ -2415,7 +2419,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           referenceInput.runtimeId = input.runtimeId === undefined ? current.runtimeId : input.runtimeId;
         }
         await ensureCompanyReferences(current.companyId, referenceInput, tx);
-        const organization = await resolveAgentOrganization(tx, current.companyId, { ...current, ...input });
+        const organization = await resolveAgentOrganization(tx, current.companyId, { ...current, ...input, autoSelect: input.positionId !== undefined && input.positionId !== current.positionId, resetIneligibleBoss: input.bossId === undefined && input.positionId !== undefined && input.positionId !== current.positionId });
         if (organization.bossId && organization.bossId !== current.bossId) {
           const members = await tx.select({ id: agents.id, bossId: agents.bossId }).from(agents).where(and(eq(agents.companyId, current.companyId), isNull(agents.deletedAt)));
           const bosses = new Map(members.map(member => [member.id, member.bossId]));

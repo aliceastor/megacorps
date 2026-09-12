@@ -212,7 +212,9 @@ async function applyManifest(flags: Flags): Promise<void> {
     console.log(`created department ${row.name ?? row.slug ?? row.id}`);
   }
 
-  for (const item of records(manifest.positions)) {
+  // Head positions derive their manager from the Boss position, so install
+  // Boss definitions first even when the manifest lists the Head first.
+  for (const item of records(manifest.positions).sort((a, b) => Number(b.isCompanyBoss === true) - Number(a.isCompanyBoss === true))) {
     const company = companyFor(item);
     const index = await companyScopedIndex(positionsByCompany, company.id, '/api/positions');
     const existing = keyFor(item).map((key) => index.get(key)).find(Boolean);

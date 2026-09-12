@@ -193,3 +193,17 @@ test('Alice CTO Ribel Digby chain uses short local links beside empty department
     assert.equal(result.departmentEdges.length, 3);
   }
 });
+
+test('company-direct staff are grouped outside departments with their real reporting edges', async () => {
+  const result = await layout({ departments: [{ id: 'engineering', name: 'Engineering' }], nodes: [
+    { id: 'boss', name: 'Boss', rank: 0, isCompanyBoss: true, width: 220, height: 100 },
+    { id: 'director', name: 'Director', rank: 2, isCompanyLeadership: true, bossId: 'boss', width: 220, height: 100 },
+    { id: 'advisor', name: 'Advisor', rank: 3, isCompanyLeadership: true, bossId: 'director', width: 220, height: 100 },
+    { id: 'head', name: 'Head', rank: 1, departmentId: 'engineering', bossId: 'boss', width: 220, height: 100 },
+  ] });
+  assert.equal(result.nodes.find((node: any) => node.id === 'director').groupId, '__company_leadership__');
+  assert.equal(result.nodes.find((node: any) => node.id === 'advisor').groupId, '__company_leadership__');
+  assert.ok(!result.groups.some((group: any) => group.id === '__unassigned__'));
+  assert.deepEqual(result.edges.map((edge: any) => edge.id).sort(), ['boss:director', 'boss:head', 'director:advisor']);
+  for (const node of result.nodes.filter((node: any) => node.isCompanyLeadership)) for (const group of result.groups) assert.ok(node.x >= group.x + group.width || node.x + node.width <= group.x);
+});

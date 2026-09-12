@@ -110,14 +110,14 @@ function projectRepoContext(company: CompanyRow | null | undefined, project: Pro
   ].filter(Boolean).join('\n');
 }
 
-async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, projectId: string | null): Promise<string> {
+export async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, projectId: string | null): Promise<string> {
   const [company] = await db.select().from(companies).where(eq(companies.id, companyId)).limit(1);
   const [project] = projectId ? await db.select().from(projects).where(and(eq(projects.id, projectId), isNull(projects.deletedAt))).limit(1) : [];
   const [runtime] = agent.runtimeId ? await db.select().from(agentRuntimes).where(eq(agentRuntimes.id, agent.runtimeId)).limit(1) : [];
   const [department] = agent.departmentId ? await db.select().from(departments).where(eq(departments.id, agent.departmentId)).limit(1) : [];
   const [position] = agent.positionId ? await db.select().from(positions).where(and(eq(positions.id, agent.positionId), eq(positions.companyId, companyId))).limit(1) : [];
   const companyGoals = await db.select().from(goals).where(eq(goals.companyId, companyId)).orderBy(desc(goals.createdAt));
-  const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt });
+  const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt, isCompanyLeadership: Boolean(position?.isCompanyLeadership || position?.isCompanyBoss) });
   return [
     await buildCommonCompanyContext(companyId, agent.id),
     await companyDiscoveryContext(companyId, projectId),
@@ -186,7 +186,7 @@ async function buildChatCardIndex(companyId: string, projectId: string | null): 
   ].join('\n');
 }
 
-function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string, continuation = false, cardIndex = '', refreshedContext = '', digest = ''): string {
+export function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string, continuation = false, cardIndex = '', refreshedContext = '', digest = ''): string {
   if (continuation) {
     const latest = [...history].reverse().find((message) => message.authorType === 'user') ?? history[history.length - 1];
     return [

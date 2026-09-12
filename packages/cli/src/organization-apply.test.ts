@@ -17,6 +17,7 @@ test('apply resolves position department and creates Boss before Head regardless
     if(req.method==='GET'){res.end(JSON.stringify(rows[collection]??[]));return;}
     let raw='';for await(const chunk of req)raw+=chunk;
     const body=JSON.parse(raw); writes.push({path,body});
+    if(collection==='positions' && body.isDepartmentHead && !rows.positions!.some(p=>p.isCompanyBoss)) {res.statusCode=400;res.end(JSON.stringify({error:'boss_position_required'}));return;}
     if(collection==='positions' && !body.isCompanyBoss && body.defaultDepartmentId!=='engineering') {res.statusCode=400;res.end(JSON.stringify({error:'position_department_required'}));return;}
     if(collection==='agents' && body.positionId==='head' && !rows.agents!.some(a=>a.positionId==='boss')) {res.statusCode=400;res.end(JSON.stringify({error:'company_boss_required'}));return;}
     const row={...body,id:body.slug};rows[collection]!.push(row);res.end(JSON.stringify(row));
@@ -33,6 +34,7 @@ test('apply resolves position department and creates Boss before Head regardless
   const code=await new Promise<number|null>((resolve,reject)=>{child.on('error',reject);child.on('exit',resolve);});
   assert.equal(code,0,output);
   assert.equal(writes.find(w=>w.path==='/api/positions'&&w.body.slug==='head')!.body.defaultDepartmentId,'engineering');
+  assert.deepEqual(writes.filter(w=>w.path==='/api/positions').map(w=>w.body.slug),['boss','head']);
   assert.deepEqual(writes.filter(w=>w.path==='/api/agents').map(w=>w.body.positionId),['boss','head']);
 });
 

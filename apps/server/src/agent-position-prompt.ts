@@ -3,6 +3,7 @@ export type AgentPositionPromptContext = {
   departmentName?: string | null;
   companyName?: string | null;
   customPrompt?: string | null;
+  isCompanyLeadership?: boolean;
 };
 
 export function formatAgentPositionPrompt(context: AgentPositionPromptContext): string {
@@ -17,7 +18,9 @@ export function formatAgentPositionPrompt(context: AgentPositionPromptContext): 
     '回報 verdict 與受審 head SHA；由 MegaCorps 合併閘門執行 merge',
   );
   return [
-    `You are ${positionName} in ${departmentName} department of firm ${companyName}.`,
+    context.isCompanyLeadership
+      ? `You are ${positionName} in company leadership of firm ${companyName}.`
+      : `You are ${positionName} in ${departmentName} department of firm ${companyName}.`,
     customPrompt,
   ].filter(Boolean).join('\n');
 }

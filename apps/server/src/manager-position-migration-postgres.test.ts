@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { isolatedPostgres } from './test-support/postgres-db.ts';
+import { managerPositionMigrationSql } from './db/manager-position-migration.ts';
+test('v35 preserves unanimous legacy supervisor evidence, inactive drafts and detects ambiguity', {skip:!process.env.TEST_DATABASE_URL&&!process.env.CI?'Dedicated PostgreSQL URL absent':false,timeout:60000},async t=>{
+ const {sql}=await isolatedPostgres(t);
+ const [c]=await sql`INSERT INTO companies(name,slug) VALUES('Legacy managers','legacy-managers') RETURNING id`;
+ const [d]=await sql`INSERT INTO departments(company_id,name,slug) VALUES(${c!.id},'Engineering','eng') RETURNING id`;
+ const [bp]=await sql`INSERT INTO positions(company_id,name,slug,is_company_boss) VALUES(${c!.id},'Boss','boss',true) RETURNING id`;
+ const [boss]=await sql`INSERT INTO agents(company_id,name,slug,role,position_id) VALUES(${c!.id},'Alice','alice','Boss',${bp!.id}) RETURNING id`;
+ const [hp]=await sql`INSERT INTO positions(company_id,name,slug,is_department_head,default_department_id) VALUES(${c!.id},'CTO','cto',true,${d!.id}) RETURNING id`;
+ const [head]=await sql`INSERT INTO agents(company_id,name,slug,role,position_id) VALUES(${c!.id},'CTO','cto','Head',${hp!.id}) RETURNING id`;
+ const [senior]=await sql`INSERT INTO positions(company_id,name,slug,default_department_id,manager_position_id) VALUES(${c!.id},'Senior','senior',${d!.id},${hp!.id}) RETURNING id`;
+ const [ribel]=await sql`INSERT INTO agents(company_id,name,slug,role,position_id) VALUES(${c!.id},'Ribel','ribel','Staff',${senior!.id}) RETURNING id`;
+ const [intern]=await sql`INSERT INTO positions(company_id,name,slug,default_department_id,manager_position_id) VALUES(${c!.id},'Internship','internship',${d!.id},${senior!.id}) RETURNING id`;
+ const [digby]=await sql`INSERT INTO agents(company_id,name,slug,role,position_id) VALUES(${c!.id},'Digby','digby','Staff',${intern!.id}) RETURNING id`;
+ const [david]=await sql`INSERT INTO agents(company_id,name,slug,role,position_id,is_active) VALUES(${c!.id},'David','david','Staff',${senior!.id},false) RETURNING *`;
+ await sql.unsafe('ALTER TABLE positions DISABLE TRIGGER organization_after_position');
+ await sql`UPDATE positions SET manager_position_id=${hp!.id} WHERE id=${intern!.id}`;
+ await sql.unsafe('ALTER TABLE positions ENABLE TRIGGER organization_after_position');
+ await assert.rejects(sql.begin(async tx=>{
+  await tx.unsafe('ALTER TABLE agents DISABLE TRIGGER organization_normalize_agent; ALTER TABLE agents DISABLE TRIGGER organization_after_agent');
+  await tx`INSERT INTO agents(company_id,name,slug,role,position_id,department_id,boss_id) VALUES(${c!.id},'Conflicting','conflicting','Staff',${intern!.id},${d!.id},${head!.id})`;
+  await tx.unsafe('ALTER TABLE agents ENABLE TRIGGER organization_normalize_agent; ALTER TABLE agents ENABLE TRIGGER organization_after_agent');
+  await tx.unsafe(managerPositionMigrationSql);
+ }),/organization_migration_ambiguous_managers/);
+ assert.equal((await sql`SELECT manager_position_id FROM positions WHERE id=${intern!.id}`)[0]!.manager_position_id,hp!.id);
+ await sql.begin(async tx=>{await tx.unsafe(managerPositionMigrationSql);});
+ assert.equal((await sql`SELECT manager_position_id FROM positions WHERE id=${intern!.id}`)[0]!.manager_position_id,senior!.id);
+ assert.equal((await sql`SELECT boss_id FROM agents WHERE id=${digby!.id}`)[0]!.boss_id,ribel!.id);
+ assert.deepEqual((await sql`SELECT * FROM agents WHERE id=${david!.id}`)[0],david);
+ const [evidence]=await sql`SELECT old_manager_position_id,new_manager_position_id FROM organization_manager_migration WHERE position_id=${intern!.id}`;
+ assert.equal(evidence!.old_manager_position_id,hp!.id);assert.equal(evidence!.new_manager_position_id,senior!.id);
+});

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { AgentLike, TaskContext } from './adapters/hermes.ts';
 import { buildAgentPrompt } from './adapters/hermes.ts';
+import { wrapA2aPrompt } from './a2a-final-output.ts';
 import { codexAppInternals } from './adapters/codex-app.ts';
 import { db } from './db/client.ts';
 import { promptLogs } from './db/schema.ts';
@@ -51,6 +52,7 @@ function redactedJson(value: unknown): string {
 }
 
 export function promptSnapshotForAdapter(agent: AgentLike, task: TaskContext): string {
+  if (agent.adapterType === 'a2a') return wrapA2aPrompt(buildAgentPrompt(agent, task), task.kind);
   if (agent.adapterType === 'codex-app') return codexAppInternals.buildCodexPrompt(agent, task);
   if (agent.adapterType === 'hermes-ssh' || agent.adapterType === 'hermes-gateway') return buildAgentPrompt(agent, task);
   return redactedJson({ agent, task });

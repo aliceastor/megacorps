@@ -2,7 +2,7 @@ export type OrgPoint = { x: number; y: number };
 export type OrgRect = OrgPoint & { width: number; height: number };
 export type OrgLayoutInput = {
   id: string; name: string; departmentId?: string | null; bossId?: string | null;
-  rank?: number | null; isCompanyBoss?: boolean; width: number; height: number;
+  rank?: number | null; isCompanyBoss?: boolean; isCompanyLeadership?: boolean; width: number; height: number;
 };
 export type OrgNode = OrgLayoutInput & OrgRect & { rank: number | null; groupId: string; relationshipIssue?: string };
 export type OrgGroup = OrgRect & { id: string; name: string; memberIds: string[] };
@@ -22,22 +22,24 @@ export function layoutOrgChart(input: { nodes: OrgLayoutInput[]; departments: { 
   const departmentIds = new Set(departments.map(d => d.id));
   const ids = new Set(source.map(n => n.id));
   const companyBosses = source.filter(n => n.isCompanyBoss === true);
-  const laneMembers = source.filter(n => n.isCompanyBoss !== true);
+  const nonBosses = source.filter(n => n.isCompanyBoss !== true);
+  const companyDirect = nonBosses.filter(n => n.isCompanyLeadership === true);
+  const laneMembers = nonBosses.filter(n => n.isCompanyLeadership !== true);
   const soleCompanyBoss = companyBosses.length === 1 ? companyBosses[0] : undefined;
   const edgeSourceId = (node: OrgLayoutInput) => node.bossId && ids.has(node.bossId) ? node.bossId : undefined;
-  const managers = [...new Set(laneMembers.map(edgeSourceId).filter((id): id is string => Boolean(id)))].sort(compare);
+  const managers = [...new Set(nonBosses.map(edgeSourceId).filter((id): id is string => Boolean(id)))].sort(compare);
   const laneMargin = new Map(managers.map((id,index) => [id,CLEARANCE+index*8]));
   const maxMargin = CLEARANCE+Math.max(0,managers.length-1)*8;
   const padding = 32, columnGap = 48;
   const groupId = (n: OrgLayoutInput) => n.departmentId && departmentIds.has(n.departmentId) ? n.departmentId : '__unassigned__';
   if (laneMembers.some(n => groupId(n) === '__unassigned__')) departments.push({ id: '__unassigned__', name: 'Unassigned department' });
-  const ranks = [...new Set(laneMembers.map(rankOf))].sort((a,b) => a===null ? 1 : b===null ? -1 : a-b);
+  const ranks = [...new Set(nonBosses.map(rankOf))].sort((a,b) => a===null ? 1 : b===null ? -1 : a-b);
   const bands = new Map<number | null, { y: number; height: number }>();
   const leadershipHeight = Math.max(0, ...companyBosses.map(node => node.height));
   const groupTop = companyBosses.length ? 16 + leadershipHeight + maxMargin * 2 + 32 : 16;
   let y = groupTop + maxMargin + 40;
   for (const rank of ranks) {
-    const height = Math.max(1, ...laneMembers.filter(n => rankOf(n) === rank).map(n => n.height));
+    const height = Math.max(1, ...nonBosses.filter(n => rankOf(n) === rank).map(n => n.height));
     bands.set(rank, { y, height }); y += height + maxMargin*2+32;
   }
   const height = Math.max(groupTop + 144, y - 40);
@@ -59,7 +61,18 @@ export function layoutOrgChart(input: { nodes: OrgLayoutInput[]; departments: { 
     }
     x += width+32;
   }
-  const laneLeft = groups[0]?.x ?? 16, laneRight = groups.length ? groups.at(-1)!.x + groups.at(-1)!.width : 304;
+  if (companyDirect.length) {
+    const directWidth = Math.max(...ranks.map(rank => companyDirect.filter(node => rankOf(node) === rank).reduce((sum, node) => sum + node.width + columnGap, 0)));
+    for (const rank of ranks) {
+      let nextX = x + padding;
+      for (const member of companyDirect.filter(node => rankOf(node) === rank)) {
+        nodes.push({ ...member, rank, groupId: '__company_leadership__', x: nextX, y: bands.get(rank)!.y });
+        nextX += member.width + columnGap;
+      }
+    }
+    x += directWidth + padding;
+  }
+  const laneLeft = groups[0]?.x ?? 16, laneRight = companyDirect.length ? x : groups.length ? groups.at(-1)!.x + groups.at(-1)!.width : 304;
   const leadershipWidth = companyBosses.reduce((sum,node) => sum + node.width, 0) + Math.max(0,companyBosses.length-1)*columnGap;
   let leadershipX = (laneLeft + laneRight - leadershipWidth) / 2;
   for (const member of companyBosses) {

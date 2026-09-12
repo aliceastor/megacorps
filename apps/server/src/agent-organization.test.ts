@@ -45,8 +45,8 @@ for (const field of ['bossId', 'positionId', 'departmentId'] as const) test(`age
 
 test('numeric Rank inversion is valid and relationship-only update preserves advanced data', async t => {
   const f=await fixture(t), [a,b]=f.rows;
-  const high={id:randomUUID(),companyId:f.company.id,rank:10},low={id:randomUUID(),companyId:f.company.id,rank:100};
-  f.state.rows(positions).push(high,low); a!.positionId=high.id; b!.positionId=low.id;
+  const high={id:randomUUID(),companyId:f.company.id,rank:2,managerPositionId:null as string|null},low={id:randomUUID(),companyId:f.company.id,rank:9,isActive:true};
+  high.managerPositionId=low.id; f.state.rows(positions).push(high,low); a!.positionId=high.id; b!.positionId=low.id;
   const before=structuredClone(a!);
   const response=await f.update(a!.id,{bossId:b!.id});
   assert.equal(response.statusCode,200,response.body); assert.deepEqual(a,{...before,bossId:b!.id});
@@ -80,7 +80,7 @@ test('agent runtime admission failure keeps its existing client error status', a
 test('position controls membership and preserves staff reporting edges', async t => {
  const f=await fixture(t), [a,b]=f.rows; const d={id:randomUUID(),companyId:f.company.id};
  f.state.rows(departments).push(d); const p={id:randomUUID(),companyId:f.company.id,rank:3,isCompanyBoss:false,isDepartmentHead:false,defaultDepartmentId:d.id,isActive:true};
- f.state.rows(positions).push(p); a!.bossId=b!.id;
+ const manager={id:randomUUID(),companyId:f.company.id,rank:2,isActive:true}; b!.positionId=manager.id; Object.assign(p,{managerPositionId:manager.id}); f.state.rows(positions).push(p,manager); a!.bossId=b!.id;
  const response=await f.update(a!.id,{positionId:p.id,departmentId:null});
  assert.equal(response.statusCode,200,response.body); assert.equal(a!.departmentId,d.id); assert.equal(a!.bossId,b!.id);
 });
@@ -92,4 +92,14 @@ test('active head assignment requires current Boss', async t=>{
  const f=await fixture(t), a=f.rows[0]!;const d={id:randomUUID(),companyId:f.company.id};f.state.rows(departments).push(d);
  const p={id:randomUUID(),companyId:f.company.id,rank:1,isCompanyBoss:false,isDepartmentHead:true,defaultDepartmentId:d.id,isActive:true};f.state.rows(positions).push(p);
  const response=await f.update(a.id,{positionId:p.id});assert.equal(response.statusCode,400,response.body);assert.equal(response.json().error,'organization_boss_required');
+});
+
+test('Agent assignment requires an explicit choice between manager Position occupants', async t=>{
+ const f=await fixture(t),[a,b,c]=f.rows; const d={id:randomUUID(),companyId:f.company.id}; f.state.rows(departments).push(d);
+ const manager={id:randomUUID(),companyId:f.company.id,rank:2,isActive:true,defaultDepartmentId:d.id};
+ const staff={id:randomUUID(),companyId:f.company.id,rank:3,isActive:true,defaultDepartmentId:d.id,managerPositionId:manager.id};
+ f.state.rows(positions).push(manager,staff);b!.positionId=manager.id;c!.positionId=manager.id;
+ const missing=await f.update(a!.id,{positionId:staff.id});assert.equal(missing.statusCode,400,missing.body);assert.equal(missing.json().error,'organization_supervisor_choice_required');assert.equal(a!.positionId,null);
+ const selected=await f.update(a!.id,{positionId:staff.id,bossId:c!.id});assert.equal(selected.statusCode,200,selected.body);assert.equal(a!.bossId,c!.id);
+ const invalid=await f.update(a!.id,{bossId:f.foreignAgent.id});assert.equal(invalid.statusCode,400,invalid.body);assert.equal(a!.bossId,c!.id);
 });

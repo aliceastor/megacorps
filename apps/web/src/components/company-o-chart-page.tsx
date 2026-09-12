@@ -2,14 +2,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Building2, CheckCircle2, Loader2, Network, Pause, Save, Users, Wifi } from 'lucide-react';
-import { positionAssignment, positionEditPatch } from '@/lib/position-assignment';
+import { positionAssignment, positionEditPatch, eligibleSupervisors, selectSupervisor, supervisorHint } from '@/lib/position-assignment';
 import { api } from '@/lib/api';
 import { layoutOrgChart } from '@/lib/org-layout';
 import { useLocale } from '@/lib/locale-context';
 
 type Company = { id: string; name: string; slug: string };
 type Department = { id: string; companyId: string; name: string; slug: string; headAgentId?: string | null };
-type Position = { id: string; companyId: string; name: string; slug: string; rank?: number | null; isCompanyBoss?: boolean; isDepartmentHead?: boolean; defaultDepartmentId?: string | null };
+type Position = { id: string; companyId: string; name: string; slug: string; rank?: number | null; isCompanyBoss?: boolean; isDepartmentHead?: boolean; isCompanyLeadership?: boolean; isActive?: boolean; managerPositionId?: string | null; defaultDepartmentId?: string | null };
 type Runtime = { id: string; companyId?: string | null; name: string; adapterType: string; config?: Record<string, unknown>; isActive?: boolean };
 type Agent = {
   id: string;
@@ -56,6 +56,7 @@ function MeasuredOrgChart({ agents, departments, positions, selectedId, onSelect
     id: agent.id, name: agent.name, bossId: agent.bossId, departmentId: agent.departmentId,
     rank: positions.find(position => position.id === agent.positionId)?.rank ?? null,
     isCompanyBoss: positions.find(position => position.id === agent.positionId)?.isCompanyBoss === true,
+    isCompanyLeadership: positions.find(position => position.id === agent.positionId)?.isCompanyLeadership === true,
     width: sizes[agent.id]?.width ?? cardWidth, height: sizes[agent.id]?.height ?? 128,
   })) }), [agents, departments, positions, sizes, cardWidth]);
 
@@ -155,7 +156,9 @@ export function CompanyOChartPage() {
   const selectedPosition = selectedAgent ? companyPositions.find((position) => position.id === selectedAgent.positionId) : null;
   const draftPosition = companyPositions.find(position => position.id === agentDraft?.positionId);
   const companyBossId = companyAgents.find(agent => agent.isActive !== false && companyPositions.some(position => position.id === agent.positionId && position.isCompanyBoss))?.id;
-  const draftOrg = positionAssignment(draftPosition, agentDraft?.bossId as string | null, companyBossId);
+  const draftCandidates = eligibleSupervisors(draftPosition, selectedAgent?.id, companyId, companyAgents, companyPositions);
+  const draftSupervisorId = draftPosition ? selectSupervisor(draftCandidates, agentDraft?.bossId) : agentDraft?.bossId ?? null;
+  const draftOrg = positionAssignment(draftPosition, draftSupervisorId, companyBossId);
   const directReports = selectedAgent ? companyAgents.filter((agent) => agent.bossId === selectedAgent.id) : [];
   const selectedAdapterType = String(agentDraft?.adapterType ?? selectedAgent?.adapterType ?? 'hermes-ssh');
 
@@ -180,6 +183,7 @@ export function CompanyOChartPage() {
 
   async function saveSelectedAgent() {
     if (!selectedAgent || !agentDraft) return;
+    if (draftCandidates.length > 1 && !draftSupervisorId) { setError('Choose an eligible supervisor from the manager position.'); return; }
     setSavingAgentId(selectedAgent.id);
     setError('');
     setNotice('');
@@ -195,7 +199,7 @@ export function CompanyOChartPage() {
         const value = agentDraft[field] || null;
         if (value !== (selectedAgent[field] || null)) payload[field] = value;
       }
-      Object.assign(payload, positionEditPatch(selectedAgent, draftPosition, agentDraft.positionId, agentDraft.bossId, companyBossId));
+      Object.assign(payload, positionEditPatch(selectedAgent, draftPosition, agentDraft.positionId, draftSupervisorId, companyBossId));
       for (const field of ['budgetPerTask', 'budgetMonthly'] as const) {
         const value = agentDraft[field] === '' || agentDraft[field] == null ? null : Number(agentDraft[field]);
         const original = selectedAgent[field] == null || selectedAgent[field] === '' ? null : Number(selectedAgent[field]);
@@ -264,7 +268,7 @@ export function CompanyOChartPage() {
         <label className="field-label">Slug<input className="input" value={String(agentDraft.slug ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, slug: event.target.value })} /></label>
         <label className="field-label">Department<select className="input" disabled title="Department is determined by position" value={draftOrg.departmentId ?? ''}><option value="">No department</option>{companyDepartments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}</select></label>
         <label className="field-label">Position<select className="input" value={String(agentDraft.positionId ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, positionId: event.target.value || null })}><option value="">No position</option>{companyPositions.map((position) => <option value={position.id} key={position.id}>{position.name}</option>)}</select></label>
-        <label className="field-label">Reports to<select className="input" disabled={Boolean(draftPosition?.isCompanyBoss || draftPosition?.isDepartmentHead)} value={draftOrg.bossId ?? ''} onChange={(event) => setAgentDraft({ ...agentDraft, bossId: event.target.value || null })}><option value="">Top-level</option>{companyAgents.filter((agent) => agent.id !== selectedAgent.id).map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>
+        <label className="field-label">Reports to<select aria-label="Reports to" className="input" disabled={Boolean(draftPosition?.isCompanyBoss || draftPosition?.isDepartmentHead)} value={draftOrg.bossId ?? ''} onChange={(event) => setAgentDraft({ ...agentDraft, bossId: event.target.value || null })}><option value="">{draftCandidates.length ? 'Choose supervisor' : 'No eligible supervisor'}</option>{draftCandidates.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select><span className="field-hint">{supervisorHint(draftPosition, draftCandidates)}</span></label>
         <label className="field-label">Profile<input className="input" value={String(agentDraft.hermesProfile ?? '')} onChange={(event) => setAgentDraft({ ...agentDraft, hermesProfile: event.target.value })} /></label>
         <label className="field-label">Adapter<select className="input" value={String(agentDraft.adapterType ?? 'hermes-ssh')} onChange={(event) => setAgentDraft({ ...agentDraft, adapterType: event.target.value, runtimeId: '' })}>
           <option value="a2a">A2A</option>{selectedAgent.adapterType === 'hermes-ssh' && <option value="hermes-ssh">Hermes SSH ({t('setup.legacy')})</option>}
