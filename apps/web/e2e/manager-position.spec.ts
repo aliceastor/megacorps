@@ -64,7 +64,7 @@ test('department tabs separate panels, leadership counts company-direct Agents a
   await expect(page.getByRole('heading', { name: 'Department Goals', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Department settings', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Company leadership', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Company leadership', exact: true })).toContainText('2 agents');
+  await expect(page.getByRole('button', { name: 'Company leadership', exact: true }).locator('p')).toHaveText('Company leadership / 2 agents');
   await expect(page.getByRole('combobox', { name: 'Department', exact: true })).toHaveCount(0);
   await expect(page.locator('.positions-page')).toContainText('Company Director');
   await page.getByRole('tab', { name: 'Members', exact: true }).click();

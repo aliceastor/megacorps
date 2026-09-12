@@ -237,7 +237,7 @@ export function DepartmentsPage() {
           {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
         </select></label>
         <div className="table-list">
-          <button aria-label={t('departments.leadership')} className={`list-row selectable-row ${departmentId === '__leadership' ? 'active' : ''}`} onClick={() => { setDepartmentId('__leadership'); setTab('positions'); }}><b>{t('departments.leadership')}</b><p>{leadershipAgents.length} {t('departments.agentsCount')}</p></button>
+          <button aria-label={t('departments.leadership')} className={`list-row selectable-row ${departmentId === '__leadership' ? 'active' : ''}`} onClick={() => { setDepartmentId('__leadership'); setTab('positions'); }}><b>{t('departments.leadership')}</b><p>{t('departments.leadership')} / {leadershipAgents.length} {t('departments.agentsCount')}</p></button>
           {companyDepartments.map((department) => <button className={`list-row selectable-row ${department.id === selectedDepartment?.id ? 'active' : ''}`} key={department.id} onClick={() => setDepartmentId(department.id)}>
             <b>{department.name}</b>
             <p>{department.slug} / {companyAgents.filter((agent) => agent.departmentId === department.id).length} {t('departments.agentsCount')}</p>
