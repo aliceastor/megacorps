@@ -6,7 +6,7 @@ test('relationship edit preserves advanced fields and explicit clears persist', 
   const original = structuredClone(agents.find(a => a.id === 'analyst')!);
   await page.getByRole('button', { name: /Product analyst/ }).click();
   const editor = page.locator('.company-o-details');
-  await editor.getByRole('combobox', { name: 'Department', exact: true }).selectOption('research');
+  await editor.getByRole('combobox', { name: 'Department', exact: true }).selectOption('product');
   await editor.getByRole('combobox', { name: 'Position', exact: true }).selectOption('rank-100');
   await editor.getByRole('combobox', { name: 'Reports to', exact: true }).selectOption('boss');
   await editor.getByRole('button', { name: 'Save', exact: true }).click();
@@ -15,7 +15,7 @@ test('relationship edit preserves advanced fields and explicit clears persist', 
   expect(saved.capabilities).toEqual(original.capabilities);
   expect(saved.adapterConfig).toEqual(original.adapterConfig);
   for (const key of ['role', 'soul', 'runtimeId', 'hermesProfile', 'budgetPerTask', 'budgetMonthly', 'memoryConfig', 'defaultTimeoutSeconds'] as const) expect(saved[key]).toEqual(original[key]);
-  expect(writes[0]).toEqual({ departmentId: 'research', positionId: 'rank-100', bossId: 'boss' });
+  expect(writes[0]).toEqual({ departmentId: 'product', positionId: 'rank-100', bossId: 'boss' });
   await editor.getByRole('combobox', { name: 'Department', exact: true }).selectOption('');
   await editor.getByRole('combobox', { name: 'Position', exact: true }).selectOption('');
   await editor.getByRole('combobox', { name: 'Reports to', exact: true }).selectOption('');

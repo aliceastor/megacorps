@@ -5,7 +5,12 @@ import { Circle, FileText, Loader2, MessageSquare, Plus, Send } from 'lucide-rea
 import Link from 'next/link';
 import { ApiError, api } from '@/lib/api';
 import { projectChatMessage } from '@/lib/chat-display';
-import { chatJobPollInterval, chatPollRetryDelay, shouldRetryChatPoll } from '@/lib/chat-poll';
+import {
+  chatJobPollInterval,
+  chatPollRetryDelay,
+  shouldRetryChatPoll,
+  shouldRetryChatTranscript,
+} from '@/lib/chat-poll';
 import { useLocale } from '@/lib/locale-context';
 import { Markdown } from './markdown';
 
@@ -198,7 +203,7 @@ export function ChatPage() {
     queryKey: ['chatMessages', selectedSession?.id],
     queryFn: () => fetchChatMessages(selectedSession!.id),
     enabled: Boolean(selectedSession),
-    retry: shouldRetryChatPoll,
+    retry: shouldRetryChatTranscript,
     retryDelay: chatPollRetryDelay,
   });
   const status = agentStatus(selectedAgent, t);

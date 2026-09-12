@@ -10,6 +10,10 @@ export function shouldRetryChatPoll(failureCount: number, error: unknown): boole
   return error instanceof ApiError && error.status === 429 ? failureCount < 3 : failureCount < 1;
 }
 
+export function shouldRetryChatTranscript(failureCount: number, _error?: unknown): boolean {
+  return failureCount < 3;
+}
+
 export function chatPollRetryDelay(failureCount: number, error: unknown): number {
   if (error instanceof ApiError && error.status === 429 && error.retryAfterMs != null) return error.retryAfterMs;
   return Math.min(1_000 * 2 ** failureCount, 10_000);
