@@ -2,13 +2,14 @@ import { expect, test } from '@playwright/test';
 import { cardId, companyId, headId, productFixture } from './product-fixture';
 
 const summary = 'Delivery verified and merged to main.';
+const artifactTitle = '受審 head ab11290670d6aea9c57e1101860d8794bee6ad65';
 const report = JSON.stringify({
   kind: 'megacorps-report',
   status: 'completed',
   verdict: 'approved',
   score: 9,
   summary,
-  workProducts: [{ type: 'pull_request', title: 'PR #17 merged', url: 'https://example.test/acme/pulls/17' }],
+  workProducts: [{ type: 'pull_request', title: artifactTitle, url: 'https://example.test/acme/pulls/17' }],
 });
 const raw = `⚠️ Normalized model name\n  ┊ review diff\n@@ -0,0 +1 @@\n+${report}\n${report}`;
 const at = '2026-09-12T12:00:00.000Z';
@@ -36,7 +37,7 @@ for (const width of [390, 1280]) test(`terminal report is readable without proto
   await expect(conversation.getByText('Report completed', { exact: true })).toBeVisible();
   await expect(conversation.getByText('Approved', { exact: true })).toBeVisible();
   await expect(conversation.getByText('Score 9/10', { exact: true })).toBeVisible();
-  await expect(conversation.getByRole('link', { name: 'PR #17 merged' })).toHaveAttribute('href', 'https://example.test/acme/pulls/17');
+  await expect(conversation.getByRole('link', { name: artifactTitle })).toHaveAttribute('href', 'https://example.test/acme/pulls/17');
 
   const rawRecord = conversation.getByText('Raw record', { exact: true });
   await expect(rawRecord).toHaveCount(1);

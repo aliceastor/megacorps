@@ -6636,6 +6636,8 @@ button.card:hover {
 .runtime-details[open] > summary { margin-bottom: 8px; }
 .conv-report-raw { min-width: 0; max-width: 100%; }
 .conv-report-raw pre { max-width: 100%; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.conv-report-details { min-width: 0; overflow-wrap: anywhere; }
+.conv-report-details .conv-open-product { max-width: 100%; text-align: left; }
 
 /* Card detail panel v2: the overview zone that sits outside the tabs.
    Whole-panel scrolling; no sticky header in this iteration. Do not touch
