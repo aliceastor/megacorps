@@ -105,6 +105,29 @@ const verifierFooter = [
   "  • `/tmp/helper.py` — [write_file] Write denied: '`/tmp/helper.py`' is outside HERMES_WRITE_SAFE_ROOT (/safe). Unset the variable or add this path's directory prefix.",
 ].join('\n');
 
+const modelWarning = "⚠️ Normalized model 'deepseek-flash' to 'deepseek-v4-flash' for deepseek.";
+
+test('model alias diagnostic followed by a chat envelope displays only the literal body', () => {
+  const savedAlice = `⚠️  Normalized model 'deepseek-flash' to 'deepseek-v4-flash' for deepseek.\n{"kind":"megacorps-chat-response","body":"在。有事直說。"}`;
+  assert.equal(normalizeA2aSendResult({ message: { parts: [{ text: savedAlice }] } }).text, '在。有事直說。');
+  for (const body of ['在。有事直說。', 'Literal <think>example</think>, "quotes".\n```chat-actions\n{"actions":[]}\n```']) {
+    for (const separator of [' ', '\n', '\r\n']) {
+      const text = `${modelWarning}${separator}${JSON.stringify({ kind: 'megacorps-chat-response', body })}`;
+      assert.equal(normalizeA2aSendResult({ message: { parts: [{ text }] } }).text, body);
+    }
+  }
+});
+
+test('alias diagnostic handling rejects invalid envelopes without selecting an older answer', () => {
+  const valid = JSON.stringify({ kind: 'megacorps-chat-response', body: 'old' });
+  for (const candidate of ['{"kind":"megacorps-chat-response","body":7}', '{"kind":"megacorps-chat-response","body":', `${valid} trailing`, `${valid}\n${valid}`]) {
+    assert.match(projectFinalText(`${modelWarning} ${candidate}`), /a2a_final_output_ambiguous/);
+  }
+  for (const text of [`Warning: unknown ${valid}`, `${modelWarning} ordinary prose`, `Example: ${modelWarning} ${valid}`]) {
+    assert.equal(projectFinalText(text), text);
+  }
+});
+
 test('known terminal file-mutation verifier footer does not obscure the immediate final report', () => {
   const text = `${banner}\nprivate tool {\n${json}\n\n${verifierFooter}`;
   assert.equal(projectFinalText(text), json);

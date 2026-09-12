@@ -18,6 +18,17 @@ function decodeChatEnvelope(candidate: string): string {
   return AMBIGUOUS_OUTPUT;
 }
 
+/** Only the observed CLI alias diagnostic can precede a display envelope.
+ * Also used for old chat rows: bare JSON may itself be an already-decoded body.
+ */
+export function projectModelWarningChat(text: string): string | null {
+  const prefix = /^⚠️? {1,2}Normalized model '[A-Za-z0-9_./:-]{1,256}' to '[A-Za-z0-9_./:-]{1,256}' for [A-Za-z0-9_-]{1,64}\.[ \t\r\n]{1,32}/.exec(text);
+  if (!prefix) return null;
+  const candidate = text.slice(prefix[0].length);
+  const projected = decodeChatEnvelope(candidate);
+  return projected === candidate ? null : projected;
+}
+
 // Do not let the downstream report extractor select an earlier root from a
 // purported final answer. Syntax/schema errors in one root still belong to the
 // normal correction path; only trailing material makes its boundary ambiguous.
@@ -72,6 +83,8 @@ function withoutKnownVerifierFooter(text: string): string {
  * arbitrary prose has no safe boundary and must not expose the transcript.
  */
 export function projectFinalText(text: string): string {
+  const warningChat = projectModelWarningChat(text);
+  if (warningChat !== null) return warningChat;
   if (!/^(?:⚠️?[^\r\n]*\r?\n)*(?:\r?\n)*┌─ Reasoning ─+┐(?:\r?\n|$)/.test(text)) return decodeChatEnvelope(text);
   const end = withoutKnownVerifierFooter(text.trimEnd());
   // Bound final-answer work independently of an arbitrarily large tool log.

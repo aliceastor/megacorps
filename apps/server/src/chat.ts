@@ -1,4 +1,5 @@
 import { claimAgentCapacity } from './dispatch.ts';
+import { projectModelWarningChat } from './a2a-final-output.ts';
 import { z } from 'zod';
 import { readLimit, optionalReadId, optionalReadProject } from './read-query.ts';
 import { buildCommonCompanyContext } from './company-context.ts';
@@ -128,10 +129,21 @@ async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, pr
   ].filter(Boolean).join('\n');
 }
 
+// Read-only compatibility for replies saved before alias diagnostics were parsed.
+// Never reinterpret new display bodies, user examples, or replay chat actions.
+function displayChatMessage(message: ChatMessageRow): ChatMessageRow {
+  const metadata = message.metadata;
+  if (message.authorType !== 'agent' || !metadata || typeof metadata !== 'object'
+    || !('adapterType' in metadata) || metadata.adapterType !== 'a2a'
+    || ('chatDisplayVersion' in metadata && metadata.chatDisplayVersion != null)) return message;
+  const body = projectModelWarningChat(message.body);
+  return body === null ? message : { ...message, body };
+}
+
 function formatChatHistoryForPrompt(history: ChatMessageRow[], budgetChars?: number): string {
   const lines = history.map((message) => {
     const author = message.authorType === 'agent' ? 'agent' : message.authorType === 'system' ? 'system' : 'user';
-    return `[${author}] ${message.body}`;
+    return `[${author}] ${displayChatMessage(message).body}`;
   });
   if (!budgetChars || lines.join('\n\n').length <= budgetChars) return lines.join('\n\n');
 
@@ -375,7 +387,7 @@ async function performChatReply(session: typeof chatSessions.$inferSelect, agent
         agentId: session.agentId,
         authorType: 'agent',
         body: result.output,
-        metadata: { runId: run.id, adapterType: agent.adapterType, sessionId: result.sessionId, tokensUsed: result.tokensUsed, overBudget, ...(job && extractChatWorkItems(result.output) ? { chatActionsPending: true } : {}) },
+        metadata: { runId: run.id, adapterType: agent.adapterType, chatDisplayVersion: 1, sessionId: result.sessionId, tokensUsed: result.tokensUsed, overBudget, ...(job && extractChatWorkItems(result.output) ? { chatActionsPending: true } : {}) },
         costUsd: result.costUsd.toString(),
         durationSeconds: result.durationSeconds,
       }).returning();
@@ -538,7 +550,7 @@ export async function registerChatRoutes(app: FastifyInstance, options: { acknow
       .where(eq(chatMessages.sessionId, id))
       .orderBy(desc(chatMessages.createdAt))
       .limit(query.limit);
-    return rows.reverse();
+    return rows.reverse().map(displayChatMessage);
   });
 
   app.post('/api/chat/sessions/:id/messages', async (request, reply) => {
