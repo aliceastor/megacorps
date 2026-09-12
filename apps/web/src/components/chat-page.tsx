@@ -4,6 +4,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Circle, FileText, Loader2, MessageSquare, Plus, Send } from 'lucide-react';
 import Link from 'next/link';
 import { ApiError, api } from '@/lib/api';
+import { projectChatMessage } from '@/lib/chat-display';
+import { chatJobPollInterval, chatPollRetryDelay, shouldRetryChatPoll } from '@/lib/chat-poll';
 import { useLocale } from '@/lib/locale-context';
 import { Markdown } from './markdown';
 
@@ -137,7 +139,7 @@ async function fetchChatMessages(sessionId: string): Promise<ChatMessage[]> {
 
 export function ChatPage() {
   const queryClient = useQueryClient();
-  const { t, tf } = useLocale();
+  const { locale, t, tf } = useLocale();
   const [companies, setCompanies] = useState<Company[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -181,20 +183,23 @@ export function ChatPage() {
     queryKey: ['chatJobs', selectedSession?.id],
     queryFn: () => api<ChatJob[]>(`/api/chat/sessions/${selectedSession!.id}/jobs`, { signal: AbortSignal.timeout(15_000) }),
     enabled: Boolean(selectedSession && selectedAgent?.adapterType === 'a2a'),
-    refetchInterval: query => query.state.data?.some(pendingChatJob) || query.state.error ? 2_000 : false,
-    retry: 1,
+    refetchInterval: query => chatJobPollInterval(query.state.data),
+    retry: shouldRetryChatPoll,
+    retryDelay: chatPollRetryDelay,
   });
   const jobPending = Boolean(jobsQuery.data?.some(pendingChatJob));
   const jobReadError = jobsQuery.error instanceof Error ? jobsQuery.error.message : '';
   const checkingJob = Boolean(selectedSession && selectedAgent?.adapterType === 'a2a' && (jobsQuery.isLoading || jobReadError));
   useEffect(() => {
     if (!selectedSession || !jobsQuery.data) return;
-    void queryClient.invalidateQueries({ queryKey: ['chatMessages', selectedSession.id] });
-  }, [jobsQuery.dataUpdatedAt, selectedSession?.id, queryClient]);
+    if (jobsQuery.data.some((job) => job.status === 'completed')) void messagesQuery.refetch();
+  }, [jobsQuery.dataUpdatedAt, selectedSession?.id]);
   const messagesQuery = useQuery({
     queryKey: ['chatMessages', selectedSession?.id],
     queryFn: () => fetchChatMessages(selectedSession!.id),
     enabled: Boolean(selectedSession),
+    retry: shouldRetryChatPoll,
+    retryDelay: chatPollRetryDelay,
   });
   const status = agentStatus(selectedAgent, t);
   const activeDraftKey = draftKey(companyId, agentId, projectFilter, selectedSession?.id ?? '');
@@ -586,10 +591,14 @@ export function ChatPage() {
           <span className="status-pill" style={{ color: status.color }}>{status.label}</span>
         </header>
         <div className="chat-messages">
-          {messages.map((message) => <article className={`chat-bubble ${message.authorType}`} key={message.id}>
-            {message.authorType === 'user' ? <div>{message.body}</div> : <Markdown text={message.body} />}
+          {messages.map((message) => {
+            const projection = projectChatMessage(message.body, message.authorType, locale);
+            return <article className={`chat-bubble ${message.authorType}`} key={message.id}>
+            {projection.text && (message.authorType === 'user' ? <div>{projection.text}</div> : <Markdown text={projection.text} />)}
+            {projection.receipt && <div className="status-pill chat-operation-receipt">{projection.receipt}</div>}
+            {projection.raw && <details className="runtime-details"><summary>{t('kanban.rawRecord')}</summary><pre>{projection.raw}</pre></details>}
             <span>{t(`common.${message.authorType}`)} / {message.metadata?.pending ? t('chat.sending') : shortTime(message.createdAt)}{message.costUsd ? ` / $${message.costUsd}` : ''}</span>
-          </article>)}
+          </article>;})}
           {reply?.pending && <article className="chat-bubble agent typing-bubble" aria-live="polite">
             {reply.partial && <div className="chat-partial-text"><Markdown text={reply.partial} /></div>}
             <div className="typing-dots" aria-label={`${selectedAgent?.name ?? t('chat.agent')} ${t('chat.replying')}`}>

@@ -40,7 +40,7 @@ async function fulfillJson(route: Route, json: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(json) });
 }
 
-async function mockChat(page: Page, options: { asyncA2a?: boolean; failFirstSend?: boolean; failFirstCreate?: boolean; busyAgents?: string[]; holdAgentSessions?: string; holdCompanyRefresh?: boolean; failSessionGetsForAgents?: string[]; failMessageGetsForSessions?: string[]; sendDelayMs?: number; sessionDelayMs?: number; locale?: 'en' | 'zh-TW' | 'ja' } = {}) {
+async function mockChat(page: Page, options: { asyncA2a?: boolean; job429Count?: number; completionMessage429Count?: number; failFirstSend?: boolean; failFirstCreate?: boolean; busyAgents?: string[]; holdAgentSessions?: string; holdCompanyRefresh?: boolean; failSessionGetsForAgents?: string[]; failMessageGetsForSessions?: string[]; sendDelayMs?: number; sessionDelayMs?: number; locale?: 'en' | 'zh-TW' | 'ja' } = {}) {
   let releaseSessions!: () => void;
   const sessionsGate = new Promise<void>((resolve) => { releaseSessions = resolve; });
   let releaseCompanies!: () => void;
@@ -53,6 +53,8 @@ async function mockChat(page: Page, options: { asyncA2a?: boolean; failFirstSend
   const sessionStore = sessions.map((session) => ({ ...session }));
   const failingSessionGets = new Set(options.failSessionGetsForAgents ?? []);
   const failingMessageGets = new Set(options.failMessageGetsForSessions ?? []);
+  let job429sRemaining = options.job429Count ?? 0;
+  let completionMessage429sRemaining = options.completionMessage429Count ?? 0;
   const state = {
     finishJob(sessionId: string) {
       jobs[sessionId]![0].status = 'completed';
@@ -65,6 +67,7 @@ async function mockChat(page: Page, options: { asyncA2a?: boolean; failFirstSend
     heldSessionGets: 0,
     sessionGetCounts: {} as Record<string, number>,
     messageGetCounts: {} as Record<string, number>,
+    jobGetCounts: {} as Record<string, number>,
     sendAttempts: 0,
     sentBodies: [] as string[],
     messagePostSessionIds: [] as string[],
@@ -124,11 +127,23 @@ async function mockChat(page: Page, options: { asyncA2a?: boolean; failFirstSend
       return fulfillJson(route, session, 201);
     }
     const jobMatch = path.match(/^\/api\/chat\/sessions\/([^/]+)\/jobs$/);
-    if (jobMatch) return fulfillJson(route, jobs[jobMatch[1]!] ?? []);
+    if (jobMatch) {
+      const jobSessionId = jobMatch[1]!;
+      state.jobGetCounts[jobSessionId] = (state.jobGetCounts[jobSessionId] ?? 0) + 1;
+      if (jobs[jobSessionId]?.some((job) => job.status === 'queued' || job.status === 'running') && job429sRemaining > 0) {
+        job429sRemaining -= 1;
+        return route.fulfill({ status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '0' }, body: JSON.stringify({ error: 'rate_limited', retryAfterSeconds: 0 }) });
+      }
+      return fulfillJson(route, jobs[jobSessionId] ?? []);
+    }
     const messageMatch = path.match(/^\/api\/chat\/sessions\/([^/]+)\/messages$/);
     if (messageMatch && request.method() === 'GET') {
       const messageSessionId = messageMatch[1]!;
       state.messageGetCounts[messageSessionId] = (state.messageGetCounts[messageSessionId] ?? 0) + 1;
+      if (messageStore[messageSessionId]?.some((message) => message.id === 'async-answer') && completionMessage429sRemaining > 0) {
+        completionMessage429sRemaining -= 1;
+        return route.fulfill({ status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '1' }, body: JSON.stringify({ error: 'rate_limited', retryAfterSeconds: 1 }) });
+      }
       if (failingMessageGets.has(messageSessionId)) return fulfillJson(route, { message: 'Synthetic history read failure' }, 503);
       return fulfillJson(route, messageStore[messageSessionId] ?? []);
     }
@@ -854,4 +869,58 @@ test('A2A accepted chat stays pending across reload and receives the polled repl
   await page.getByPlaceholder('Message').fill('Next turn');
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeEnabled();
   expect(state.sendAttempts).toBe(1);
+});
+
+test('long-running A2A polling is bounded and reads the transcript only after completion', async ({ page }) => {
+  test.setTimeout(20_000);
+  const state = await mockChat(page, { asyncA2a: true });
+  await page.goto('/chat');
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  const initialMessageReads = state.messageGetCounts['session-ada-orbit'] ?? 0;
+  await page.getByPlaceholder('Message').fill('Wait for the actual completion');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect.poll(() => state.jobGetCounts['session-ada-orbit'] ?? 0, { timeout: 12_000 }).toBeGreaterThanOrEqual(4);
+  expect(state.messageGetCounts['session-ada-orbit']).toBe(initialMessageReads + 1);
+  expect(state.sendAttempts).toBe(1);
+  state.finishJob('session-ada-orbit');
+  await expect(page.getByText('The durable reply arrived.')).toHaveCount(1);
+  await expect.poll(() => state.messageGetCounts['session-ada-orbit'] ?? 0).toBe(initialMessageReads + 2);
+  expect(state.sendAttempts).toBe(1);
+});
+
+test('transient job 429 honors Retry-After and retrieves completion without repost or reload', async ({ page }) => {
+  const state = await mockChat(page, { asyncA2a: true, job429Count: 1 });
+  await page.goto('/chat');
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  await page.getByPlaceholder('Message').fill('Recover the completion fetch');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect.poll(() => state.jobGetCounts['session-ada-orbit'] ?? 0).toBeGreaterThanOrEqual(2);
+  state.finishJob('session-ada-orbit');
+  await expect(page.getByText('The durable reply arrived.')).toHaveCount(1);
+  await expect(page.locator('.typing-bubble')).toHaveCount(0);
+  expect(state.sendAttempts).toBe(1);
+});
+
+test('terminal transcript 429 waits for Retry-After then shows completion without repost', async ({ page }) => {
+  const state = await mockChat(page, { asyncA2a: true, completionMessage429Count: 1 });
+  await page.goto('/chat');
+  await expect(page.getByText('The orbital diagnostics are ready.')).toBeVisible();
+  await page.getByPlaceholder('Message').fill('Retry the terminal transcript read');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  state.finishJob('session-ada-orbit');
+  await expect(page.getByText('The durable reply arrived.')).toHaveCount(1, { timeout: 8_000 });
+  expect(state.sendAttempts).toBe(1);
+});
+
+test('chat action protocol and legacy self-note text render as localized receipts', async ({ page }) => {
+  const state = await mockChat(page, { locale: 'zh-TW' });
+  state.appendMessage('session-ada-orbit', { id: 'action-protocol', sessionId: 'session-ada-orbit', companyId: 'company-acme', agentId: 'agent-ada', authorType: 'agent', body: '已加入工作。\n```json\n{"kind":"megacorps-chat-actions","actions":[{"action":"create_card","title":"Ship","body":"Acceptance: shipped"}]}\n```' });
+  state.appendMessage('session-ada-orbit', { id: 'action-outcome', sessionId: 'session-ada-orbit', companyId: 'company-acme', agentId: 'agent-ada', authorType: 'system', body: 'Kanban updates from this conversation:\n✓ Self-note — noted: An English sentence sliced in the mid' });
+  await page.goto('/chat');
+  await expect(page.getByText('已加入工作。', { exact: true })).toBeVisible();
+  await expect(page.getByText('已請求 1 項看板更新')).toBeVisible();
+  await expect(page.getByText('看板更新：已儲存 1 則備註')).toBeVisible();
+  await expect(page.getByText('原始記錄')).toHaveCount(2);
+  await expect(page.locator('.chat-bubble details[open]')).toHaveCount(0);
+  await expect(page.locator('.chat-bubble details pre')).toHaveCount(2);
 });

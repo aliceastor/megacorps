@@ -696,6 +696,48 @@ test('classifyLog / classifyAction / dedupeByExactKeys / foldSystemRuns / assemb
   assert.equal(items.length, 1);
 });
 
+test('a successful dispatch with a final report becomes a readable result with its raw record retained', () => {
+  const output = 'warning\n' + JSON.stringify({ kind: 'megacorps-report', status: 'completed', verdict: 'approved', score: 9, summary: 'Merged and verified.', workProducts: [{ type: 'pull_request', title: 'PR #1', url: 'https://example.test/pulls/1' }] });
+  const event = classifyLog(log('report', { type: 'dispatch', status: 'success', output }), ctx);
+  assert.equal(event.kind, 'message');
+  assert.equal(event.hidden, false);
+  assert.equal(event.body, 'Merged and verified.');
+  assert.equal(event.report?.verdict, 'approved');
+  assert.equal(event.report?.score, 9);
+  assert.equal(event.rawRecord, output);
+});
+
+test('an agent review comment projects its report while retaining review classification and raw body', () => {
+  const body = JSON.stringify({ kind: 'megacorps-report', status: 'completed', verdict: 'revision_requested', summary: 'One fix remains.' });
+  const event = classifyComment(agentComment('report-comment', 'a-ben', 'review_note', { body }), ctx);
+  assert.equal(event.kind, 'review');
+  assert.equal(event.body, 'One fix remains.');
+  assert.equal(event.report?.verdict, 'revision_requested');
+  assert.equal(event.rawRecord, body);
+});
+
+test('duplicate dispatch report log folds into its agent_update comment', () => {
+  const body = JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'One visible result.' });
+  const result = build({
+    comments: [agentComment('report-comment', 'a-ben', 'agent_update', { body, createdAt: at(1) })],
+    logs: [log('report-log', { agentId: 'a-ben', type: 'dispatch', status: 'success', output: body, createdAt: at(0) })],
+  });
+  const visible = flatEvents(result.items).filter((event) => event.report && !event.hidden);
+  assert.deepEqual(visible.map((event) => event.id), ['c-report-comment']);
+  assert.equal(visible[0]?.body, 'One visible result.');
+});
+
+test('same-summary reports with different payload or author remain distinct', () => {
+  const approved = JSON.stringify({ kind: 'megacorps-report', status: 'completed', verdict: 'approved', summary: 'Generic result.' });
+  const rejected = JSON.stringify({ kind: 'megacorps-report', status: 'completed', verdict: 'revision_requested', summary: 'Generic result.' });
+  const result = build({
+    comments: [agentComment('report-comment', 'a-ben', 'agent_update', { body: approved, createdAt: at(1) })],
+    logs: [log('report-log', { agentId: 'a-cara', type: 'dispatch', status: 'success', output: rejected, createdAt: at(0) })],
+  });
+  const visible = flatEvents(result.items).filter((event) => event.report && !event.hidden);
+  assert.deepEqual(visible.map((event) => event.report?.verdict).sort(), ['approved', 'revision_requested']);
+});
+
 test('highlightMentions bolds @slug tokens by the server rule and ignores e-mail addresses', () => {
   const mentionAgents = agents.map((agent) => ({ slug: agent.slug, name: agent.name }));
   assert.deepEqual(highlightMentions('hi @ben and @cara', mentionAgents), [

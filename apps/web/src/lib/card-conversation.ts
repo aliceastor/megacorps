@@ -1,4 +1,6 @@
 // The conversation model behind the card panel's 對話 tab: four raw sources
+import type { AgentReport } from '@megacorps/shared';
+import { projectTerminalAgentReport } from './agent-report-display.ts';
 // (comments, task logs, card actions, work products) become one classified,
 // de-duplicated, threaded list. Pure and React-free so node:test can pin the
 // rules down; the UI only renders what comes out of buildConversation.
@@ -72,6 +74,8 @@ export type ConversationEvent = {
   /** nesting depth inside a thread (capped at 3 for display). */
   depth?: number;
   raw: { comment?: CardComment; log?: TaskLog; action?: CardAction; product?: WorkProduct };
+  report?: AgentReport;
+  rawRecord?: string;
 };
 export type ConversationThreadKind = 'delegation' | 'brainstorm' | 'split' | 'checkpoint' | 'reply';
 export type ConversationThreadMeta =
@@ -259,6 +263,13 @@ export function classifyComment(comment: CardComment, ctx: ConversationContext):
     event.refs.reviewRoundKind = str(metadata.kind);
     event.refs.decision = str(metadata.decision);
   }
+  const report = actor.type === 'agent' ? projectTerminalAgentReport(comment.body) : null;
+  if (report) {
+    event.body = report.summary;
+    event.report = report;
+    event.rawRecord = comment.body ?? '';
+    event.tone = report.status === 'completed' ? 'success' : 'danger';
+  }
 
   // Peer questions reuse the delegation columns (assignee + queued status) but
   // they are conversation, so they are recognised before the field rule.
@@ -325,6 +336,10 @@ export function classifyLog(log: TaskLog, _ctx: ConversationContext): Conversati
     delegationReview: false,
     raw: { log },
   };
+  const report = log.status === 'success' && (type === 'dispatch' || type === 'review' || type === 'task_review')
+    ? projectTerminalAgentReport(log.output)
+    : null;
+  if (report) return { ...event, kind: 'message', tone: report.status === 'completed' ? 'success' : 'danger', body: report.summary, hidden: false, report, rawRecord: log.output };
   if (failed) return { ...event, kind: 'alert', tone: 'danger' };
   if (type === 'stage') return { ...event, kind: 'status', tone: 'neutral' };
   if (ALERT_LOG_TYPES.has(type)) return { ...event, kind: 'alert', tone: 'danger' };
@@ -532,6 +547,18 @@ export function dedupeByFamilyWindow(events: ConversationEvent[]): ConversationE
   const comments = events.filter((event) => event.source === 'comment' && event.actor.type !== 'you');
   for (const event of events) {
     if (event.source !== 'log' || event.kind === 'alert') continue;
+    if (event.refs.logType === 'dispatch' && event.report) {
+      const logAgentId = event.raw.log?.agentId;
+      const target = nearest(comments.filter((comment) => comment.rawLabel === 'agent_update'
+        && comment.rawRecord === event.rawRecord
+        && Boolean(logAgentId && comment.actor.type === 'agent' && comment.actor.id === logAgentId)), event.at, FAMILY_WINDOW_MS);
+      if (target) {
+        const chip = costChip(event);
+        if (chip) addPatch(patches, target.id, (item) => ({ ...item, chips: [...item.chips, chip] }));
+        addPatch(patches, event.id, (item) => ({ ...item, kind: 'system', tone: 'neutral', hidden: true, refs: { ...item.refs, mergedInto: target.id } }));
+        continue;
+      }
+    }
     const family = FAMILIES.find((item) => item.logTypes.has(event.refs.logType ?? ''));
     if (!family) continue;
     const target = nearest(comments.filter(family.matches), event.at, FAMILY_WINDOW_MS);

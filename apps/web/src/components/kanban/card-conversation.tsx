@@ -18,6 +18,7 @@ import {
 } from '@/lib/card-conversation';
 import { displayFindings, findingLocation, panelDegraded, roundForComment, stripFindingsTable, submittedCount } from '@/lib/card-review';
 import { useLocale } from '@/lib/locale-context';
+import { reportArtifactHref } from '@/lib/agent-report-display';
 import { formatRelative } from '@/lib/relative-time';
 import { childChipTone } from './card-overview-chips';
 import { type Agent, type Card, type CardStatus, type CardTabKey, type ReviewRound, type TaskLog, statusLabels } from './card-types';
@@ -192,9 +193,30 @@ export function ConversationMessage({ event, ctx, depth = 0, extraChips }: { eve
         <When event={event} ctx={ctx} />
       </header>
       <Body text={event.body} ctx={ctx} />
+      {event.report && <TerminalReportDetails event={event} ctx={ctx} />}
       <Chips event={event} ctx={ctx} extra={extraChips} />
     </div>
   </article>;
+}
+
+function TerminalReportDetails({ event, ctx }: { event: ConversationEvent; ctx: RenderCtx }) {
+  const report = event.report!;
+  return <div className="conv-report-details">
+    <div className="conv-chips">
+      <span className={`conv-chip consequence ${report.status}`}>{ctx.t(`kanban.reportStatus.${report.status}`)}</span>
+      {report.verdict && <Chip chip={{ kind: 'verdict', text: report.verdict === 'approved' ? 'approve' : report.verdict === 'revision_requested' ? 'reject' : 'request_help', status: report.verdict }} ctx={ctx} />}
+      {report.score !== undefined && <span className="conv-chip score">{ctx.t('kanban.score')} {report.score}/10</span>}
+    </div>
+    {report.workProducts?.length ? <div className="conv-chips">
+      {report.workProducts.map((product, index) => {
+        const href = reportArtifactHref(product.url);
+        return href
+          ? <a key={`${product.title}-${index}`} className="btn conv-open-product" href={href} target="_blank" rel="noreferrer"><ExternalLink size={13} /> {product.title}</a>
+          : <span key={`${product.title}-${index}`} className="conv-chip">{product.title}</span>;
+      })}
+    </div> : null}
+    {event.rawRecord && <details className="runtime-details conv-report-raw"><summary>{ctx.t('kanban.rawRecord')}</summary><pre>{event.rawRecord}</pre></details>}
+  </div>;
 }
 
 export function ConversationReview({ event, ctx, depth = 0 }: { event: ConversationEvent; ctx: RenderCtx; depth?: number }) {
@@ -210,6 +232,7 @@ export function ConversationReview({ event, ctx, depth = 0 }: { event: Conversat
         <When event={event} ctx={ctx} />
       </header>
       <Body text={event.body} ctx={ctx} />
+      {event.report && <TerminalReportDetails event={event} ctx={ctx} />}
       <Chips event={event} ctx={ctx} />
     </div>
   </article>;

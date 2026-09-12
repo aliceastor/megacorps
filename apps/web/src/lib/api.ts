@@ -38,12 +38,14 @@ function getApiUrl(): string {
 export class ApiError extends Error {
   status: number;
   data: unknown;
+  retryAfterMs: number | null;
 
-  constructor(message: string, status: number, data: unknown) {
+  constructor(message: string, status: number, data: unknown, retryAfterMs: number | null = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.data = data;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -121,7 +123,9 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
         window.location.href = `/login?next=${encodeURIComponent(next)}`;
       }
     }
-    throw new ApiError(message, response.status, data);
+    const retryAfter = response.headers.get('Retry-After');
+    const retryAfterSeconds = Number(retryAfter ?? (data && typeof data === 'object' && 'retryAfterSeconds' in data ? (data as { retryAfterSeconds?: unknown }).retryAfterSeconds : NaN));
+    throw new ApiError(message, response.status, data, Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0 ? retryAfterSeconds * 1_000 : null);
   }
   return data as T;
 }
