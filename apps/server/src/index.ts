@@ -25,6 +25,10 @@ export async function buildServer() {
   app.setErrorHandler((error, request, reply) => {
     let cause: any = error;
     for (let depth = 0; cause && depth < 5; depth++, cause = cause.cause) {
+      if (/^organization_/.test(cause.constraint_name ?? '') || /^organization_/.test(cause.message ?? '')) {
+        reply.code(cause.code === '23505' || cause.code === '55P03' ? 409 : 400).send({ error: cause.constraint_name?.startsWith('organization_') ? cause.constraint_name : cause.message });
+        return;
+      }
       if (cause.code === 'MC409') {
         reply.code(409).send({ error: 'merge_in_flight', detail: 'Gitea may already have accepted the authorized merge. This change cannot guarantee cancellation; reconcile the merge before changing gates or project policy.' });
         return;

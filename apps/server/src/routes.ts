@@ -1,3 +1,4 @@
+import { resolveAgentOrganization, validatePositionRole } from './position-authority.ts';
 import { agentRemoteWork, agentsWithRemoteStatus, refreshAgentRemoteCapacity, refreshCancelledCardCapacity } from './a2a-remote-reconciliation.ts';
 import { readLimit, readOffset, optionalReadId, optionalReadProject } from './read-query.ts';
 import { acknowledgeA2aExecution } from './a2a-executions.ts';
@@ -1477,6 +1478,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/positions', async (request, reply) => {
     const input = createPositionSchema.parse(request.body);
     const user = await requireCompanyRole(request, reply, input.companyId, 'operator'); if (!user) return reply;
+    try { validatePositionRole(input); } catch(error) { return reply.code(400).send({error: (error as Error).message}); }
     if (input.defaultDepartmentId) {
       try { await ensureCompanyReferences(input.companyId, { departmentId: input.defaultDepartmentId }); }
       catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
@@ -1489,7 +1491,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const [existingBoss] = await db.select({ id: positions.id }).from(positions).where(and(eq(positions.companyId, input.companyId), eq(positions.isCompanyBoss, true), eq(positions.isActive, true))).limit(1);
       if (existingBoss) return reply.code(409).send({ error: 'company_boss_position_exists', existingPositionId: existingBoss.id });
     }
-    const [position] = await db.insert(positions).values({
+    const [position] = await retryMergeGateWrite(() => db.insert(positions).values({
       companyId: input.companyId,
       name: input.name,
       slug: input.slug,
@@ -1498,11 +1500,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       reviewDomain: optionalText(input.reviewDomain) ?? null,
       rank: input.rank,
       isCompanyBoss: input.isCompanyBoss,
+      isDepartmentHead: input.isDepartmentHead,
       canDelegateAcrossDepartments: input.canDelegateAcrossDepartments,
       defaultDepartmentId: input.defaultDepartmentId ?? null,
       managerPositionId: input.isCompanyBoss ? null : input.managerPositionId ?? null,
       isActive: input.isActive,
-    }).returning();
+    }).returning());
     if (position) await db.insert(activityLog).values({ companyId: position.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'position.created', entityType: 'position', entityId: position.id, details: { name: position.name } });
     return reply.code(201).send(position);
   });
@@ -1513,6 +1516,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!existing) return reply.code(404).send({ error: 'position_not_found' });
     if (input.companyId && input.companyId !== existing.companyId) return reply.code(400).send({ error: 'position_company_immutable' });
     const user = await requireCompanyRole(request, reply, existing.companyId, 'operator'); if (!user) return reply;
+    try { validatePositionRole({...existing,...input}); } catch(error) { return reply.code(400).send({error: (error as Error).message}); }
     const nextDefaultDepartmentId = input.defaultDepartmentId === undefined ? existing.defaultDepartmentId : input.defaultDepartmentId ?? null;
     const nextManagerPositionId = input.managerPositionId === undefined ? existing.managerPositionId : input.managerPositionId ?? null;
     const nextIsCompanyBoss = input.isCompanyBoss === undefined ? existing.isCompanyBoss : input.isCompanyBoss;
@@ -1534,7 +1538,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const [replacementBoss] = await db.select({ id: positions.id }).from(positions).where(and(eq(positions.companyId, existing.companyId), eq(positions.isCompanyBoss, true), eq(positions.isActive, true), ne(positions.id, id))).limit(1);
       if (!replacementBoss) return reply.code(409).send({ error: 'company_boss_position_required', message: 'Assign another active boss position before disabling this one.' });
     }
-    const [position] = await db.update(positions).set({
+    const [position] = await retryMergeGateWrite(() => db.update(positions).set({
       name: input.name,
       slug: input.slug,
       prompt: input.prompt === undefined ? undefined : optionalText(input.prompt) ?? null,
@@ -1542,12 +1546,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       reviewDomain: input.reviewDomain === undefined ? undefined : optionalText(input.reviewDomain) ?? null,
       rank: input.rank,
       isCompanyBoss: input.isCompanyBoss,
+      isDepartmentHead: input.isDepartmentHead,
       canDelegateAcrossDepartments: input.canDelegateAcrossDepartments,
       defaultDepartmentId: input.defaultDepartmentId === undefined ? undefined : input.defaultDepartmentId ?? null,
       managerPositionId: nextIsCompanyBoss ? null : input.managerPositionId === undefined ? undefined : input.managerPositionId ?? null,
       isActive: input.isActive,
       updatedAt: new Date(),
-    }).where(eq(positions.id, id)).returning();
+    }).where(eq(positions.id, id)).returning());
     if (!position) return reply.code(404).send({ error: 'position_not_found' });
     await db.insert(activityLog).values({ companyId: position.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'position.updated', entityType: 'position', entityId: position.id, details: { name: position.name } });
     return position;
@@ -1558,8 +1563,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!position) return reply.code(404).send({ error: 'position_not_found' });
     const user = await requireCompanyRole(request, reply, position.companyId, 'operator'); if (!user) return reply;
     if (position.isCompanyBoss && position.isActive) return reply.code(409).send({ error: 'company_boss_position_required', message: 'Assign another boss position before deleting this one.' });
-    await db.update(agents).set({ positionId: null }).where(eq(agents.positionId, id));
-    await db.delete(positions).where(eq(positions.id, id));
+    await retryMergeGateWrite(() => db.transaction(async tx => {
+      await tx.select().from(companies).where(eq(companies.id, position.companyId)).for('update');
+      await tx.update(agents).set({ positionId: null }).where(eq(agents.positionId, id));
+      await tx.update(positions).set({managerPositionId:null}).where(eq(positions.managerPositionId,id));
+      await tx.delete(positions).where(eq(positions.id, id));
+    }));
     await db.insert(activityLog).values({ companyId: position.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'position.deleted', entityType: 'position', entityId: id, details: { name: position.name } });
     return { ok: true };
   });
@@ -2283,7 +2292,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const user = await requireCompanyRole(request, reply, companyId, 'operator'); if (!user) return reply;
     try { await ensureCompanyReferences(companyId, { departmentId: input.departmentId, positionId: input.positionId, bossId: input.bossId, runtimeId: input.runtimeId, adapterType: input.adapterType }); }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'company_reference_mismatch' }); }
-    const [agent] = await db.insert(agents).values({ companyId, departmentId: input.departmentId ?? null, positionId: input.positionId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: input.bossId ?? null, capabilities: input.capabilities ?? [], memoryConfig: input.memoryConfig ?? {}, maxConcurrent: input.maxConcurrent ?? 1, defaultTimeoutSeconds: input.defaultTimeoutSeconds ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
+    const organization = await resolveAgentOrganization(db, companyId, input);
+    const [agent] = await db.insert(agents).values({ companyId, departmentId: organization.departmentId ?? null, positionId: input.positionId ?? null, slug: input.slug, name: input.name, role: input.role, title: input.title, soul: input.soul ?? null, adapterType: input.adapterType, adapterConfig: input.adapterConfig ?? {}, runtimeId: input.runtimeId ?? null, hermesProfile: input.hermesProfile, bossId: organization.bossId ?? null, capabilities: input.capabilities ?? [], memoryConfig: input.memoryConfig ?? {}, maxConcurrent: input.maxConcurrent ?? 1, defaultTimeoutSeconds: input.defaultTimeoutSeconds ?? null, budgetPerTask: input.budgetPerTask?.toString(), budgetMonthly: input.budgetMonthly?.toString() }).returning();
     if (agent) await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, agentId: agent.id, action: 'agent.created', entityType: 'agent', entityId: agent.id, details: { name: agent.name, adapterType: agent.adapterType } });
     // Best-effort Gitea identity at birth; a failure here is recoverable later
     // via POST /api/agents/:id/gitea and must not fail agent creation.
@@ -2299,16 +2309,19 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const [agent] = await db.select().from(agents).where(and(eq(agents.id, id), isNull(agents.deletedAt))).limit(1);
     if (!agent) return reply.code(404).send({ error: 'agent_not_found' });
     const user = await requireCompanyRole(request, reply, agent.companyId, 'operator'); if (!user) return reply;
-    await db.update(kanbanCards).set({ assigneeId: null }).where(eq(kanbanCards.assigneeId, id));
-    await db.update(kanbanCards).set({ reviewerId: null }).where(eq(kanbanCards.reviewerId, id));
-    await db.update(agents).set({ bossId: null }).where(eq(agents.bossId, id));
-    await db.update(agents).set({
-      isActive: false,
-      isBusy: false,
-      slug: `${agent.slug}-deleted-${id.slice(0, 8)}`,
-      deletedAt: new Date(),
-    }).where(eq(agents.id, id));
-    await db.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'agent.deleted', entityType: 'agent', entityId: id, details: { name: agent.name } });
+    await retryMergeGateWrite(() => db.transaction(async tx => {
+      await tx.select().from(companies).where(eq(companies.id, agent.companyId)).for('update');
+      await tx.update(kanbanCards).set({ assigneeId: null }).where(eq(kanbanCards.assigneeId, id));
+      await tx.update(kanbanCards).set({ reviewerId: null }).where(eq(kanbanCards.reviewerId, id));
+      await tx.update(agents).set({ bossId: null }).where(eq(agents.bossId, id));
+      await tx.update(agents).set({
+        isActive: false,
+        isBusy: false,
+        slug: `${agent.slug}-deleted-${id.slice(0, 8)}`,
+        deletedAt: new Date(),
+      }).where(eq(agents.id, id));
+      await tx.insert(activityLog).values({ companyId: agent.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'agent.deleted', entityType: 'agent', entityId: id, details: { name: agent.name } });
+      }));
     return { ok: true };
   });
   // Per-agent token lifecycle. The raw token is returned exactly once, from
@@ -2402,11 +2415,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           referenceInput.runtimeId = input.runtimeId === undefined ? current.runtimeId : input.runtimeId;
         }
         await ensureCompanyReferences(current.companyId, referenceInput, tx);
-        if (input.bossId && input.bossId !== current.bossId) {
+        const organization = await resolveAgentOrganization(tx, current.companyId, { ...current, ...input });
+        if (organization.bossId && organization.bossId !== current.bossId) {
           const members = await tx.select({ id: agents.id, bossId: agents.bossId }).from(agents).where(and(eq(agents.companyId, current.companyId), isNull(agents.deletedAt)));
           const bosses = new Map(members.map(member => [member.id, member.bossId]));
           const visited = new Set([id]);
-          let cursor: string | null | undefined = input.bossId;
+          let cursor: string | null | undefined = organization.bossId;
           while (cursor) {
             if (visited.has(cursor)) throw new Error(cursor === id && cursor === input.bossId ? 'agent_self_manager' : 'agent_reporting_cycle');
             visited.add(cursor); cursor = bosses.get(cursor);
@@ -2418,13 +2432,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           role: input.role,
           title: input.title,
           soul: input.soul,
-          departmentId: input.departmentId,
+          departmentId: organization.departmentId === current.departmentId ? undefined : organization.departmentId,
           positionId: input.positionId,
           adapterType: input.adapterType,
           adapterConfig: input.adapterConfig === undefined ? undefined : preserveRedactedSecrets(input.adapterConfig, current.adapterConfig),
           runtimeId: input.runtimeId,
           hermesProfile: input.hermesProfile,
-          bossId: input.bossId,
+          bossId: organization.bossId === current.bossId ? undefined : organization.bossId,
           capabilities: input.capabilities,
           memoryConfig: input.memoryConfig,
           maxConcurrent: input.maxConcurrent,
@@ -2438,7 +2452,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }));
       return redactAgent(agent);
     } catch (error) {
-      if (error instanceof Error && /^(agent_self_manager|agent_reporting_cycle|agent_runtime_required|.*_company_mismatch|runtime_adapter_mismatch)$/.test(error.message)) return reply.code(400).send({ error: error.message });
+      if (error instanceof Error && error.message === 'organization_busy') return reply.code(409).send({ error: 'organization_busy' });
+      if (error instanceof Error && /^(organization_.*|agent_self_manager|agent_reporting_cycle|agent_runtime_required|.*_company_mismatch|runtime_adapter_mismatch)$/.test(error.message)) return reply.code(400).send({ error: error.message });
       throw error;
     }
   });

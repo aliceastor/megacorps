@@ -311,7 +311,7 @@ export async function registerCompanySetupRoutes(app: FastifyInstance) {
           if (!bossStep && selected?.departmentId && selected.departmentId !== state.department?.id)
             failure('head_department_mismatch');
           let position = state.roles.find((p) =>
-            bossStep ? p.isCompanyBoss : !p.isCompanyBoss && p.slug === 'department-head',
+            bossStep ? p.isCompanyBoss : p.isDepartmentHead && p.defaultDepartmentId === state.department?.id,
           );
           if (!position)
             [position] = await tx
@@ -321,7 +321,9 @@ export async function registerCompanySetupRoutes(app: FastifyInstance) {
                 name: bossStep ? 'Boss' : 'Department head',
                 slug: bossStep ? 'boss' : 'department-head',
                 isCompanyBoss: bossStep,
-                rank: bossStep ? 0 : 10,
+                rank: bossStep ? 0 : 1,
+                isDepartmentHead: !bossStep,
+                defaultDepartmentId: bossStep ? null : state.department!.id,
                 prompt: bossStep ? CEO_POSITION_PROMPT : null,
                 isActive: true,
               })

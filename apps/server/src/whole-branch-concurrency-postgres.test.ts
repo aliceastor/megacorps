@@ -23,7 +23,8 @@ test('PostgreSQL whole-branch completion authority and review provenance', { ski
     const [position] = await db.insert(s.positions).values({ companyId: company!.id, name: 'Boss', slug: 'boss', isCompanyBoss: true }).returning();
     const [boss] = await db.insert(s.agents).values({ companyId: company!.id, name: 'Boss', slug: 'boss', role: 'worker', positionId: position!.id, adapterType: 'webhook' }).returning();
     const [department] = await db.insert(s.departments).values({ companyId: company!.id, name: 'Engineering', slug: 'engineering' }).returning();
-    const [head] = await db.insert(s.agents).values({ companyId: company!.id, name: 'Head', slug: 'head', role: 'worker', departmentId: department!.id, adapterType: 'webhook' }).returning();
+    const [headPosition] = await db.insert(s.positions).values({companyId:company!.id,name:'Head',slug:'head',rank:1,isDepartmentHead:true,defaultDepartmentId:department!.id}).returning();
+    const [head] = await db.insert(s.agents).values({ companyId: company!.id, name: 'Head', slug: 'head', role: 'worker', positionId:headPosition!.id, departmentId: department!.id, adapterType: 'webhook' }).returning();
     await db.update(s.departments).set({ headAgentId: head!.id }).where(eq(s.departments.id, department!.id));
     const [card] = await db.insert(s.kanbanCards).values({ companyId: company!.id, title: 'Assess goal', body: 'Acceptance: accepted department report.', assigneeId: boss!.id, columnStatus: 'in_progress', requiresApproval: false }).returning();
     const [run] = await db.insert(s.taskRuns).values({ companyId: company!.id, cardId: card!.id, agentId: boss!.id, kind: 'dispatch', status: 'running' }).returning();

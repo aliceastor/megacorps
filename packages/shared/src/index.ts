@@ -288,8 +288,9 @@ export const createPositionSchema = z.object({
   description: z.string().trim().max(2000).nullable().optional(),
   // Review domain (code, content, ...) under which this position scores reviews; feeds the agent CV.
   reviewDomain: z.string().trim().max(40).nullable().optional(),
-  rank: z.number().int().min(0).max(10000).default(100),
+  rank: z.number().int().min(0).max(9).default(2),
   isCompanyBoss: z.boolean().default(false),
+  isDepartmentHead: z.boolean().default(false),
   canDelegateAcrossDepartments: z.boolean().default(false),
   defaultDepartmentId: z.string().uuid().nullable().optional(),
   managerPositionId: z.string().uuid().nullable().optional(),

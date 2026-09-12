@@ -76,3 +76,20 @@ test('agent runtime admission failure keeps its existing client error status', a
   assert.equal(response.statusCode,400,response.body); assert.equal(response.json().error,'agent_runtime_required');
   assert.equal(a.adapterType,'a2a');
 });
+
+test('position controls membership and preserves staff reporting edges', async t => {
+ const f=await fixture(t), [a,b]=f.rows; const d={id:randomUUID(),companyId:f.company.id};
+ f.state.rows(departments).push(d); const p={id:randomUUID(),companyId:f.company.id,rank:3,isCompanyBoss:false,isDepartmentHead:false,defaultDepartmentId:d.id,isActive:true};
+ f.state.rows(positions).push(p); a!.bossId=b!.id;
+ const response=await f.update(a!.id,{positionId:p.id,departmentId:null});
+ assert.equal(response.statusCode,200,response.body); assert.equal(a!.departmentId,d.id); assert.equal(a!.bossId,b!.id);
+});
+test('Boss assignment clears department and superior', async t=>{
+ const f=await fixture(t), [a,b]=f.rows;const p={id:randomUUID(),companyId:f.company.id,rank:0,isCompanyBoss:true,isDepartmentHead:false,defaultDepartmentId:null,isActive:true};f.state.rows(positions).push(p);
+ const response=await f.update(a!.id,{positionId:p.id,bossId:b!.id});assert.equal(response.statusCode,200,response.body);assert.equal(a!.bossId,null);assert.equal(a!.departmentId,null);
+});
+test('active head assignment requires current Boss', async t=>{
+ const f=await fixture(t), a=f.rows[0]!;const d={id:randomUUID(),companyId:f.company.id};f.state.rows(departments).push(d);
+ const p={id:randomUUID(),companyId:f.company.id,rank:1,isCompanyBoss:false,isDepartmentHead:true,defaultDepartmentId:d.id,isActive:true};f.state.rows(positions).push(p);
+ const response=await f.update(a.id,{positionId:p.id});assert.equal(response.statusCode,400,response.body);assert.equal(response.json().error,'organization_boss_required');
+});

@@ -1,3 +1,4 @@
+import { positionAuthorityMigrationSql } from './position-authority-migration.ts';
 import { cleanupUnusedDefault } from './companyless-migration.ts';
 import { a2aPollingMigrationSql } from './a2a-polling-migration.ts';
 import { chatJobsMigrationSql } from './chat-jobs-migration.ts';
@@ -18,6 +19,14 @@ const MIGRATION_LOCK_KEY = 727274001;
 // created before the version table will re-run v1 exactly once to get recorded.
 // Never edit an applied migration's statements — add the change as a new version.
 const migrations: Migration[] = [
+  { version: 34, name: 'position-department-authority', run: async () => {
+    await sql.begin(async tx => {
+      // DDL is atomic. A completed constraint also handles a crash between the
+      // DDL commit and recording this migration version in the existing runner.
+      const complete = await tx`SELECT 1 FROM pg_constraint WHERE conrelid='positions'::regclass AND conname='organization_position_role'`;
+      if (!complete.length) await tx.unsafe(positionAuthorityMigrationSql);
+    });
+  } },
   { version: 33, name: 'durable-async-chat-jobs', run: async () => { await sql.unsafe(chatJobsMigrationSql); } },
   { version: 32, name: 'durable-a2a-polling', run: async () => { await sql.unsafe(a2aPollingMigrationSql); } },
   { version: 31, name: 'pre-review-evidence-identity', run: async () => { await sql.unsafe(`ALTER TABLE kanban_cards ADD COLUMN IF NOT EXISTS review_identity JSONB;

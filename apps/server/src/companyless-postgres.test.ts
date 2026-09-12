@@ -127,7 +127,7 @@ test('PostgreSQL companyless bootstrap, audit, complete inventory and deletion t
     await call('POST',`/api/companies/${id}/setup/probe`);
     assert.equal((await call('PUT',`/api/companies/${id}/setup`,{step:'finish'})).statusCode,200);
     const before=(await call('GET',`/api/companies/${id}/setup`)).json();
-    await sql`UPDATE departments SET head_agent_id=NULL WHERE id=${before.department.id}`;
+    await sql`UPDATE agents SET position_id=NULL WHERE id=${before.head.id}`;
     const broken=(await call('GET',`/api/companies/${id}/setup`)).json();
     assert.equal(broken.status,'needs_attention');assert.equal(broken.company.autoDispatchEnabled,true);
     const reopened=await call('PUT',`/api/companies/${id}/setup`,{step:'reopen'});

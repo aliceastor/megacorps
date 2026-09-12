@@ -58,7 +58,7 @@ export function playbookFor(role: StructuralRole): string {
 
 // Ready-made position prompts for the Positions page. Personality and house
 // rules live here; the playbooks above are injected regardless.
-export type PositionTemplate = { key: string; name: string; slug: string; isCompanyBoss: boolean; reviewDomain: string | null; description: string; prompt: string };
+export type PositionTemplate = { key: string; name: string; slug: string; isCompanyBoss: boolean; isDepartmentHead: boolean; rank: number; reviewDomain: string | null; description: string; prompt: string };
 
 export const POSITION_TEMPLATES: PositionTemplate[] = [
   {
@@ -66,6 +66,8 @@ export const POSITION_TEMPLATES: PositionTemplate[] = [
     name: 'CEO',
     slug: 'ceo',
     isCompanyBoss: true,
+    isDepartmentHead: false,
+    rank: 0,
     reviewDomain: null,
     description: 'Company boss: turns the client\'s idea into a plan, allocates departments, integrates, and answers to the client.',
     prompt: 'You run the company for the client. You think in outcomes and deadlines, you consult the departments the goal concerns before you commit anyone, you keep the client informed at the moments that matter and never bother them with what the company can decide itself. You do not write code or content; you decide, coordinate, integrate, and accept.',
@@ -75,6 +77,8 @@ export const POSITION_TEMPLATES: PositionTemplate[] = [
     name: 'Department Head',
     slug: 'department-head',
     isCompanyBoss: false,
+    isDepartmentHead: true,
+    rank: 1,
     reviewDomain: null,
     description: 'Runs one department: allocates its members, integrates their work, reviews it as the professional gate.',
     prompt: 'You lead your department. You know your people\'s strengths and load and you assign accordingly; you keep work flowing rather than doing it all yourself; you review your members\' output to a professional standard and integrate it before it leaves the department. When the company boss asks for a proposal you answer concretely.',
@@ -84,6 +88,8 @@ export const POSITION_TEMPLATES: PositionTemplate[] = [
     name: 'Code Reviewer',
     slug: 'code-reviewer',
     isCompanyBoss: false,
+    isDepartmentHead: false,
+    rank: 2,
     reviewDomain: 'code',
     description: 'Professional reviewer for the code domain: correctness, tests, safety, maintainability.',
     prompt: 'You review code. You clone, run the tests, read the diff, and approve only what you would merge yourself. You care about correctness first, then safety, then clarity. Your feedback names the file, the problem, and the fix. You score on the rubric consistently.',
@@ -93,6 +99,8 @@ export const POSITION_TEMPLATES: PositionTemplate[] = [
     name: 'Content Reviewer',
     slug: 'content-reviewer',
     isCompanyBoss: false,
+    isDepartmentHead: false,
+    rank: 2,
     reviewDomain: 'content',
     description: 'Professional reviewer for the content domain: accuracy, structure, tone, fitness for the audience.',
     prompt: 'You review written and visual content. You check facts, structure, tone, and whether it serves the audience the card names. You approve only what you would publish under your own name. Your feedback quotes the passage and states the change. You score on the rubric consistently.',
@@ -102,6 +110,8 @@ export const POSITION_TEMPLATES: PositionTemplate[] = [
     name: 'Specialist',
     slug: 'specialist',
     isCompanyBoss: false,
+    isDepartmentHead: false,
+    rank: 2,
     reviewDomain: null,
     description: 'Individual contributor: executes cards end to end within their timeout window.',
     prompt: 'You are a hands-on specialist. You take a card, deliver exactly what it asks, test it, commit and push, and report with evidence. You ask peers or your reviewer when blocked rather than guessing, and you leave notes on decisions that will matter later.',

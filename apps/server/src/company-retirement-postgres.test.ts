@@ -69,9 +69,7 @@ test('PostgreSQL seeded company retirement preserves settings and enforces trans
     await sql`UPDATE positions SET prompt='customized' WHERE id=${position!.id}`;
     assert.equal(await blocker('positions'),1);
     await sql`UPDATE positions SET prompt=${CEO_POSITION_PROMPT} WHERE id=${position!.id}`;
-    const [foreignPosition]=await sql`INSERT INTO positions(company_id,name,slug,manager_position_id) VALUES(${target!.id},'Foreign subordinate','foreign-subordinate',${position!.id}) RETURNING id`;
-    assert.equal(await blocker('positions'),1);
-    await sql`DELETE FROM positions WHERE id=${foreignPosition!.id}`;
+    await assert.rejects(sql`INSERT INTO positions(company_id,name,slug,manager_position_id) VALUES(${target!.id},'Foreign subordinate','foreign-subordinate',${position!.id})`, /organization_manager_position_company_mismatch/);
     await sql`INSERT INTO retirement_future(project_id) VALUES(${project!.id})`;
     assert.equal(await blocker('retirement_future'),1);
     await sql`DELETE FROM retirement_future`;

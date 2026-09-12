@@ -1,0 +1,26 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import Fastify from 'fastify';
+import cookie from '@fastify/cookie';
+import { isolatedPostgres } from './test-support/postgres-db.ts';
+test('Boss deletion rejection preserves card ownership, Staff manager and audit atomically', {skip:!process.env.TEST_DATABASE_URL&&!process.env.CI?'Dedicated PostgreSQL test URL absent':false,timeout:60000},async t=>{
+ const {sql}=await isolatedPostgres(t);
+ const {registerRoutes}=await import('./routes.ts');const {signSession}=await import('./auth.ts');
+ const [c]=await sql`INSERT INTO companies(name,slug) VALUES('Delete','delete') RETURNING id`;
+ const [u]=await sql`INSERT INTO users(name,email,role) VALUES('Operator','delete@example.test','admin') RETURNING *`;
+ await sql`INSERT INTO company_memberships(company_id,user_id,role,status) VALUES(${c!.id},${u!.id},'admin','active')`;
+ const [d]=await sql`INSERT INTO departments(company_id,name,slug) VALUES(${c!.id},'Engineering','eng') RETURNING id`;
+ const [bp]=await sql`INSERT INTO positions(company_id,name,slug,is_company_boss) VALUES(${c!.id},'Boss','boss',true) RETURNING id`;
+ const [boss]=await sql`INSERT INTO agents(company_id,name,slug,role,position_id) VALUES(${c!.id},'Boss','boss','Boss',${bp!.id}) RETURNING id`;
+ const [hp]=await sql`INSERT INTO positions(company_id,name,slug,is_department_head,default_department_id) VALUES(${c!.id},'Head','head',true,${d!.id}) RETURNING id`;
+ await sql`INSERT INTO agents(company_id,name,slug,role,position_id) VALUES(${c!.id},'Head','head','Head',${hp!.id})`;
+ const [staff]=await sql`INSERT INTO agents(company_id,name,slug,role,boss_id) VALUES(${c!.id},'Staff','staff','Staff',${boss!.id}) RETURNING id`;
+ const [card]=await sql`INSERT INTO kanban_cards(company_id,title,body,assignee_id,reviewer_id) VALUES(${c!.id},'Owned','Owned evidence',${boss!.id},${boss!.id}) RETURNING *`;
+ const app=Fastify();t.after(()=>app.close());await app.register(cookie);await registerRoutes(app);
+ const response=await app.inject({method:'DELETE',url:'/api/agents/'+boss!.id,headers:{cookie:'session='+await signSession(u as any)}});
+ assert.ok(response.statusCode>=400,response.body);
+ assert.deepEqual((await sql`SELECT * FROM kanban_cards WHERE id=${card!.id}`)[0],card);
+ assert.equal((await sql`SELECT boss_id FROM agents WHERE id=${staff!.id}`)[0]!.boss_id,boss!.id);
+ assert.equal((await sql`SELECT deleted_at FROM agents WHERE id=${boss!.id}`)[0]!.deleted_at,null);
+ assert.equal((await sql`SELECT * FROM activity_log WHERE action='agent.deleted'`).length,0);
+});

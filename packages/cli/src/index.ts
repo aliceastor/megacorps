@@ -154,6 +154,9 @@ async function applyManifest(flags: Flags): Promise<void> {
   const options = apiOptions(flags);
   if (!options.auth.session) throw new Error('MEGACORPS_SESSION or --session is required for apply');
   const manifest = parseYaml(await readFile(file, 'utf8')) as ManifestRecord;
+  if (records(manifest.departments).some(item => item.headAgentId != null)) {
+    throw new Error('Department headAgentId is derived. Define an isDepartmentHead position and assign its Agent instead.');
+  }
   const defaultCompanyRef = text(manifest.defaultCompany);
   const companies = indexByKeys(await apiRequest<ApiObject[]>(options, '/api/companies'));
 
@@ -213,7 +216,11 @@ async function applyManifest(flags: Flags): Promise<void> {
     const company = companyFor(item);
     const index = await companyScopedIndex(positionsByCompany, company.id, '/api/positions');
     const existing = keyFor(item).map((key) => index.get(key)).find(Boolean);
-    const payload = { ...withoutRefs(item, ['company', 'companySlug']), companyId: company.id };
+    const departmentIndex = await companyScopedIndex(departmentsByCompany, company.id, '/api/departments');
+    const department = item.department ? byRef(departmentIndex, item.department, 'department') : null;
+    const payload = { ...withoutRefs(item, ['company', 'companySlug', 'department']), companyId: company.id,
+      ...(department ? { defaultDepartmentId: department.id } : {}),
+    };
     const row = existing
       ? await apiRequest<ApiObject>(options, `/api/positions/${existing.id}`, { method: 'PUT', body: JSON.stringify(payload) })
       : await apiRequest<ApiObject>(options, '/api/positions', { method: 'POST', body: JSON.stringify(payload) });
@@ -233,7 +240,19 @@ async function applyManifest(flags: Flags): Promise<void> {
     console.log(`${existing ? 'updated' : 'created'} project ${row.name ?? row.id}`);
   }
 
+  // Head assignment requires a current Boss. Resolve roles from authoritative
+  // positions so manifest ordering or a display title cannot define authority.
+  const orderedAgents: Array<{ item: ManifestRecord; order: number }> = [];
   for (const item of records(manifest.agents)) {
+    const company = companyFor(item);
+    const positionIndex = await companyScopedIndex(positionsByCompany, company.id, '/api/positions');
+    const agentIndex = await companyScopedIndex(agentsByCompany, company.id, '/api/agents');
+    const existing = keyFor(item).map(key => agentIndex.get(key)).find(Boolean);
+    const reference = text(item.position) ?? text(item.positionId) ?? text(existing?.positionId);
+    const position = reference ? byRef(positionIndex, reference, 'position') : null;
+    orderedAgents.push({ item, order: position?.isCompanyBoss === true ? 0 : position?.isDepartmentHead === true ? 1 : 2 });
+  }
+  for (const { item } of orderedAgents.sort((a,b) => a.order-b.order)) {
     const company = companyFor(item);
     const departments = await companyScopedIndex(departmentsByCompany, company.id, '/api/departments');
     const positions = await companyScopedIndex(positionsByCompany, company.id, '/api/positions');
