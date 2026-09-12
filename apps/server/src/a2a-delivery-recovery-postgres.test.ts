@@ -72,7 +72,7 @@ test('PostgreSQL missing A2A delivery receipt recovery is precise, atomic, and f
       await tx`UPDATE work_products SET summary = 'Changed evidence' WHERE id = ${f.product.id}`;
     });
     await ready;
-    try { await assert.rejects(recoverMissingA2aDeliveryReceipt(f.root.id), (error: any) => error.code === '55P03'); }
+    try { await assert.rejects(recoverMissingA2aDeliveryReceipt(f.root.id), (error: any) => (error.cause?.code ?? error.code) === '55P03'); }
     finally { release(); }
     await writer;
     assert.equal(await recoverMissingA2aDeliveryReceipt(f.root.id), false);
