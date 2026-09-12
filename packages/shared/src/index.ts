@@ -464,6 +464,8 @@ export const agentReportSchema = z.object({
   recovery: agentRecoverySchema.optional(),
   workProducts: z.array(reportedWorkProductSchema).optional(),
   verdict: z.enum(['approved', 'revision_requested', 'escalate']).optional(),
+  // Optional combined Boss goal assessment; usable only with a current server token.
+  parentAssessment: z.object({ token: z.string().regex(/^[a-f0-9]{64}$/), verdict: z.enum(['approved', 'revision_requested']), summary: z.string().trim().min(1).max(4000) }).strict().optional(),
   summary: z.string().trim().min(1).max(4000),
   questions: z.array(z.string().trim().min(1).max(1000)).max(10).optional(),
   delegations: z.array(agentReportDelegationSchema).max(8).optional(),

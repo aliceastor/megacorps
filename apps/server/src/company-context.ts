@@ -11,18 +11,18 @@ export const KNOWLEDGE_DOC_CHARS = 4_000;
 export function relevantKnowledgeTags(docTags: string[] | null, tags: string[]): boolean {
   const normalized = (docTags ?? []).map(t => t.trim().toLowerCase()).filter(Boolean);
   const wanted = new Set(tags.map(t => t.trim().toLowerCase()));
-  return !normalized.length || normalized.some(t => t === 'general' || wanted.has(t));
+  return !normalized.length || normalized.some(t => ['general', 'handbook', 'policy'].includes(t) || wanted.has(t));
 }
 
 export async function buildCompanyKnowledge(companyId: string, tags: string[] = []) {
-  const wanted = [...new Set(['general', ...tags.map(t => t.trim().toLowerCase())])];
+  const wanted = [...new Set(['general', 'handbook', 'policy', ...tags.map(t => t.trim().toLowerCase())])];
   // Select relevant documents in PostgreSQL before ordering/limiting; newer
   // unrelated departments must never evict the relevant older charter.
   const rows = await db.select().from(knowledgeDocs).where(and(eq(knowledgeDocs.companyId, companyId), sql`(
     coalesce(cardinality(${knowledgeDocs.tags}), 0) = 0 OR
     NOT EXISTS (SELECT 1 FROM unnest(${knowledgeDocs.tags}) AS knowledge_tag WHERE trim(knowledge_tag) <> '') OR
     EXISTS (SELECT 1 FROM unnest(${knowledgeDocs.tags}) AS knowledge_tag WHERE lower(trim(knowledge_tag)) = ANY(ARRAY[${sql.join(wanted.map(tag => sql`${tag}`), sql`, `)}]::text[]))
-  )`)).orderBy(desc(knowledgeDocs.updatedAt), knowledgeDocs.id).limit(21);
+  )`)).orderBy(sql`CASE WHEN EXISTS (SELECT 1 FROM unnest(${knowledgeDocs.tags}) AS mandatory_tag WHERE lower(trim(mandatory_tag)) IN ('handbook', 'policy')) THEN 0 ELSE 1 END`, desc(knowledgeDocs.updatedAt), knowledgeDocs.id).limit(21);
   const selected: Array<{ id: string; title: string; updatedAt: string | null; truncated: boolean }> = [];
   let text = 'Company knowledge (current selected documents):\n';
   let omitted = rows.length > 20;

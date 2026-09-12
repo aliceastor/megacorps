@@ -54,7 +54,7 @@ export type TeamMemberView = {
   liveCards: number;
   isBusy: boolean;
   cv: DomainCv[];
-  lastRejectReason: string | null;
+  latestReviewFeedback: string | null;
 };
 
 // The department head's resource view: who is free, what each member says
@@ -68,7 +68,7 @@ export function formatTeamResourceView(members: TeamMemberView[]): string {
       `  load: ${member.liveCards} live card(s)${member.isBusy ? ', busy right now' : ', free'}`,
       `  declared capabilities: ${member.capabilities.length ? member.capabilities.join(', ') : 'none declared'}`,
       `  verified track record: ${formatCv(member.cv)}`,
-      member.lastRejectReason ? `  last rejection: ${member.lastRejectReason}` : '',
+      member.latestReviewFeedback ? `  latest review feedback: ${member.latestReviewFeedback}` : '',
     ].filter(Boolean).join('\n')),
     'Prefer members whose verified track record matches the work; declared capabilities are a hint, reviews are evidence. Balance load — a busy member finishes later, not faster.',
   ].join('\n');

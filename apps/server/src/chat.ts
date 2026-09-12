@@ -1,5 +1,7 @@
 import { claimAgentCapacity } from './dispatch.ts';
 import { projectModelWarningChat } from './a2a-final-output.ts';
+import { companyDiscoveryContext } from './company-discovery.ts';
+import { agentOperationGuide } from './agent-operation-guide.ts';
 import { z } from 'zod';
 import { readLimit, optionalReadId, optionalReadProject } from './read-query.ts';
 import { buildCommonCompanyContext } from './company-context.ts';
@@ -118,6 +120,7 @@ async function buildDirectChatGoalContext(companyId: string, agent: AgentRow, pr
   const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt });
   return [
     await buildCommonCompanyContext(companyId, agent.id),
+    await companyDiscoveryContext(companyId, projectId),
     `Project: ${project?.name ?? 'No project / general chat'}`,
     project?.description ? `Project description: ${project.description}` : '',
     projectRepoContext(company, project, runtime, agent),
@@ -188,6 +191,7 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
     const latest = [...history].reverse().find((message) => message.authorType === 'user') ?? history[history.length - 1];
     return [
       'Continue the existing Direct Chat thread.',
+      agentOperationGuide('chat'),
       'Use the recent transcript below as authoritative memory for this chat session. If the user asks what was just said, answer from this transcript.',
       'The company, goal, and Kanban context were already provided in prior turns for this chat session. Do not ask the user to repeat recent messages unless genuinely ambiguous.',
       [
@@ -205,6 +209,7 @@ function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, histo
   }
   return [
     kanbanContext ? '' : company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
+    agentOperationGuide('chat'),
     digest,
     `Goal context:\n${goalContext}`,
     [

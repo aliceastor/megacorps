@@ -33,13 +33,13 @@ test('summarizeCv averages the latest twenty per domain and flags thin samples',
 test('formatCv and the team view read like a manager briefing', () => {
   assert.equal(formatCv([]), 'no reviewed work yet');
   const view = formatTeamResourceView([
-    { name: 'Ribel', slug: 'ribel', positionName: 'Engineer', departmentName: 'IT', capabilities: ['typescript', 'postgres'], liveCards: 2, isBusy: true, cv: summarizeCv([row('code', 8, 'approved', 1), row('code', 9, 'approved', 2)]), lastRejectReason: null },
-    { name: 'Digby', slug: 'digby', positionName: null, departmentName: 'IT', capabilities: [], liveCards: 0, isBusy: false, cv: [], lastRejectReason: 'Missing tests for the SSO path.' },
+    { name: 'Ribel', slug: 'ribel', positionName: 'Engineer', departmentName: 'IT', capabilities: ['typescript', 'postgres'], liveCards: 2, isBusy: true, cv: summarizeCv([row('code', 8, 'approved', 1), row('code', 9, 'approved', 2)]), latestReviewFeedback: null },
+    { name: 'Digby', slug: 'digby', positionName: null, departmentName: 'IT', capabilities: [], liveCards: 0, isBusy: false, cv: [], latestReviewFeedback: 'Missing tests for the SSO path.' },
   ]);
   assert.match(view, /Ribel \(slug: ribel, Engineer, IT\)/);
   assert.match(view, /load: 2 live card\(s\), busy right now/);
   assert.match(view, /code 8\.5\/10 over 2 \(thin sample\), 100% approved/);
   assert.match(view, /Digby.*\n.*load: 0 live card\(s\), free/);
-  assert.match(view, /last rejection: Missing tests/);
+  assert.match(view, /latest review feedback: Missing tests/);
   assert.match(view, /reviews are evidence/);
 });

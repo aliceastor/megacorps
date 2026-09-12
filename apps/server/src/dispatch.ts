@@ -7,6 +7,9 @@ import { assertA2aTaskRunOwner, isA2aTaskRunLeaseLost, claimRecoverableA2aTaskRu
 import { buildCommonCompanyContext, buildCompanyContextParts } from './company-context.ts';
 import { routeDelegatedQuestion, resumeDelegatedQuestion, blockDelegatedAssignment } from './delegated-help.ts';
 import { acceptedDescendantEvidence, sealDeliveryAcceptance } from './delivery-acceptance.ts';
+import { captureParentAssessment, tryReuseParentAssessment } from './parent-assessment.ts';
+import { receiptFromParentAssessment } from './assessment-reuse.ts';
+import { acceptedReviewerEvidencePacket } from './reviewer-evidence.ts';
 import { assertCompanyExecutionReady, structuralAssignment, structuralTargetContext, isBossAssessment, structuralCompletionIssue, structuralReviewer } from './company-workflow.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import { workerRepositoryReadiness } from './worker-readiness.ts';
@@ -28,6 +31,7 @@ import { effectiveFanoutCap, evaluateSplitPlan, formatChildOpening, formatSplitA
 import { normalizeDecisionMode, type AgentReportChild } from '@megacorps/shared';
 import { REVIEW_SCORE_RUBRIC, formatTeamResourceView, parseReviewScore, summarizeCv, type TeamMemberView } from './agent-cv.ts';
 import { REVIEWER_PLAYBOOK, playbookFor, structuralRole } from './role-playbooks.ts';
+import { agentApiDiscovery, agentOperationGuide } from './agent-operation-guide.ts';
 import { brainstormFromOutput, brainstormRoundComplete, formatBrainstormClosed, formatBrainstormOpened, planBrainstormTargets, type BrainstormRequest } from './brainstorm.ts';
 import { CLIENT_CHECKPOINT_APPROVAL_TYPE, checkpointEligibilityError, checkpointFromOutput, checkpointFromQuestion, checkpointReminderDue, combineCheckpointAnswer, formatCheckpointAnswer, formatCheckpointMessage, type ClientCheckpointRequest } from './client-checkpoints.ts';
 import { setCardDependencies } from './card-dependencies.ts';
@@ -944,20 +948,25 @@ export async function teamResourceView(companyId: string, bossId: string): Promi
   const reports = await activeDirectReportsForAgent(companyId, bossId);
   const ids = reports.map((report) => report.id);
   if (ids.length === 0) return '';
-  const [agentRows, liveRows, scoreRows, rejectRows] = await Promise.all([
+  const [agentRows, liveRows, scoreRows, feedbackRows] = await Promise.all([
     db.select({ id: agents.id, capabilities: agents.capabilities, isBusy: agents.isBusy }).from(agents).where(inArray(agents.id, ids)),
     db.select({ assigneeId: kanbanCards.assigneeId, count: drizzleSql<number>`count(*)::int` }).from(kanbanCards)
       .where(and(inArray(kanbanCards.assigneeId, ids), isNull(kanbanCards.deletedAt), inArray(kanbanCards.columnStatus, ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm'])))
       .groupBy(kanbanCards.assigneeId),
     db.select({ agentId: agentReviewScores.agentId, domain: agentReviewScores.domain, score: agentReviewScores.score, verdict: agentReviewScores.verdict, createdAt: agentReviewScores.createdAt })
       .from(agentReviewScores).where(inArray(agentReviewScores.agentId, ids)).orderBy(desc(agentReviewScores.createdAt)).limit(ids.length * 40),
-    db.select({ assigneeId: kanbanCards.assigneeId, feedback: kanbanCards.reviewFeedback, updatedAt: kanbanCards.updatedAt }).from(kanbanCards)
+    db.select({ assigneeId: kanbanCards.assigneeId, reviewFeedback: kanbanCards.reviewFeedback, updatedAt: kanbanCards.updatedAt }).from(kanbanCards)
       .where(and(inArray(kanbanCards.assigneeId, ids), isNull(kanbanCards.deletedAt), isNotNull(kanbanCards.reviewFeedback))).orderBy(desc(kanbanCards.updatedAt)).limit(ids.length * 3),
   ]);
   const agentById = new Map(agentRows.map((row) => [row.id, row]));
   const liveById = new Map(liveRows.map((row) => [row.assigneeId, Number(row.count)]));
-  const lastReject = new Map<string, string>();
-  for (const row of rejectRows) if (row.assigneeId && row.feedback && !lastReject.has(row.assigneeId)) lastReject.set(row.assigneeId, row.feedback.replace(/\s+/g, ' ').slice(0, 160));
+  const latestFeedback = new Map<string, string>();
+  for (const row of feedbackRows) if (row.assigneeId && row.reviewFeedback && !latestFeedback.has(row.assigneeId)) {
+    const extracted = extractAgentReport(row.reviewFeedback);
+    const report = extracted && 'report' in extracted ? extracted.report : null;
+    const feedback = report ? `${report.verdict ?? report.status}: ${report.summary}` : row.reviewFeedback;
+    latestFeedback.set(row.assigneeId, feedback.replace(/\s+/g, ' ').slice(0, 160));
+  }
   const members: TeamMemberView[] = reports.map((report) => ({
     name: report.name,
     slug: report.slug,
@@ -967,7 +976,7 @@ export async function teamResourceView(companyId: string, bossId: string): Promi
     liveCards: liveById.get(report.id) ?? 0,
     isBusy: Boolean(agentById.get(report.id)?.isBusy),
     cv: summarizeCv(scoreRows.filter((row) => row.agentId === report.id)),
-    lastRejectReason: lastReject.get(report.id) ?? null,
+    latestReviewFeedback: latestFeedback.get(report.id) ?? null,
   }));
   return formatTeamResourceView(members);
 }
@@ -1372,6 +1381,7 @@ async function integrationSection(card: CardRow): Promise<string> {
     'GOAL ASSESSMENT TURN: assess accepted department/employee evidence against the requested goal and acceptance criteria. Cite the original artifacts and authors. Strategy-only Boss must not clone, run tests, author another deliverable or present this assessment as independent professional QA. Request targeted corrections if coverage is missing; preserve explicit platform gates.',
     GOAL_ASSESSMENT_EVIDENCE_GUIDANCE,
     evidence.ready ? 'All required descendant evidence and gates are current and server-accepted.' : `Acceptance is no longer current: ${evidence.issues.join(' ')}`,
+    await acceptedReviewerEvidencePacket(card),
     ...evidence.products.slice(0, 40).map(product => `- ${product.title} [product=${product.id}; card=${product.cardId}; author=${product.agentId}; run=${product.taskRunId}]: ${product.url ?? ''} ${clipText(product.summary ?? '', 600)}`),
   ].join('\n');
 }
@@ -2547,6 +2557,13 @@ export async function recordCostAndEnforceBudget(card: CardRow, agent: AgentRow,
 }
 export async function cascadeParentStatus(parentCardId: string | null): Promise<void> {
   if (!parentCardId) return;
+  const reused = await tryReuseParentAssessment(parentCardId);
+  if (reused) {
+    await addCardMessage({ cardId: reused.id, authorType: 'system', action: 'parent_assessment_reused', body: 'Reused the company Boss’s explicit parent goal assessment from the accepted child review. Scope, original authors, product versions and required gates remain current; no additional model assessment or score was created.' });
+    publishLiveEvent({ type: 'card.updated', companyId: reused.companyId, entityType: 'card', entityId: reused.id, cardId: reused.id, projectId: reused.projectId, action: 'parent.assessment_reused' });
+    await cascadeParentStatus(reused.parentCardId);
+    return;
+  }
   const [parent] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, parentCardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!parent) return;
   if (parent.columnStatus === 'done' || parent.columnStatus === 'cancelled') return;
@@ -3791,7 +3808,8 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       await completeTaskRun(options.taskRunId, { status: 'cancelled', preserveCard: true, output: 'Review superseded before execution.' });
       return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
     }
-    const reviewPrompt = await buildReviewPrompt(promptCard, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'review' }) + reviewIdentityContext(reviewIdentity);
+    const parentAssessment = reviewMode === 'quality' ? await captureParentAssessment(promptCard, reviewer.id) : null;
+    const reviewPrompt = await buildReviewPrompt(promptCard, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'review' }) + reviewIdentityContext(reviewIdentity) + (parentAssessment ? `\n\n${parentAssessment.prompt}` : '');
     const reviewTask = { id: card.id, title: `Review: ${card.title}`, body: reviewPrompt, reportingMode: isRecoveryReview(card, reviewer.id) ? 'recovery' as const : 'review' as const, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent: reviewer, kind: 'review' }), taskRunId: options.taskRunId };
     await recordPromptLog({
       companyId: card.companyId,
@@ -4028,7 +4046,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     await db.update(heartbeatRuns).set({ status: acceptedReviewOutput ? 'success' : 'failed', completedAt: new Date(), durationSeconds: result.durationSeconds, error: acceptedReviewOutput ? null : result.output }).where(eq(heartbeatRuns.id, run.id));
     if (humanGate && !childBlock) await ensureHumanGate(card, reviewer.id, 'Client approval required after reviewer approval', { reviewerVerdict: 'approved' });
     else await resolvePendingApproval(card, childBlock || mergeBlocked ? 'cancelled' : rejected ? (reviewMode === 'help' ? 'revision_requested' : 'rejected') : 'approved', childBlock ? childBlock.message : mergeBlocked ? mergePlan.detail : rejected ? result.output : 'Reviewer approved task.', reviewer.id);
-    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: childBlock ? 'review.waiting_on_children' : mergeBlocked ? 'review.evidence_changed' : rejected ? (reviewMode === 'help' ? 'review.revision_requested' : 'review.rejected') : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, mode: reviewMode, childBlock } });
+    await addActivity({ companyId: card.companyId, actorType: 'agent', actorId: reviewer.id, agentId: reviewer.id, action: childBlock ? 'review.waiting_on_children' : mergeBlocked ? 'review.evidence_changed' : rejected ? (reviewMode === 'help' ? 'review.revision_requested' : 'review.rejected') : 'review.approved', entityType: 'card', entityId: card.id, details: { runId: run.id, costUsd: result.costUsd, mode: reviewMode, childBlock, parentAssessment: !childBlock && !mergeBlocked && !rejected ? receiptFromParentAssessment(parentAssessment, normalizedReview.report, result.output) : null } });
     await completeTaskRun(options.taskRunId, { status: rejected ? 'failed' : 'success', error: rejected ? result.output : null, output: childBlock ? childBlock.message : result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
     if (!updated) throw new Error('card_update_failed');
     if (mergePlan) await applyMergeGatePlan(updated, mergePlan, { approvedBy: reviewer.id, fromStatus: card.columnStatus });
@@ -4411,6 +4429,7 @@ export function startDispatchLoop(app: FastifyInstance): void {
 }
 
 export const dispatchInternals = {
+  buildTaskPrompt,
   ensureAssigned,
   claimNextTaskRun,
   adapterFailureMessage,
@@ -4542,8 +4561,9 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
     `Mission: ${company?.mission ?? 'No mission configured.'}`,
     `Auto dispatch: ${company?.autoDispatchEnabled === false ? 'off' : 'on'}`,
     `Dispatch interval seconds: ${company?.dispatchIntervalSeconds ?? 10}`,
-    `Projects: ${scopedToProject ? scopedProjects.map((project) => project.name).join(', ') || 'not included for no-project chat' : companyProjects.map((project) => project.name).join(', ') || 'none'}`,
-    includeGoals ? `Goals:\n${scopedGoals.map((goal) => formatGoal(goal)).join('\n') || 'none'}` : '',
+    `Projects: ${(scopedToProject ? scopedProjects : companyProjects).slice(0, 50).map((project) => `${project.name} [project=${project.id}]`).join(', ') || 'none in selected scope'}`,
+    'Project pointers identify company work; they do not change the current delivery target. Full directory: GET /api/projects?companyId=<company-id> (authenticated user access).',
+    includeGoals ? `Goals:\n${scopedGoals.slice(0, 40).map((goal) => focusCard && goal.projectId && goal.projectId !== focusCard.projectId ? `- ${goalScopeLabel(goal)}: ${goal.title} [goal=${goal.id}; project=${goal.projectId}; details=/api/goals?companyId=${companyId}]` : formatGoal(goal)).join('\n') || 'none'}` : '',
   ].filter(Boolean).join('\n'), includeGoals ? 2600 : 1600);
 
   addContextSection(state, 'Company Structure', [
@@ -4628,7 +4648,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
       `Assignee: ${focusAssignee?.name ?? (focusCard.assigneeId ? 'unavailable' : 'unassigned')}`,
       `Reviewer: ${focusReviewer?.name ?? (focusCard.reviewerId ? 'unavailable' : 'none')}`,
       parent ? `Legacy parent card (read-only): ${compactCardLine(parent, agentById)}` : '',
-      children.length > 0 ? `Legacy child cards (read-only; do not create more):\n${children.map((card) => compactCardLine(card, agentById)).join('\n')}` : '',
+      children.length > 0 ? `Existing child cards (reference; follow current role and delegation instructions):\n${children.map((card) => compactCardLine(card, agentById)).join('\n')}` : '',
       `Dependencies:\n${deps.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
       `Requires approval: ${focusCard.requiresApproval ? 'yes' : 'no'}`,
       `Retry: ${focusCard.retryCount ?? 0}/${focusCard.maxRetries ?? 3}`,
@@ -4685,7 +4705,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
   }) : recentRuns;
   addContextSection(state, 'Recent Company Activity', scopedToProject && !options.projectId ? 'omitted for no-project chat' : recentActivity.map((event) => [
     `- ${formatDate(event.createdAt)} | ${event.actorType}:${event.actorId} | ${event.action} | ${event.entityType}:${event.entityId}`,
-    `  details=${clipText(JSON.stringify(event.details ?? {}), 800)}`,
+    !focusCard || event.entityId === focusCard.id || companyCards.some(card => card.id === event.entityId && card.projectId === focusCard.projectId) ? `  details=${clipText(JSON.stringify(event.details ?? {}), 800)}` : '  [historical pointer; details omitted]',
   ].join('\n')).join('\n') || 'none', 5000);
   addContextSection(state, 'Recent Heartbeat Runs', scopedRuns.map((run) => [
     `- ${formatDate(run.createdAt)} | ${run.source}/${run.status} | card=${run.cardId ?? 'none'} | agent=${run.agentId ? agentById.get(run.agentId)?.name ?? run.agentId : 'none'} | duration=${run.durationSeconds ?? 0}s | cost=${run.costUsd ?? '0'}`,
@@ -5162,23 +5182,24 @@ async function buildReviewPromptCore(card: CardRow, options: PromptBuildOptions 
 async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
  const { role: common, reference } = await buildCompanyContextParts(card.companyId, card.assigneeId, card.tags ?? []);
  const assignment = card.assigneeId ? await structuralAssignment(card.companyId, card.assigneeId) : null;
- if (assignment?.delegationRequired) return [common,
+ if (assignment?.delegationRequired) return [common, agentOperationGuide('management'),
    `${assignment.role === 'ceo' ? 'STRATEGY' : 'DEPARTMENT MANAGEMENT'} assignment: ${card.title} [${card.id}]`,
    card.body, `Coordination only: ${card.coordinationOnly ? 'explicitly selected by the operator; no fabricated child work' : 'no; required execution must be delegated'}.`,
    card.assigneeId ? await informationalProjectAuthority(card, card.assigneeId, false) : '',
    structuralTargetContext(assignment),
+   card.assigneeId ? await teamResourceView(card.companyId, card.assigneeId) : '',
    'Use report.children [{title, body: "Scope plus ## Acceptance checklist", assigneeSlug, dependsOn?}] for execution deliverables. A successful split creates required children; wait for verified acceptance. Use report.broadcast to consult departments and report.mentions for concrete peer questions. Completed report summaries are goal assessments citing verified work products, never a substitute for children or a new implementation PR.',
    `Explicit approval gate: ${card.requiresApproval ? 'required' : 'not required unless an indispensable external decision arises'}. Forced brainstorm: ${card.forceBrainstorm ? 'required before splitting' : 'no'}.`,
    await buildKanbanDeltaContext(card, options), await integrationSection(card), await clientCheckpointSection(card),
    reference,
    'Return a megacorps-report. Use status progress while delegating/waiting, completed for an evidence-supported goal assessment after child acceptance, input_required only for an actionable question or permission request. Never execute the implementation yourself.',
  ].filter(Boolean).join('\n\n');
- return [common, await buildTaskPromptCore(card, { ...options, referenceContext: reference })].join('\n\n');
+ return [common, agentOperationGuide('execution'), await buildTaskPromptCore(card, { ...options, referenceContext: reference })].join('\n\n');
 }
 
 export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
  const { role: common, reference } = await buildCompanyContextParts(card.companyId, card.reviewerId, card.tags ?? []);
- if (isRecoveryReview(card, card.reviewerId ?? undefined)) return [common,
+ if (isRecoveryReview(card, card.reviewerId ?? undefined)) return [common, agentApiDiscovery,
    `Repair the blocker for ${card.id}: ${card.title}. Original goal and acceptance:\n${card.body}`,
    card.reviewerId ? await informationalProjectAuthority(card, card.reviewerId, false) : '',
    recoveryPrompt(card),
@@ -5187,19 +5208,20 @@ export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptio
    agentReportGuidance('recovery'),
  ].filter(Boolean).join('\n\n');
  const mergePolicy = await managedMergePolicyForCard(card);
- if (await isBossAssessment(card.companyId, card.reviewerId)) return [common,
+ if (await isBossAssessment(card.companyId, card.reviewerId)) return [common, agentApiDiscovery,
    `GOAL ASSESSMENT for ${card.id}: ${card.title}. This is not independent quality review.`,
-   'Assess acceptance coverage using department evidence and the explicit sole-head SELF-CHECK. Never clone, run tests, implement, or professionally review the artifact. Required independent-review policy is enforced separately; missing staff requires an actionable client decision.',
+   'Assess acceptance coverage using department evidence and actual reviewer checks. Use an explicit sole-head SELF-CHECK only when the department truly has no eligible independent reviewer and current policy permits it. Never clone, run tests, implement, or professionally review the artifact. Required independent-review policy is enforced separately; missing staff requires an actionable client decision.',
    GOAL_ASSESSMENT_EVIDENCE_GUIDANCE,
    `Acceptance: ${acceptanceOf(card.body) ?? card.body}`,
    card.reviewerId ? await informationalProjectAuthority(card, card.reviewerId, false) : '',
    `Department result:\n${clipText(card.executionLog, 12000)}`,
+   card.rollupStatus !== 'integrating' ? await acceptedReviewerEvidencePacket(card) : '',
    await integrationSection(card),
    reference,
    'Return an explicit verdict approved only when the goal is covered by evidence, revision_requested with concrete missing scope, or escalate for a necessary client decision. Label the result GOAL ASSESSMENT; do not assign a professional QA score.',
    mergePolicy,
  ].join('\n\n');
- return [common, `Current review goal: ${card.title}\n${acceptanceOf(card.body) ?? card.body}`, card.reviewerId ? await informationalProjectAuthority(card, card.reviewerId, false) : '', await buildReviewPromptCore(card, options), reference, mergePolicy].filter(Boolean).join('\n\n');
+ return [common, agentOperationGuide('review'), `Current review goal: ${card.title}\n${acceptanceOf(card.body) ?? card.body}`, card.reviewerId ? await informationalProjectAuthority(card, card.reviewerId, false) : '', await buildReviewPromptCore(card, options), reference, mergePolicy].filter(Boolean).join('\n\n');
 }
 
 /** Refresh same-card message authority independently of stale delegation/session text. */
@@ -5230,7 +5252,7 @@ async function buildMessageDelegationPrompt(card: CardRow, comment: CardCommentR
  comment = await sanitizeCompanyOutput(card.companyId, comment);
  const authority = await messageProjectAuthority(card, comment.assigneeAgentId);
  const context = await buildCompanyContextParts(card.companyId, comment.assigneeAgentId, card.tags ?? []);
- return [context.role, `Current assignment: ${card.title}\n${comment.body}`, authority, await buildMessageDelegationPromptCore(card, comment, options), context.reference].join('\n\n');
+ return [context.role, agentApiDiscovery, `Current assignment: ${card.title}\n${comment.body}`, authority, await buildMessageDelegationPromptCore(card, comment, options), context.reference].join('\n\n');
 }
 
 async function buildMessageReviewPrompt(card: CardRow, report: CardCommentRow, request: CardCommentRow | null | undefined, options: PromptBuildOptions = {}): Promise<string> {
@@ -5240,6 +5262,6 @@ async function buildMessageReviewPrompt(card: CardRow, report: CardCommentRow, r
  const bossAssessment = await isBossAssessment(card.companyId, report.reviewerAgentId);
  const authority = await messageProjectAuthority(card, report.reviewerAgentId, bossAssessment);
  const context = await buildCompanyContextParts(card.companyId, report.reviewerAgentId, card.tags ?? []);
- if (bossAssessment) return [context.role, 'GOAL ASSESSMENT: assess scope coverage using the delegated report and cited evidence. This is not independent professional QA. Never clone, test or implement. Return approved, revision_requested or escalate with the concrete goal coverage reason.', GOAL_ASSESSMENT_EVIDENCE_GUIDANCE, `Assignment: ${request?.body ?? card.body}`, authority, `Department report: ${report.body}`, context.reference, mergePolicy].filter(Boolean).join('\n\n');
- return [context.role, `Current review assignment: ${card.title}\n${request?.body ?? card.body}`, authority, await buildMessageReviewPromptCore(card, report, request, options), context.reference, mergePolicy].filter(Boolean).join('\n\n');
+ if (bossAssessment) return [context.role, agentApiDiscovery, 'GOAL ASSESSMENT: assess scope coverage using the delegated report and cited evidence. This is not independent professional QA. Never clone, test or implement. Return approved, revision_requested or escalate with the concrete goal coverage reason.', GOAL_ASSESSMENT_EVIDENCE_GUIDANCE, `Assignment: ${request?.body ?? card.body}`, authority, `Department report: ${report.body}`, context.reference, mergePolicy].filter(Boolean).join('\n\n');
+ return [context.role, agentApiDiscovery, `Current review assignment: ${card.title}\n${request?.body ?? card.body}`, authority, await buildMessageReviewPromptCore(card, report, request, options), context.reference, mergePolicy].filter(Boolean).join('\n\n');
 }

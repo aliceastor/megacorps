@@ -28,7 +28,10 @@ export function rateLimitPolicyForPath(method: string, path: string): RateLimitP
 
   const windowMs = envNumber('RATE_LIMIT_WINDOW_MS', 60_000);
   if (path.startsWith('/api/auth/')) return { key: 'auth', limit: envNumber('RATE_LIMIT_AUTH_PER_MINUTE', 12), windowMs };
-  if (path.startsWith('/api/chat/')) return { key: 'chat', limit: envNumber('RATE_LIMIT_CHAT_PER_MINUTE', 40), windowMs };
+  if (path.startsWith('/api/chat/')) {
+    if (method === 'GET') return { key: 'chat-read', limit: envNumber('RATE_LIMIT_CHAT_READ_PER_MINUTE', 600), windowMs };
+    return { key: 'chat', limit: envNumber('RATE_LIMIT_CHAT_PER_MINUTE', 40), windowMs };
+  }
   if (path.startsWith('/api/webhook/')) return { key: 'webhook', limit: envNumber('RATE_LIMIT_WEBHOOK_PER_MINUTE', 120), windowMs };
   if (path.startsWith('/api/runner/')) return { key: 'runner', limit: envNumber('RATE_LIMIT_RUNNER_PER_MINUTE', 240), windowMs };
   if (path.startsWith('/api/agent/')) return { key: 'agent-session', limit: envNumber('RATE_LIMIT_AGENT_SESSION_PER_MINUTE', 240), windowMs };

@@ -11,6 +11,17 @@ test('native recovery help documents manager actions and authority boundaries', 
   assert.match(JSON.stringify(apiHelpCatalog()), /raise_to_human/);
 });
 
+test('api help exposes bounded surface operation guides with explicit authentication boundaries', () => {
+  const catalog = apiHelpCatalog();
+  assert.deepEqual(Object.keys(catalog.agentOperations).sort(), ['chat', 'execution', 'management', 'review']);
+  for (const guide of Object.values(catalog.agentOperations)) {
+    assert.ok(guide.length <= 3_500);
+    assert.match(guide, /GET \/api\/help\?format=markdown/);
+    assert.match(guide, /browser session.*not available|session routes.*not available/i);
+  }
+  assert.match(apiHelpMarkdown(), /## Agent Operations/);
+});
+
 test('webhook help explains a structured review status conflict and its coherent correction', () => {
   const endpoint = apiHelpCatalog().endpoints.find(row => row.path === '/api/webhook/task-complete')!;
   const help = JSON.stringify(endpoint);

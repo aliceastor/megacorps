@@ -4,9 +4,35 @@ import { createCompanySchema, createDepartmentSchema, updateCompanySchema, updat
 import { randomUUID } from 'node:crypto';
 import { companies, departments, positions, agents, knowledgeDocs, kanbanCards } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
-import { buildReviewPrompt } from './dispatch.ts';
+import { buildReviewPrompt, dispatchInternals } from './dispatch.ts';
 import { CEO_PLAYBOOK, DEPARTMENT_HEAD_PLAYBOOK } from './role-playbooks.ts';
 import { buildCompanyKnowledge } from './company-context.ts';
+import { agentReviewScores } from './db/schema.ts';
+
+test('mandatory handbook and policy tags are company-wide while specialist and foreign documents stay scoped', async t => {
+  memoryDb(t, [[knowledgeDocs, [
+    { id: 'handbook', companyId: 'c', title: 'Handbook', tags: ['Handbook', 'Policy'], body: 'Company required handbook', updatedAt: new Date(0) },
+    { id: 'sales', companyId: 'c', title: 'Sales', tags: ['sales'], body: 'Sales-only material', updatedAt: new Date() },
+    { id: 'foreign', companyId: 'other', title: 'Foreign', tags: ['Policy'], body: 'Foreign secrets', updatedAt: new Date() },
+  ]]]);
+  const result = await buildCompanyKnowledge('c', ['engineering']);
+  assert.match(result.text, /Company required handbook/);
+  assert.doesNotMatch(result.text, /Sales-only material|Foreign secrets/);
+});
+
+test('staffed-head assignment includes eligible team CV and workload', async t => {
+  const card: any = { id: 'card', companyId: 'c', projectId: null, title: 'Write docs', body: 'Acceptance: useful docs', assigneeId: 'head', columnStatus: 'todo', tags: [] };
+  memoryDb(t, [[companies, [{ id: 'c', name: 'Firm' }]], [departments, [{ id: 'd', companyId: 'c', name: 'Engineering', headAgentId: 'head' }]],
+    [agents, [{ id: 'head', companyId: 'c', name: 'Head', slug: 'head', departmentId: 'd', adapterType: 'webhook', isActive: true }, { id: 'worker', companyId: 'c', name: 'Writer', slug: 'writer', bossId: 'head', departmentId: 'd', adapterType: 'webhook', isActive: true, capabilities: ['documentation'] }]],
+    [kanbanCards, [card, { id: 'old', companyId: 'c', title: 'Prior task', assigneeId: 'worker', columnStatus: 'done', updatedAt: new Date(), reviewFeedback: JSON.stringify({ kind: 'megacorps-report', status: 'completed', verdict: 'approved', summary: 'All documentation checks passed.' }) }]], [agentReviewScores, [{ id: 'score', companyId: 'c', cardId: 'old', agentId: 'worker', reviewerId: 'head', domain: 'content', score: 9, verdict: 'approved', createdAt: new Date() }]]]);
+  const prompt = await (dispatchInternals as any).buildTaskPrompt(card);
+  assert.match(prompt, /DEPARTMENT MANAGEMENT/);
+  assert.match(prompt, /content 9\/10 over 1/);
+  assert.match(prompt, /declared capabilities: documentation/);
+  assert.match(prompt, /load:/);
+  assert.match(prompt, /latest review feedback: approved: All documentation checks passed\./);
+  assert.doesNotMatch(prompt, /last rejection:/);
+});
 test('common knowledge stays within total and document budgets with explicit selection metadata', async t => {
   memoryDb(t, [[knowledgeDocs, Array.from({ length: 25 }, (_, i) => ({ id: `doc-${i}`, title: `Document ${i}`, companyId: 'company', tags: [], body: 'x'.repeat(8000), updatedAt: new Date() }))]]);
   const result = await buildCompanyKnowledge('company');

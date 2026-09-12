@@ -17,3 +17,10 @@ test('formats assigned position prompt with company and department', () => {
 test('omits position prompt when an agent has no position', () => {
   assert.equal(formatAgentPositionPrompt({ positionName: '', departmentName: 'Engineering', companyName: 'MegaCorps', customPrompt: 'Ignored.' }), '');
 });
+
+test('observed legacy merge-after-PASS instruction is projected to review-only authority', () => {
+  const prompt = formatAgentPositionPrompt({ positionName: 'CTO', customPrompt: '- 測試全綠 + diff 合理 → **PASS**，並用 gitea API merge 該 PR，verdict 附 merge commit SHA\n- 沒驗證過不給 PASS' });
+  assert.doesNotMatch(prompt, /並用 gitea API merge 該 PR/);
+  assert.match(prompt, /MegaCorps/);
+  assert.match(prompt, /沒驗證過不給 PASS/);
+});
