@@ -33,6 +33,7 @@ for (const route of ['/departments/o-chart', '/agents']) test(`name-only edit pr
   const { agents, writes } = await fixture(page);
   const legacy = agents.find(agent => agent.id === 'unassigned')!;
   Object.assign(legacy, { positionId: null, departmentId: 'engineering', bossId: 'manager' });
+  const original = structuredClone(legacy);
   await page.goto(route);
   if (route === '/agents') await page.locator('.agent-name-button').filter({ hasText: 'Unassigned colleague' }).click();
   else await page.getByRole('button', { name: /Unassigned colleague/ }).click();
@@ -44,4 +45,8 @@ for (const route of ['/departments/o-chart', '/agents']) test(`name-only edit pr
   expect(writes[0]).not.toHaveProperty('bossId');
   expect(legacy.departmentId).toBe('engineering');
   expect(legacy.bossId).toBe('manager');
+  expect(legacy.runtimeId).toBe(original.runtimeId);
+  expect(legacy.adapterConfig).toEqual(original.adapterConfig);
+  expect(legacy.capabilities).toEqual(original.capabilities);
+  expect(legacy.name).toBe('Legacy colleague renamed');
 });

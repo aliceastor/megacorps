@@ -193,8 +193,8 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
   useEffect(() => {
     if (loadError) setToast({ message: t('agents.loadFailed'), type: 'error' });
   }, [loadError]);
-  useEffect(() => {
-    if (!selected) return;
+  function selectAgent(selected: Agent) {
+    setSelected(selected);
     setAgentDraft({
       name: selected.name,
       slug: selected.slug,
@@ -210,7 +210,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
       capabilities: selected.capabilities ?? [],
       defaultTimeoutSeconds: selected.defaultTimeoutSeconds ?? null,
     });
-  }, [selected?.id]);
+  }
   useEffect(() => {
     setSlug(name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
   }, [name]);
@@ -607,7 +607,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
               <tbody>
                 {sortedAgents.length === 0 ? <tr><td colSpan={8}><p className="field-hint">{t('agents.noMatches')}</p></td></tr> : sortedAgents.map((agent) => (
                   <tr key={agent.id} className={selected?.id === agent.id ? 'expanded-row' : undefined}>
-                    <td><button type="button" className="text-button agent-name-button" onClick={() => setSelected(agent)}><b>{agent.name}</b><small>{agent.slug}</small></button></td>
+                    <td><button type="button" className="text-button agent-name-button" onClick={() => selectAgent(agent)}><b>{agent.name}</b><small>{agent.slug}</small></button></td>
                     <td>{agentPosition(agent)}</td>
                     <td>{agentDepartment(agent)}</td>
                     <td>{agentManager(agent)}</td>
@@ -616,7 +616,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
                     <td>{t('agents.monthlyBudget')} {formatUsd(agent.budgetMonthly)}<small>{t('agents.perTaskBudget')} {formatUsd(agent.budgetPerTask)}</small></td>
                     <td>
                       <div className="action-row compact">
-                        <button className="btn icon-btn" aria-label={`${t('common.edit')} ${agent.name}`} title={t('common.edit')} onClick={() => setSelected(agent)}><Pencil size={14} /></button>
+                        <button className="btn icon-btn" aria-label={`${t('common.edit')} ${agent.name}`} title={t('common.edit')} onClick={() => selectAgent(agent)}><Pencil size={14} /></button>
                         <button className="btn icon-btn" aria-label={`${t('agents.test')} ${agent.name}`} title={t('agents.testConnection')} disabled={testing === agent.id} onClick={() => agentAction(agent.id, `/api/agents/${agent.id}/test-connection`, t('agents.connectionSuccessful'))}><Wifi size={14} /></button>
                         <Link className="btn icon-btn" aria-label={`Injected context for ${agent.name}`} title="Injected context: what this agent was actually sent" href={`/logs?agentId=${agent.id}`}><FileText size={14} /></Link>
                         {agent.isActive ? <button className="btn icon-btn" aria-label={`${t('agents.pause')} ${agent.name}`} title={t('agents.pause')} onClick={() => agentAction(agent.id, `/api/agents/${agent.id}/pause`, t('agents.agentPaused'))}><Pause size={14} /></button> : <button className="btn icon-btn" aria-label={`${t('agents.resume')} ${agent.name}`} title={t('agents.resume')} onClick={() => agentAction(agent.id, `/api/agents/${agent.id}/resume`, t('agents.agentResumed'))}><CheckCircle2 size={14} /></button>}
@@ -633,7 +633,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
             <div className="panel-title"><h3>{department.name}</h3><span className="status-pill">{visibleAgents.filter((agent) => agent.departmentId === department.id).length} {t('companies.membersCount')}</span></div>
             <div className="org-chart-scroll" aria-label={`${department.name} organization chart`}>
               <AnimatePresence>
-                {(roots.filter((agent) => agent.departmentId === department.id).length ? roots.filter((agent) => agent.departmentId === department.id) : visibleAgents.filter((agent) => agent.departmentId === department.id)).map((agent) => <AgentNode key={agent.id} agent={agent} agents={visibleAgents} departments={companyDepartments} positions={companyPositions} selectedId={selected?.id} onSelect={setSelected} />)}
+                {(roots.filter((agent) => agent.departmentId === department.id).length ? roots.filter((agent) => agent.departmentId === department.id) : visibleAgents.filter((agent) => agent.departmentId === department.id)).map((agent) => <AgentNode key={agent.id} agent={agent} agents={visibleAgents} departments={companyDepartments} positions={companyPositions} selectedId={selected?.id} onSelect={selectAgent} />)}
               </AnimatePresence>
             </div>
           </section>)}
@@ -642,7 +642,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
           <div className="panel-title"><h3>{t('companies.unassignedDepartment')}</h3><span className="status-pill">{visibleAgents.filter((agent) => !agent.departmentId).length} {t('companies.membersCount')}</span></div>
           <div className="org-chart-scroll" aria-label="Unassigned department organization chart">
           <AnimatePresence>
-            {(roots.filter((agent) => !agent.departmentId).length ? roots.filter((agent) => !agent.departmentId) : visibleAgents.filter((agent) => !agent.departmentId)).map((agent) => <AgentNode key={agent.id} agent={agent} agents={visibleAgents} departments={companyDepartments} positions={companyPositions} selectedId={selected?.id} onSelect={setSelected} />)}
+            {(roots.filter((agent) => !agent.departmentId).length ? roots.filter((agent) => !agent.departmentId) : visibleAgents.filter((agent) => !agent.departmentId)).map((agent) => <AgentNode key={agent.id} agent={agent} agents={visibleAgents} departments={companyDepartments} positions={companyPositions} selectedId={selected?.id} onSelect={selectAgent} />)}
           </AnimatePresence>
           </div>
         </section>}
@@ -709,7 +709,7 @@ export function OrgChart({ surface = 'companies' }: { surface?: 'companies' | 'a
             <div className="data-grid">
               <section className="section-card" style={{ padding: 0 }}>
                 <h2>{t('agents.directReports')}</h2>
-                <div className="table-list">{selectedReports.length ? selectedReports.map((agent) => <button className="list-row" key={agent.id} style={{ textAlign: 'left' }} onClick={() => setSelected(agent)}><b>{agent.name}</b><p>{agentPosition(agent)} / {agentStatus(agent)}</p></button>) : <p style={{ color: 'var(--muted)' }}>{t('agents.noDirectReports')}</p>}</div>
+                <div className="table-list">{selectedReports.length ? selectedReports.map((agent) => <button className="list-row" key={agent.id} style={{ textAlign: 'left' }} onClick={() => selectAgent(agent)}><b>{agent.name}</b><p>{agentPosition(agent)} / {agentStatus(agent)}</p></button>) : <p style={{ color: 'var(--muted)' }}>{t('agents.noDirectReports')}</p>}</div>
               </section>
               <section className="section-card" style={{ padding: 0 }}>
                 <h2>{t('agents.assignedWork')}</h2>
