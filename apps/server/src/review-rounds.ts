@@ -538,7 +538,7 @@ export async function reviewPanelSlot(cardId: string, options: { taskRunId?: str
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
     if (result.success) await rememberTaskAdapterSession(card, reviewer, 'panel_review', result, taskRun.id);
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
-    const normalized = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    const normalized = normalizeAgentResult({ output: result.output, needsInput: result.needsInput, allowCollaboration: false });
     if (normalized.outcome !== 'completed') {
       await requeueSlot({ card, round, slot, reviewer, taskRun, heartbeatRunId: run.id, output: result.output,
         error: normalized.reason ?? `panel_review_not_complete: reported ${normalized.outcome}; finish the review before submitting its verdict.`, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
@@ -585,7 +585,7 @@ export async function completePanelReviewFromWebhook(taskRunId: string, input: {
   const [reviewer] = taskRun.agentId ? await db.select().from(agents).where(and(eq(agents.id, taskRun.agentId), isNull(agents.deletedAt))).limit(1) : [];
   if (!reviewer) throw new Error('reviewer_not_found');
   const output = [input.summary, input.output].filter(Boolean).join('\n\n') || null;
-  const normalized = normalizeAgentResult({ output, report: input.report ?? undefined });
+  const normalized = normalizeAgentResult({ output, report: input.report ?? undefined, allowCollaboration: false });
   if (normalized.outcome !== 'completed') throw new Error(normalized.reason ?? `panel_review_not_complete: reported ${normalized.outcome}; finish the review before submitting its verdict.`);
   if (!['done', 'in_review'].includes(input.status)) throw new Error(`panel_review_not_complete: callback status is ${input.status}.`);
   const report = normalized.report;
@@ -617,7 +617,7 @@ async function finalizeRound(round: ReviewRoundRow, card: CardRow, decision: Rou
   publishLiveEvent({ type: 'card.updated', companyId: card.companyId, entityType: 'card', entityId: card.id, cardId: card.id, projectId: card.projectId, action: 'review_round.closed' });
 }
 
-type CloseContext = { answeredBy: string[]; absentIds: string[]; nameOf: (id: string) => string; closedBy: string };
+type CloseContext = { answeredBy: string[]; absentIds: string[]; nameOf: (id: string) => string; closedBy: string; requiredUnavailable?: boolean };
 
 async function closePanelRound(round: ReviewRoundRow, card: CardRow, ctx: CloseContext): Promise<void> {
   const rows = await db.select().from(reviewFindings).where(eq(reviewFindings.roundId, round.id)).orderBy(reviewFindings.createdAt);
@@ -636,7 +636,7 @@ async function closePanelRound(round: ReviewRoundRow, card: CardRow, ctx: CloseC
   const meta = metadataOf(round.metadata);
   const verdictMap = metadataOf(meta.verdicts);
   const verdicts = ctx.answeredBy.map((id) => verdictMap[id]).filter((value): value is ReviewVerdict => value === 'approved' || value === 'revision_requested' || value === 'escalate');
-  const decision: RoundOutcome = ctx.answeredBy.length === 0 ? 'unavailable' : roundDecision({ findings: merged, verdicts });
+  const decision: RoundOutcome = ctx.requiredUnavailable || ctx.answeredBy.length === 0 ? 'unavailable' : roundDecision({ findings: merged, verdicts });
   const message = formatRoundClosedMessage({
     round: round.round,
     kind: 'panel',
@@ -663,7 +663,7 @@ async function closeVerifyRound(round: ReviewRoundRow, card: CardRow, ctx: Close
     return Array.isArray(list) ? list.filter(isVerificationEntry) : [];
   });
   const verification = verificationDecision(findings, flattened);
-  const decision: RoundOutcome = ctx.answeredBy.length === 0 ? 'unavailable' : verification.decision;
+  const decision: RoundOutcome = ctx.requiredUnavailable || ctx.answeredBy.length === 0 ? 'unavailable' : verification.decision;
   if (decision !== 'unavailable') {
     for (const row of rows) {
       const wanted = normalizeFindingKey(row.findingKey);
@@ -699,24 +699,87 @@ async function closeVerifyRound(round: ReviewRoundRow, card: CardRow, ctx: Close
 export async function tryCloseRound(roundId: string, options: { force?: boolean; closedBy?: string } = {}): Promise<boolean> {
   const [round] = await db.select().from(reviewRounds).where(eq(reviewRounds.id, roundId)).limit(1);
   if (!round || round.status !== 'open') return false;
-  const slots = await roundSlots(round);
-  const done = slots.filter((slot) => metadataOf(slot.metadata).done === true);
+  const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, round.cardId), isNull(kanbanCards.deletedAt))).limit(1);
+  const collaborationRound = card?.splitRequestKey?.startsWith('collaboration:') === true;
+  let slots = await roundSlots(round);
+  const done = slots.filter((slot) => {
+    const metadata = metadataOf(slot.metadata);
+    return metadata.done === true && (!collaborationRound || metadata.failed !== true);
+  });
   const timedOut = Boolean(round.timeoutAt && round.timeoutAt.getTime() <= Date.now());
   if (!options.force && !timedOut && done.length < slots.length) return false;
-  const [claimed] = await db.update(reviewRounds).set({ status: 'closed', closedAt: new Date() })
+  let reviewerIds = round.reviewerIds;
+  let roundMetadataPatch: Record<string, unknown> = {};
+  let shortageIds: string[] = [];
+  let requiredUnavailable = false;
+  if (collaborationRound) {
+    const absent = slots.filter((slot) => {
+      const metadata = metadataOf(slot.metadata);
+      return metadata.done !== true || metadata.failed === true;
+    });
+    const absentIds = absent.map(slotReviewerId).filter(Boolean);
+    if (absentIds.length > 0) {
+      const rows = await db.select().from(agents).where(inArray(agents.id, absentIds));
+      const byId = new Map(rows.map((row) => [row.id, row]));
+      const cache = createRuntimeAvailabilityCache();
+      const reasons: string[] = [];
+      for (const id of absentIds) {
+        const reviewer = byId.get(id);
+        let reason: string | null = null;
+        if (!reviewer || reviewer.companyId !== card.companyId || reviewer.deletedAt) reason = 'missing';
+        else if (reviewer.isActive === false) reason = 'inactive';
+        else if (reviewer.id === card.assigneeId) reason = 'is the assignee';
+        else if (!(await agentRuntimeAvailable({ companyId: card.companyId, runtimeId: reviewer.runtimeId, adapterType: reviewer.adapterType ?? 'hermes-ssh' }, cache))) reason = 'runtime unavailable';
+        if (reason) { shortageIds.push(id); reasons.push(`${id} ${reason}`); }
+      }
+      if (shortageIds.length > 0) {
+        const shortage = `collaboration_reviewer_shortage: ${reasons.join('; ')}`;
+        reviewerIds = reviewerIds.filter((id) => !shortageIds.includes(id));
+        roundMetadataPatch = { ...roundMetadataPatch, panel_degraded: reviewerIds.length === 1, collaborationShortageReason: shortage };
+        slots = slots.filter((slot) => !shortageIds.includes(slotReviewerId(slot)));
+      }
+      const requiredSlots = absent.filter((slot) => !shortageIds.includes(slotReviewerId(slot)));
+      if (requiredSlots.length > 0) {
+        const viableRuns = await db.select({ messageCommentId: taskRuns.messageCommentId }).from(taskRuns).where(and(
+          inArray(taskRuns.messageCommentId, requiredSlots.map((slot) => slot.id)),
+          eq(taskRuns.kind, 'panel_review'),
+          inArray(taskRuns.status, ['queued', 'running']),
+        ));
+        const viableSlotIds = new Set(viableRuns.map((run) => run.messageCommentId).filter(Boolean));
+        const exhausted = requiredSlots.filter((slot) => !viableSlotIds.has(slot.id));
+        if (exhausted.length > 0) {
+          requiredUnavailable = true;
+          roundMetadataPatch = { ...roundMetadataPatch, collaborationUnavailableReason: `collaboration_reviewer_unavailable: no viable review run for ${exhausted.map(slotReviewerId).join(', ')}` };
+          slots = slots.filter((slot) => !exhausted.includes(slot));
+        }
+      }
+      if (slots.some((slot) => {
+        const metadata = metadataOf(slot.metadata);
+        return metadata.done !== true || metadata.failed === true;
+      })) return false;
+    }
+  }
+  const closePatch: Partial<ReviewRoundRow> = { status: 'closed', closedAt: new Date() };
+  if (shortageIds.length > 0) closePatch.reviewerIds = reviewerIds;
+  if (Object.keys(roundMetadataPatch).length > 0) {
+    closePatch.metadata = drizzleSql`coalesce(${reviewRounds.metadata}, '{}'::jsonb) || ${JSON.stringify(roundMetadataPatch)}::jsonb` as unknown as Record<string, unknown>;
+  }
+  const [claimed] = await db.update(reviewRounds).set(closePatch)
     .where(and(eq(reviewRounds.id, round.id), eq(reviewRounds.status, 'open'))).returning();
   if (!claimed) return false;
-  const absentSlots = slots.filter((slot) => metadataOf(slot.metadata).done !== true);
+  const absentSlots = (await roundSlots(claimed)).filter((slot) => {
+    const metadata = metadataOf(slot.metadata);
+    return metadata.done !== true || (collaborationRound && metadata.failed === true);
+  });
   if (absentSlots.length > 0) {
     await db.update(taskRuns).set({ status: 'cancelled', completedAt: new Date(), lockedBy: null, lockedAt: null, error: 'review_round_closed', updatedAt: new Date() })
       .where(and(inArray(taskRuns.messageCommentId, absentSlots.map((slot) => slot.id)), eq(taskRuns.kind, 'panel_review'), inArray(taskRuns.status, ['queued', 'running'])));
   }
-  const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, round.cardId), isNull(kanbanCards.deletedAt))).limit(1);
   if (!card) return true;
   const answeredBy = done.map(slotReviewerId).filter(Boolean);
   const absentIds = absentSlots.map(slotReviewerId).filter(Boolean);
   const nameOf = await agentNames([...claimed.reviewerIds, ...absentIds]);
-  const ctx: CloseContext = { answeredBy, absentIds, nameOf, closedBy: options.closedBy ?? (timedOut ? 'timeout' : 'slots') };
+  const ctx: CloseContext = { answeredBy, absentIds, nameOf, closedBy: options.closedBy ?? (timedOut ? 'timeout' : 'slots'), requiredUnavailable };
   if (claimed.kind === 'verify') await closeVerifyRound(claimed, card, ctx);
   else await closePanelRound(claimed, card, ctx);
   return true;

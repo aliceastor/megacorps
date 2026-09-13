@@ -4,7 +4,7 @@ import { agents, companies, departments, positions, kanbanCards, cardComments } 
 import { memoryDb } from './test-support/memory-db.ts';
 import { collaborationDelegationRequirement, completionBlockedByChildren, dispatchCard, buildReviewPrompt, processChildSplits } from './dispatch.ts';
 import { getAdapter } from './adapters/registry.ts';
-import { companyExecutionReadiness } from './company-workflow.ts';
+import { companyExecutionReadiness, departmentRepresentative } from './company-workflow.ts';
 import { dispatchInternals, createMessageDelegations } from './dispatch.ts';
 import { withA2aRecoveryRun } from './a2a-task-recovery.ts';
 test('staffed-head message reports are idempotent and agent-generated children cannot grant coordination exemption', async t => {
@@ -59,6 +59,44 @@ test('Boss must delegate to structural department heads without numeric rank or 
   fixture(t);
   const requirement = await collaborationDelegationRequirement(card, 'boss');
   assert.equal(requirement.required, true); assert.deepEqual(requirement.reports.map(r => r.id), ['head']);
+});
+test('department representative preserves a real Head regardless of availability', () => {
+  const formalHead = { ...head, isActive: false, isBusy: true, runtimeId: null } as any;
+  const fallback = { id: 'fallback', companyId: 'company', departmentId: 'department', positionId: 'staff-position', isActive: true } as any;
+  assert.equal(departmentRepresentative(
+    { id: 'department', companyId: 'company', headAgentId: formalHead.id } as any,
+    [fallback, formalHead],
+    [{ id: 'staff-position', companyId: 'company', rank: 2, isCompanyBoss: false, isActive: true }] as any,
+  )?.id, formalHead.id);
+});
+test('headless department representative is the active member with the smallest valid position rank and deterministic id tie break', () => {
+  const members: any[] = [
+    { id: 'later', companyId: 'company', departmentId: 'department', positionId: 'senior-b', isActive: true },
+    { id: 'lower-rank', companyId: 'company', departmentId: 'department', positionId: 'junior', isActive: true },
+    { id: 'earlier', companyId: 'company', departmentId: 'department', positionId: 'senior-a', isActive: true },
+    { id: 'paused', companyId: 'company', departmentId: 'department', positionId: 'best', isActive: false },
+    { id: 'boss-member', companyId: 'company', departmentId: 'department', positionId: 'boss-position', isActive: true },
+    { id: 'foreign', companyId: 'foreign', departmentId: 'department', positionId: 'best', isActive: true },
+    { id: 'unpositioned', companyId: 'company', departmentId: 'department', positionId: null, isActive: true },
+  ];
+  const roles: any[] = [
+    { id: 'best', companyId: 'company', rank: 1, isCompanyBoss: false, isActive: true },
+    { id: 'senior-a', companyId: 'company', rank: 2, isCompanyBoss: false, isActive: true },
+    { id: 'senior-b', companyId: 'company', rank: 2, isCompanyBoss: false, isActive: true },
+    { id: 'junior', companyId: 'company', rank: 8, isCompanyBoss: false, isActive: true },
+    { id: 'boss-position', companyId: 'company', rank: 0, isCompanyBoss: true, isActive: true },
+  ];
+  assert.equal(departmentRepresentative({ id: 'department', companyId: 'company', headAgentId: null } as any, members, roles)?.id, 'earlier');
+  assert.equal(departmentRepresentative({ id: 'empty', companyId: 'company', headAgentId: null } as any, members, roles), null);
+});
+test('Boss alone gains headless department fallback without changing Staff authority', async t => {
+  const state = fixture(t, [{ id: 'representative', companyId: 'company', name: 'Representative', slug: 'representative', departmentId: 'department', positionId: 'staff-position', isActive: true, adapterType: 'webhook' }]);
+  state.rows(departments)[0]!.headAgentId = null;
+  state.rows(positions).push({ id: 'staff-position', companyId: 'company', rank: 2, isCompanyBoss: false, isActive: true });
+  const bossRequirement = await collaborationDelegationRequirement(card, 'boss');
+  assert.deepEqual(bossRequirement.reports.map(row => row.id), ['representative']);
+  assert.equal((await collaborationDelegationRequirement({ ...card, assigneeId: 'representative' }, 'representative')).required, false);
+  assert.equal((await companyExecutionReadiness('company', 'boss', 'department')).structureReady, true);
 });
 test('sole head executes but staffed head delegates even when staff are unavailable', async (t) => {
   const state = fixture(t);

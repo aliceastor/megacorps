@@ -9,6 +9,7 @@ export function agentReportGuidance(mode: ReportingMode): string {
       : mode === 'recovery'
         ? { kind: 'megacorps-report', status: 'completed', summary: 'Return the task with a concrete correction.', recovery: { action: 'rework', reason: 'Reported evidence does not match the assigned project.', instructions: 'Produce the deliverable in the assigned project and report its actual PR and head revision for review.' } }
         : { kind: 'megacorps-report', status: 'completed', summary: 'Describe what was completed and how it was verified.', workProducts: [{ type: 'file', title: 'Verified deliverable', url: 'https://example.com/actual-deliverable' }] };
+  const collaboration = { kind: 'megacorps-report', status: 'input_required', summary: 'Product input is required to continue this owned card.', request: { kind: 'collaboration', departmentSlug: 'product', question: 'Provide the approved interface wording needed by this card.', acceptance: ['Cover every visible error state.', 'Return the approved wording with its source.'] } };
   return [
     'Return one flat megacorps-report JSON in your final response. No HTTP request is needed to report progress, delegation, or results. MegaCorps applies review, approval and merge gates; report completed does not itself mark the card Done.',
     'Use only fields relevant to this turn. The notation report.children or report.request means a top-level key beside kind/status/summary, never another report wrapper. Omit unused optional fields instead of filling them with null.',
@@ -22,6 +23,10 @@ export function agentReportGuidance(mode: ReportingMode): string {
       'If unable to continue, state what you tried, what is missing and the exact question. Use this help shape; use request.kind permission for an actual authorization blocker:',
       '```json', JSON.stringify({ kind: 'megacorps-report', status: 'input_required', summary: 'Explain the blocker and methods already attempted.', request: { kind: 'help', question: 'State the precise decision or missing information needed to continue.' } }), '```',
     ]),
+    ...(['execution', 'management'].includes(mode) ? [
+      'If this owned card needs another department, Staff or a department Head may submit one collaboration request alone. It directly creates a required child under the original card with the target department Head as assignee; there is no preapproval. Staff prefers source Head plus requester as reviewers; Head uses the source Head. Reviewer shortage records one reason and may downgrade to one reviewer, while a busy reviewer waits. Accepted results return here and the original owner resumes integration:',
+      '```json', JSON.stringify(collaboration), '```',
+    ] : []),
     'MegaCorps routes help to the assigned reviewer or responsible superior. A formatting correction asks you to repair the report only, without repeating completed task actions. It does not authorize a denied task action or remove a real permission blocker.',
   ].filter(Boolean).join('\n\n');
 }

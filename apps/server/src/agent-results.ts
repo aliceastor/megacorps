@@ -54,7 +54,7 @@ function productKey(product: ReportedWorkProduct): string {
 }
 
 /** Classify report validity and meaning before consumers perform any side effects. */
-export function normalizeAgentResult(input: { output?: string | null; report?: unknown; workProducts?: unknown[]; needsInput?: { question: string } | null }): AgentResult {
+export function normalizeAgentResult(input: { output?: string | null; report?: unknown; workProducts?: unknown[]; needsInput?: { question: string } | null; allowCollaboration?: boolean }): AgentResult {
   const text = input.output ?? '';
   const embedded = extractAgentReport(text);
   const explicitInput = input.report === undefined ? null : normalizeOptionalReportFields(input.report);
@@ -70,6 +70,12 @@ export function normalizeAgentResult(input: { output?: string | null; report?: u
   if (explicit?.success && embedded && 'report' in embedded && !isDeepStrictEqual(explicit.data, embedded.report)) {
     return { ...base, source: 'invalid', outcome: 'invalid', reason: 'agent_report_invalid: conflicting current reports. Return one consistent status and verdict.' };
   }
+  if (report?.request?.kind === 'collaboration' && input.allowCollaboration === false) {
+    return { ...base, source: 'invalid', outcome: 'invalid', reason: 'collaboration_dispatch_required: Ask the original card owner to submit this request from its execution task. In this review or message assignment, report the missing scope through request.kind="help" instead; do not recreate completed work.' };
+  }
+  if (report?.request?.kind === 'collaboration' && (
+    ['failed', 'rejected'].includes(report.status) || report.verdict || report.recovery || report.checkpoint || report.broadcast || report.children?.length || report.delegations?.length
+  )) return { ...base, source: 'invalid', outcome: 'invalid', reason: 'collaboration_request_conflict: Submit this collaboration request alone, without a failure status, review verdict, recovery action, checkpoint, broadcast, children or delegations. Preserve your scope and acceptance criteria; do not repeat completed work.' };
   const productInputs = [...(report?.workProducts ?? []), ...(input.workProducts ?? [])];
   const products = productInputs.map((product) => reportedWorkProductSchema.safeParse(product));
   const invalidProduct = products.findIndex((product) => !product.success);

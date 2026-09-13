@@ -45,6 +45,7 @@ import { formatAgentPositionPrompt } from './agent-position-prompt.ts';
 import { promptSnapshotForAdapter, recordPromptLog } from './prompt-logs.ts';
 import { extractAgentReport, structuredDelegationPlan } from './agent-report.ts';
 import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts, settleOriginalHeartbeat } from './agent-results.ts';
+import { processCollaborationRequest } from './collaboration-requests.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { finishProtocolHelp, protocolHelpOrigin, protocolRepairSession, recordProtocolFailure, resetProtocolRepair } from './protocol-repair.ts';
 import { applyRecoveryReport, isRecoveryReview, isStructuredReviewerHelp, recoveryMutationAllowed, requestCardRecovery, recoveryPrompt } from './card-recovery.ts';
@@ -1343,13 +1344,17 @@ export async function processChildSplits(card: CardRow, splitter: AgentRow, chil
 
 // Injected when a parent comes back from waiting_on_children: the owner's job
 // on this turn is integration, not fresh work.
-const GOAL_ASSESSMENT_EVIDENCE_GUIDANCE = 'Server-accepted provenance and passed gates are not content verification. Cite the actual reviewer checks supporting each coverage claim and preserve their limitations; distinguish inherited evidence from anything you personally verified. If content verification is missing, request targeted verification from an eligible head or reviewer instead of asserting that every reference is real or every criterion passed. Remain strategy-only; do not perform professional artifact QA yourself.';
+const ACCEPTED_EVIDENCE_GUIDANCE = 'Server-accepted provenance and passed gates are not content verification. Cite the actual reviewer checks supporting each coverage claim and preserve their limitations; distinguish inherited evidence from anything you personally verified. If content verification is missing, request targeted verification from an eligible head or reviewer instead of asserting that every reference is real or every criterion passed.';
+const GOAL_ASSESSMENT_EVIDENCE_GUIDANCE = `${ACCEPTED_EVIDENCE_GUIDANCE} Remain strategy-only; do not perform professional artifact QA yourself.`;
 async function integrationSection(card: CardRow): Promise<string> {
   if (card.rollupStatus !== 'integrating') return '';
   const evidence = await acceptedDescendantEvidence(card);
+  const bossAssessment = await isBossAssessment(card.companyId, card.assigneeId);
   return [
-    'GOAL ASSESSMENT TURN: assess accepted department/employee evidence against the requested goal and acceptance criteria. Cite the original artifacts and authors. Strategy-only Boss must not clone, run tests, author another deliverable or present this assessment as independent professional QA. Request targeted corrections if coverage is missing; preserve explicit platform gates.',
-    GOAL_ASSESSMENT_EVIDENCE_GUIDANCE,
+    bossAssessment
+      ? 'GOAL ASSESSMENT TURN: assess accepted department/employee evidence against the requested goal and acceptance criteria. Cite the original artifacts and authors. Strategy-only Boss must not clone, run tests, author another deliverable or present this assessment as independent professional QA. Request targeted corrections if coverage is missing; preserve explicit platform gates.'
+      : 'INTEGRATION TURN: continue the original Staff-owned work using the accepted collaboration evidence below. Integrate it into the requested result and perform any remaining work within your role. Reuse the delivered artifacts and reviewer evidence; do not recreate completed work merely to claim authorship. Request targeted corrections if coverage is missing; preserve explicit platform gates.',
+    bossAssessment ? GOAL_ASSESSMENT_EVIDENCE_GUIDANCE : ACCEPTED_EVIDENCE_GUIDANCE,
     evidence.ready ? 'All required descendant evidence and gates are current and server-accepted.' : `Acceptance is no longer current: ${evidence.issues.join(' ')}`,
     await acceptedReviewerEvidencePacket(card),
     ...evidence.products.slice(0, 40).map(product => `- ${product.title} [product=${product.id}; card=${product.cardId}; author=${product.agentId}; run=${product.taskRunId}]: ${product.url ?? ''} ${clipText(product.summary ?? '', 600)}`),
@@ -1551,7 +1556,7 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
       metadata: { peerQuestionCommentId: comment.id, megacorpsPromptChars: prompt.length, contextMode: 'full_bootstrap' },
     });
     const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, target, run.id, null, 'peer'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds, a2aScope: a2aExecutionScope(target.id, task) }));
-    const normalizedAnswer = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    const normalizedAnswer = normalizeAgentResult({ output: result.output, needsInput: result.needsInput, allowCollaboration: false });
     if (!result.success || !result.output.trim() || ['failed', 'rejected', 'invalid', 'permission', 'input_required'].includes(normalizedAnswer.outcome)) throw new Error(normalizedAnswer.reason ?? result.output ?? 'peer_answer_failed');
     await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: target.id, action: 'peer_answer', body: result.output, delegationStatus: 'done' });
     if ((comment.metadata as Record<string, unknown> | null)?.helpRequestId) {
@@ -2848,7 +2853,7 @@ export async function runMessageDelegation(cardId: string, options: { taskRunId?
       error: result.success ? null : result.output || 'message_delegation_failed',
       costUsd: result.costUsd.toString(),
     }).where(eq(heartbeatRuns.id, run.id));
-    const normalizedMessage = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    const normalizedMessage = normalizeAgentResult({ output: result.output, needsInput: result.needsInput, allowCollaboration: false });
     if (!result.success || ['failed', 'rejected', 'invalid', 'permission'].includes(normalizedMessage.outcome)) {
       const errorMessage = normalizedMessage.reason ?? (result.output || 'message_delegation_failed');
       if (normalizedMessage.outcome === 'permission') await blockDelegatedAssignment(card, comment.id, errorMessage,{eventKey:taskRun.id,permissionBlocked:true});
@@ -2986,9 +2991,9 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
     await db.update(agents).set({ currentSessionId: result.sessionId, isBusy: false }).where(eq(agents.id, reviewer.id));
     const explicitDecision = explicitReviewDecision(result.output);
     const decision = explicitDecision ?? reviewDecision(result.output, report.reviewerScope === 'final' ? 'quality' : 'help');
-    const normalizedReview = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    const normalizedReview = normalizeAgentResult({ output: result.output, needsInput: result.needsInput, allowCollaboration: false });
     if (!result.success || ['failed', 'rejected', 'permission', 'input_required', 'invalid'].includes(normalizedReview.outcome)) {
-      const errorMessage = result.output || 'message_review_failed';
+      const errorMessage = normalizedReview.reason ?? (result.output || 'message_review_failed');
       await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: errorMessage, durationSeconds: result.durationSeconds }).where(eq(heartbeatRuns.id, run.id));
       await completeTaskRun(taskRun.id, { status: 'failed', retryableFailure: true, error: errorMessage, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });
       if (await requeueMessageTaskAfterFailure({ card, comment: report, taskRun, kind: 'message_review', agentId: reviewer.id, message: errorMessage })) return card;
@@ -3072,7 +3077,7 @@ export async function completeMessageTaskRunFromWebhook(taskRunId: string, input
   const actorAgentId = taskRun.agentId;
   input = await sanitizeCompanyOutput(card.companyId, input);
   const output = [input.summary, input.output, input.report ? JSON.stringify(input.report) : null].filter(Boolean).join('\n\n') || `Webhook marked message task ${input.status}`;
-  const normalizedMessage = normalizeAgentResult({ output, report: input.report ?? undefined });
+  const normalizedMessage = normalizeAgentResult({ output, report: input.report ?? undefined, allowCollaboration: false });
   if (normalizedMessage.outcome === 'invalid') throw new Error(normalizedMessage.reason!);
   await persistAgentWorkProducts(card, actorAgentId, taskRun.id, normalizedMessage.workProducts, null, normalizedMessage.report);
   const terminalFailure = input.status === 'blocked' || input.status === 'cancelled' || ['failed', 'rejected', 'permission'].includes(normalizedMessage.outcome);
@@ -3323,6 +3328,17 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
       throw new Error(normalizedResult.reason!);
     }
     await rememberTaskAdapterSession(card, agent, 'dispatch', result, options.taskRunId);
+    const collaborationRequest = normalizedResult.report?.request?.kind === 'collaboration' ? normalizedResult.report.request : null;
+    if (collaborationRequest) {
+      const collaboration = await processCollaborationRequest(lockedCard, agent, collaborationRequest, options.taskRunId);
+      if (collaboration.errors.length) {
+        await recordCostAndEnforceBudget(card, agent, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
+        return sendAgentFeedbackAndRequeue({ card: lockedCard, agent, kind: 'dispatch', message: collaboration.errors.join('\n'), runId: run.id, taskRunId: options.taskRunId, output: result.output, result });
+      }
+      normalizedResult.outcome = 'progress';
+      normalizedResult.question = null;
+      normalizedResult.reason = null;
+    }
     const actionableOutput = result.output;
     const structuredPlan = structuredDelegationPlan(actionableOutput);
     const dispatchNotes = reportNotesFromOutput(actionableOutput);
@@ -3472,7 +3488,9 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     }
     const effectiveReviewerId = await resolveEffectiveReviewerId(card, agent);
     const needsInputQuestion = normalizedResult.outcome === 'input_required' ? normalizedResult.question : null;
-    const completionDecision = needsInputQuestion
+    const completionDecision = collaborationRequest
+      ? { needsHelpReview: false, nextStatus: 'in_progress' as const, topLevelGuidanceAccepted: false }
+      : needsInputQuestion
       ? needsInputCompletionDecision(effectiveReviewerId)
       : dispatchCompletionDecision(result.output, effectiveReviewerId);
     // A client checkpoint overrides the normal completion: the card parks and
@@ -3499,7 +3517,7 @@ export async function dispatchCard(cardId: string, source: 'manual' | 'loop' = '
     const humanGate = !parked && !fixRound && !effectiveReviewerId && ((completionDecision.needsHelpReview && completionDecision.nextStatus !== 'blocked') || (completionDecision.nextStatus === 'done' && card.requiresApproval === true));
     const topLevelGuidanceAccepted = parked || humanGate ? false : completionDecision.topLevelGuidanceAccepted;
     const nextStatus: CardStatus = checkpointRequest ? 'waiting_on_client' : brainstormLaunch ? 'waiting_on_brainstorm' : fixRound || humanGate ? 'in_review' : completionDecision.nextStatus;
-    const childGateStatus = normalizedResult.outcome === 'progress' && await actorHasDelegatedInScope(card.id, agent.id) ? 'done' : nextStatus;
+    const childGateStatus = collaborationRequest || (normalizedResult.outcome === 'progress' && await actorHasDelegatedInScope(card.id, agent.id)) ? 'done' : nextStatus;
     let childBlock = parked ? null : await completionBlockedByChildren(card, childGateStatus);
     const dispatchMergePlan = !childBlock && nextStatus === 'done' ? await planMergeGate({ ...card, executionLog: result.output }, { reviewIdentity, taskRunId: options.taskRunId }) : null;
     let effectiveNextStatus: CardStatus = childBlock ? 'in_progress' : dispatchMergePlan ? mergeCompletionStatus(dispatchMergePlan) : nextStatus;
@@ -3829,7 +3847,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
       return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
     }
     await recordCostAndEnforceBudget(card, reviewer, run.id, result.costUsd, result.tokensUsed, result.durationSeconds);
-    const normalizedReview = normalizeAgentResult({ output: result.output, needsInput: result.needsInput });
+    const normalizedReview = normalizeAgentResult({ output: result.output, needsInput: result.needsInput, allowCollaboration: false });
     if (normalizedReview.outcome === 'permission') {
       const blocked = await parkPermissionBlockedResult(card, reviewer.id, run.id, normalizedReview.reason!, result.output, options.taskRunId);
       await completeTaskRun(options.taskRunId, { status: 'failed', preserveCard: blocked.preservedHumanGate, error: normalizedReview.reason, output: result.output, costUsd: result.costUsd, durationSeconds: result.durationSeconds });

@@ -22,6 +22,20 @@ test('api help exposes bounded surface operation guides with explicit authentica
   assert.match(apiHelpMarkdown(), /## Agent Operations/);
 });
 
+test('api help documents collaboration and omits the retired cross-department position permission', () => {
+  const catalog = apiHelpCatalog();
+  const serialized = JSON.stringify(catalog);
+  assert.doesNotMatch(serialized, /canDelegateAcrossDepartments/);
+  assert.match(serialized, /departmentSlug/);
+  assert.match(serialized, /collaboration/);
+  const createPosition = catalog.endpoints.find((row) => row.method === 'POST' && row.path === '/api/positions');
+  const updatePosition = catalog.endpoints.find((row) => row.method === 'PUT' && row.path === '/api/positions/:id');
+  assert.equal(Object.hasOwn(createPosition?.body as object, 'canDelegateAcrossDepartments'), false);
+  assert.equal(Object.hasOwn(updatePosition?.body as object, 'canDelegateAcrossDepartments'), false);
+  assert.match(apiHelpMarkdown(), /original card owner/i);
+  assert.match(apiHelpMarkdown(), /target department Head/i);
+});
+
 test('webhook help explains a structured review status conflict and its coherent correction', () => {
   const endpoint = apiHelpCatalog().endpoints.find(row => row.path === '/api/webhook/task-complete')!;
   const help = JSON.stringify(endpoint);

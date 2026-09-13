@@ -35,6 +35,7 @@ import { admitUsage, attemptKey, resultUsage, settleTaskRunUsage } from './usage
 import { transportUsage } from './usage-facts.ts';
 import { retryMergeGateWrite } from './db/merge-gate-write.ts';
 import { applyRecoveryReport, isRecoveryReview, isStructuredReviewerHelp, requestCardRecovery } from './card-recovery.ts';
+import { processCollaborationRequest } from './collaboration-requests.ts';
 
 const REDACTED = '[redacted]';
 const SENSITIVE_CONFIG_KEY = /(password|pass|token|secret|jwt|apiKey|privateKey)/i;
@@ -133,7 +134,7 @@ async function createRunnerTaskCompletion(input: {
   const runAgentId = input.run.agentId ?? card.assigneeId;
   input.body = await sanitizeCompanyOutput(card.companyId, input.body);
   let output = [input.body.summary, input.body.output].filter(Boolean).join('\n\n');
-  const normalized = normalizeAgentResult({ output, report: input.body.report, workProducts: input.body.workProducts });
+  let normalized = normalizeAgentResult({ output, report: input.body.report, workProducts: input.body.workProducts, allowCollaboration: input.run.kind === 'dispatch' });
   if (input.run.kind==='review' && !isRecoveryReview(card) && isStructuredReviewerHelp(normalized) && ['success','done','needs_review','in_review'].includes(input.body.status)) {
     if(!runAgentId || runAgentId!==card.reviewerId)throw httpError(409,'Reviewer authority changed.','review_actor_mismatch');
     const recovery=await requestCardRecovery(card,{reason:normalized.question!,eventKey:`review-help:${input.run.id}`,actorId:runAgentId,stage:'review',taskRunId:input.run.id,requireCurrentRunAuthority:true});
@@ -165,13 +166,25 @@ async function createRunnerTaskCompletion(input: {
     return recovery?.card ?? (await db.select().from(kanbanCards).where(eq(kanbanCards.id,card.id)).limit(1))[0]!;
   }
   if (normalized.report?.recovery && !isRecoveryReview(card)) throw httpError(409,'Recovery actions require the current recovery review.','recovery_context_required');
+  const [actor] = runAgentId ? await db.select().from(agents).where(and(eq(agents.id, runAgentId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
   const protocolGuidance = input.run.kind === 'review' && Boolean(protocolHelpOrigin(card, runAgentId ?? ''));
   const conflictingReviewerHelp = input.run.kind === 'review' && normalized.outcome === 'input_required' && normalized.report?.request?.kind === 'help';
   if (normalized.outcome === 'invalid' || conflictingReviewerHelp || (input.run.kind === 'review' && normalized.outcome === 'completed' && (normalized.verdictError || (!protocolGuidance && normalized.source === 'report' && !normalized.verdict)))) {
-    const [actor] = runAgentId ? await db.select().from(agents).where(eq(agents.id, runAgentId)).limit(1) : [];
     const reason = normalized.reason ?? normalized.verdictError ?? (conflictingReviewerHelp ? 'review_help_conflict: Send one successful input_required help request without an artifact verdict or another work request.' : 'Return one evidence-supported current review verdict.');
     if (!actor || !['dispatch', 'review'].includes(input.run.kind)) throw httpError(409, reason, 'agent_report_invalid');
     return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: input.run.kind === 'review' ? 'review' : 'dispatch', message: reason, taskRunId: input.run.id, runId: input.run.heartbeatRunId, result: { sessionId: actor.currentSessionId ?? '' } });
+  }
+  const collaborationRequest = normalized.report?.request?.kind === 'collaboration' ? normalized.report.request : null;
+  const consumableCollaboration = collaborationRequest && normalized.outcome === 'input_required' && input.run.kind === 'dispatch' && !['failed', 'blocked', 'cancelled'].includes(input.body.status);
+  if (consumableCollaboration && !actor) throw httpError(409, 'collaboration_requester_unavailable: Restore the original requesting agent before requesting collaboration.', 'collaboration_request_rejected');
+  if (consumableCollaboration && actor) {
+    const collaboration = await processCollaborationRequest(card, actor, collaborationRequest, input.run.id);
+    if (collaboration.errors.length || !collaboration.created.length) {
+      const message = collaboration.errors.join('\n') || 'collaboration_request_rejected: No collaboration child created.';
+      if (/collaboration_(?:authority_changed|requester_unavailable|dispatch_required)/.test(message)) throw httpError(409, message, 'collaboration_request_rejected');
+      return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: 'dispatch', message, taskRunId: input.run.id, runId: input.run.heartbeatRunId, output, result: { sessionId: actor.currentSessionId ?? '' } });
+    }
+    normalized = { ...normalized, outcome: 'progress', question: null, reason: null };
   }
   output = agentResultExecutionLog(output, normalized);
   // Permission denials carry diagnostics, never accepted completion evidence.
@@ -186,7 +199,6 @@ async function createRunnerTaskCompletion(input: {
     await completeTaskRun(input.run.id, { status: 'success', preserveCard: true, output });
     return (await db.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1))[0]!;
   }
-  const [actor] = runAgentId ? await db.select().from(agents).where(eq(agents.id, runAgentId)).limit(1) : [];
   const protocolHelp = actor && input.run.kind === 'review' ? await finishProtocolHelp(card, actor.id, output, input.run.id) : null;
   if (protocolHelp) {
     await completeTaskRun(input.run.id, { status: 'success', preserveCard: true, output });

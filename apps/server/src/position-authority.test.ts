@@ -8,3 +8,7 @@ test('Position contract exposes explicit head identity and bounded rank', () => 
  for(const rank of [-1,10,100,1.5]) assert.equal(createPositionSchema.safeParse({...base,rank}).success,false);
  assert.equal(createPositionSchema.parse({...base,rank:undefined,isDepartmentHead:false}).rank,2);
 });
+test('obsolete cross-department delegation input is stripped from the public position contract', () => {
+ const input={companyId:randomUUID(),name:'Staff',slug:'staff',defaultDepartmentId:randomUUID(),canDelegateAcrossDepartments:true};
+ assert.equal(Object.hasOwn(createPositionSchema.parse(input),'canDelegateAcrossDepartments'),false);
+});

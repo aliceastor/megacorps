@@ -30,6 +30,33 @@ test('execution guide teaches valid native progress and help reports without cla
   assert.doesNotMatch(guide, /Authorization: Bearer <agent/i);
 });
 
+test('owner execution and management guides teach the canonical collaboration request only on owner surfaces', () => {
+  for (const surface of ['execution', 'management'] as const) {
+    const guide = agentOperationGuide(surface);
+    const collaboration = [...guide.matchAll(/```megacorps-report\n([\s\S]*?)\n```/g)]
+      .map((match) => JSON.parse(match[1]!))
+      .find((report) => report.request?.kind === 'collaboration');
+    const parsed = agentReportSchema.safeParse(collaboration);
+    assert.equal(parsed.success, true, `${surface} collaboration example must match the shared report schema`);
+    assert.ok(parsed.success && parsed.data.status === 'input_required');
+    assert.deepEqual(parsed.success && parsed.data.request, {
+      kind: 'collaboration',
+      departmentSlug: 'product',
+      question: 'Provide the approved interface wording needed by this card.',
+      acceptance: ['Cover every visible error state.', 'Return the approved wording with its source.'],
+    });
+    assert.match(guide, /original card.*parent/i);
+    assert.match(guide, /target department.*Head/i);
+    assert.match(guide, /busy.*wait/i);
+    assert.match(guide, /original owner.*resume/i);
+  }
+  for (const surface of ['review', 'chat'] as const) {
+    const guide = agentOperationGuide(surface);
+    assert.doesNotMatch(guide, /request\.kind.{0,40}collaboration/is);
+    assert.doesNotMatch(guide, /departmentSlug/);
+  }
+});
+
 test('management guide teaches schema-valid children and preserves assignment authority', () => {
   const guide = agentOperationGuide('management');
   const parsed = agentReportSchema.safeParse(example(guide, 'megacorps-report'));

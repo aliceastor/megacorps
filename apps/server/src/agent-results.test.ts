@@ -128,6 +128,24 @@ function fixture(t: TestContext) {
 const report = (status: string, extra = {}) => ({ kind: 'megacorps-report', status, summary: 'Current result', ...extra });
 const product = { type: 'pull_request', title: 'Change', url: 'https://github.com/example/repo/pull/1' };
 
+test('message review returns the actionable collaboration dispatch restriction', async t => {
+  const { card, agent: reviewer, run, state } = fixture(t);
+  const request = { id: randomUUID(), cardId: card.id, assigneeAgentId: 'worker', reviewerAgentId: reviewer.id, action: 'delegate_request', body: 'Review delegated result', delegationStatus: 'submitted' };
+  const reportComment = { ...request, id: randomUUID(), parentCommentId: request.id, action: 'delegate_report' };
+  state.rows(cardComments).push(request, reportComment);
+  run.kind = 'message_review';
+  (run as any).messageCommentId = reportComment.id;
+  t.mock.method(getAdapter('webhook'), 'dispatch', async () => ({
+    success: true,
+    output: JSON.stringify({ kind: 'megacorps-report', status: 'input_required', summary: 'Need another department.', request: { kind: 'collaboration', departmentSlug: 'product', question: 'Supply approved copy.', acceptance: ['Approved copy is returned.'] } }),
+    sessionId: 'message-review-collaboration', tokensUsed: 1, costUsd: 0, durationSeconds: 1,
+  }));
+  await reviewMessageDelegation(card.id, { taskRunId: run.id });
+  assert.match(String((run as any).error), /collaboration_dispatch_required/);
+  const retry = state.rows(cardComments).find((comment) => comment.action === 'delegate_review_retry_queued');
+  assert.match(String(retry?.body), /original card owner.*execution task/i);
+});
+
 test('cancelled dispatch preserves its paid late result without moving the card', async t => {
   const { card, run, state } = fixture(t);
   t.mock.method(getAdapter('webhook'), 'dispatch', async () => {

@@ -19,6 +19,10 @@ test('each playbook teaches the moves the pipeline depends on', () => {
   // Member: no client contact, no unsanctioned splits.
   assert.ok(MEMBER_PLAYBOOK.includes('Do not ask the client'));
   assert.ok(MEMBER_PLAYBOOK.includes('Do not split or delegate unless'));
+  assert.match(DEPARTMENT_HEAD_PLAYBOOK, /cross-department collaboration request/i);
+  assert.match(MEMBER_PLAYBOOK, /cross-department collaboration request/i);
+  assert.match(CEO_PLAYBOOK, /smallest valid Position rank.*fixed agent ID/i);
+  assert.doesNotMatch(CEO_PLAYBOOK, /promot|appoint/i);
   // Reviewer: quality gate only, goal judgement belongs upstream.
   assert.ok(REVIEWER_PLAYBOOK.includes('acceptance criteria'));
   assert.ok(REVIEWER_PLAYBOOK.includes('not yours'));

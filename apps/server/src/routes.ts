@@ -41,6 +41,7 @@ import { sanitizeCompanyOutput } from './output-secrets.ts';
 import { sendAgentFeedbackAndRequeue } from './dispatch.ts';
 import { finishProtocolHelp, protocolHelpOrigin, protocolRepairResetState } from './protocol-repair.ts';
 import { applyRecoveryReport, finishHumanRecovery, isRecoveryReview, isStructuredReviewerHelp, requestCardRecovery } from './card-recovery.ts';
+import { processCollaborationRequest } from './collaboration-requests.ts';
 import { completionCondition, guardedCompletionUpdate } from './completion-guard.ts';
 import { inspectManagedProject, optInManagedBinding } from './managed-project-policy.ts';
 import { mergeIntents } from './db/schema.ts';
@@ -1475,7 +1476,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const access = await requireAnyVisibleCompany(request, reply); if (!access) return reply;
     const query = request.query as { companyId?: string };
     if (access.companyIds.length === 0 || (query.companyId && !access.companyIds.includes(query.companyId))) return [];
-    return db.select().from(positions).where(query.companyId ? eq(positions.companyId, query.companyId) : inArray(positions.companyId, access.companyIds)).orderBy(desc(positions.createdAt));
+    const rows = await db.select().from(positions).where(query.companyId ? eq(positions.companyId, query.companyId) : inArray(positions.companyId, access.companyIds)).orderBy(desc(positions.createdAt));
+    return rows.map(({ canDelegateAcrossDepartments: _obsolete, ...position }) => position);
   });
   app.post('/api/positions', async (request, reply) => {
     const input = createPositionSchema.parse(request.body);
@@ -1504,13 +1506,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       isCompanyBoss: input.isCompanyBoss,
       isDepartmentHead: input.isDepartmentHead,
       isCompanyLeadership: input.isCompanyBoss ? true : input.isCompanyLeadership,
-      canDelegateAcrossDepartments: input.canDelegateAcrossDepartments,
       defaultDepartmentId: input.defaultDepartmentId ?? null,
       managerPositionId: input.isCompanyBoss ? null : input.managerPositionId ?? null,
       isActive: input.isActive,
     }).returning());
     if (position) await db.insert(activityLog).values({ companyId: position.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'position.created', entityType: 'position', entityId: position.id, details: { name: position.name } });
-    return reply.code(201).send(position);
+    if (!position) return reply.code(500).send({ error: 'position_create_failed' });
+    const { canDelegateAcrossDepartments: _obsolete, ...publicPosition } = position;
+    return reply.code(201).send(publicPosition);
   });
   app.put('/api/positions/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
@@ -1551,7 +1554,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       isCompanyBoss: input.isCompanyBoss,
       isDepartmentHead: input.isDepartmentHead,
       isCompanyLeadership: input.isCompanyBoss ? true : input.isCompanyLeadership,
-      canDelegateAcrossDepartments: input.canDelegateAcrossDepartments,
       defaultDepartmentId: input.defaultDepartmentId === undefined ? undefined : input.defaultDepartmentId ?? null,
       managerPositionId: nextIsCompanyBoss ? null : input.managerPositionId === undefined ? undefined : input.managerPositionId ?? null,
       isActive: input.isActive,
@@ -1559,7 +1561,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }).where(eq(positions.id, id)).returning());
     if (!position) return reply.code(404).send({ error: 'position_not_found' });
     await db.insert(activityLog).values({ companyId: position.companyId, actorType: 'user', actorId: user.id, userId: user.id, action: 'position.updated', entityType: 'position', entityId: position.id, details: { name: position.name } });
-    return position;
+    const { canDelegateAcrossDepartments: _obsolete, ...publicPosition } = position;
+    return publicPosition;
   });
   app.delete('/api/positions/:id', async (request, reply) => {
     const id = (request.params as { id: string }).id;
@@ -3032,7 +3035,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!outputCard) return reply.code(404).send({ error: 'card_not_found' });
     if (callerAgent && callerAgent.companyId !== outputCard.companyId) return reply.code(403).send({ error: 'company_access_denied' });
     parsedBody.data = await sanitizeCompanyOutput(outputCard.companyId, parsedBody.data);
-    const normalizedResult = normalizeAgentResult({ output: [parsedBody.data.summary, parsedBody.data.output].filter(Boolean).join('\n\n'), report: parsedBody.data.report, workProducts: parsedBody.data.workProducts });
+    let normalizedResult = normalizeAgentResult({ output: [parsedBody.data.summary, parsedBody.data.output].filter(Boolean).join('\n\n'), report: parsedBody.data.report, workProducts: parsedBody.data.workProducts });
     const body = { ...parsedBody.data, report: normalizedResult.report ?? undefined, workProducts: normalizedResult.workProducts };
     const taskRunId = body.taskRunId ?? body.idempotencyKey;
     let requestedStatus = normalizeCardStatus(body.status);
@@ -3094,6 +3097,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (projectForRepo?.repoUrl && body.workProducts.some((product) => product.repoUrl && !gitRemoteMatchesProjectRepo(product.repoUrl, projectForRepo.repoUrl))) {
         return reply.code(400).send({ error: 'work_product_repo_mismatch', detail: 'workProduct.repoUrl must match project.repo_url (same org/repo).' });
       }
+    }
+    if (normalizedResult.report?.request?.kind === 'collaboration' && webhookTaskRun && webhookTaskRun.kind !== 'dispatch') {
+      const rejected = normalizeAgentResult({ report: normalizedResult.report, allowCollaboration: false });
+      return reply.code(409).send({ error: 'collaboration_dispatch_required', message: rejected.reason });
     }
     if (webhookTaskRun?.kind==='review' && !isRecoveryReview(card) && isStructuredReviewerHelp(normalizedResult)) {
       if(!webhookTaskRun.agentId || webhookTaskRun.agentId!==card.reviewerId)return reply.code(409).send({error:'review_actor_mismatch'});
@@ -3191,7 +3198,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const requestedDelegation = structuredDelegations
       ? structuredDelegations.map(delegationLineFromReportItem)
       : delegationItems(executionLog);
-    const escalation = !blockedResult && isGuidanceEscalation(requestedStatus, executionLog);
+    let escalation = !blockedResult && isGuidanceEscalation(requestedStatus, executionLog);
     const escalationReviewerId = escalation ? await resolveIndependentReviewerForCard(card, actorAgentId) : null;
     const guidanceDecision = webhookCompletionDecision({
       requestedStatus,
@@ -3211,6 +3218,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (existingWebhook) return { ok: true, duplicate: true, cardId: body.cardId, taskRunId, newStatus: card.columnStatus };
     }
     const [actorAgent] = actorAgentId ? await db.select().from(agents).where(and(eq(agents.id, actorAgentId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
+    let collaborationConsumed = false;
+    const collaborationRequest = normalizedResult.report?.request?.kind === 'collaboration' ? normalizedResult.report.request : null;
+    const consumableCollaboration = collaborationRequest && normalizedResult.outcome === 'input_required' && (!webhookTaskRun || webhookTaskRun.kind === 'dispatch') && !['failed', 'blocked', 'cancelled'].includes(body.status);
+    if (consumableCollaboration && !actorAgent) return reply.code(409).send({ error: 'collaboration_request_rejected', message: 'collaboration_requester_unavailable: Restore the original requesting agent before requesting collaboration.' });
+    if (consumableCollaboration && actorAgent) {
+      if (actorAgent.id !== card.assigneeId || (webhookTaskRun && (webhookTaskRun.agentId !== actorAgent.id || webhookTaskRun.kind !== 'dispatch'))) return reply.code(409).send({ error: 'collaboration_request_rejected', message: 'collaboration_authority_changed: Only the current owner of the original request card can request its collaboration child. Return to the owned card context.' });
+      const collaboration = await processCollaborationRequest(card, actorAgent, collaborationRequest, taskRunId);
+      if (collaboration.errors.length || !collaboration.created.length) {
+        const message = collaboration.errors.join('\n') || 'collaboration_request_rejected: No collaboration child created.';
+        if (!/collaboration_(?:authority_changed|requester_unavailable|dispatch_required)/.test(message)) await sendAgentFeedbackAndRequeue({ card, agent: actorAgent, kind: 'dispatch', message, taskRunId, runId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId, output: executionLog, result: { sessionId: actorAgent.currentSessionId ?? '' } });
+        return reply.code(409).send({ error: 'collaboration_request_rejected', message });
+      }
+      collaborationConsumed = true;
+      normalizedResult = { ...normalizedResult, outcome: 'progress', question: null, reason: null };
+      requestedStatus = 'in_progress';
+      escalation = false;
+    }
     const [productProject] = card.projectId ? await db.select().from(projects).where(and(eq(projects.id, card.projectId), isNull(projects.deletedAt))).limit(1) : [];
     if (!(await persistAgentWorkProducts(card, actorAgentId, taskRunId ?? null, body.workProducts, productProject, normalizedResult.report))) {
       await completeTaskRun(taskRunId, { status: normalizedResult.outcome === 'permission' ? 'failed' : 'success', preserveCard: true, output: executionLog });
@@ -3324,7 +3348,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const childBlock = await completionBlockedByChildren(card, requestedNextStatus);
     const mergePlan = !childBlock && requestedNextStatus === 'done' ? await planMergeGate({ ...card, executionLog: body.report ? JSON.stringify(body.report) : executionLog }) : null;
     const nextStatus = childBlock ? 'in_progress' : mergePlan ? mergeCompletionStatus(mergePlan) : requestedNextStatus;
-    const completesRun = delegatedViaWebhook || delegationFailed || Boolean(childBlock) || nextStatus !== 'in_progress';
+    const completesRun = collaborationConsumed || delegatedViaWebhook || delegationFailed || Boolean(childBlock) || nextStatus !== 'in_progress';
     const webhookAction = childBlock ? 'webhook.waiting_on_children' : delegatedViaWebhook ? 'webhook.message_delegated' : delegationFailed ? 'webhook.delegation_failed' : `webhook.task_${nextStatus}`;
     // Progress callbacks may arrive before a malformed adapter tail. Only an
     // accepted run-completing callback can clear its actor/kind repair budget,
@@ -3337,12 +3361,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       columnStatus: nextStatus,
       rollupStatus: childBlock ? 'waiting_on_children' : nextStatus === 'done' ? 'done' : undefined,
       executionLog,
-      reviewFeedback: reviewRevisionRequested ? body.report?.summary ?? executionLog : undefined,
+      reviewFeedback: collaborationConsumed ? null : reviewRevisionRequested ? body.report?.summary ?? executionLog : undefined,
       reviewerId: escalation ? escalationReviewerId : qualityReviewerId ?? undefined,
       completedAt: nextStatus === 'done' ? new Date() : completesRun ? null : undefined,
       retryCount: nextStatus === 'done' || delegatedViaWebhook ? 0 : undefined,
       nextRunAt: completesRun ? null : undefined,
-      lastError: delegationFailed ? delegationFailureReason : nextStatus === 'blocked' || nextStatus === 'cancelled' ? normalizedResult.reason ?? body.summary ?? `webhook_${nextStatus}` : escalation ? null : undefined,
+      lastError: collaborationConsumed ? null : delegationFailed ? delegationFailureReason : nextStatus === 'blocked' || nextStatus === 'cancelled' ? normalizedResult.reason ?? body.summary ?? `webhook_${nextStatus}` : escalation ? null : undefined,
       executionLockId: completesRun ? null : undefined,
       executionLockedByAgentId: completesRun ? null : undefined,
       executionLockedAt: completesRun ? null : undefined,

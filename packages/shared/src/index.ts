@@ -292,7 +292,6 @@ export const createPositionSchema = z.object({
   isCompanyBoss: z.boolean().default(false),
   isDepartmentHead: z.boolean().default(false),
   isCompanyLeadership: z.boolean().default(false),
-  canDelegateAcrossDepartments: z.boolean().default(false),
   defaultDepartmentId: z.string().uuid().nullable().optional(),
   managerPositionId: z.string().uuid().nullable().optional(),
   isActive: z.boolean().default(true),
@@ -448,6 +447,12 @@ export type ReportedWorkProduct = z.infer<typeof reportedWorkProductSchema>;
 export const agentReportRequestSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('permission'), question: agentReportCheckpointSchema.shape.question }),
   z.object({ kind: z.literal('help'), question: agentReportCheckpointSchema.shape.question }),
+  z.object({
+    kind: z.literal('collaboration'),
+    departmentSlug: z.string().trim().min(1).max(120),
+    question: agentReportCheckpointSchema.shape.question,
+    acceptance: z.array(z.string().trim().min(1).max(1000)).min(1).max(10),
+  }).strict(),
   agentReportCheckpointSchema.omit({ kind: true }).extend({
     kind: z.literal('checkpoint'),
     checkpointKind: z.enum(['direction', 'interim']).default('direction'),

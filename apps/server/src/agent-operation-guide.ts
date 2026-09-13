@@ -17,8 +17,16 @@ export function buildAgentApiDiscovery(apiOrigin: string | null): string {
 const catalogPointer = agentApiDiscovery;
 
 const reportRules = [
-  'Native result: return one flat `megacorps-report` JSON object in the final response; no HTTP call is needed. Valid states are completed, progress, input_required, failed, rejected. Use `input_required` with `request.kind` help or permission and one concrete question. MegaCorps preserves review, approval, client and merge gates.',
+  'Native result: return one flat `megacorps-report` JSON object in the final response; no HTTP call is needed. Valid states are completed, progress, input_required, failed, rejected. Use `input_required` with one singular request: request.kind help or permission and one concrete question. MegaCorps preserves review, approval, client and merge gates.',
   'Use only current facts and omit unused fields. A completed report records an outcome; it does not by itself mark a card Done or bypass any permission.',
+].join('\n');
+
+const collaborationRules = [
+  'When this owned card needs another department, a Staff member or department Head may submit request.kind `collaboration` with departmentSlug, a complete question, and 1–10 acceptance strings. Submit it alone: do not combine it with children, delegations, checkpoint, broadcast, recovery, verdict, or failed/rejected status.',
+  'A valid request directly creates a required child with this original card as parent; it has no preapproval step. The target department Head must be formal and owns that child. For Staff requests the preferred reviewers are the source Head and requester; for Head requests the source Head is reviewer. Reviewer shortage records one reason and may use the existing single-review downgrade; a busy reviewer waits and is not omitted. Accepted results return here and the original owner resumes integration.',
+  '```megacorps-report',
+  JSON.stringify({ kind: 'megacorps-report', version: 1, status: 'input_required', summary: 'Product input is required to continue this owned card.', request: { kind: 'collaboration', departmentSlug: 'product', question: 'Provide the approved interface wording needed by this card.', acceptance: ['Cover every visible error state.', 'Return the approved wording with its source.'] } }),
+  '```',
 ].join('\n');
 
 const guides: Record<AgentOperationSurface, string> = {
@@ -29,6 +37,7 @@ const guides: Record<AgentOperationSurface, string> = {
     '```megacorps-report',
     JSON.stringify({ kind: 'megacorps-report', version: 1, status: 'input_required', summary: 'Implementation is blocked on the documented deployment choice.', request: { kind: 'help', question: 'Which supported deployment target should this task use?' } }),
     '```',
+    collaborationRules,
     catalogPointer,
   ].join('\n'),
   management: [
@@ -39,6 +48,7 @@ const guides: Record<AgentOperationSurface, string> = {
     '```megacorps-report',
     JSON.stringify({ kind: 'megacorps-report', version: 1, status: 'progress', summary: 'Replace with current coordination facts.', children: [] }),
     '```',
+    collaborationRules,
     catalogPointer,
   ].join('\n'),
   review: [

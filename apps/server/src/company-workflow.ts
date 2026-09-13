@@ -8,6 +8,30 @@ import type { AgentResult } from './agent-results.ts';
 import { currentA2aRecoveryRun } from './a2a-task-recovery.ts';
 
 type Agent = typeof agents.$inferSelect;
+type Department = typeof departments.$inferSelect;
+type Position = typeof positions.$inferSelect;
+
+export function departmentRepresentative(department: Department, members: Agent[], roles: Position[]): Agent | null {
+  const bossPositionIds = new Set(roles.filter(role => role.companyId === department.companyId && role.isCompanyBoss).map(role => role.id));
+  const formalHead = members.find(member => member.id === department.headAgentId
+    && member.companyId === department.companyId
+    && member.departmentId === department.id
+    && !(member.positionId && bossPositionIds.has(member.positionId)));
+  if (formalHead) return formalHead;
+  const positionById = new Map(roles
+    .filter(role => role.companyId === department.companyId && role.isActive !== false)
+    .map(role => [role.id, role]));
+  return members
+    .filter(member => member.companyId === department.companyId && member.departmentId === department.id && member.isActive !== false)
+    .map(member => ({ member, position: member.positionId ? positionById.get(member.positionId) : undefined }))
+    .filter((entry): entry is { member: Agent; position: Position } => Boolean(entry.position)
+      && !entry.position!.isCompanyBoss
+      && Number.isInteger(entry.position!.rank)
+      && entry.position!.rank >= 0
+      && entry.position!.rank <= 9)
+    .sort((left, right) => left.position.rank - right.position.rank || left.member.id.localeCompare(right.member.id))[0]?.member ?? null;
+}
+
 export async function companyStructure(companyId: string) {
   const [[company], members, divisions, roles] = await Promise.all([
     db.select().from(companies).where(eq(companies.id, companyId)).limit(1),
@@ -17,14 +41,15 @@ export async function companyStructure(companyId: string) {
   ]);
   const bossIds = new Set(roles.filter(p => p.isCompanyBoss).map(p => p.id));
   const bosses = members.filter(a => a.positionId && bossIds.has(a.positionId));
+  const representatives = divisions.map(department => ({ department, agent: departmentRepresentative(department, members, roles) }));
   const roleOf = (agentId: string) => structuralRole({ isCompanyBoss: bosses.some(a => a.id === agentId), isDepartmentHead: divisions.some(d => d.headAgentId === agentId) && members.some(a => a.id === agentId) });
   const targetsFor = (agentId: string) => {
     const role = roleOf(agentId);
-    if (role === 'ceo') return members.filter(a => a.id !== agentId && !bosses.some(b => b.id === a.id) && divisions.some(d => d.headAgentId === a.id && a.departmentId === d.id));
+    if (role === 'ceo') return representatives.map(entry => entry.agent).filter((agent): agent is Agent => Boolean(agent) && agent!.id !== agentId);
     const ownDepartments = new Set(divisions.filter(d => d.headAgentId === agentId).map(d => d.id));
     return members.filter(a => a.id !== agentId && !bosses.some(b => b.id === a.id) && (role === 'department_head' ? Boolean(a.departmentId && ownDepartments.has(a.departmentId)) && roleOf(a.id) === 'member' : a.bossId === agentId));
   };
-  return { company, members, divisions, roles, bosses, roleOf, targetsFor };
+  return { company, members, divisions, roles, bosses, representatives, roleOf, targetsFor };
 }
 
 export async function companyExecutionReadiness(companyId: string, actorId?: string | null, departmentId?: string | null) {
@@ -37,17 +62,20 @@ export async function companyExecutionReadiness(companyId: string, actorId?: str
   for (const department of structure.divisions) {
     const head = structure.members.find(a => a.id === department.headAgentId);
     if (!head) {
-      const message = `Assign a same-company head to department ${department.name}.`;
-      setupIssues.push(message);
-      if (department.headAgentId || department.id === departmentId || structure.members.some(a => a.id === actorId && a.departmentId === department.id)) issues.push(message);
+      const representative = structure.representatives.find(entry => entry.department.id === department.id)?.agent;
+      if (!representative) {
+        const message = `Assign a same-company head or active ranked member to department ${department.name}.`;
+        setupIssues.push(message);
+        if (department.headAgentId || department.id === departmentId || structure.members.some(a => a.id === actorId && a.departmentId === department.id)) issues.push(message);
+      }
     }
     else if (structure.roleOf(head.id) === 'ceo') issues.push(`Boss and department head must be distinct agents (${department.name}).`);
     else if (head.departmentId !== department.id) issues.push(`Move ${head.name} into department ${department.name} or choose its member as head.`);
   }
-  if (!structure.members.some(a => structure.roleOf(a.id) === 'department_head' && structure.divisions.some(d => d.headAgentId === a.id && a.departmentId === d.id))) issues.push('Assign at least one usable department head distinct from the Boss.');
+  if (!structure.representatives.some(entry => entry.agent)) issues.push('Assign at least one usable department representative distinct from the Boss.');
   if (departmentId && !structure.divisions.some(d => d.id === departmentId)) issues.push('Selected department must belong to this company.');
   const runtimeIssues: string[] = [];
-  const candidates = actorId ? structure.members.filter(a => a.id === actorId) : [...structure.bosses, ...structure.members.filter(a => structure.roleOf(a.id) === 'department_head')];
+  const candidates = actorId ? structure.members.filter(a => a.id === actorId) : [...structure.bosses, ...structure.representatives.map(entry => entry.agent).filter((agent): agent is Agent => Boolean(agent))];
   if (actorId && !candidates.length) issues.push('Assignment must name a member of this company.');
   const cache = createRuntimeAvailabilityCache();
   const recovery = currentA2aRecoveryRun();

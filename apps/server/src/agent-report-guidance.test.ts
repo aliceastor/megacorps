@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { agentReportSchema } from '@megacorps/shared';
 import { buildAgentPrompt } from './adapters/hermes.ts';
+import { agentReportGuidance } from './agent-report-guidance.ts';
 import { MEMBER_PLAYBOOK } from './role-playbooks.ts';
 import { buildReviewPrompt } from './dispatch.ts';
 import { memoryDb } from './test-support/memory-db.ts';
@@ -25,6 +26,20 @@ for (const mode of ['execution', 'management', 'review', 'recovery'] as const) t
   for (const [, example] of examples) assert.equal(agentReportSchema.safeParse(JSON.parse(example!)).success, true);
   if (mode === 'management') assert.equal(JSON.parse(examples[0]![1]!).children.length, 0, 'no ghost assignments in generic management examples');
   if (mode === 'recovery') assert.equal(JSON.parse(examples[0]![1]!).status, 'completed', 'a recovery decision must satisfy the stage handler, not just the shared envelope schema');
+});
+
+test('owner report guidance offers schema-valid collaboration without granting it to review or recovery', () => {
+  for (const mode of ['execution', 'management'] as const) {
+    const prompt = agentReportGuidance(mode);
+    const reports = [...prompt.matchAll(/```json\s*([\s\S]*?)```/g)].map((match) => JSON.parse(match[1]!));
+    const collaboration = reports.find((report) => report.request?.kind === 'collaboration');
+    assert.equal(agentReportSchema.safeParse(collaboration).success, true);
+    assert.match(prompt, /departmentSlug/);
+    assert.match(prompt, /original owner.*resume/i);
+  }
+  for (const mode of ['review', 'recovery'] as const) {
+    assert.doesNotMatch(agentReportGuidance(mode), /departmentSlug|request\.kind.{0,40}collaboration/is);
+  }
 });
 
 test('informational peer wrapper cannot invite board mutations', () => {
