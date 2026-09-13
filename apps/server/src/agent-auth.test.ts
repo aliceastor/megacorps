@@ -28,7 +28,7 @@ test('agentTokenMatches is exact', () => {
   assert.equal(agentTokenMatches(token, null), false);
 });
 
-const baseAgent = { hermesProfile: 'alice', currentSessionId: null, adapterConfig: { webhookSharedSecret: 'legacy-shared-secret-123' } };
+const baseAgent = { hermesProfile: 'alice', currentSessionId: null, adapterConfig: { megacorpsApiUrl: 'https://synthetic-api.example.test', webhookSharedSecret: 'legacy-shared-secret-123' } };
 const task = { id: 'card-1', title: 'Do the thing', body: 'Body.' };
 
 test('task prompts prefer the per-agent token over the shared secret', () => {

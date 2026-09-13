@@ -29,8 +29,10 @@ test('staffed-head assignment includes eligible team CV and workload', async t =
   assert.match(prompt, /DEPARTMENT MANAGEMENT/);
   assert.match(prompt, /content 9\/10 over 1/);
   assert.match(prompt, /declared capabilities: documentation/);
-  assert.match(prompt, /load:/);
-  assert.match(prompt, /latest review feedback: approved: All documentation checks passed\./);
+  assert.match(prompt, /open assigned cards:/);
+  assert.match(prompt, /content \| 9\/10 \| approved; reviewer: Head/);
+  assert.match(prompt, /score record ID: score/);
+  assert.doesNotMatch(prompt, /latest review feedback:/);
   assert.doesNotMatch(prompt, /last rejection:/);
 });
 test('common knowledge stays within total and document budgets with explicit selection metadata', async t => {

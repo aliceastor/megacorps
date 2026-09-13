@@ -34,8 +34,10 @@ test('management guide teaches schema-valid children and preserves assignment au
   const guide = agentOperationGuide('management');
   const parsed = agentReportSchema.safeParse(example(guide, 'megacorps-report'));
   assert.equal(parsed.success, true);
-  assert.ok(parsed.success && parsed.data.children?.length === 1);
+  assert.ok(parsed.success && !parsed.data.children?.length, 'generic examples must not assign a fictional recipient');
   assert.match(guide, /eligible.*direct report/i);
+  assert.match(guide, /children.*title.*body.*assigneeSlug/s);
+  assert.doesNotMatch(guide, /qa-lead|department-head/);
 });
 
 test('review guide teaches a schema-valid score and verdict without granting approval authority', () => {

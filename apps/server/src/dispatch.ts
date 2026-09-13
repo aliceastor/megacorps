@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { formatTaskState, taskStateReference } from './task-state-context.ts';
 import { agentRemoteWork, refreshAgentRemoteCapacity, sweepA2aRemoteReconciliation } from './a2a-remote-reconciliation.ts';
 import { sweepMissingA2aDeliveryReceipts } from './a2a-delivery-recovery.ts';
 import { a2aExecutionScope } from './a2a-execution-scope.ts';
@@ -29,7 +30,8 @@ import { buildAgentDigest } from './agent-digest.ts';
 import { giteaAuthenticatedCloneUrl, giteaCloneUrlForAgent, giteaConfigFromEnv } from './gitea.ts';
 import { effectiveFanoutCap, evaluateSplitPlan, formatChildOpening, formatSplitAnnouncement, type SplitAgentRef } from './card-splitting.ts';
 import { normalizeDecisionMode, type AgentReportChild } from '@megacorps/shared';
-import { REVIEW_SCORE_RUBRIC, formatTeamResourceView, parseReviewScore, summarizeCv, type TeamMemberView } from './agent-cv.ts';
+import { REVIEW_SCORE_RUBRIC, parseReviewScore } from './agent-cv.ts';
+import { buildTeamResourceContext } from './team-resource-context.ts';
 import { REVIEWER_PLAYBOOK, playbookFor, structuralRole } from './role-playbooks.ts';
 import { agentApiDiscovery, agentOperationGuide } from './agent-operation-guide.ts';
 import { brainstormFromOutput, brainstormRoundComplete, formatBrainstormClosed, formatBrainstormOpened, planBrainstormTargets, type BrainstormRequest } from './brainstorm.ts';
@@ -230,9 +232,8 @@ function companyStructureLines(input: {
       .map((report) => report.slug)
       .sort((left, right) => left.localeCompare(right));
     const positionName = position?.name ?? agent.title ?? agent.role ?? 'none';
-    const departmentName = department?.name ?? 'none';
-    const positionDescription = oneLine(position?.description ?? position?.prompt, 600);
-    return `[${agent.name} (${agent.slug}), ${positionName} | ${departmentName}, ${positionDescription}|[list: ${directReportSlugs.join(', ') || 'none'}]]`;
+    const departmentName = position?.isCompanyBoss || position?.isCompanyLeadership ? 'company leadership' : department?.name ?? 'unassigned department';
+    return `- ${agent.name} (${agent.slug}): ${positionName}; ${departmentName}; agent ID: ${agent.id}${position ? `; position ID: ${position.id}` : ''}${directReportSlugs.length ? `; direct reports: ${directReportSlugs.join(', ')}` : ''}`;
   });
 }
 
@@ -947,40 +948,7 @@ export async function recordReviewScore(card: CardRow, reviewer: AgentRow, verdi
 }
 
 export async function teamResourceView(companyId: string, bossId: string): Promise<string> {
-  const reports = await activeDirectReportsForAgent(companyId, bossId);
-  const ids = reports.map((report) => report.id);
-  if (ids.length === 0) return '';
-  const [agentRows, liveRows, scoreRows, feedbackRows] = await Promise.all([
-    db.select({ id: agents.id, capabilities: agents.capabilities, isBusy: agents.isBusy }).from(agents).where(inArray(agents.id, ids)),
-    db.select({ assigneeId: kanbanCards.assigneeId, count: drizzleSql<number>`count(*)::int` }).from(kanbanCards)
-      .where(and(inArray(kanbanCards.assigneeId, ids), isNull(kanbanCards.deletedAt), inArray(kanbanCards.columnStatus, ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm'])))
-      .groupBy(kanbanCards.assigneeId),
-    db.select({ agentId: agentReviewScores.agentId, domain: agentReviewScores.domain, score: agentReviewScores.score, verdict: agentReviewScores.verdict, createdAt: agentReviewScores.createdAt })
-      .from(agentReviewScores).where(inArray(agentReviewScores.agentId, ids)).orderBy(desc(agentReviewScores.createdAt)).limit(ids.length * 40),
-    db.select({ assigneeId: kanbanCards.assigneeId, reviewFeedback: kanbanCards.reviewFeedback, updatedAt: kanbanCards.updatedAt }).from(kanbanCards)
-      .where(and(inArray(kanbanCards.assigneeId, ids), isNull(kanbanCards.deletedAt), isNotNull(kanbanCards.reviewFeedback))).orderBy(desc(kanbanCards.updatedAt)).limit(ids.length * 3),
-  ]);
-  const agentById = new Map(agentRows.map((row) => [row.id, row]));
-  const liveById = new Map(liveRows.map((row) => [row.assigneeId, Number(row.count)]));
-  const latestFeedback = new Map<string, string>();
-  for (const row of feedbackRows) if (row.assigneeId && row.reviewFeedback && !latestFeedback.has(row.assigneeId)) {
-    const extracted = extractAgentReport(row.reviewFeedback);
-    const report = extracted && 'report' in extracted ? extracted.report : null;
-    const feedback = report ? `${report.verdict ?? report.status}: ${report.summary}` : row.reviewFeedback;
-    latestFeedback.set(row.assigneeId, feedback.replace(/\s+/g, ' ').slice(0, 160));
-  }
-  const members: TeamMemberView[] = reports.map((report) => ({
-    name: report.name,
-    slug: report.slug,
-    positionName: report.positionName ?? null,
-    departmentName: report.departmentName ?? null,
-    capabilities: agentById.get(report.id)?.capabilities ?? [],
-    liveCards: liveById.get(report.id) ?? 0,
-    isBusy: Boolean(agentById.get(report.id)?.isBusy),
-    cv: summarizeCv(scoreRows.filter((row) => row.agentId === report.id)),
-    latestReviewFeedback: latestFeedback.get(report.id) ?? null,
-  }));
-  return formatTeamResourceView(members);
+  return buildTeamResourceContext(companyId, bossId);
 }
 
 // === Brainstorm rounds =========================================================
@@ -4781,32 +4749,37 @@ async function buildKanbanDeltaContext(card: CardRow, options: PromptBuildOption
   const recentActions = actions.filter((action) => afterPromptSince(action.createdAt, since)).reverse();
   const recentLogs = logs.filter((log) => afterPromptSince(log.createdAt, since)).reverse();
   const recentProducts = products.filter((product) => afterPromptSince(product.createdAt, since)).reverse();
-  return [
-    `Delta since: ${since ? since.toISOString() : 'last adapter turn unknown'}`,
-    `Current task: ${compactCardLine(card, agentById)}`,
-    `Updated at: ${card.updatedAt ? formatDate(card.updatedAt) : 'unknown'}`,
-    `Decision mode: ${card.decisionMode ?? 'not set'}`,
-    'Current workflow: split independent deliverables into child cards through report.children (bounded by the org chart: direct reports only, a few live children, one round at a time) and delegate help inside a card through DELEGATE; the completion protocol carries the exact rules.',
-    `Last error: ${promptDiagnostic(card.lastError)}`,
-    card.reviewFeedback ? `Current review feedback:\n${clipText(card.reviewFeedback, 2500)}` : 'Current review feedback: none',
-    ancestors.length > 0 ? `Parent chain:\n${ancestors.map((item) => compactCardLine(item, agentById)).join('\n')}` : 'Parent chain: none',
-    children.length > 0 ? `Child cards now:\n${children.map((item) => compactCardLine(item, agentById)).join('\n')}` : 'Child cards now: none',
-    `Dependencies now:\n${deps.map((item) => compactCardLine(item, agentById)).join('\n') || 'none'}`,
-    `New message board entries:\n${recentMessages.map((message) => {
+  const reference = (item: CardRow) => taskStateReference(item, item.assigneeId ? agentById.get(item.assigneeId)?.name ?? 'unavailable' : undefined);
+  return [formatTaskState({
+    id: card.id, title: card.title, status: card.columnStatus ?? 'todo',
+    assignee: card.assigneeId ? agentById.get(card.assigneeId)?.name ?? 'unavailable' : undefined,
+    reviewer: card.reviewerId ? agentById.get(card.reviewerId)?.name ?? 'unavailable' : undefined,
+    updatedAt: card.updatedAt ? formatDate(card.updatedAt) : undefined,
+    since: since?.toISOString(), priority: card.priority ?? 0, decisionMode: card.decisionMode,
+    requiresApproval: Boolean(card.requiresApproval),
+    sections: [
+    { title: 'Last error', entries: card.lastError ? [promptDiagnostic(card.lastError)] : [] },
+    { title: 'Review feedback', entries: card.reviewFeedback ? [clipText(card.reviewFeedback, 2500)] : [] },
+    { title: 'Parent chain', entries: ancestors.length ? ancestors.map(reference) : card.parentCardId ? [`- Parent unavailable: ${card.parentCardId}`] : [] },
+    { title: 'Child cards', entries: children.length ? [`Acceptance policy: ${card.requiredChildPolicy ?? 'all_required_accepted'}`, ...children.map(reference)] : [] },
+    { title: 'Dependencies', entries: (card.dependencyCardIds ?? []).map(id => { const dependency = deps.find(item => item.id === id); return dependency ? reference(dependency) : `- Dependency unavailable: ${id}`; }) },
+    { title: since ? 'New messages' : 'Messages', entries: recentMessages.map((message) => {
       const author = message.agentId ? agentById.get(message.agentId)?.name ?? 'unavailable' : message.authorType;
       return `- ${formatDate(message.createdAt)} | ${author} | ${message.action}: ${clipText(promptDiagnostic(message.body), 900)}`;
-    }).join('\n') || 'none'}`,
-    `New action timeline entries:\n${recentActions.map((action) => [
+    }) },
+    { title: since ? 'New actions' : 'Actions', entries: recentActions.map((action) => [
       `- ${formatDate(action.createdAt)} | ${action.actorType}:${action.actorId} | ${action.action} | ${action.fromStatus ?? 'none'} -> ${action.toStatus ?? 'none'}`,
       action.detail ? `  detail: ${clipText(action.detail, 700)}` : '',
-    ].filter(Boolean).join('\n')).join('\n') || 'none'}`,
-    `New lifecycle log entries:\n${recentLogs.map((log) => [
+    ].filter(Boolean).join('\n')) },
+    { title: since ? 'New lifecycle events' : 'Lifecycle events', entries: recentLogs.map((log) => [
       `- ${formatDate(log.createdAt)} | ${log.type}/${log.status}: ${clipText(promptDiagnostic(log.message), 700)}`,
       log.output ? `  output: ${clipText(promptDiagnostic(log.output), 900)}` : '',
-    ].filter(Boolean).join('\n')).join('\n') || 'none'}`,
-    `New work products:\n${recentProducts.map((product) => `- ${product.type}: ${product.title}${product.url ? ` (${product.url})` : product.pullRequestUrl ? ` (${product.pullRequestUrl})` : ''}${product.summary ? ` -- ${clipText(product.summary, 500)}` : ''}`).join('\n') || 'none'}`,
+    ].filter(Boolean).join('\n')) },
+    { title: since ? 'New work products' : 'Work products', entries: recentProducts.map((product) => `- ${product.type}: ${product.title}${product.url ? ` (${product.url})` : product.pullRequestUrl ? ` (${product.pullRequestUrl})` : ''}${product.summary ? ` -- ${clipText(product.summary, 500)}` : ''}`) },
+    ],
+  }),
     'If your adapter session has lost the original task context, do not guess. Return status="input_required" with request.kind="help" and request.question explaining that the session context was lost and a full context retry is needed.',
-  ].join('\n');
+  ].join('\n\n');
 }
 
 async function messageBoardThreadContext(card: CardRow, focusComment: CardCommentRow): Promise<string> {
@@ -5187,7 +5160,7 @@ export async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions
  const assignment = card.assigneeId ? await structuralAssignment(card.companyId, card.assigneeId) : null;
  if (assignment?.delegationRequired) return [common, agentOperationGuide('management'),
    `${assignment.role === 'ceo' ? 'STRATEGY' : 'DEPARTMENT MANAGEMENT'} assignment: ${card.title} [${card.id}]`,
-   card.body, `Coordination only: ${card.coordinationOnly ? 'explicitly selected by the operator; no fabricated child work' : 'no; required execution must be delegated'}.`,
+   card.body, card.coordinationOnly ? 'Assignment: coordination only, explicitly selected by the operator; do not fabricate child work.' : 'Assignment: this goal requires execution. Your role in this turn is to coordinate and delegate the implementation.',
    card.assigneeId ? await informationalProjectAuthority(card, card.assigneeId, false) : '',
    structuralTargetContext(assignment),
    card.assigneeId ? await teamResourceView(card.companyId, card.assigneeId) : '',

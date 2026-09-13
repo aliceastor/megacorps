@@ -18,10 +18,12 @@ for (const mode of ['execution', 'management', 'review', 'recovery'] as const) t
   assert.doesNotMatch(prompt, /Optional webhook body:|legacy DELEGATE block|verifications.*dispositions/);
   if (mode === 'execution') assert.doesNotMatch(prompt, /Ordinary review example|"verdict"|"children"/);
   if (mode === 'management') assert.match(prompt, /"children"/);
+  assert.doesNotMatch(prompt, /qa-lead|department-head/);
   if (mode === 'review') assert.match(prompt, /revision_requested/);
   const examples = [...prompt.matchAll(/```json\s*([\s\S]*?)```/g)];
   assert.ok(examples.length > 0);
   for (const [, example] of examples) assert.equal(agentReportSchema.safeParse(JSON.parse(example!)).success, true);
+  if (mode === 'management') assert.equal(JSON.parse(examples[0]![1]!).children.length, 0, 'no ghost assignments in generic management examples');
   if (mode === 'recovery') assert.equal(JSON.parse(examples[0]![1]!).status, 'completed', 'a recovery decision must satisfy the stage handler, not just the shared envelope schema');
 });
 

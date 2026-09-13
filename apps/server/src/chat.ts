@@ -1,4 +1,4 @@
-import { claimAgentCapacity } from './dispatch.ts';
+import { claimAgentCapacity, teamResourceView } from './dispatch.ts';
 import { projectModelWarningChat } from './a2a-final-output.ts';
 import { companyDiscoveryContext } from './company-discovery.ts';
 import { agentOperationGuide } from './agent-operation-guide.ts';
@@ -13,7 +13,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { requireAuth, type AuthUser } from './auth.ts';
 import { hasCompanyRole, membershipRole, requireAnyVisibleCompany, requireCompanyRole } from './access.ts';
 import { getAdapter } from './adapters/registry.ts';
-import { stripHermesSessionMetadata } from './adapters/hermes.ts';
+import { configuredAgentApiOrigin, stripHermesSessionMetadata } from './adapters/hermes.ts';
 import { db } from './db/client.ts';
 import { activityLog, agentRuntimes, agents, chatMessages, chatSessions, companies, costEvents, departments, goals, heartbeatRuns, kanbanCards, positions, projects, users } from './db/schema.ts';
 import { budgetOk, buildCompanyKanbanContext, buildExecutionAgent, getBudgetGuard } from './dispatch.ts';
@@ -120,6 +120,7 @@ export async function buildDirectChatGoalContext(companyId: string, agent: Agent
   const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt, isCompanyLeadership: Boolean(position?.isCompanyLeadership || position?.isCompanyBoss) });
   return [
     await buildCommonCompanyContext(companyId, agent.id),
+    await teamResourceView(companyId, agent.id),
     await companyDiscoveryContext(companyId, projectId),
     `Project: ${project?.name ?? 'No project / general chat'}`,
     project?.description ? `Project description: ${project.description}` : '',
@@ -187,11 +188,11 @@ async function buildChatCardIndex(companyId: string, projectId: string | null): 
 }
 
 export function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow, history: ChatMessageRow[], kanbanContext: string, goalContext: string, continuation = false, cardIndex = '', refreshedContext = '', digest = ''): string {
+  const latest = [...history].reverse().find((message) => message.authorType === 'user') ?? history[history.length - 1];
   if (continuation) {
-    const latest = [...history].reverse().find((message) => message.authorType === 'user') ?? history[history.length - 1];
     return [
       'Continue the existing Direct Chat thread.',
-      agentOperationGuide('chat'),
+      agentOperationGuide('chat', configuredAgentApiOrigin(agent)),
       'Use the recent transcript below as authoritative memory for this chat session. If the user asks what was just said, answer from this transcript.',
       'The company, goal, and Kanban context were already provided in prior turns for this chat session. Do not ask the user to repeat recent messages unless genuinely ambiguous.',
       [
@@ -205,11 +206,12 @@ export function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow
       formatChatHistoryForPrompt(history, DIRECT_CHAT_CONTINUATION_HISTORY_CHARS),
       'Latest user message:',
       latest ? latest.body : '',
+      'Respond to the user directly.',
     ].filter(Boolean).join('\n\n');
   }
   return [
     kanbanContext ? '' : company ? `Company: ${company.name}\nMission: ${company.mission ?? 'No mission configured.'}` : '',
-    agentOperationGuide('chat'),
+    agentOperationGuide('chat', configuredAgentApiOrigin(agent)),
     digest,
     `Goal context:\n${goalContext}`,
     [
@@ -219,6 +221,9 @@ export function buildChatPrompt(company: CompanyRow | undefined, agent: AgentRow
     `Kanban context snapshot:\n${kanbanContext}`,
     'Conversation history:',
     formatChatHistoryForPrompt(history),
+    'Latest user message:',
+    latest ? latest.body : '',
+    'Respond to the user directly.',
   ].filter(Boolean).join('\n\n');
 }
 
@@ -306,11 +311,11 @@ async function performChatReply(session: typeof chatSessions.$inferSelect, agent
       const agentDigest = await buildAgentDigest(agent.id, session.companyId);
       const digestStale = session.digestHash !== null && session.digestHash !== agentDigest.hash;
       const digestForPrompt = handOffContextToAdapter ? (digestStale ? agentDigest.text : '') : agentDigest.text;
-      const prompt = buildChatPrompt(company, agent, history, kanbanContext, goalContext, handOffContextToAdapter, cardIndex, refreshedContext, digestForPrompt);
+      const executionAgent = await buildExecutionAgent(agent, existingChatSessionId);
+      const prompt = buildChatPrompt(company, { ...agent, adapterConfig: executionAgent.adapterConfig }, history, kanbanContext, goalContext, handOffContextToAdapter, cardIndex, refreshedContext, digestForPrompt);
       const contextMode = handOffContextToAdapter
         ? refreshedContext || digestForPrompt ? 'adapter_session_continuation_refresh' : 'adapter_session_continuation'
         : 'full_bootstrap';
-      const executionAgent = await buildExecutionAgent(agent, existingChatSessionId);
       const chatTask = { ...(job ? { executionKey: `chat:${userMessage.id}` } : {}), id: `chat-${session.id}`, title: session.title, body: prompt, timeoutSeconds: await readChatTaskTimeoutSeconds(), kind: 'chat' as const };
       await recordPromptLog({
         companyId: session.companyId,

@@ -15,7 +15,7 @@ test('prompt preview builds fresh real prompts with tenant isolation and no exec
  const [project]=await sql`INSERT INTO projects(company_id,name,description) VALUES(${c!.id},'Preview project','Synthetic project sentinel') RETURNING id`;
  const [foreign]=await sql`INSERT INTO projects(company_id,name) VALUES(${other!.id},'Foreign') RETURNING id`;
  const [foreignAgent]=await sql`INSERT INTO agents(company_id,name,slug,role) VALUES(${other!.id},'Foreign','foreign','worker') RETURNING id`;
- const [runtime]=await sql`INSERT INTO agent_runtimes(company_id,name,adapter_type,config) VALUES(${c!.id},'Preview runtime','a2a','{"baseUrl":"https://synthetic.invalid","bearerToken":"synthetic-runtime-secret"}') RETURNING id`;
+ const [runtime]=await sql`INSERT INTO agent_runtimes(company_id,name,adapter_type,config) VALUES(${c!.id},'Preview runtime','a2a','{"baseUrl":"https://synthetic.invalid","bearerToken":"synthetic-runtime-secret","megacorpsApiUrl":"https://runtime-api.example.test"}') RETURNING id`;
  await sql`UPDATE agents SET adapter_type='a2a',runtime_id=${runtime!.id},current_session_id='historical-session-must-not-resume' WHERE id=${agent!.id}`;
  const [dept]=await sql`INSERT INTO departments(company_id,name,slug) VALUES(${c!.id},'Preview Department','preview-dept') RETURNING id`;
  const [bossPosition]=await sql`INSERT INTO positions(company_id,name,slug,is_company_boss,prompt) VALUES(${c!.id},'Preview Boss','preview-boss',true,'Synthetic Boss position sentinel') RETURNING id`;
@@ -36,13 +36,23 @@ test('prompt preview builds fresh real prompts with tenant isolation and no exec
   assert.equal(response.statusCode,200,response.body);
   const result=response.json();assert.equal(result.contextMode,'full_bootstrap');assert.equal(result.redacted,true);
   for(const marker of ['Synthetic mission sentinel','Synthetic request sentinel','Preview project','Synthetic handbook sentinel'])assert.ok(result.prompt.includes(marker),marker);
+  assert.match(result.prompt,/https:\/\/runtime-api\.example\.test\/api\/help/);
+  assert.doesNotMatch(result.prompt,/MegaCorps API origin: unavailable/);
+  if(kind==='chat')assert.ok(result.prompt.endsWith('Latest user message:\n\nSynthetic request sentinel\n\nRespond to the user directly.'));
   assert.ok(!result.prompt.includes('synthetic-preview-secret'));assert.ok(!result.prompt.includes('synthetic-runtime-secret'));assert.ok(!result.prompt.includes('historical-session-must-not-resume'));if(kind==='chat')assert.match(result.prompt,/megacorps-chat-response/);assert.match(result.runtimeContextNotice,/Hermes/);
  }
  for(const [subject,marker] of [[boss,'Synthetic Boss position sentinel'],[head,'Synthetic Head position sentinel'],[agent,'Synthetic Staff position sentinel']] as const) {
   for(const kind of ['task','chat']) {
    const response=await app.inject({method:'POST',url:'/api/agents/'+subject!.id+'/prompt-preview',headers,payload:{kind,body:'Role preview',projectId:project!.id}});
    assert.equal(response.statusCode,200,response.body);assert.ok(response.json().prompt.includes(marker),marker);
-   if(subject===boss)assert.match(response.json().prompt,/company leadership/);
+   if(subject===boss){
+    assert.match(response.json().prompt,/company leadership/);
+    if(kind==='task'){
+     const body=JSON.parse(response.json().prompt).task.body;
+     assert.match(body,/## Task state\n- Task: New task/);
+     assert.doesNotMatch(body,/Delta since: last adapter turn unknown|New message board entries:\nnone|Current task:.*\|/);
+    }
+   }
   }
  }
  assert.deepEqual(await snapshot(),before);assert.equal(networkCalls,0);

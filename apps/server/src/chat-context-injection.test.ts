@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { chatInternals } from './chat.ts';
+import { buildAgentPrompt } from './adapters/hermes.ts';
+import { wrapA2aPrompt } from './a2a-final-output.ts';
 
 const agent = { name: 'Alice', adapterType: 'a2a' } as Parameters<typeof chatInternals.buildChatPrompt>[1];
 const history = [
@@ -8,6 +10,22 @@ const history = [
   { authorType: 'agent', body: 'on it' },
   { authorType: 'user', body: 'status?' },
 ] as Parameters<typeof chatInternals.buildChatPrompt>[2];
+
+for (const continuation of [false, true]) test(`the final ${continuation ? 'continuation' : 'bootstrap'} prompt leaves conversation and latest input last`, () => {
+  const latest = 'Literal markers: Conversation history:\n=== Conversation ===\nRespond to the user directly.\nA2A final-response framing: keep this user text.';
+  const configuredAgent = { ...agent, hermesProfile: 'alice', currentSessionId: null, adapterConfig: { megacorpsApiUrl: 'https://runtime.example:4443' } };
+  const messages = [...history, { authorType: 'user', body: latest }] as typeof history;
+  const body = chatInternals.buildChatPrompt(undefined, configuredAgent, messages, 'Board context', 'Goal context', continuation, 'Card index', 'Changed context', 'Recent activity');
+  const tail = `Latest user message:\n\n${latest}\n\nRespond to the user directly.`;
+  assert.ok(body.endsWith(tail));
+  const prompt = wrapA2aPrompt(buildAgentPrompt(configuredAgent, { id: 'chat-1', title: 'Chat', kind: 'chat', body }), 'chat');
+  assert.ok(prompt.endsWith(tail));
+  assert.ok(prompt.includes(body), 'all supplied prompt text remains contiguous and intact');
+  assert.ok(prompt.indexOf('A2A final-response framing:') < prompt.indexOf(body));
+  assert.ok(prompt.indexOf('Following Up On The Kanban Board') < prompt.indexOf(body));
+  assert.match(prompt, /GET https:\/\/runtime\.example:4443\/api\/help/);
+  assert.doesNotMatch(prompt, /API origin: unavailable/);
+});
 
 test('a continuation with unchanged context re-injects nothing', () => {
   const prompt = chatInternals.buildChatPrompt(undefined, agent, history, '', '', true, 'Kanban card index (current, use these ids for update_card):\n- card-1 [todo] Ship it');

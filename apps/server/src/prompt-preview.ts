@@ -27,6 +27,8 @@ export async function buildPromptPreview(agent: typeof agents.$inferSelect, inpu
   const now = new Date();
   const projectId = input.projectId ?? null;
   const title = input.title?.trim() || (input.kind === 'chat' ? `Chat with ${agent.name}` : 'New task');
+  // This builder only SELECTs runtime/configuration and reads existing tokens.
+  const executionAgent = await buildExecutionAgent(agent, null);
   let task: TaskContext;
   if (input.kind === 'chat') {
     const [company] = await db.select().from(companies).where(eq(companies.id, agent.companyId)).limit(1);
@@ -36,7 +38,7 @@ export async function buildPromptPreview(agent: typeof agents.$inferSelect, inpu
     const goals = await buildDirectChatGoalContext(agent.companyId, agent, projectId);
     const digest = await buildAgentDigest(agent.id, agent.companyId);
     const history = [{ id, body: input.body, authorType: 'user', createdAt: now }] as (typeof chatMessages.$inferSelect)[];
-    task = { id: `chat-${id}`, title, kind: 'chat', body: buildChatPrompt(company, agent, history, kanban, goals, false, '', '', digest.text) };
+    task = { id: `chat-${id}`, title, kind: 'chat', body: buildChatPrompt(company, { ...agent, adapterConfig: executionAgent.adapterConfig }, history, kanban, goals, false, '', '', digest.text) };
   } else {
     const card = {
       id, companyId: agent.companyId, projectId, departmentId: agent.departmentId, assigneeId: agent.id,
@@ -47,8 +49,6 @@ export async function buildPromptPreview(agent: typeof agents.$inferSelect, inpu
     task = { id, title, body: await buildTaskPrompt(card, { continuation: false, kind: 'dispatch' }),
       reportingMode: (await structuralAssignment(agent.companyId, agent.id)).delegationRequired ? 'management' : 'execution' };
   }
-  // This builder only SELECTs runtime/configuration and reads existing tokens.
-  const executionAgent = await buildExecutionAgent(agent, null);
   return sanitizeCompanyOutput(agent.companyId, {
     kind: input.kind, prompt: promptSnapshotForAdapter(executionAgent, task), generatedAt: now.toISOString(),
     redacted: true, contextMode: 'full_bootstrap',

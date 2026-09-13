@@ -51,7 +51,7 @@ for (const role of ['boss', 'head'] as const) test(`${role} actual dispatch prom
   t.mock.method(getAdapter('webhook'), 'dispatch', async (_agent: unknown, task: TaskContext) => { prompt = task.body ?? ''; return { success: true, output: '{"kind":"megacorps-report","status":"progress","summary":"The bounded planning work is underway."}', sessionId: 'fixed', tokensUsed: 0, costUsd: 0, durationSeconds: 1 }; });
   await dispatchCard(card.id, 'manual', { taskRunId: run.id });
   assertGrounding(prompt);
-  assert.match(prompt, /required execution must be delegated/);
+  assert.match(prompt, /Your role in this turn is to coordinate and delegate the implementation/);
 });
 
 for (const continuation of [false, true]) test(`ordinary ${continuation ? 'continued' : 'fresh'} QA prompt requires actual artifact inspection`, async t => {

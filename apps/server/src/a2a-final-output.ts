@@ -4,7 +4,7 @@ const CHAT_KIND = 'megacorps-chat-response';
 /** Transport-only framing; the body still uses the existing chat-actions protocol. */
 export function wrapA2aPrompt(prompt: string, kind?: string): string {
   if (kind !== 'chat') return prompt;
-  return `${prompt}\n\nA2A final-response framing: Return your final display answer as exactly one terminal JSON object on a single line, with only these fields: {"kind":"${CHAT_KIND}","body":"your complete answer"}. JSON-escape newlines and quotes in body. Include any chat-actions fence required above unchanged inside body. Put no text after this object.`;
+  return `A2A final-response framing: Return your final display answer as exactly one terminal JSON object on a single line, with only these fields: {"kind":"${CHAT_KIND}","body":"your complete answer"}. JSON-escape newlines and quotes in body. Include any chat-actions fence required by the instructions below unchanged inside body. Put no text after this object.\n\n${prompt}`;
 }
 
 function decodeChatEnvelope(candidate: string): string {

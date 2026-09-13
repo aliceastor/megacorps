@@ -59,6 +59,7 @@ test('A2A prompt wrapper applies only to chat, including informational chat', as
   assert.match(module.wrapA2aPrompt(prompt, 'chat'), /megacorps-chat-response/);
   assert.ok(module.wrapA2aPrompt(prompt, 'chat').includes(prompt));
   assert.match(module.wrapA2aPrompt(prompt, 'chat'), /chat-actions/);
+  assert.ok(module.wrapA2aPrompt(prompt, 'chat').endsWith(prompt), 'transport framing must precede the intact supplied prompt');
 });
 
 test('chat envelope body stays intact through the A2A boundary', () => {

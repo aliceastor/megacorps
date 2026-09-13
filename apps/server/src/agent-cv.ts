@@ -45,35 +45,49 @@ export function formatCv(cv: DomainCv[]): string {
   return cv.map((item) => `${item.domain} ${item.average}/10 over ${item.samples}${item.thin ? ' (thin sample)' : ''}, ${item.approvedRate}% approved`).join('; ');
 }
 
+export const TEAM_DIRECTORY_LIMIT = 40;
+export const RECENT_SCORE_LIMIT = 3;
+const DOMAIN_DISPLAY_LIMIT = 8;
+const compact = (value: string, limit = 120) => {
+  const text = value.replace(/\s+/g, ' ').trim();
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+};
+export type StoredScoreView = ReviewScoreRow & { id: string; cardId: string; reviewerId: string | null; reviewerName: string | null };
 export type TeamMemberView = {
-  name: string;
-  slug: string;
-  positionName: string | null;
-  departmentName: string | null;
-  capabilities: string[];
-  liveCards: number;
-  isBusy: boolean;
-  cv: DomainCv[];
-  latestReviewFeedback: string | null;
+  id: string; name: string; slug: string; positionName: string | null; departmentName: string | null;
+  bossName: string | null; bossId: string | null; isActive: boolean; eligibleForDelegation: boolean;
+  capabilities: string[]; liveCards: number; isBusy: boolean; maxConcurrent: number; cv: DomainCv[];
+  recentScores: StoredScoreView[]; scoreCount: number;
 };
 
-// The department head's resource view: who is free, what each member says
-// they can do, and what reviewers have actually verified they can do.
-export function formatTeamResourceView(members: TeamMemberView[]): string {
+export function formatTeamResourceView(members: TeamMemberView[], options: { totalMembers?: number; eligibleSlugs?: string[] } = {}): string {
   if (members.length === 0) return '';
+  const shown = members.slice(0, TEAM_DIRECTORY_LIMIT);
+  const omitted = Math.max(0, (options.totalMembers ?? members.length) - shown.length);
+  const recipients = options.eligibleSlugs ?? members.filter(member => member.eligibleForDelegation).map(member => member.slug);
   return [
-    'Your team (resource view — use it to decide who gets what):',
-    ...members.map((member) => [
-      `- ${member.name} (slug: ${member.slug}${member.positionName ? `, ${member.positionName}` : ''}${member.departmentName ? `, ${member.departmentName}` : ''})`,
-      `  load: ${member.liveCards} live card(s)${member.isBusy ? ', busy right now' : ', free'}`,
-      `  declared capabilities: ${member.capabilities.length ? member.capabilities.join(', ') : 'none declared'}`,
-      `  verified track record: ${formatCv(member.cv)}`,
-      member.latestReviewFeedback ? `  latest review feedback: ${member.latestReviewFeedback}` : '',
-    ].filter(Boolean).join('\n')),
-    'Prefer members whose verified track record matches the work; declared capabilities are a hint, reviews are evidence. Balance load — a busy member finishes later, not faster.',
-  ].join('\n');
+    '## Company directory (informational; all non-deleted members, including inactive members)',
+    'Directory visibility grants no assignment or delegation authority. Reporting lines and current delegation availability are separate.',
+    `Eligible delegation recipients for you now: ${recipients.slice(0, TEAM_DIRECTORY_LIMIT).map(slug => compact(slug)).join(', ') || 'none currently'}${recipients.length > TEAM_DIRECTORY_LIMIT ? `; ${recipients.length - TEAM_DIRECTORY_LIMIT} additional eligible recipients omitted` : ''}.`,
+    'Open assigned cards are backlog, not active execution slots. Idle does not guarantee runtime availability. CV uses the latest 20 stored scores per domain; thin sample means fewer than 5.',
+    ...shown.map(member => {
+      const recent = member.recentScores.slice(0, RECENT_SCORE_LIMIT);
+      const older = Math.max(0, member.scoreCount - recent.length);
+      return [
+        `- ${compact(member.name)} (slug: ${compact(member.slug)}${member.positionName ? `, ${compact(member.positionName)}` : ''}${member.departmentName ? `, ${compact(member.departmentName)}` : ''}); ${member.isActive ? 'active' : 'inactive'}; agent ID: ${member.id}`,
+        member.bossId ? `  reports to: ${compact(member.bossName ?? member.bossId)} (agent ID: ${member.bossId})` : '',
+        `  open assigned cards: ${member.liveCards}; execution: ${member.isBusy ? 'busy' : 'idle'}; configured concurrency: ${member.maxConcurrent}`,
+        member.capabilities.length ? `  declared capabilities: ${member.capabilities.slice(0, 12).map(value => compact(value, 80)).join(', ')}${member.capabilities.length > 12 ? `; ${member.capabilities.length - 12} more omitted` : ''}` : '',
+        `  verified CV: ${formatCv(member.cv.slice(0, DOMAIN_DISPLAY_LIMIT).map(item => ({ ...item, domain: compact(item.domain, 80) })))}${member.cv.length > DOMAIN_DISPLAY_LIMIT ? `; ${member.cv.length - DOMAIN_DISPLAY_LIMIT} domains omitted` : ''}`,
+        recent.length ? '  Recent stored score records:' : '  No stored score records.',
+        ...recent.map(score => `  - ${score.createdAt?.toISOString() ?? 'date not recorded'} | ${compact(score.domain, 80)} | ${score.score}/10 | ${compact(score.verdict, 80)}; reviewer: ${compact(score.reviewerName ?? 'name unavailable')} (agent ID: ${score.reviewerId ?? 'not recorded'}); card ID: ${score.cardId}; score record ID: ${score.id}; source: /api/cards/${score.cardId}/review-scores (session-authenticated; newest 20 per card)`),
+        older ? `  ${older} older score records omitted.` : '',
+      ].filter(Boolean).join('\n');
+    }),
+    omitted ? `${omitted} company members omitted from this bounded directory.` : '',
+    'Use verified CV and stored score records as evidence; declared capabilities are a hint. Balance open work and execution availability within your existing delegation scope.',
+  ].filter(Boolean).join('\n');
 }
-
 export const REVIEW_SCORE_RUBRIC = [
   'Score the work 0-10 in your report ("score": N) using this rubric, independent of the verdict:',
   '9-10: everything green and beyond the brief; 7-8: green with minor blemishes; 5-6: barely acceptable; 3-4: rejected, fixable; 0-2: rejected, fundamentally off.',

@@ -51,7 +51,7 @@ export async function buildCompanyContextParts(companyId: string, agentId?: stri
   const custom = role === 'ceo' ? structure.company?.bossRolePrompt : role === 'department_head' ? department?.headRolePrompt : null;
   const roleText = [
     'Current company role and knowledge context (replaces earlier versions):',
-    `Company: ${structure.company?.name ?? companyId}; department: ${department?.name ?? 'unassigned'}; structural role: ${role ?? 'unassigned'}.`,
+    `Company: ${structure.company?.name ?? companyId}; ${position?.isCompanyLeadership || position?.isCompanyBoss ? 'scope: company leadership' : `department: ${department?.name ?? 'unassigned'}`}; structural role: ${role ?? 'unassigned'}.`,
     role ? playbookFor(role) : '',
     custom ? `Additional role instructions (additive; platform delegation, evidence, review, permission and approval gates remain mandatory):\n${custom.slice(0, 8000)}` : '',
     formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: structure.company?.name, customPrompt: position?.prompt, isCompanyLeadership: Boolean(position?.isCompanyLeadership || position?.isCompanyBoss) }),

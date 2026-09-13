@@ -2,8 +2,18 @@ export type AgentOperationSurface = 'chat' | 'execution' | 'management' | 'revie
 
 export const agentApiDiscovery = [
   'Discovery: the complete public catalog is GET /api/help or GET /api/help?format=markdown.',
+  'Public Help authentication: none. Reading the catalog grants no management permissions.',
   'Authentication boundary: browser session management routes are not available to a runtime token unless an authenticated user session or admin-created direct API token was explicitly supplied. Runner keys and agent-session JWTs work only on their dedicated runner or agent-session routes. Never infer credentials or broader permission from this guide.',
 ].join('\n');
+
+/** Runtime discovery uses a configured origin; relative catalog paths are documentation only. */
+export function buildAgentApiDiscovery(apiOrigin: string | null): string {
+  return [
+    apiOrigin ? `MegaCorps API origin: ${apiOrigin}` : 'MegaCorps API origin: unavailable — no valid runtime-reachable HTTP(S) origin is configured. Ask the operator for the runtime-reachable API origin before making HTTP calls.',
+    apiOrigin ? `Full public API Help: GET ${apiOrigin}/api/help or GET ${apiOrigin}/api/help?format=markdown.` : '',
+    agentApiDiscovery,
+  ].filter(Boolean).join('\n');
+}
 const catalogPointer = agentApiDiscovery;
 
 const reportRules = [
@@ -25,8 +35,9 @@ const guides: Record<AgentOperationSurface, string> = {
     '## Available MegaCorps operations — management',
     reportRules,
     'Delegate bounded work with top-level `children` only to eligible direct reports supplied in the prompt. Each child needs a title, complete body and assigneeSlug. Use progress while children are outstanding. You may also request help or permission with the same singular request contract. Do not invent reports, expand an assignee’s authority, or treat delegation as acceptance evidence.',
+    'Non-action example: the empty children array creates no assignments. For an actual assignment, each children entry needs title (bounded deliverable), body (scope and acceptance evidence), and assigneeSlug (an eligible direct report from the supplied context).',
     '```megacorps-report',
-    JSON.stringify({ kind: 'megacorps-report', version: 1, status: 'progress', summary: 'Delegated the bounded verification task and will wait for its evidence.', children: [{ title: 'Verify the release candidate', body: 'Run the required checks against the assigned release candidate.\n\nAcceptance:\n- Report exact commands and observed results.', assigneeSlug: 'qa-lead' }] }),
+    JSON.stringify({ kind: 'megacorps-report', version: 1, status: 'progress', summary: 'Replace with current coordination facts.', children: [] }),
     '```',
     catalogPointer,
   ].join('\n'),
@@ -51,6 +62,6 @@ const guides: Record<AgentOperationSurface, string> = {
 };
 
 /** Bounded, surface-specific operations help suitable for inclusion in an agent prompt. */
-export function agentOperationGuide(surface: AgentOperationSurface): string {
-  return guides[surface];
+export function agentOperationGuide(surface: AgentOperationSurface, apiOrigin?: string | null): string {
+  return apiOrigin === undefined ? guides[surface] : guides[surface].replace(catalogPointer, buildAgentApiDiscovery(apiOrigin));
 }

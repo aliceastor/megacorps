@@ -318,13 +318,13 @@ test('optional delegation instructions include direct reports and block format',
   assert.match(instructions, /- Bob: <another delegated work item and expected deliverable>/);
 });
 
-test('company structure lines include name slug position department description and direct reports', () => {
+test('company structure shows identity and position pointers without injecting other position instructions', () => {
   const departmentById = new Map<string, any>([
     ['dept-eng', { id: 'dept-eng', name: 'Engineering', slug: 'engineering' }],
     ['dept-prod', { id: 'dept-prod', name: 'Product', slug: 'product' }],
   ]);
   const positionById = new Map<string, any>([
-    ['pos-cto', { id: 'pos-cto', name: 'CTO', slug: 'cto', description: 'Owns technical direction.' }],
+    ['pos-cto', { id: 'pos-cto', name: 'CTO', slug: 'cto', description: 'Owns technical direction.', prompt: 'FOREIGN POSITION INSTRUCTION' }],
     ['pos-eng', { id: 'pos-eng', name: 'Backend Engineer', slug: 'backend-engineer', description: 'Builds backend systems.' }],
   ]);
   const lines = dispatchInternals.companyStructureLines({
@@ -337,7 +337,8 @@ test('company structure lines include name slug position department description 
     positionById,
   });
   assert.deepEqual(lines, [
-    '[Alice (alice), CTO | Engineering, Owns technical direction.|[list: bob]]',
-    '[Bob (bob), Backend Engineer | Product, Builds backend systems.|[list: none]]',
+    '- Alice (alice): CTO; Engineering; agent ID: agent-1; position ID: pos-cto; direct reports: bob',
+    '- Bob (bob): Backend Engineer; Product; agent ID: agent-2; position ID: pos-eng',
   ]);
+  assert.doesNotMatch(lines.join('\n'), /FOREIGN POSITION INSTRUCTION|Owns technical direction|Builds backend systems/);
 });

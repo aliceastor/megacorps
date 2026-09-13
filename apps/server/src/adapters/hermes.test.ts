@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildAgentPrompt, buildHermesCliCommand, extractSessionId, hermesTaskResult, estimateTokens, megacorpsApiUrl, stripHermesSessionMetadata } from './hermes.ts';
+import { buildAgentPrompt, buildHermesCliCommand, configuredAgentApiOrigin, extractSessionId, hermesTaskResult, estimateTokens, megacorpsApiUrl, stripHermesSessionMetadata } from './hermes.ts';
 import { buildHermesSshRemoteCommand, resolveHermesSshConnectionConfig } from './hermes-ssh.ts';
 
 test('short report instructions describe accepted progress, requests and report work products', () => {
@@ -26,6 +26,40 @@ function withEnv<T>(values: Record<string, string | undefined>, fn: () => T): T 
     }
   }
 }
+
+test('native reporting and chat expose credential-free configured API and public Help URLs', () => {
+  for (const kind of ['task', 'chat'] as const) for (const reportingMode of ['execution', undefined] as const) {
+    const prompt = buildAgentPrompt({ hermesProfile: 'fixture', currentSessionId: null, adapterConfig: { megacorpsApiUrl: 'https://user:secret@runtime.example:4443/path?token=private#fragment' } }, { id: 'card', title: 'Assigned', body: 'Current input', kind, reportingMode });
+    assert.match(prompt, /API origin: https:\/\/runtime\.example:4443/);
+    assert.match(prompt, /GET https:\/\/runtime\.example:4443\/api\/help\?format=markdown/);
+    assert.match(prompt, /public.*no authentication|authentication.*none/i);
+    assert.match(prompt, /browser session.*not available/i);
+    assert.doesNotMatch(prompt, /user:secret|token=private|#fragment|\/api\/help\//);
+  }
+});
+
+test('unconfigured or invalid runtime origins never advertise a guessed localhost', () => {
+  withEnv({ INTERNAL_API_URL: undefined, MEGACORPS_API_URL: undefined, MEGACORPS_PUBLIC_URL: undefined }, () => {
+    for (const megacorpsApiUrl of [undefined, '/relative', 'file:///private', 'https://', 'https:relative']) {
+      for (const kind of ['task', 'chat'] as const) for (const reportingMode of ['execution', undefined] as const) {
+        const prompt = buildAgentPrompt({ hermesProfile: 'fixture', currentSessionId: null, adapterConfig: { megacorpsApiUrl } }, { id: 'card', title: 'Assigned', body: 'Input', kind, reportingMode });
+        assert.match(prompt, /API origin: unavailable/);
+        assert.doesNotMatch(prompt, /localhost|127\.0\.0\.1|file:\/\/\//);
+      }
+    }
+    assert.equal(megacorpsApiUrl({ hermesProfile: 'fixture', currentSessionId: null }), 'http://localhost:4000', 'transport callback compatibility is unchanged');
+  });
+});
+
+test('discovery uses legacy URL aliases and environment precedence without accepting relative HTTP shorthand', () => {
+  withEnv({ INTERNAL_API_URL: 'https://internal.example/path', MEGACORPS_API_URL: 'https://api.example', MEGACORPS_PUBLIC_URL: 'https://public.example' }, () => {
+    for (const key of ['megacorpsApiUrl', 'callbackUrl', 'webhookBaseUrl', 'publicApiUrl']) {
+      assert.equal(configuredAgentApiOrigin({ adapterConfig: { [key]: 'https://runtime.example/path' } }), 'https://runtime.example');
+    }
+    assert.equal(configuredAgentApiOrigin({ adapterConfig: {} }), 'https://internal.example');
+    assert.equal(configuredAgentApiOrigin({ adapterConfig: { megacorpsApiUrl: 'https:relative' } }), null);
+  });
+});
 
 test('extracts Hermes session IDs from stdout', () => {
   assert.equal(extractSessionId('ok\nSession: 20260604_120102_abc123\n'), '20260604_120102_abc123');

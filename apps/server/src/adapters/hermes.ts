@@ -1,6 +1,7 @@
 import { unknownUsage, type UsageFacts } from '../usage-facts.ts';
 import { currentUsageAttempt } from '../usage-context.ts';
 import { agentReportGuidance, type ReportingMode } from '../agent-report-guidance.ts';
+import { buildAgentApiDiscovery } from '../agent-operation-guide.ts';
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
 export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' | 'maintenance'; taskRunId?: string | null; executionKey?: string; reportingMode?: ReportingMode; informationalOnly?: boolean };
 export type TaskResult = {
@@ -70,6 +71,23 @@ export function megacorpsApiUrl(agent: AgentLike): string {
     ?? 'http://localhost:4000';
 }
 
+/** Prompt discovery is separate from the existing callback resolver and never guesses localhost. */
+export function configuredAgentApiOrigin(agent: { adapterConfig?: unknown }): string | null {
+  const config = agent.adapterConfig && typeof agent.adapterConfig === 'object' ? agent.adapterConfig as Record<string, unknown> : {};
+  const configured = configuredString(config.megacorpsApiUrl)
+    ?? configuredString(config.callbackUrl)
+    ?? configuredString(config.webhookBaseUrl)
+    ?? configuredString(config.publicApiUrl)
+    ?? configuredString(process.env.INTERNAL_API_URL)
+    ?? configuredString(process.env.MEGACORPS_API_URL)
+    ?? configuredString(process.env.MEGACORPS_PUBLIC_URL);
+  if (!configured || !/^https?:\/\//i.test(configured)) return null;
+  try {
+    const url = new URL(configured);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : null;
+  } catch { return null; }
+}
+
 function webhookSharedSecret(agent: AgentLike): string | undefined {
   return configuredString(agent.adapterConfig?.webhookSharedSecret)
     ?? configuredString(agent.adapterConfig?.webhookSecret)
@@ -82,7 +100,7 @@ export function buildAgentPrompt(agent: AgentLike, task: TaskContext): string {
   }
   if (task.reportingMode && task.kind !== 'chat' && task.kind !== 'maintenance') {
     return [`Agent: ${agent.hermesProfile ?? 'unknown'}; Card: ${task.id}; Run: ${task.taskRunId ?? 'none'}`,
-      task.body, agentReportGuidance(task.reportingMode)].join('\n\n');
+      buildAgentApiDiscovery(configuredAgentApiOrigin(agent)), task.body, agentReportGuidance(task.reportingMode)].join('\n\n');
   }
   if (task.kind === 'chat') {
     return `You are in a direct MegaCorps chat session.
@@ -91,10 +109,7 @@ export function buildAgentPrompt(agent: AgentLike, task: TaskContext): string {
 Agent: ${agent.hermesProfile ?? 'unknown'}
 Session: ${agent.currentSessionId ?? 'new'}
 
-=== Conversation ===
-${task.body}
-
-Respond to the user directly.
+${buildAgentApiDiscovery(configuredAgentApiOrigin(agent))}
 
 === Following Up On The Kanban Board ===
 This chat and the Kanban board are separate contexts, so anything agreed here
@@ -112,7 +127,9 @@ block and MegaCorps will apply it to the board on the user's behalf:
 
 Rules: priority is low|normal|high|urgent. status is todo|in_progress|in_review|needs_review|waiting_on_external|done|blocked|cancelled. Only use a cardId that appears in the Kanban context you were given. Prefer update_card over create_card when the work already has a card. Omit the block entirely for ordinary conversation — questions, explanations, and advice do not belong on the board. Do not call the Kanban webhook and do not call session-auth endpoints such as POST /api/cards from a chat turn; this block is your channel.
 
-The "note" action is your own cross-session memory: whenever this conversation reaches a decision, correction, or fact you will need in later work (including your Kanban runs), record it as a note. Notes are injected back to you in future sessions as part of your activity digest. A conversation that changed nothing needs no note.`;
+The "note" action is your own cross-session memory: whenever this conversation reaches a decision, correction, or fact you will need in later work (including your Kanban runs), record it as a note. Notes are injected back to you in future sessions as part of your activity digest. A conversation that changed nothing needs no note.
+
+${task.body}${task.body.endsWith('Respond to the user directly.') ? '' : '\n\nRespond to the user directly.'}`;
   }
 
   if (task.kind === 'maintenance') {
@@ -127,7 +144,7 @@ ${task.body}
 This session is only for consolidating your own memory and skills. Do not call the MegaCorps Kanban webhook, do not create or update work items, and do not start new project work.`;
   }
 
-  const apiUrl = megacorpsApiUrl(agent);
+  const apiUrl = configuredAgentApiOrigin(agent);
   const taskWebhookSecret = webhookSharedSecret(agent);
   // Per-agent token wins over the shared secret: the webhook then knows which
   // agent is reporting instead of trusting whatever the payload claims.
@@ -141,10 +158,12 @@ This session is only for consolidating your own memory and skills. Do not call t
     : `{ "cardId": "${task.id}", ${currentUsageAttempt() ? `"usageAttemptKey": "${currentUsageAttempt()}", ` : ''}"status": "done", "summary": "...", "output": "..." }`;
   // The conversation endpoint authenticates with the per-agent token only, so
   // it is advertised only when the agent actually has one.
-  const commentsEndpointLine = agent.apiToken
+  const commentsEndpointLine = apiUrl && agent.apiToken
     ? `\n- POST ${apiUrl}/api/cards/${task.id}/comments -- Leave a message on the card conversation ({ "body": "..." }); @<slug> wakes that agent`
     : '';
-  return `You are now working under PLATFORM MegaCorps at ${apiUrl}.
+  return `You are now working under PLATFORM MegaCorps${apiUrl ? ` at ${apiUrl}` : ''}.
+
+${buildAgentApiDiscovery(apiUrl)}
 
 Task runtimes usually do not have a browser session cookie. Do not call session-auth endpoints such as POST /api/cards for delegation. Return structured report.delegations for same-card help or report.children for authorized independent deliverables as specified in the task. MegaCorps validates and creates the assignments.
 
@@ -188,11 +207,11 @@ If you cannot solve the task, return status "input_required" with request.kind "
 
 === Optional Asynchronous API Integration ===
 The existing authorized webhook is optional. Use your native response for normal reporting even when HTTP is unavailable. If an optional reporting call is declined, do not retry the reporting call or weaken its security gate; return your report directly, distinguishing completed work from any genuinely blocked task action. This does not authorize a denied task action or remove a real permission blocker.
-- POST ${apiUrl}/api/webhook/task-complete -- Optional asynchronous task report${commentsEndpointLine}
+${apiUrl ? `- POST ${apiUrl}/api/webhook/task-complete -- Optional asynchronous task report${commentsEndpointLine}
 ${webhookAuthLine}
 Optional webhook body: ${webhookBodyExample}
 If using this integration, include the same structured object as its "report" field. The report state controls completion even when the webhook status says done. Use only this card and task run's authorized endpoint and identity.
-- GET ${apiUrl}/api/help -- Optional full API documentation when network access is available; no fetch is required to return a report.
+- GET ${apiUrl}/api/help -- Optional full API documentation when network access is available; no fetch is required to return a report.` : 'HTTP integration is unavailable until a runtime-reachable API origin is configured. Return the native report directly.'}
 `;
 }
 

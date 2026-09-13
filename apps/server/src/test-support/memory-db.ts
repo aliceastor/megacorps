@@ -112,6 +112,35 @@ export function memoryDb(t: TestContext, fixtures: Array<[Table, Row[]]>) {
     };
     return chain;
   }
+  // Explicit boundary double for the resource view's set-based score window.
+  // Real PostgreSQL tests own SQL/window/ordering correctness; this keeps
+  // orchestration fixtures in memory without adding a production test fallback.
+  const previousExecute = db.execute;
+  t.mock.method(db, 'execute', (async (statement: SQL) => {
+    const compiled = dialect.sqlToQuery(statement);
+    if (!compiled.sql.includes('AS team_ranked_scores')) {
+      if (Reflect.get(previousExecute, 'mock')) return previousExecute.call(db, statement);
+      throw new Error('Raw SQL needs an explicit memory fixture');
+    }
+    const table = [...tables.keys()].find(item => getTableName(item) === 'agent_review_scores');
+    if (!table) return [];
+    const selected = rows(table).filter(row => matches(table, row, statement)).sort((a, b) =>
+      String(a.agentId).localeCompare(String(b.agentId))
+      || (b.createdAt?.getTime() ?? -Infinity) - (a.createdAt?.getTime() ?? -Infinity)
+      || String(b.id).localeCompare(String(a.id)));
+    const bound = /domain_rank <= \$(\d+)/.exec(compiled.sql);
+    if (!bound) throw new Error('Ranked score query must bind its per-domain window');
+    const window = Number(compiled.params[Number(bound[1]) - 1]);
+    const counts = new Map<string, number>();
+    for (const row of selected) counts.set(row.agentId, (counts.get(row.agentId) ?? 0) + 1);
+    const ranks = new Map<string, number>();
+    return selected.flatMap(row => {
+      const key = JSON.stringify([row.agentId, row.domain]);
+      const rank = (ranks.get(key) ?? 0) + 1;
+      ranks.set(key, rank);
+      return rank <= window ? [{ ...row, scoreCount: counts.get(row.agentId), domain_rank: rank }] : [];
+    });
+  }) as any);
   t.mock.method(db, 'select', () => ({ from: (table: Table) => query(table, 'select') }) as any);
   t.mock.method(db, 'update', (table: Table) => ({ set: (value: Row) => query(table, 'update', value) }) as any);
   t.mock.method(db, 'insert', (table: Table) => ({ values: (value: Row | Row[]) => query(table, 'insert', value) }) as any);
