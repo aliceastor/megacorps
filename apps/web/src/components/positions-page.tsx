@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { BriefcaseBusiness, Plus, Save, ShieldCheck, Trash2 } from 'lucide-react';
 import { api } from '@/lib/api';
+import { agentAuthority } from '@megacorps/shared';
 
 type Company = { id: string; name: string; slug: string };
 type Department = { id: string; companyId: string; name: string; slug: string };
@@ -61,6 +62,10 @@ export function PositionsPage({ scopeCompanyId, scopeDepartmentId, leadership = 
   const headConflict = companyPositions.some(position => position.id !== selectedId && position.isDepartmentHead && position.defaultDepartmentId === defaultDepartmentId);
   const bossPosition = companyPositions.find(position => position.isCompanyBoss && position.isActive !== false);
   const companyHasBoss = companyPositions.some((position) => position.isCompanyBoss && position.isActive !== false);
+  const previewAuthority = agentAuthority(
+    { id: 'position-preview-agent', companyId, positionId: selectedId || 'position-preview', departmentId: leadership || isCompanyBoss ? null : defaultDepartmentId || null, isActive: true, deletedAt: null },
+    { id: selectedId || 'position-preview', companyId, rank: isCompanyBoss ? 0 : isDepartmentHead ? 1 : rank, isCompanyBoss, isDepartmentHead, isActive, defaultDepartmentId: leadership || isCompanyBoss ? null : defaultDepartmentId || null },
+  );
 
   useEffect(() => {
     api<PositionTemplate[]>('/api/positions/templates').then(setTemplates).catch(() => setTemplates([]));
@@ -259,7 +264,7 @@ export function PositionsPage({ scopeCompanyId, scopeDepartmentId, leadership = 
             <div className="panel-title"><h3>Prompt preview</h3><span className="status-pill">{isCompanyBoss ? 'company boss' : leadership ? 'company leadership' : 'department'}</span></div>
             <pre className="log-block">{[
               leadership || isCompanyBoss ? `You are ${name || 'xxxxx'} in the company leadership of ${selectedCompany?.name ?? 'yyyy'}, outside departments.` : `You are ${name || 'xxxxx'} in the ${companyDepartments.find(department => department.id === defaultDepartmentId)?.name ?? '{agent.department}'} department of ${selectedCompany?.name ?? 'yyyy'}.`,
-              `Authority: rank ${rank}; boss=${isCompanyBoss ? 'yes' : 'no'}; active=${isActive ? 'yes' : 'no'}.`,
+              `Authority: rank ${isCompanyBoss ? 0 : isDepartmentHead ? 1 : rank}; boss=${previewAuthority.boss ? 'yes' : 'no'}; department_head=${previewAuthority.departmentHead ? 'yes' : 'no'}; staff=${previewAuthority.staff ? 'yes' : 'no'}; active=${previewAuthority.active ? 'yes' : 'no'}.`,
               description ? `Description: ${description}` : '',
               prompt || '{custom position prompt}',
             ].filter(Boolean).join('\n')}</pre>

@@ -18,6 +18,7 @@ import { db } from './db/client.ts';
 import { reviewIdentityMatches, type ReviewIdentity } from './review-identity.ts';
 import { activityLog, cardComments, externalEvents, externalWaits, kanbanCards, mergeIntents, projects, taskLogs, taskRuns, workProducts } from './db/schema.ts';
 import { executeAuthorizedMerge, settleMergeIntent } from './authorized-merge.ts';
+import { ensureMergeDecision, reopenUncertainMerge } from './manager-merge.ts';
 import { managedMergeTarget } from './managed-project-policy.ts';
 import { recordStageAction, type CardActionActor } from './card-actions.ts';
 import { publishLiveEvent } from './live.ts';
@@ -449,7 +450,7 @@ async function parkForMergeLocked(card: CardRow, plan: Extract<MergeGatePlan, { 
     const target = managedMergeTarget(plan.project, giteaConfigFromEnv());
     if (target && plan.candidate.pullRequestNumber) {
       const [version] = await tx.select().from(kanbanCards).where(eq(kanbanCards.id, card.id)).limit(1);
-      await tx.insert(mergeIntents).values({ cardId: card.id, projectId: plan.project.id, waitId: wait.id, originatingTaskRunId: options.taskRunId ?? null, headSha: plan.headSha, repoFullName: `${target.org}/${target.repo}`, defaultBranch: plan.defaultBranch, gateVersion: version!.mergeGateVersion ?? 0, state: 'prepared', attemptCount: 0 });
+      await tx.insert(mergeIntents).values({ cardId: card.id, projectId: plan.project.id, waitId: wait.id, originatingTaskRunId: options.taskRunId ?? null, headSha: plan.headSha, repoFullName: `${target.org}/${target.repo}`, defaultBranch: plan.defaultBranch, gateVersion: version!.mergeGateVersion ?? 0, state: 'prepared', attemptCount: 0, decisionRequired: true, candidateDepartmentId: fresh.departmentId });
     }
     return { wait, created: true };
   });
@@ -628,6 +629,7 @@ export async function reconcileMergeWait(waitId: string, options: { immediate?: 
     if (!wait || wait.status !== 'waiting' || !wait.authorizedHeadSha || wait.provider !== MERGE_WAIT_PROVIDER) return false;
     const [card] = await db.select().from(kanbanCards).where(and(eq(kanbanCards.id, wait.cardId), isNull(kanbanCards.deletedAt))).limit(1);
     if (!card || card.columnStatus !== 'waiting_on_external' || !(await completionStillCurrent(card))) return false;
+    if (await ensureMergeDecision(wait.id)) return true;
     const count = wait.pollCount ?? 0;
     if (count >= EXTERNAL_POLL_MAX || (!(options.immediate && count === 0) && !pollDecision({ ...wait, pollIntervalSeconds: wait.pollIntervalSeconds ?? 30 }, Date.now()).poll)) return false;
     const [claimed] = await db.update(externalWaits).set({ pollCount: count + 1, lastPolledAt: new Date(), pollIntervalSeconds: count + 1 >= EXTERNAL_POLL_MAX ? null : 30 }).where(and(eq(externalWaits.id, wait.id), eq(externalWaits.status, 'waiting'), eq(externalWaits.pollCount, count))).returning();
@@ -645,6 +647,10 @@ export async function reconcileMergeWait(waitId: string, options: { immediate?: 
           if (pull?.head?.sha && pull.base?.ref && typeof pull.merged === 'boolean' && ['open', 'closed'].includes(pull.state ?? '')) {
             const outcome = await handlePullRequestEvent(match, { action: pull.state === 'closed' || pull.merged ? 'closed' : 'synchronized', pull_request: pull, repository: { full_name: `${slug.org}/${slug.repo}` } });
             if (outcome) return true;
+            if (pull.state === 'open' && pull.merged === false && pull.head?.sha && pull.base?.ref) {
+              await reopenUncertainMerge(wait.id, {headSha:pull.head.sha,base:pull.base.ref});
+              if (await ensureMergeDecision(wait.id)) return true;
+            }
             if (await executeAuthorizedMerge(wait.id, options)) {
               const after = await giteaPullRequest(config, slug.org, slug.repo, number, options.fetchImpl);
               if (after?.head?.sha && after.base?.ref && typeof after.merged === 'boolean' && ['open', 'closed'].includes(after.state ?? '')) {

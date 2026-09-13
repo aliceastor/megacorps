@@ -117,7 +117,7 @@ export async function buildDirectChatGoalContext(companyId: string, agent: Agent
   const [department] = agent.departmentId ? await db.select().from(departments).where(eq(departments.id, agent.departmentId)).limit(1) : [];
   const [position] = agent.positionId ? await db.select().from(positions).where(and(eq(positions.id, agent.positionId), eq(positions.companyId, companyId))).limit(1) : [];
   const companyGoals = await db.select().from(goals).where(eq(goals.companyId, companyId)).orderBy(desc(goals.createdAt));
-  const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt, isCompanyLeadership: Boolean(position?.isCompanyLeadership || position?.isCompanyBoss) });
+  const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt, isCompanyLeadership: Boolean(position?.isCompanyLeadership || position?.isCompanyBoss), agent, position });
   return [
     await buildCommonCompanyContext(companyId, agent.id),
     await teamResourceView(companyId, agent.id),
@@ -312,7 +312,9 @@ async function performChatReply(session: typeof chatSessions.$inferSelect, agent
       const digestStale = session.digestHash !== null && session.digestHash !== agentDigest.hash;
       const digestForPrompt = handOffContextToAdapter ? (digestStale ? agentDigest.text : '') : agentDigest.text;
       const executionAgent = await buildExecutionAgent(agent, existingChatSessionId);
-      const prompt = buildChatPrompt(company, { ...agent, adapterConfig: executionAgent.adapterConfig }, history, kanbanContext, goalContext, handOffContextToAdapter, cardIndex, refreshedContext, digestForPrompt);
+      const { mergeCandidateContext } = await import('./manager-merge.ts');
+      const candidates = await mergeCandidateContext(session.companyId, agent.id, session.projectId);
+      const prompt = buildChatPrompt(company, { ...agent, adapterConfig: executionAgent.adapterConfig }, history, kanbanContext, goalContext, handOffContextToAdapter, cardIndex, refreshedContext, [digestForPrompt,candidates].filter(Boolean).join('\n\n'));
       const contextMode = handOffContextToAdapter
         ? refreshedContext || digestForPrompt ? 'adapter_session_continuation_refresh' : 'adapter_session_continuation'
         : 'full_bootstrap';

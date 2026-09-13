@@ -2,6 +2,21 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apiHelpCatalog, apiHelpMarkdown } from './api-help.ts';
 
+test('CLI help labels every Agent role separately from credential requirements', () => {
+  for (const command of apiHelpCatalog().cli.commands) {
+    for (const role of ['boss', 'departmentHead', 'staff'] as const) {
+      assert.match(command.agentApplicability[role], /role alone/i);
+    }
+    assert.ok(command.credentialTransport.length > 0);
+  }
+  const cliSection = apiHelpMarkdown().split('## CLI Commands')[1];
+  assert.ok(cliSection);
+  const cliMarkdown = cliSection.split('## Endpoints')[0];
+  assert.ok(cliMarkdown);
+  assert.match(cliMarkdown, /DEPARTMENT HEAD:/);
+  assert.match(cliMarkdown, /Credential transport:/);
+});
+
 test('native recovery help documents manager actions and authority boundaries', () => {
   const help = apiHelpMarkdown();
   assert.match(help, /fix_card/);
@@ -20,6 +35,26 @@ test('api help exposes bounded surface operation guides with explicit authentica
     assert.match(guide, /browser session.*not available|session routes.*not available/i);
   }
   assert.match(apiHelpMarkdown(), /## Agent Operations/);
+});
+
+test('every endpoint separates human session authorization from explicit Agent-role applicability', () => {
+  const catalog = apiHelpCatalog();
+  for (const endpoint of catalog.endpoints) {
+    assert.deepEqual(Object.keys(endpoint.agentApplicability).sort(), ['boss', 'departmentHead', 'staff']);
+    for (const applicability of Object.values(endpoint.agentApplicability)) {
+      assert.match(applicability, /available|unavailable/i, `${endpoint.method} ${endpoint.path} has an ambiguous Agent role`);
+    }
+    assert.ok(endpoint.credentialTransport.length > 0, `${endpoint.method} ${endpoint.path} missing credential transport`);
+  }
+  const help = catalog.endpoints.find((endpoint) => endpoint.method === 'GET' && endpoint.path === '/api/help')!;
+  assert.match(help.agentApplicability.boss, /available/i);
+  assert.match(help.agentApplicability.departmentHead, /available/i);
+  assert.match(help.agentApplicability.staff, /available/i);
+  const sessionRoute = catalog.endpoints.find((endpoint) => endpoint.method === 'GET' && endpoint.path === '/api/cards')!;
+  assert.match(sessionRoute.agentApplicability.boss, /unavailable/i);
+  assert.match(sessionRoute.credentialTransport, /session.*human|direct API token.*human/i);
+  assert.match(apiHelpMarkdown(), /Agent applicability: BOSS=/);
+  assert.match(apiHelpMarkdown(), /Credential transport:/);
 });
 
 test('api help documents collaboration and omits the retired cross-department position permission', () => {

@@ -42,6 +42,12 @@ test('owner report guidance offers schema-valid collaboration without granting i
   }
 });
 
+test('platform merge decision wrapper permits only its scoped operation', () => {
+  const prompt = buildAgentPrompt({ hermesProfile: 'fixture', currentSessionId: null }, { id: 'merge-1', title: 'Merge decision', body: 'Candidate from server', kind: 'chat', mergeDecision: true } as any);
+  assert.match(prompt, /scoped merge_pr/);
+  assert.doesNotMatch(prompt, /"create_card"|"note"|informational colleague/);
+});
+
 test('informational peer wrapper cannot invite board mutations', () => {
   const prompt = buildAgentPrompt({ hermesProfile: 'fixture', currentSessionId: null }, { id: 'peer-1', title: 'Question', body: 'Answer only', kind: 'chat', informationalOnly: true } as any);
   assert.doesNotMatch(prompt, /megacorps-chat-actions|"create_card"|"update_card"/);

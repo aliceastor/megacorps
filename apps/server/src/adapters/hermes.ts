@@ -3,7 +3,7 @@ import { currentUsageAttempt } from '../usage-context.ts';
 import { agentReportGuidance, type ReportingMode } from '../agent-report-guidance.ts';
 import { buildAgentApiDiscovery } from '../agent-operation-guide.ts';
 export type ExecResult = { stdout: string; stderr: string; exitCode: number; duration: number };
-export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' | 'maintenance'; taskRunId?: string | null; executionKey?: string; reportingMode?: ReportingMode; informationalOnly?: boolean };
+export type TaskContext = { id: string; title: string; body: string; timeoutSeconds?: number; kind?: 'task' | 'chat' | 'maintenance'; taskRunId?: string | null; executionKey?: string; reportingMode?: ReportingMode; informationalOnly?: boolean; mergeDecision?: boolean };
 export type TaskResult = {
   success: boolean;
   output: string;
@@ -95,6 +95,9 @@ function webhookSharedSecret(agent: AgentLike): string | undefined {
 }
 
 export function buildAgentPrompt(agent: AgentLike, task: TaskContext): string {
+  if (task.mergeDecision && task.kind === 'chat') {
+    return `This is a platform-assigned manager decision. Only the scoped merge_pr operation described below is available. It does not grant provider credentials or implementation authority.\n\n${buildAgentApiDiscovery(configuredAgentApiOrigin(agent))}\n\n${task.body}`;
+  }
   if (task.informationalOnly && task.kind === 'chat') {
     return `This is an informational colleague question, not authorization to execute work or change the board.\n\n${task.body}\n\nReply with the answer text only; MegaCorps posts it to the original thread.`;
   }

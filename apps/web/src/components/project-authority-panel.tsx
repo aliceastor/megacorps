@@ -381,7 +381,7 @@ export function ProjectAuthorityPanel({ lockedCompanyId, heading = 'Projects', d
           <details><summary>Advanced merge policy</summary>
             <label className="field-label"><input type="checkbox" checked={completionRequiresMerge ?? repoProvider === 'gitea-local'} onChange={(event) => { setCompletionRequiresMerge(event.target.checked); if (!event.target.checked) setAutoMergeAfterApproval(false); }} /> Require verified merge before completion</label>
             <label className="field-label"><input type="checkbox" checked={autoMergeAfterApproval ?? (repoProvider === 'gitea-local' && !repoUrl)} onChange={(event) => { setAutoMergeAfterApproval(event.target.checked); if (event.target.checked) setCompletionRequiresMerge(true); }} /> Let MegaCorps merge after all approvals</label>
-            <p>Managed Gitea projects use the server identity to merge the exact approved head. Save to verify branch protection. Disable automatic merge to keep manual merging.</p>
+            <p>Managed Gitea projects require independent review and an explicit merge_pr decision from the Boss or this department’s Head. The server verifies and merges the exact approved head. Save to verify branch protection.</p>
           </details>
         </section>
 

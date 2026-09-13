@@ -84,3 +84,39 @@ test('chat guide teaches only schema-valid server-mediated chat actions', () => 
   assert.match(guide, /create_card.*update_card.*note/s);
   assert.doesNotMatch(guide, /POST \/api\/cards/);
 });
+
+test('every operation guide labels Boss, Department Head, and Staff applicability', () => {
+  for (const surface of ['chat', 'execution', 'management', 'review'] satisfies AgentOperationSurface[]) {
+    const guide = agentOperationGuide(surface);
+    assert.match(guide, /BOSS:/);
+    assert.match(guide, /DEPARTMENT HEAD:/);
+    assert.match(guide, /STAFF:/);
+  }
+});
+
+test('Boss guidance reserves ordinary implementation and professional review for the eligible workforce', () => {
+  assert.match(agentOperationGuide('execution'), /BOSS: coordination only, never ordinary code\/docs implementation/i);
+  assert.match(agentOperationGuide('review'), /BOSS: professional review unavailable/i);
+  assert.match(agentOperationGuide('review'), /goal assessment.*separate management/i);
+});
+
+test('management and Direct Chat teach the exact bounded merge decision operation', () => {
+  for (const surface of ['management', 'chat'] as const) {
+    const guide = agentOperationGuide(surface);
+    assert.match(guide, /merge_pr/);
+    assert.match(guide, /intentId.*UUID/s);
+    assert.match(guide, /headSha.*40 lowercase hexadecimal/s);
+    assert.match(guide, /reason.*1.*2000/s);
+    assert.match(guide, /GET \/api\/cards\/:id\/merge-intents/);
+    assert.match(guide, /independent review/i);
+    assert.match(guide, /human.*child/i);
+    assert.match(guide, /provider execution/i);
+    assert.match(guide, /force merge/i);
+    assert.match(guide, /BOSS.*company/i);
+    assert.match(guide, /DEPARTMENT HEAD.*own.*department/i);
+    assert.match(guide, /STAFF.*unavailable/i);
+  }
+  for (const surface of ['execution', 'review'] as const) {
+    assert.doesNotMatch(agentOperationGuide(surface), /"action":"merge_pr"/);
+  }
+});

@@ -97,6 +97,17 @@ export async function completeRetryableRun(runId: string, input: RunCompletion):
       ...(block ? { columnStatus: 'blocked', lastError: reason, nextRunAt: null, completedAt: null } : {}),
       updatedAt: now,
     }).where(completionCondition(card)).returning();
+    // A successful originating review may settle after parking its candidate.
+    // Clearing only its retry metadata advances the card's SQL fence. Carry
+    // that exact prepared, still-unauthorized candidate across this metadata
+    // write; never reauthorize an older intent or a changed evidence gate.
+    if (updated && input.status === 'success' && !block && card.columnStatus === 'waiting_on_external') {
+      await tx.update(mergeIntents).set({ gateVersion: updated.mergeGateVersion }).where(and(
+        eq(mergeIntents.cardId, card.id), eq(mergeIntents.originatingTaskRunId, runId),
+        eq(mergeIntents.state, 'prepared'), eq(mergeIntents.gateVersion, card.mergeGateVersion),
+        drizzleSql`${mergeIntents.authorizedAt} IS NULL`,
+      ));
+    }
     if(block && updated)await requestCardRecovery(updated,{reason,eventKey:`run:${run.id}`,actorId:run.agentId,stage:kind,sourceMessageId:run.messageCommentId,taskRunId:run.id},tx);
     if (failed) await tx.insert(taskLogs).values({
       cardId: card.id, agentId: run.agentId, type: 'retry', status: exhausted ? 'failed' : 'warning',

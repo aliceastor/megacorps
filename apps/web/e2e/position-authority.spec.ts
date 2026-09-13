@@ -22,6 +22,7 @@ test('department head position fixes rank and prevents a duplicate head even in 
   await expect(page.getByLabel('Department Head', { exact: true })).toBeChecked();
   await expect(page.getByLabel('Rank', { exact: true })).toHaveValue('1');
   await expect(page.getByLabel('Rank', { exact: true })).toBeDisabled();
+  await expect(page.locator('.positions-page .log-block')).toContainText('Authority: rank 1; boss=no; department_head=yes; staff=yes; active=yes.');
   await page.getByRole('button', { name: 'New Position', exact: true }).click();
   await expect(page.getByLabel('Department Head', { exact: true })).toBeDisabled();
   await expect(page.getByLabel('Rank', { exact: true })).toHaveValue('2');

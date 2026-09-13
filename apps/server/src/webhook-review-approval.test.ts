@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
-import { activityLog, agents, approvals, cardComments, costEvents, departments, externalWaits, kanbanCards, mergeIntents, projects, taskRuns, workProducts } from './db/schema.ts';
+import { activityLog, agents, approvals, cardComments, costEvents, departments, externalWaits, kanbanCards, mergeIntents, positions, projects, taskRuns, workProducts } from './db/schema.ts';
 import { memoryDb } from './test-support/memory-db.ts';
 import { readyCompany } from './test-support/ready-company.ts';
 import { registerRoutes } from './routes.ts';
 import { beginReviewIdentity } from './review-identity.ts';
 import { captureDeliveryAcceptance } from './delivery-acceptance.ts';
+import { requestManagerMerge } from './manager-merge.ts';
+import { reconcileMergeWait } from './merge-gate.ts';
 
 const head = 'a'.repeat(40);
 async function fixture(t: TestContext, bossReview = false) {
@@ -185,6 +187,13 @@ test('worker webhook approval is settled by its accepted reviewer webhook before
   assert.notEqual(result.json().duplicate, true);
   assert.equal(f.state.rows(mergeIntents)[0]?.headSha, head);
   assert.equal(f.ordinary.status, 'approved', 'Accepted review must settle its ordinary quality-review record.');
+  assert.equal(f.posts(), 0, 'Reviewer acceptance alone never merges.');
+  const candidate=f.state.rows(mergeIntents)[0]!;
+  const bossRole=f.state.rows(positions).find(role=>role.isCompanyBoss)!;
+  Object.assign(bossRole,{rank:0,isActive:true,defaultDepartmentId:null});
+  const boss=f.state.rows(agents).find(agent=>agent.positionId===bossRole.id)!;
+  await requestManagerMerge({companyId:f.card.companyId,agentId:boss.id,source:'management'},{action:'merge_pr',intentId:candidate.id,headSha:head,reason:'Accepted independent review meets delivery criteria.'});
+  await reconcileMergeWait(candidate.waitId,{immediate:true});
   assert.equal(f.posts(), 1); assert.equal(f.state.rows(mergeIntents)[0]?.state, 'verified'); assert.equal(f.card.columnStatus, 'done');
   const decided = structuredClone(f.ordinary);
   await f.post(f.reviewRun.id); assert.deepEqual(f.ordinary, decided); assert.equal(f.posts(), 1, 'Replay cannot merge again.');

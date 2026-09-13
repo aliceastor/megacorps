@@ -42,7 +42,7 @@ function priorityToNumber(priority: string | undefined): number {
 }
 
 export type ChatWorkItemOutcome = {
-  action: 'create_card' | 'update_card' | 'note';
+  action: 'create_card' | 'update_card' | 'note' | 'merge_pr';
   cardId: string | null;
   title: string | null;
   ok: boolean;
@@ -69,6 +69,14 @@ async function applyOne(input: ApplyInput, action: ChatWorkItemAction): Promise<
   const actor = { type: 'user' as const, id: input.user.id, userId: input.user.id };
   const actorName = input.user.email ?? input.user.id;
   const origin = `Direct Chat with ${input.agentName}`;
+
+  if (action.action === 'merge_pr') {
+    const { requestManagerMerge } = await import('./manager-merge.ts');
+    const receipt = await requestManagerMerge({companyId:input.companyId,agentId:input.agentId,userId:input.user.id,source:'chat'},action);
+    const { reconcileMergeWait } = await import('./merge-gate.ts');
+    await reconcileMergeWait(receipt.waitId,{immediate:true});
+    return {action:'merge_pr',cardId:receipt.cardId,title:null,ok:true,detail:`Merge decision ${receipt.status}. Provider-confirmed completion is tracked on the card; authorization alone does not mean merged.`};
+  }
 
   if (action.action === 'note') {
     // Notes are the agent's own memory, not board state: no card mutation, no
@@ -200,7 +208,7 @@ export function formatChatWorkItemOutcomes(outcomes: ChatWorkItemOutcome[]): str
   const lines = outcomes.map((outcome) => {
     if (outcome.action === 'note') return `${outcome.ok ? '✓' : '✗'} Self-note — ${outcome.detail}`;
     const label = outcome.title ?? outcome.cardId ?? 'card';
-    const verb = outcome.action === 'create_card' ? 'Created card' : 'Updated card';
+    const verb = outcome.action === 'merge_pr' ? 'Merge request' : outcome.action === 'create_card' ? 'Created card' : 'Updated card';
     return `${outcome.ok ? '✓' : '✗'} ${verb} "${label}" — ${outcome.detail}`;
   });
   return [`Kanban updates from this conversation:`, ...lines].join('\n');

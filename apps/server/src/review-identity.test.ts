@@ -169,7 +169,7 @@ function assertManagedPrompt(prompt: string) {
   assert.ok(prompt.includes(legacyMergeInstruction), 'Exercise the actual saved position instruction.');
   const policy = prompt.lastIndexOf('Authoritative managed project merge policy');
   assert.ok(policy > prompt.lastIndexOf(legacyMergeInstruction), 'Server policy must follow the legacy position prompt.');
-  assert.match(prompt.slice(policy), /MegaCorps alone performs the authorized merge after all approvals/);
+  assert.match(prompt.slice(policy), /MegaCorps alone performs the authorized merge after independent review, an explicit manager merge_pr decision/);
   assert.match(prompt.slice(policy), /only your assigned ordinary agent identity/);
   assert.match(prompt.slice(policy), /Do not read or use administrator.*environment/);
   assert.match(prompt.slice(policy), /Do not call.*merge/);

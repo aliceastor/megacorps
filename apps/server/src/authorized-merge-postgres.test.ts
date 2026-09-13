@@ -3,10 +3,11 @@ import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { isolatedPostgres } from './test-support/postgres-db.ts';
+import { authorizeManagerMerge, seedManagerMergeReview } from './test-support/manager-merge-fixture.ts';
 
 test('PostgreSQL 16 durable authorized merge fence', { skip: !process.env.TEST_DATABASE_URL && !process.env.CI ? 'TEST_DATABASE_URL absent; real merge transaction tests run in CI' : false, timeout: 60_000 }, async (t) => {
   const { db, sql } = await isolatedPostgres(t);
-  const { companies, projects, kanbanCards, approvals, externalWaits, mergeIntents, reviewRounds, taskRuns, workProducts } = await import('./db/schema.ts');
+  const { companies, projects, kanbanCards, approvals, externalWaits, mergeIntents, reviewRounds, taskRuns, workProducts, activityLog } = await import('./db/schema.ts');
   const { reviewCard } = await import('./dispatch.ts');
   const { executeAuthorizedMerge } = await import('./authorized-merge.ts');
   const { ensureHumanGate } = await import('./review-rounds.ts');
@@ -20,17 +21,19 @@ test('PostgreSQL 16 durable authorized merge fence', { skip: !process.env.TEST_D
   const fetchImpl: typeof fetch = async (url, init) => {
     const path = new URL(String(url)).pathname;
     if (init?.method === 'POST') { posts++; assert.equal(JSON.parse(String(init.body)).head_commit_id, head); await onPost?.(); return new Response(null, { status: 204 }); }
-    const value = path.endsWith('/version') ? { version: '1.22.6' } : path.endsWith('/user') ? { login: 'service' } : path.endsWith('/permission') ? { permission: 'admin' } : path.endsWith('/collaborators') ? [] : path.endsWith('/branch_protections') ? [{ rule_name: '[m]ain', created_at: '2026-09-05T00:00:00Z', enable_push: false, enable_merge_whitelist: true, merge_whitelist_usernames: ['service'], merge_whitelist_teams: [] }, { rule_name: '**', created_at: '2026-09-05T00:00:02Z', enable_push: true, enable_push_whitelist: false, enable_merge_whitelist: true, merge_whitelist_usernames: [], merge_whitelist_teams: [] }] : path.endsWith('/pulls/12') ? { number: 12, state: merged ? 'closed' : 'open', merged, head: { sha: head }, base: { ref: 'main' } } : { default_branch: 'main' };
+    const value = path.endsWith('/version') ? { version: '1.22.6' } : path.endsWith('/user') ? { login: 'service' } : path.endsWith('/collaborators/service/permission') ? { permission: 'admin', user: { is_admin: false } } : path.endsWith('/permission') ? { permission: 'write', user: { is_admin: false } } : path.endsWith('/collaborators') ? [] : path.endsWith('/branch_protections') ? [{ rule_name: '[m]ain', created_at: '2026-09-05T00:00:00Z', enable_push: false, enable_merge_whitelist: true, merge_whitelist_usernames: ['service'], merge_whitelist_teams: [] }, { rule_name: '**', created_at: '2026-09-05T00:00:02Z', enable_push: true, enable_push_whitelist: false, enable_merge_whitelist: true, merge_whitelist_usernames: [], merge_whitelist_teams: [] }] : path.endsWith('/pulls/12') ? { number: 12, state: merged ? 'closed' : 'open', merged, head: { sha: head }, base: { ref: 'main' } } : { default_branch: 'main', owner: { login: 'org' } };
     return new Response(JSON.stringify(value));
   };
   async function fixture() {
     const [company] = await db.insert(companies).values({ name: 'Merge fixture', slug: `merge-${randomUUID()}` }).returning();
     const [project] = await db.insert(projects).values({ companyId: company!.id, name: 'Managed', repoProvider: 'gitea-local', repoUrl: 'https://gitea.test/org/repo', managedRepoFullName: 'org/repo', defaultBranch: 'main', autoMergeAfterApproval: true, completionRequiresMerge: true }).returning();
     const [card] = await db.insert(kanbanCards).values({ companyId: company!.id, projectId: project!.id, title: 'Exact head', body: 'Evidence', columnStatus: 'waiting_on_external' }).returning();
+    const authority = await seedManagerMergeReview(company!.id, project!.id, card!.id, head);
     const [wait] = await db.insert(externalWaits).values({ cardId: card!.id, companyId: company!.id, waitingFor: 'merge into main', provider: 'gitea', status: 'waiting', authorizedHeadSha: head, externalId: '12', externalUrl: 'https://gitea.test/org/repo/pulls/12', pollCount: 0, pollIntervalSeconds: 30 }).returning();
     const [fresh] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card!.id));
-    const [intent] = await db.insert(mergeIntents).values({ cardId: card!.id, projectId: project!.id, waitId: wait!.id, headSha: head, repoFullName: 'org/repo', defaultBranch: 'main', gateVersion: fresh!.mergeGateVersion, state: 'prepared' }).returning();
-    return { card: fresh!, project: project!, wait: wait!, intent: intent! };
+    const [intent] = await db.insert(mergeIntents).values({ cardId: card!.id, projectId: project!.id, waitId: wait!.id, headSha: head, repoFullName: 'org/repo', defaultBranch: 'main', gateVersion: fresh!.mergeGateVersion, state: 'prepared', candidateDepartmentId: authority.department.id }).returning();
+    await authorizeManagerMerge(company!.id, authority.boss.id, intent!);
+    return { card: fresh!, project: project!, wait: wait!, intent: intent!, authority };
   }
   function conflict(error: any): boolean { return error?.code === 'MC409' || (error?.cause && conflict(error.cause)); }
   await t.test('claim wins: human gate, review, child, move, wait and project policy cannot silently cancel in-flight merge; unrelated cards remain writable', async () => {
@@ -85,13 +88,20 @@ test('PostgreSQL 16 durable authorized merge fence', { skip: !process.env.TEST_D
     onPost = async () => { merged = true; };
     try {
       await parkForMerge(card!, { disposition: 'wait', project: f.project, candidate: { kind: 'pull_request', pullRequestNumber: 12, pullRequestUrl: f.wait.externalUrl, branch: 'feature', headSha: head, workProductId: null }, headSha: head, defaultBranch: 'main', waitingFor: 'merge into main', externalId: '12', externalUrl: f.wait.externalUrl }, { fetchImpl });
+      let [parkedCard] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card!.id));
+      assert.equal(parkedCard!.columnStatus, 'waiting_on_external', 'review acceptance alone waits for a manager decision');
+      const intents = await db.select().from(mergeIntents).where(eq(mergeIntents.cardId, card!.id));
+      const current = intents.find(intent => intent.state === 'prepared' && !intent.authorizedAt)!;
+      assert.equal(current.authorizedAt, null);
+      await authorizeManagerMerge(f.card.companyId, f.authority.boss.id, current);
+      await reconcileMergeWait(current.waitId, { immediate: true, fetchImpl });
       assert.equal((await db.select().from(kanbanCards).where(eq(kanbanCards.id, card!.id)))[0]!.columnStatus, 'done');
     } finally { onPost = undefined; merged = false; }
   });
   await t.test('review entrypoint settles its original running task and old retry streak while provider acceptance awaits verification', async (t) => {
     const f = await fixture();
     await db.update(externalWaits).set({ status: 'superseded' }).where(eq(externalWaits.id, f.wait.id));
-    await db.update(kanbanCards).set({ columnStatus: 'in_review', runRetryState: { review: { failures: 1, nextRunAt: null } } }).where(eq(kanbanCards.id, f.card.id));
+    await db.update(kanbanCards).set({ columnStatus: 'in_review', reviewerId: null, runRetryState: { review: { failures: 1, nextRunAt: null } } }).where(eq(kanbanCards.id, f.card.id));
     await db.insert(workProducts).values({ companyId: f.card.companyId, cardId: f.card.id, projectId: f.project.id, type: 'pull_request', title: 'Reviewed PR', pullRequestUrl: f.wait.externalUrl, commitSha: head });
     const [run] = await db.insert(taskRuns).values({ cardId: f.card.id, companyId: f.card.companyId, kind: 'review', status: 'running' }).returning();
     t.mock.method(globalThis, 'fetch', fetchImpl);
@@ -99,7 +109,15 @@ test('PostgreSQL 16 durable authorized merge fence', { skip: !process.env.TEST_D
     assert.equal((await db.select().from(taskRuns).where(eq(taskRuns.id, run!.id)))[0]!.status, 'success');
     const [card] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, f.card.id));
     assert.equal(card!.columnStatus, 'waiting_on_external'); assert.equal(card!.executionLockId, null); assert.equal(card!.activeHeartbeatRunId, null);
+    assert.equal(card!.runRetryState?.review, undefined, 'successful originating review clears the old failure streak');
+    await db.insert(activityLog).values({ companyId: f.card.companyId, actorType: 'agent', actorId: f.authority.reviewer.id, agentId: f.authority.reviewer.id, action: 'review.approved', entityType: 'card', entityId: f.card.id, details: { runId: card!.reviewIdentity!.scope, mode: 'quality' } });
     const intents = await db.select().from(mergeIntents).where(eq(mergeIntents.cardId, f.card.id));
-    assert.ok(intents.some((intent) => intent.state === 'accepted'));
+    const current = intents.find(intent => intent.state === 'prepared')!;
+    assert.ok(current, 'review entrypoint parks a manager-decision candidate without merging');
+    assert.equal(current.authorizedAt, null);
+    assert.equal(current.gateVersion, card!.mergeGateVersion, 'retry metadata settlement must not stale the just-created manager candidate');
+    await authorizeManagerMerge(f.card.companyId, f.authority.boss.id, current);
+    await reconcileMergeWait(current.waitId, { immediate: true, fetchImpl });
+    assert.equal((await db.select().from(mergeIntents).where(eq(mergeIntents.id, current.id)))[0]!.state, 'accepted');
   });
 });

@@ -21,6 +21,14 @@ type ApiEndpoint = {
   responseExample?: unknown;
   rateLimit?: string;
   notes?: string[];
+  agentApplicability?: AgentApplicability;
+  credentialTransport?: string;
+};
+
+type AgentApplicability = {
+  boss: string;
+  departmentHead: string;
+  staff: string;
 };
 
 type ApiHelpEndpoint = ApiEndpoint & {
@@ -28,6 +36,8 @@ type ApiHelpEndpoint = ApiEndpoint & {
   responseExample: unknown;
   rateLimit: string;
   requiredRole: 'none' | 'viewer' | 'operator' | 'admin';
+  agentApplicability: AgentApplicability;
+  credentialTransport: string;
 };
 
 type CliCommand = {
@@ -508,7 +518,7 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
   if (endpoint.path === '/api/projects/:id/merge-readiness') {
     return { responseSchema: { autoMergeAfterApproval: 'boolean', completionRequiresMerge: 'boolean', ready: 'boolean; protected merge permission, not worker push or runtime reachability', issues: 'string[]', checkedAt: 'ISO datetime', serviceIdentity: 'string | null' }, responseExample: { autoMergeAfterApproval: true, completionRequiresMerge: true, ready: false, issues: ['Provider inspection is required.'], checkedAt: '2026-09-06T00:00:00.000Z', serviceIdentity: null }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   }
-  if (endpoint.path === '/api/cards/:id/merge-intents') return { responseSchema: { type: 'array', items: 'Durable MergeIntent rows: cardId/projectId/waitId/headSha/repoFullName/defaultBranch/gateVersion/state/attemptCount/lastAttemptAt/lastResult' }, responseExample: [], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
+  if (endpoint.path === '/api/cards/:id/merge-intents') return { responseSchema: { type: 'array', items: 'Durable MergeIntent rows: id/cardId/projectId/waitId/headSha/repoFullName/defaultBranch/gateVersion/state/attemptCount/lastAttemptAt/lastResult/decisionRequired/candidateDepartmentId/authorizedByAgentId/authorizedByUserId/authorizedAt/authorizationReason/decisionQuestionId. Use id as merge_pr.intentId; authorization is separate from provider-confirmed completion.' }, responseExample: [], rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   if (endpoint.path === '/api/companies/:id/deletion-preview') return { responseSchema: { companyId: 'uuid', canDelete: 'boolean', blocking: 'Record<table, count>', inventory: 'Record<table, {count, ids, foreignCount}>' }, responseExample: { companyId: 'company-uuid', canDelete: false, blocking: { projects: 1 }, inventory: { projects: { count: 1, ids: ['project-uuid'], foreignCount: 0 } } }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   if (endpoint.path === '/api/companies/:id/retirement-preview') return { responseSchema: { source: 'company identity', target: 'company identity', canRetire: 'boolean', blocking: 'Record<table, count>', conflicts: 'safe identity conflicts[]', inventory: 'Record<table, {count, ids, foreignCount}>', projects: 'unbound project identities[]', runtimes: 'runtime identities[] without configuration', positions: 'seed position identities[] with unusedSeed', memberships: 'source membership identities[]', readinessIssue: 'string' }, responseExample: { source: { id: 'source-uuid', name: 'Default Company', slug: 'default' }, target: { id: 'target-uuid', name: 'Target', slug: 'target' }, canRetire: true, blocking: {}, conflicts: [], inventory: {}, projects: [], runtimes: [], positions: [], memberships: [], readinessIssue: 'Recheck target repository access and managed merge readiness.' }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
   if (endpoint.path === '/api/companies/:id/retirement') return { responseSchema: { ok: true, source: 'company identity', target: 'company identity', movedProjectIds: 'uuid[]', movedRuntimeIds: 'uuid[]', removedPositionIds: 'uuid[]', removedMembershipIds: 'uuid[]', preservedActivityIds: 'uuid[]', readinessIssue: 'string' }, responseExample: { ok: true, source: { id: 'source-uuid', name: 'Default Company', slug: 'default' }, target: { id: 'target-uuid', name: 'Target', slug: 'target' }, movedProjectIds: [], movedRuntimeIds: [], removedPositionIds: [], removedMembershipIds: [], preservedActivityIds: [], readinessIssue: 'Recheck target repository access and managed merge readiness.' }, rateLimit: endpoint.rateLimit ?? defaultRateLimit, requiredRole: roleDefault(endpoint) };
@@ -739,6 +749,36 @@ function responseDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'respons
   };
 }
 
+function actorDefaults(endpoint: ApiEndpoint): Pick<ApiHelpEndpoint, 'agentApplicability' | 'credentialTransport'> {
+  if (endpoint.method === 'GET' && endpoint.path === '/api/help') return {
+    agentApplicability: { boss: 'available', departmentHead: 'available', staff: 'available' },
+    credentialTransport: 'Public catalog; no credential required. Reading Help grants no operational authority.',
+  };
+  if (endpoint.auth === 'agent-session') return {
+    agentApplicability: {
+      boss: 'available only when the dedicated agent-session route and operation authorization allow it',
+      departmentHead: 'available only when the dedicated agent-session route and operation authorization allow it',
+      staff: 'available only when the dedicated agent-session route and operation authorization allow it',
+    },
+    credentialTransport: 'Dedicated Ed25519 agent-session JWT minted by a machine runner; Agent role alone supplies no credential.',
+  };
+  const transport = endpoint.auth === 'session'
+    ? 'Browser cookie session or admin-created direct API token owned by a human user; viewer/operator/admin is the human authorization dimension.'
+    : endpoint.auth === 'runner'
+      ? 'Dedicated machine runner key; Agent role supplies no runner credential.'
+      : endpoint.auth === 'none'
+        ? 'Public route; no credential required.'
+        : `Dedicated ${endpoint.auth} credential; Agent role alone supplies no credential.`;
+  return {
+    agentApplicability: {
+      boss: 'unavailable by Agent role alone',
+      departmentHead: 'unavailable by Agent role alone',
+      staff: 'unavailable by Agent role alone',
+    },
+    credentialTransport: transport,
+  };
+}
+
 function endpointWithDefaults(endpoint: ApiEndpoint): ApiHelpEndpoint {
   if (endpoint.method === 'GET' && endpoint.path === '/api/agents') endpoint = { ...endpoint, notes: [...(endpoint.notes ?? []), 'remoteWork is null or {status: waiting_for_remote | unresolved, count, reason}. isBusy remains true while accepted A2A work has not naturally finished, even if its local card was cancelled. Refreshing or clearing an agent session does not release this remote capacity.'] };
   if (endpoint.method === 'POST' && endpoint.path === '/api/chat/sessions/:id/messages') endpoint = { ...endpoint, notes: [...(endpoint.notes ?? []), '409 a2a_remote_work_pending means a previous A2A invocation still occupies the agent. Wait for its original task reconciliation; repeated submissions do not cancel it or create a replacement task.'] };
@@ -777,7 +817,7 @@ function endpointWithDefaults(endpoint: ApiEndpoint): ApiHelpEndpoint {
     endpoint.path === '/api/a2a/push' ? 'Usage on submitted/working/input_required/auth_required or unknown states is incremental and preserves active exposure. Only completed/failed/canceled/rejected are terminal accounting callbacks, including when no new usage is supplied. Cumulative cost reports replace earlier cost by delta; token-only or unknown-cost progress does not release reservations. Late progress cannot reopen terminal exposure.' : endpoint.path === '/api/webhook/task-complete' ? 'A normalized in_progress callback reports incremental usage and retains active exposure; cumulative cost reports replace earlier cost by delta. Duplicate, token-only or unknown-cost progress does not release the remaining reservation or extend its expiry. Other completion statuses finalize accounting. The actual provider return also finalizes accounting independently of its resulting card status.' : 'Runner completion finalizes accounting for the original provider attempt; authenticated late corrections retain facts without reopening its reservation.',
     endpoint.path === '/api/a2a/push' ? 'Context-only reconciliation hints may be unsigned when no per-agent signing secret is configured; they never settle or release accounting. The adapter includes usageAttemptKey only with configured a2aPushSecret or a2aBearerToken. Supply usage in statusUpdate.metadata.megacorpsUsage. The server-issued usageAttemptKey callback query identifies the original attempt; HMAC is required for accounting. Reused A2A context/task IDs are not usage-event identities. Signed late accounting never replays or accelerates orchestration. This extension is opt-in; no claim existing Hermes supplies it.' : 'Supply usage as a top-level object. Original taskRunId is required for runner callbacks; a webhook may instead use a server-issued usageAttemptKey. If both are supplied they must identify the same attempt. Legacy costUsd is an estimate. Duplicate/late authenticated usage may correct a terminal attempt without replaying completion; original runner ownership survives release of its orchestration lock.',
   ] };
-  return { ...endpoint, ...responseDefaults(endpoint) };
+  return { ...endpoint, ...responseDefaults(endpoint), ...actorDefaults(endpoint) };
 }
 
 export function apiHelpCatalog() {
@@ -824,7 +864,22 @@ export function apiHelpCatalog() {
       note: 'backlog and todo are merged. Send todo for new work; legacy backlog input is accepted and normalized to todo. The web board visually groups in_review/needs_review/waiting_on_external and blocked/cancelled while the API preserves canonical statuses. Kanban adapter prompts use full_bootstrap for the first scoped card turn and adapter_session_delta for later codex-app/hermes-ssh turns.',
     },
     adapters: agentAdapterTypes,
-    cli: cliHelp,
+    cli: {
+      ...cliHelp,
+      commands: cliHelp.commands.map((command) => ({
+        ...command,
+        agentApplicability: {
+          boss: 'Role alone does not authorize this CLI command.',
+          departmentHead: 'Role alone does not authorize this CLI command.',
+          staff: 'Role alone does not authorize this CLI command.',
+        },
+        credentialTransport: command.auth === 'runner'
+          ? 'Machine runner key; runner registration and scope control access, not Agent rank.'
+          : command.auth === 'session'
+            ? 'Human session cookie with the endpoint-required company role. Never inject human credentials into Agent prompts.'
+            : 'Login requires human account credentials; an Agent role is not a login credential.',
+      })),
+    },
     endpoints: catalogEndpoints,
   };
 }
@@ -904,6 +959,10 @@ export function apiHelpMarkdown(): string {
       `### megacorps ${command.command}`,
       command.summary,
       `Auth: ${command.auth}`,
+      `BOSS: ${command.agentApplicability.boss}`,
+      `DEPARTMENT HEAD: ${command.agentApplicability.departmentHead}`,
+      `STAFF: ${command.agentApplicability.staff}`,
+      `Credential transport: ${command.credentialTransport}`,
       `Env: ${command.env.join(', ') || 'none'}`,
       `Flags: ${JSON.stringify(command.flags)}`,
       'Example:',
@@ -920,7 +979,7 @@ export function apiHelpMarkdown(): string {
   for (const group of groups) {
     lines.push('', `### ${group}`);
     for (const endpoint of catalog.endpoints.filter((item) => item.group === group)) {
-      lines.push('', `#### ${endpoint.method} ${endpoint.path}`, endpoint.summary, `Auth: ${endpoint.auth}`, `Required role: ${endpoint.requiredRole}`);
+      lines.push('', `#### ${endpoint.method} ${endpoint.path}`, endpoint.summary, `Auth: ${endpoint.auth}`, `Human required role: ${endpoint.requiredRole}`, `Agent applicability: BOSS=${endpoint.agentApplicability.boss}; DEPARTMENT HEAD=${endpoint.agentApplicability.departmentHead}; STAFF=${endpoint.agentApplicability.staff}`, `Credential transport: ${endpoint.credentialTransport}`);
       if (endpoint.params) lines.push(`Params: ${JSON.stringify(endpoint.params)}`);
       if (endpoint.query) lines.push(`Query: ${JSON.stringify(endpoint.query)}`);
       if (endpoint.body) lines.push('Body:', jsonBlock(endpoint.body));

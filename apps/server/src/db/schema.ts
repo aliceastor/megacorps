@@ -551,6 +551,13 @@ export const mergeIntents = pgTable('merge_intents', {
   attemptCount: integer('attempt_count').notNull().default(0),
   lastAttemptAt: timestamp('last_attempt_at', { withTimezone: true }),
   lastResult: text('last_result'),
+  decisionRequired: boolean('decision_required').notNull().default(true),
+  candidateDepartmentId: uuid('candidate_department_id'),
+  authorizedByAgentId: uuid('authorized_by_agent_id'),
+  authorizedByUserId: uuid('authorized_by_user_id'),
+  authorizedAt: timestamp('authorized_at', { withTimezone: true }),
+  authorizationReason: text('authorization_reason'),
+  decisionQuestionId: uuid('decision_question_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 

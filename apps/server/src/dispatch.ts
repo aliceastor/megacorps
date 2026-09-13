@@ -1526,6 +1526,7 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
     const executionAgent = await buildExecutionAgent(target, null);
     const digest = (await buildAgentDigest(target.id, card.companyId)).text;
     const questionMetadata = commentMetadata(comment.metadata);
+    const mergeDecision = questionMetadata.mergeDecision === true && comment.authorType === 'system' && typeof questionMetadata.mergeIntentId === 'string';
     const prompt = [
       await buildCommonCompanyContext(card.companyId, target.id, card.tags ?? []),
       questionMetadata.brainstorm
@@ -1540,9 +1541,11 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
       `Recent conversation on this card:\n${clipText(await messageBoardThreadContext(card, comment), 3000)}`,
       `Question from ${authorName}:`,
       comment.body,
-      'Reply with the answer text only. Your reply is posted back to the same message board thread automatically — do not call any webhook, do not create or update cards, and do not delegate. If you genuinely do not know, say so and name who or what might.',
+      mergeDecision
+        ? 'This is a platform-queued merge decision. Follow the candidate-specific merge_pr instruction above. Return one megacorps-chat-actions block containing only that merge_pr action, or explain why it must be returned for correction or escalated. Do not call a provider API or execute implementation work.'
+        : 'Reply with the answer text only. Your reply is posted back to the same message board thread automatically — do not call any webhook, do not create or update cards, and do not delegate. If you genuinely do not know, say so and name who or what might.',
     ].filter(Boolean).join('\n\n');
-    const task = { executionKey: attemptKey({ heartbeatRunId: run.id }), id: `peer-${comment.id}`, title: `Peer question on: ${card.title}`, body: prompt, timeoutSeconds: await readChatTaskTimeoutSeconds(), kind: 'chat' as const, informationalOnly: true };
+    const task = { executionKey: attemptKey({ heartbeatRunId: run.id }), id: `peer-${comment.id}`, title: `Peer question on: ${card.title}`, body: prompt, timeoutSeconds: await readChatTaskTimeoutSeconds(), kind: 'chat' as const, informationalOnly: !mergeDecision, mergeDecision };
     await recordPromptLog({
       companyId: card.companyId,
       agentId: target.id,
@@ -1558,7 +1561,18 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
     const result = await sanitizeCompanyOutput(card.companyId, await executeUsage(cardUsageScope(card, target, run.id, null, 'peer'), () => adapter.dispatch(executionAgent, task), { timeoutSeconds: task.timeoutSeconds, a2aScope: a2aExecutionScope(target.id, task) }));
     const normalizedAnswer = normalizeAgentResult({ output: result.output, needsInput: result.needsInput, allowCollaboration: false });
     if (!result.success || !result.output.trim() || ['failed', 'rejected', 'invalid', 'permission', 'input_required'].includes(normalizedAnswer.outcome)) throw new Error(normalizedAnswer.reason ?? result.output ?? 'peer_answer_failed');
-    await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: target.id, action: 'peer_answer', body: result.output, delegationStatus: 'done' });
+    let answerBody = result.output;
+    if (mergeDecision) {
+      const { extractChatWorkItems } = await import('./chat-work-items.ts');
+      const { requestManagerMerge } = await import('./manager-merge.ts');
+      const block = extractChatWorkItems(result.output);
+      const actions = block && 'actions' in block ? block.actions.actions : [];
+      const action = actions[0];
+      if (actions.length !== 1 || action?.action !== 'merge_pr' || action.intentId !== questionMetadata.mergeIntentId) throw new Error(`merge_decision_not_authorized: ${result.output.slice(0, 1500)}`);
+      const receipt = await requestManagerMerge({companyId:card.companyId,agentId:target.id,source:'management'}, action);
+      answerBody = `Merge decision ${receipt.status}: ${action.reason}. Provider verification is still required.`;
+    }
+    await addCardMessage({ cardId: card.id, parentCommentId: comment.id, agentId: target.id, action: 'peer_answer', body: answerBody, delegationStatus: 'done' });
     if ((comment.metadata as Record<string, unknown> | null)?.helpRequestId) {
       const resumed = await resumeDelegatedQuestion(comment);
       if (resumed) await enqueueMessageTaskRun(resumed, 'message');
@@ -1572,6 +1586,10 @@ async function answerPeerQuestion(app: FastifyInstance, card: CardRow, comment: 
     return true;
   } catch (error) { if (isA2aTaskRunLeaseLost(error)) throw error;
     const message = await sanitizeCompanyOutput(card.companyId, error instanceof Error ? error.message : 'peer_answer_failed');
+    if (commentMetadata(comment.metadata).mergeDecision === true && comment.authorType === 'system') {
+      const { recoverMergeDecision } = await import('./manager-merge.ts');
+      await recoverMergeDecision(card, comment, target.id, message);
+    }
     // One failed attempt ends the question rather than retrying forever; the
     // asking agent sees the failure in the thread and can re-ask.
     await db.update(cardComments).set({ delegationStatus: 'failed' }).where(eq(cardComments.id, comment.id));
@@ -4579,7 +4597,7 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
     const runtime = focusAgent.runtimeId ? runtimeById.get(focusAgent.runtimeId) : undefined;
     const department = focusAgent.departmentId ? departmentById.get(focusAgent.departmentId) : undefined;
     const position = focusAgent.positionId ? positionById.get(focusAgent.positionId) : undefined;
-    const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt, isCompanyLeadership: Boolean(position?.isCompanyLeadership || position?.isCompanyBoss) });
+    const positionPrompt = formatAgentPositionPrompt({ positionName: position?.name, departmentName: department?.name, companyName: company?.name, customPrompt: position?.prompt, isCompanyLeadership: Boolean(position?.isCompanyLeadership || position?.isCompanyBoss), agent: { ...focusAgent, companyId }, position });
     const reports = visibleAgents
       .filter((agent) => agent.bossId === focusAgent.id && agent.isActive !== false)
       .map((agent) => ({

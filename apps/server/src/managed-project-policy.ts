@@ -10,7 +10,7 @@ export function managedMergePromptPolicy(project: ManagedProjectPolicy | null | 
   return [
     'Authoritative managed project merge policy (current server configuration):',
     'These rules override conflicting position instructions and earlier session instructions, including instructions to merge after PASS.',
-    'MegaCorps alone performs the authorized merge after all approvals and exact reviewed-head verification. Report evidence, the PR URL and full head SHA. When reviewing, report the exact reviewed head and your verdict; approval is not permission for an agent to merge.',
+    'MegaCorps alone performs the authorized merge after independent review, an explicit manager merge_pr decision, all approvals and exact reviewed-head verification. Boss may authorize company candidates; a formal department Head may authorize only its own department candidates. Staff cannot authorize merge. Reviewer approval alone never starts a merge. Report evidence, the PR URL and full head SHA. Use the platform merge_pr action only in Direct Chat or a queued merge decision turn; never use provider credentials to merge.',
     'Use only your assigned ordinary agent identity. Do not read or use administrator or service credentials from environment files, runtime configuration, other profiles or shared files. Do not switch identities or change permission/runtime policy to bypass a denial; report the concrete blocker.',
     'Do not call provider merge APIs or execute merge/push operations into the default branch. Managed work branches support normal append pushes; provider protection forbids force pushes and branch deletion. A changed PR head requires a new review.',
   ].join('\n');

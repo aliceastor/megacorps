@@ -1,3 +1,4 @@
+import { managerMergeMigration } from './manager-merge-migration.ts';
 import { managerPositionMigrationSql } from './manager-position-migration.ts';
 import { positionAuthorityMigrationSql } from './position-authority-migration.ts';
 import { cleanupUnusedDefault } from './companyless-migration.ts';
@@ -20,6 +21,7 @@ const MIGRATION_LOCK_KEY = 727274001;
 // created before the version table will re-run v1 exactly once to get recorded.
 // Never edit an applied migration's statements — add the change as a new version.
 const migrations: Migration[] = [
+  { version: 36, name: 'manager-authorized-merge', run: async () => { await sql.begin(async tx => { await tx.unsafe(managerMergeMigration); }); } },
   { version: 35, name: 'manager-position-company-leadership', run: async () => {
     await sql.begin(async tx => {
       const complete=await tx`SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='positions' AND column_name='is_company_leadership'`;

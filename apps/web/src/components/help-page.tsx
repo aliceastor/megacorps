@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { BookOpen, Copy, ExternalLink, FileCode2, Search, Terminal } from 'lucide-react';
 import { api, API_URL } from '@/lib/api';
 
@@ -21,6 +21,8 @@ type ApiEndpoint = {
   responseExample?: unknown;
   rateLimit?: string;
   notes?: string[];
+  agentApplicability: { boss: string; departmentHead: string; staff: string };
+  credentialTransport: string;
 };
 
 type CliCommand = {
@@ -31,6 +33,8 @@ type CliCommand = {
   env: string[];
   example: string;
   lifecycle: string[];
+  agentApplicability: { boss: string; departmentHead: string; staff: string };
+  credentialTransport: string;
 };
 
 type CliHelp = {
@@ -63,23 +67,44 @@ type ApiHelp = {
   rateLimits?: { enforced: boolean; summary: string; productionRecommendation: string };
   kanban: { stages: string[]; legacyAliases: Record<string, string>; note: string };
   adapters: string[];
+  agentOperations: Record<'chat' | 'execution' | 'management' | 'review', string>;
   cli: CliHelp;
   endpoints: ApiEndpoint[];
 };
+
+export function AgentOperationHelp({ guides }: { guides: ApiHelp['agentOperations'] }) {
+  const labels: Record<keyof typeof guides, string> = { chat: 'Direct Chat', execution: 'Execution', management: 'Management', review: 'Review' };
+  return <section className="card section-card">
+    <div className="panel-title"><div><h2>Agent operations</h2><p style={{ margin: 0, color: 'var(--muted)' }}>Injected operation guidance with explicit Agent-role applicability.</p></div><BookOpen size={18} /></div>
+    <div className="help-architecture-grid">
+      {(Object.keys(labels) as Array<keyof typeof guides>).map((surface) => <article className="list-row help-surface" key={surface}>
+        <b>{labels[surface]}</b>
+        <CodeBlock value={guides[surface]} />
+      </article>)}
+    </div>
+  </section>;
+}
 
 function CodeBlock({ value }: { value: unknown }) {
   return <pre className="log-block">{typeof value === 'string' ? value : JSON.stringify(value, null, 2)}</pre>;
 }
 
-function EndpointCard({ endpoint }: { endpoint: ApiEndpoint }) {
+export function EndpointCard({ endpoint }: { endpoint: ApiEndpoint }) {
   return <article className="list-row help-endpoint">
     <div className="help-endpoint-head">
       <span className={`method-pill method-${endpoint.method.toLowerCase()}`}>{endpoint.method}</span>
       <code>{endpoint.path}</code>
       <span className="status-pill">{endpoint.auth}</span>
-      <span className="status-pill">{endpoint.requiredRole ?? 'none'}</span>
+      <span className="status-pill">Human role: {endpoint.requiredRole ?? 'none'}</span>
     </div>
     <p>{endpoint.summary}</p>
+    <b>Agent roles</b>
+    <div className="help-api-list">
+      <span><b>BOSS:</b> {endpoint.agentApplicability.boss}</span>
+      <span><b>DEPARTMENT HEAD:</b> {endpoint.agentApplicability.departmentHead}</span>
+      <span><b>STAFF:</b> {endpoint.agentApplicability.staff}</span>
+    </div>
+    <p><b>Credential transport:</b> {endpoint.credentialTransport}</p>
     {endpoint.params && <><b>Params</b><CodeBlock value={endpoint.params} /></>}
     {endpoint.query && <><b>Query</b><CodeBlock value={endpoint.query} /></>}
     {endpoint.body !== undefined && <><b>Body</b><CodeBlock value={endpoint.body} /></>}
@@ -99,6 +124,13 @@ function CliCommandCard({ command }: { command: CliCommand }) {
       <span className="status-pill">{command.auth}</span>
     </div>
     <p>{command.summary}</p>
+    <b>Agent roles</b>
+    <div className="help-api-list">
+      <span><b>BOSS:</b> {command.agentApplicability.boss}</span>
+      <span><b>DEPARTMENT HEAD:</b> {command.agentApplicability.departmentHead}</span>
+      <span><b>STAFF:</b> {command.agentApplicability.staff}</span>
+    </div>
+    <p><b>Credential transport:</b> {command.credentialTransport}</p>
     <b>Flags</b>
     <CodeBlock value={command.flags} />
     <b>Environment</b>
@@ -143,7 +175,7 @@ export function HelpPage() {
   if (error) return <p className="form-error">{error}</p>;
   if (!help) return <p style={{ color: 'var(--muted)' }}>Loading API help...</p>;
 
-  return <div style={{ display: 'grid', gap: 16 }}>
+  return <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, gap: 16 }}>
     <div className="page-head">
       <div>
         <h1>Help</h1>
@@ -220,6 +252,8 @@ export function HelpPage() {
       </div>
       {help.rateLimits && <p style={{ color: 'var(--muted)', margin: 0 }}>{help.rateLimits.summary}</p>}
     </section>}
+
+    {tab === 'api' && <AgentOperationHelp guides={help.agentOperations} />}
 
     {tab === 'cli' && <section className="card section-card">
       <div className="panel-title">

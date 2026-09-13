@@ -4,6 +4,7 @@ import { approvals, externalWaits, kanbanCards, mergeIntents, projects, reviewRo
 import { childCompletionPolicySatisfied } from './dispatch.ts';
 import { giteaConfigFromEnv, giteaMergePullRequest, giteaPullRequest } from './gitea.ts';
 import { inspectManagedProject, managedMergeTarget } from './managed-project-policy.ts';
+import { managerDecisionStillValid } from './manager-merge.ts';
 
 const ACTIVE = ['in_flight', 'uncertain', 'accepted'];
 export const MERGE_ATTEMPT_MAX = 3;
@@ -40,6 +41,7 @@ export async function executeAuthorizedMerge(waitId: string, options: { fetchImp
       wait.status !== 'waiting' || wait.cardId !== card.id || wait.authorizedHeadSha !== intent.headSha || wait.externalId !== String(number) || wait.provider !== 'gitea' ||
       !managedMergeTarget(freshProject, config) || freshProject.managedRepoFullName !== intent.repoFullName || (freshProject.defaultBranch ?? 'main') !== intent.defaultBranch ||
       intent.attemptCount !== original.attemptCount || intent.state !== original.state) return null;
+    if (!(await managerDecisionStillValid(tx, card, intent))) return null;
     const decisions = await tx.select().from(approvals).where(eq(approvals.cardId, card.id)).orderBy(desc(approvals.createdAt));
     const human = decisions.find((approval) => (approval.payload as { humanGate?: boolean } | null)?.humanGate === true);
     const rounds = await tx.select().from(reviewRounds).where(eq(reviewRounds.cardId, card.id));

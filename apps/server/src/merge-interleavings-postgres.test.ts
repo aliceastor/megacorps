@@ -4,6 +4,7 @@ import { fork, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { isolatedPostgres } from './test-support/postgres-db.ts';
+import { authorizeManagerMerge, seedManagerMergeReview } from './test-support/manager-merge-fixture.ts';
 
 test('PostgreSQL separate-process merge interleavings', { skip: !process.env.TEST_DATABASE_URL && !process.env.CI ? 'TEST_DATABASE_URL absent; separate-process PostgreSQL checks run in CI' : false, timeout: 180_000 }, async t => {
   const { db, sql } = await isolatedPostgres(t);
@@ -13,11 +14,14 @@ test('PostgreSQL separate-process merge interleavings', { skip: !process.env.TES
     const [company] = await db.insert(companies).values({ name: 'Contenders', slug: `contenders-${randomUUID()}` }).returning();
     const [project] = await db.insert(projects).values({ companyId: company!.id, name: 'Managed', repoProvider: 'gitea-local', repoUrl: 'https://gitea.test/org/repo', managedRepoFullName: 'org/repo', defaultBranch: 'main', autoMergeAfterApproval: true, completionRequiresMerge: true }).returning();
     const [card] = await db.insert(kanbanCards).values({ companyId: company!.id, projectId: project!.id, title: 'Exact head', body: 'Evidence', columnStatus: parked ? 'waiting_on_external' : 'in_review' }).returning();
-    if (!parked) return { card: card!, project: project!, wait: null, intent: null };
+    const authority = await seedManagerMergeReview(company!.id, project!.id, card!.id, head);
+    const [reviewedCard] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card!.id));
+    if (!parked) return { card: reviewedCard!, project: project!, wait: null, intent: null, authority };
     const [wait] = await db.insert(externalWaits).values({ cardId: card!.id, companyId: company!.id, waitingFor: 'merge into main', provider: 'gitea', status: 'waiting', authorizedHeadSha: head, externalId: '12', externalUrl: 'https://gitea.test/org/repo/pulls/12', pollCount: 0, pollIntervalSeconds: 30 }).returning();
     const [fresh] = await db.select().from(kanbanCards).where(eq(kanbanCards.id, card!.id));
-    const [intent] = await db.insert(mergeIntents).values({ cardId: card!.id, projectId: project!.id, waitId: wait!.id, headSha: head, repoFullName: 'org/repo', defaultBranch: 'main', gateVersion: fresh!.mergeGateVersion, state: 'prepared' }).returning();
-    return { card: fresh!, project: project!, wait: wait!, intent: intent! };
+    const [intent] = await db.insert(mergeIntents).values({ cardId: card!.id, projectId: project!.id, waitId: wait!.id, headSha: head, repoFullName: 'org/repo', defaultBranch: 'main', gateVersion: fresh!.mergeGateVersion, state: 'prepared', candidateDepartmentId: authority.department.id }).returning();
+    await authorizeManagerMerge(company!.id, authority.boss.id, intent!);
+    return { card: fresh!, project: project!, wait: wait!, intent: intent!, authority };
   }
   function contender(input: Record<string, unknown>) {
     const name = `mc_contender_${randomUUID()}`;
@@ -61,6 +65,7 @@ test('PostgreSQL separate-process merge interleavings', { skip: !process.env.TES
     const waits = await db.select().from(externalWaits).where(eq(externalWaits.cardId, f.card.id));
     const intents = await db.select().from(mergeIntents).where(eq(mergeIntents.cardId, f.card.id));
     assert.equal(waits.length, 1); assert.equal(intents.length, 1); assert.equal(intents[0]!.waitId, waits[0]!.id);
+    assert.equal(intents[0]!.authorizedAt, null, 'independent review alone does not authorize a provider merge');
     assert.equal((await db.select().from(kanbanCards).where(eq(kanbanCards.id, f.card.id)))[0]!.columnStatus, 'waiting_on_external');
   });
   await t.test('cancellation wins while an independent merge claimant waits on the card', async () => {

@@ -1,6 +1,6 @@
 # Auroria Inc. 員工手冊
 
-版本：2026-09-13；依 MegaCorps 321ee25 已上線架構整理。
+版本：2026-09-13；對應 MegaCorps 主管授權合併與角色權限架構。
 
 本手冊規範公司工作方式。實際權限、組織、專案、審查及合併門檻，以平台目前設定與本次注入內容為準；手冊、歷史對話或範例不授予額外權限，也不能覆蓋安全限制。
 
@@ -14,6 +14,7 @@
 ## 2. 組織與分工
 
 - 公司只有一位 Boss，Rank 0，不屬任何部門，沒有 Agent 回報對象。公司領導層可另有直屬 Agent，但不因此取得 Boss 權限。
+- 注入的 boss／department_head／staff 表示可用操作的繼承：Boss 三項皆 yes，Head 為 no／yes／yes，Staff 為 no／no／yes。這不改變組織身分，也不授予 provider 管理權；停用 Agent 沒有操作權限。
 - 每個部門最多一個 Department Head 職位，Rank 1，其 Manager Position 為 Boss 職位。一般職位依平台使用 Rank 2–9，數字越小層級越高。
 - 成員部門由 Position 決定；回報人須從 Manager Position 的合資格成員中選擇。不要自行跨越管理關係指派工作。
 - Boss 負責目標、優先順序、分派、協調與目標評估；不親自寫程式或文件、跑測試、建立交付 PR，亦不代替專業 Reviewer。
@@ -52,7 +53,7 @@
 - 程式相關 Commit Message、PR 標題及程式碼註解使用英文；土木工程專業內容以英文為主。其他交付遵從任務語言要求。
 - 審查人檢查當前實物及確切 revision，依固定 rubric 提供 0–10 分與依據；協調、聊天、Boss 目標評估及自檢不冒充獨立專業評分。
 - 已有有效審查可依平台提供的證據復用；內容、revision、範圍或門檻變更時補查受影響部分。審查不是另做一份交付。
-- 目前 managed Gitea 的合併由平台在審查、證據、權限及確切 revision 門檻通過後執行。CTO、其他 Agent 與 Boss 均不得憑本手冊直接合併或繞過分支保護；其他 provider 依實際專案政策處理。
+- Managed Gitea：獨立 Reviewer 通過後，由 Boss（全公司）或正式 Department Head（本部門）使用平台提供的候選 ID、完整受審 SHA 與理由提出 merge_pr；Staff 無合併決定權。可在 Direct Chat 或平台排程的 Merge 決定回合使用。主管忙碌就等待，失敗有限重試並向 Boss／人類升級。平台重新核對審查、測試、客戶批准及 revision 後才執行，確認 provider 結果才算合併完成；不直接使用 Gitea 管理員憑證或繞過保護。其他 provider 依專案政策。
 - 不強制另建 Phase Merge 卡。Boss 在必要子卡及門檻通過後做目標評估；completed 回報不等於自行將卡片設 done，實際狀態由平台決定。
 
 ## 6. 回報、指引與安全

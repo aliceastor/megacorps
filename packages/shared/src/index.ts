@@ -1,4 +1,5 @@
 import { z } from 'zod';
+export { agentAuthority, type AgentAuthority, type AuthorityAgent, type AuthorityPosition } from './agent-authority.ts';
 
 export const cardStatuses = ['todo', 'in_progress', 'in_review', 'needs_review', 'waiting_on_external', 'waiting_on_client', 'waiting_on_brainstorm', 'done', 'blocked', 'cancelled'] as const;
 export type CardStatus = (typeof cardStatuses)[number];
@@ -503,7 +504,15 @@ export type AgentReport = z.infer<typeof agentReportSchema>;
 // POST /api/cards itself. Instead it emits this block in its reply and the
 // server applies it on the chatting user's behalf, the same way a DELEGATE
 // block is turned into delegation requests server-side.
+export const mergePrActionSchema = z.object({
+  action: z.literal('merge_pr'),
+  intentId: z.string().uuid(),
+  headSha: z.string().regex(/^[0-9a-f]{40}$/),
+  reason: z.string().trim().min(1).max(2000),
+}).strict();
+export type MergePrAction = z.infer<typeof mergePrActionSchema>;
 export const chatWorkItemActionSchema = z.discriminatedUnion('action', [
+  mergePrActionSchema,
   z.object({
     action: z.literal('create_card'),
     title: z.string().trim().min(1).max(200),

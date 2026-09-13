@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { memoryDb } from './test-support/memory-db.ts';
-import { externalEvents, externalWaits, kanbanCards, mergeIntents, projects, taskRuns, workProducts } from './db/schema.ts';
+import { agents, externalEvents, externalWaits, kanbanCards, mergeIntents, positions, projects, taskRuns, workProducts } from './db/schema.ts';
 import { parkForMerge, planMergeGate, reconcileMergeWait, type MergeGatePlan } from './merge-gate.ts';
-import { dispatchInternals, reviewCard } from './dispatch.ts';
+import { dispatchInternals } from './dispatch.ts';
 import { executeAuthorizedMerge } from './authorized-merge.ts';
 import { giteaConfigFromEnv, giteaManagedReadiness } from './gitea.ts';
+import { managerDecisionStillValid, requestManagerMerge } from './manager-merge.ts';
+import { db } from './db/client.ts';
 
 const head = 'a'.repeat(40);
 function fixture(t: TestContext, establish = false) {
@@ -14,25 +16,33 @@ function fixture(t: TestContext, establish = false) {
   process.env.GITEA_URL = 'https://gitea.test'; process.env.GITEA_ADMIN_TOKEN = 'synthetic-service-secret';
   t.after(() => { if (previous.url === undefined) delete process.env.GITEA_URL; else process.env.GITEA_URL = previous.url; if (previous.token === undefined) delete process.env.GITEA_ADMIN_TOKEN; else process.env.GITEA_ADMIN_TOKEN = previous.token; });
   const project: any = { id: randomUUID(), companyId: randomUUID(), name: 'Managed', repoProvider: 'gitea-local', repoUrl: 'https://gitea.test/org/repo', managedRepoFullName: 'org/repo', defaultBranch: 'main', completionRequiresMerge: true, autoMergeAfterApproval: true };
-  const card: any = { id: randomUUID(), companyId: project.companyId, projectId: project.id, title: 'Reviewed deliverable', body: 'Evidence', columnStatus: 'in_review', mergeGateVersion: 0, assigneeId: null, reviewerId: null, requiresApproval: false, dependencyCardIds: [] };
-  const state = memoryDb(t, [[projects, [project]], [kanbanCards, [card]], [workProducts, [{ id: 'work', cardId: card.id, projectId: project.id, type: 'pull_request', pullRequestUrl: 'https://gitea.test/org/repo/pulls/12', commitSha: head }]]]);
+  const departmentId = randomUUID();
+  const staff: any = { id: randomUUID(), companyId: project.companyId, positionId: randomUUID(), departmentId, isActive: true, giteaUsername: 'staff' };
+  const manager: any = { id: randomUUID(), companyId: project.companyId, positionId: randomUUID(), departmentId, isActive: true, giteaUsername: 'head' };
+  const boss: any = { id: randomUUID(), companyId: project.companyId, positionId: randomUUID(), departmentId: null, isActive: true, giteaUsername: 'boss' };
+  const identity: any = { id: randomUUID(), scope: randomUUID(), projectId: project.id, repoUrl: project.repoUrl, defaultBranch: 'main', headSha: head, externalId: '12', candidateKey: '["v2","pull_request",12]', capturedAt: new Date().toISOString() };
+  const card: any = { id: randomUUID(), companyId: project.companyId, projectId: project.id, departmentId, title: 'Reviewed deliverable', body: 'Evidence', columnStatus: 'in_review', mergeGateVersion: 0, assigneeId: staff.id, reviewerId: manager.id, reviewIdentity: identity, requiresApproval: false, dependencyCardIds: [] };
+  const acceptedReview: any = { id: identity.scope, cardId: card.id, companyId: project.companyId, agentId: manager.id, kind: 'review', status: 'success', reviewIdentity: identity, output: JSON.stringify({ kind: 'megacorps-report', status: 'completed', verdict: 'approved', summary: 'Independent artifact review passed.' }) };
+  const state = memoryDb(t, [[agents, [staff, manager, boss]], [positions, [{ id: staff.positionId, companyId: project.companyId, rank: 9, isActive: true, defaultDepartmentId: departmentId }, { id: manager.positionId, companyId: project.companyId, rank: 1, isActive: true, isDepartmentHead: true, defaultDepartmentId: departmentId }, { id: boss.positionId, companyId: project.companyId, rank: 0, isActive: true, isCompanyBoss: true }]], [projects, [project]], [kanbanCards, [card]], [taskRuns, [acceptedReview]], [workProducts, [{ id: 'work', cardId: card.id, projectId: project.id, type: 'pull_request', pullRequestUrl: 'https://gitea.test/org/repo/pulls/12', commitSha: head }]]]);
   const plan: Extract<MergeGatePlan, { disposition: 'wait' }> = { disposition: 'wait', project, candidate: { kind: 'pull_request', pullRequestNumber: 12, pullRequestUrl: 'https://gitea.test/org/repo/pulls/12', branch: 'feature', headSha: head, workProductId: 'work' }, headSha: head, defaultBranch: 'main', waitingFor: 'merge into main', externalId: '12', externalUrl: 'https://gitea.test/org/repo/pulls/12' };
   let posts = 0, merged = false, observedHead = head, observedBase = 'main';
+  const requests: string[] = [];
   const rules: any[] = establish ? [] : [{ rule_name: '[m]ain', created_at: '2026-09-05T00:00:00Z', enable_push: false, enable_merge_whitelist: true, merge_whitelist_usernames: ['service'], merge_whitelist_teams: [] }, { rule_name: '**', created_at: '2026-09-05T00:00:02Z', enable_push: true, enable_push_whitelist: false, enable_merge_whitelist: true, merge_whitelist_usernames: [], merge_whitelist_teams: [] }];
   let post: () => Promise<Response> = async () => { merged = true; return new Response(null, { status: 204 }); };
   const fetchImpl: typeof fetch = async (url, init) => {
     const path = new URL(String(url)).pathname;
+    requests.push(`${init?.method ?? 'GET'} ${path}`);
     if (init?.method === 'POST' && path.endsWith('/branch_protections')) { rules.push({ ...JSON.parse(String(init.body)), created_at: new Date().toISOString() }); return new Response('{}'); }
     if (init?.method === 'POST') {
       posts++; const body = JSON.parse(String(init.body));
       assert.deepEqual(body, { Do: 'merge', head_commit_id: head, force_merge: false, merge_when_checks_succeed: false, delete_branch_after_merge: false });
       return post();
     }
-    const result = path.endsWith('/version') ? { version: '1.22.6' } : path.endsWith('/user') ? { login: 'service' } : path.endsWith('/permission') ? { permission: 'admin' } : path.endsWith('/collaborators') ? [] : path.endsWith('/branch_protections') ? rules : path.endsWith('/pulls/12') ? { number: 12, state: merged ? 'closed' : 'open', merged, head: { sha: observedHead }, base: { ref: observedBase } } : { default_branch: 'main' };
+    const result = path.endsWith('/version') ? { version: '1.22.6' } : path.endsWith('/user') ? { login: 'service' } : path.endsWith('/collaborators/service/permission') ? { permission: 'admin' } : path.includes('/collaborators/') && path.endsWith('/permission') ? { permission: 'write', user: { is_admin: false } } : path.endsWith('/collaborators') ? [] : path.endsWith('/branch_protections') ? rules : path.endsWith('/pulls/12') ? { number: 12, state: merged ? 'closed' : 'open', merged, head: { sha: observedHead }, base: { ref: observedBase } } : { default_branch: 'main' };
     return new Response(JSON.stringify(result));
   };
   t.mock.method(globalThis, 'fetch', fetchImpl);
-  return { project, card, state, plan, fetchImpl, posts: () => posts, setPost: (fn: typeof post) => { post = fn; }, merge: () => { merged = true; }, drift: () => { observedHead = 'b'.repeat(40); }, retarget: (branch = 'feature/deep/nested') => { observedBase = branch; }, canServiceMerge: () => {
+  return { project, card, state, plan, fetchImpl, manager, boss, requests, posts: () => posts, setPost: (fn: typeof post) => { post = fn; }, merge: () => { merged = true; }, drift: () => { observedHead = 'b'.repeat(40); }, retarget: (branch = 'feature/deep/nested') => { observedBase = branch; }, canServiceMerge: () => {
     // Pinned Gitea: plain exact EqualFold precedes globs; globs use oldest
     // CreatedUnix first and case-sensitive matching (literal class and ** here).
     const special = (name: string) => /[\[\]*?{}]/.test(name);
@@ -45,13 +55,27 @@ function fixture(t: TestContext, establish = false) {
     return !effective?.enable_merge_whitelist || effective.merge_whitelist_usernames.includes('service');
   } };
 }
-test('normal review entrypoint settles its original run after automatic merge and never injects service secrets', async (t) => {
+
+async function authorize(f: ReturnType<typeof fixture>, actor = f.manager) {
+  const intent: any = f.state.rows(mergeIntents).at(-1);
+  assert.ok(intent, 'parking creates one durable merge candidate');
+  const result = await requestManagerMerge({ companyId: f.card.companyId, agentId: actor.id, source: 'management' }, { action: 'merge_pr', intentId: intent.id, headSha: intent.headSha, reason: 'Independent review accepted this exact candidate.' });
+  assert.equal(await managerDecisionStillValid(db, f.card, intent), true, 'recorded manager decision remains valid before provider claim');
+  const wait: any = f.state.rows(externalWaits).find((row: any) => row.id === intent.waitId);
+  if (wait.pollCount == null) wait.pollCount = 0;
+  return result;
+}
+test('reviewer-only approval queues until an owning Head authorizes merge and never exposes service secrets', async (t) => {
   const f = fixture(t);
   f.setPost(async () => { assert.equal(f.canServiceMerge(), true); f.merge(); return new Response(null, { status: 204 }); });
-  const run: any = { id: randomUUID(), cardId: f.card.id, companyId: f.card.companyId, kind: 'review', status: 'running' };
-  f.state.rows(taskRuns).push(run);
-  await reviewCard(f.card.id, { taskRunId: run.id });
-  assert.equal(f.posts(), 1); assert.equal(run.status, 'success'); assert.equal(f.card.columnStatus, 'done');
+  const run: any = f.state.rows(taskRuns)[0]!;
+  await parkForMerge(f.card, f.plan, { fetchImpl: f.fetchImpl });
+  assert.equal(f.posts(), 0, 'reviewer approval only queues a manager decision');
+  assert.equal(run.status, 'success'); assert.equal(f.card.columnStatus, 'waiting_on_external');
+  await authorize(f, f.manager);
+  assert.equal(await executeAuthorizedMerge(f.state.rows(externalWaits)[0]!.id, { fetchImpl: f.fetchImpl }), true, JSON.stringify({ requests: f.requests, intent: f.state.rows(mergeIntents)[0], wait: f.state.rows(externalWaits)[0], card: f.card }));
+  await reconcileMergeWait(f.state.rows(externalWaits)[0]!.id, { immediate: true, fetchImpl: f.fetchImpl });
+  assert.equal(f.posts(), 1); assert.equal(f.card.columnStatus, 'done');
   assert.equal(f.state.rows(mergeIntents)[0]?.state, 'verified');
   const prompt = dispatchInternals.projectGitProtocol(null, f.project, f.card, { slug: 'ordinary' } as any);
   assert.match(prompt, /MegaCorps alone performs the authorized merge/);
@@ -69,6 +93,10 @@ test('ambiguous accepted request is reconciled from the same intent, without a s
   const f = fixture(t);
   f.setPost(async () => { f.merge(); throw new Error('response lost after acceptance'); });
   await parkForMerge(f.card, f.plan, { fetchImpl: f.fetchImpl });
+  assert.equal(f.posts(), 0);
+  await authorize(f);
+  await executeAuthorizedMerge(f.state.rows(externalWaits)[0]!.id, { fetchImpl: f.fetchImpl });
+  await reconcileMergeWait(f.state.rows(externalWaits)[0]!.id, { immediate: true, fetchImpl: f.fetchImpl });
   assert.equal(f.card.columnStatus, 'done'); assert.equal(f.posts(), 1);
   assert.equal(f.state.rows(mergeIntents)[0]?.state, 'verified');
   assert.equal(f.state.rows(externalEvents).filter((event) => event.status === 'success').length, 1);
@@ -77,16 +105,26 @@ test('head pushed between read and POST is rejected with 409 and reopens review 
   const f = fixture(t);
   f.setPost(async () => { f.drift(); return new Response('{}', { status: 409 }); });
   await parkForMerge(f.card, f.plan, { fetchImpl: f.fetchImpl });
+  assert.equal(f.posts(), 0);
+  await authorize(f);
+  await executeAuthorizedMerge(f.state.rows(externalWaits)[0]!.id, { fetchImpl: f.fetchImpl });
+  await reconcileMergeWait(f.state.rows(externalWaits)[0]!.id, { immediate: true, fetchImpl: f.fetchImpl });
   assert.equal(f.posts(), 1); assert.equal(f.card.columnStatus, 'in_review');
   assert.equal(f.state.rows(mergeIntents)[0]?.headSha, head); assert.equal(f.state.rows(mergeIntents)[0]?.state, 'drift');
 });
 test('a new review after changed gates creates a fresh authorization even when the head is unchanged', async (t) => {
   const f = fixture(t); f.setPost(async () => new Response('{}', { status: 405 }));
   await parkForMerge(f.card, f.plan, { fetchImpl: f.fetchImpl });
+  await authorize(f);
+  await executeAuthorizedMerge(f.state.rows(externalWaits)[0]!.id, { fetchImpl: f.fetchImpl });
+  await reconcileMergeWait(f.state.rows(externalWaits)[0]!.id, { immediate: true, fetchImpl: f.fetchImpl });
   f.card.mergeGateVersion++;
   f.card.columnStatus = 'in_review';
   f.setPost(async () => { f.merge(); return new Response(null, { status: 204 }); });
   await parkForMerge(f.card, f.plan, { fetchImpl: f.fetchImpl });
+  await authorize(f, f.boss);
+  await executeAuthorizedMerge(f.state.rows(externalWaits).at(-1)!.id, { fetchImpl: f.fetchImpl });
+  await reconcileMergeWait(f.state.rows(externalWaits).at(-1)!.id, { immediate: true, fetchImpl: f.fetchImpl });
   assert.equal(f.card.columnStatus, 'done');
   assert.equal(f.state.rows(mergeIntents).length, 2);
   assert.equal(f.state.rows(externalWaits).filter((wait) => wait.status === 'superseded').length, 1);
@@ -101,6 +139,9 @@ for (const target of ['feature/deep/nested', 'MAIN']) test(`established provider
     externalWrites++; f.merge(); return new Response(null, { status: 204 });
   });
   await parkForMerge(f.card, f.plan, { fetchImpl: f.fetchImpl });
+  await authorize(f);
+  await executeAuthorizedMerge(f.state.rows(externalWaits)[0]!.id, { fetchImpl: f.fetchImpl });
+  await reconcileMergeWait(f.state.rows(externalWaits)[0]!.id, { immediate: true, fetchImpl: f.fetchImpl });
   assert.equal(f.posts(), 1); assert.equal(externalWrites, 0);
   assert.equal(f.card.columnStatus, 'waiting_on_external');
   assert.equal(f.state.rows(mergeIntents)[0]?.state, 'retryable');
@@ -111,6 +152,9 @@ test('out-of-band provider protection violation never claims Done or cancellatio
   const f = fixture(t);
   f.setPost(async () => { f.retarget(); f.merge(); return new Response(null, { status: 204 }); });
   await parkForMerge(f.card, f.plan, { fetchImpl: f.fetchImpl });
+  await authorize(f);
+  await executeAuthorizedMerge(f.state.rows(externalWaits)[0]!.id, { fetchImpl: f.fetchImpl });
+  await reconcileMergeWait(f.state.rows(externalWaits)[0]!.id, { immediate: true, fetchImpl: f.fetchImpl });
   assert.equal(f.posts(), 1); assert.equal(f.card.columnStatus, 'waiting_on_external');
   assert.equal(f.state.rows(mergeIntents)[0]?.state, 'accepted');
   assert.match(f.card.lastError, /retarget|target.*changed/i);
@@ -119,9 +163,11 @@ test('out-of-band provider protection violation never claims Done or cancellatio
 for (const status of [405, 422]) test(`provider ${status} remains pending with bounded retries of one durable intent`, async (t) => {
   const f = fixture(t); f.setPost(async () => new Response('{}', { status }));
   await parkForMerge(f.card, f.plan, { fetchImpl: f.fetchImpl });
+  assert.equal(f.posts(), 0);
+  await authorize(f);
   const intent = f.state.rows(mergeIntents)[0]!, wait = f.state.rows(externalWaits)[0]!;
   assert.equal(f.card.columnStatus, 'waiting_on_external');
-  assert.equal(await executeAuthorizedMerge(wait.id, { fetchImpl: f.fetchImpl }), false);
+  assert.equal(await executeAuthorizedMerge(wait.id, { fetchImpl: f.fetchImpl }), true);
   for (let i = 0; i < 4; i++) { intent.lastAttemptAt = new Date(0); wait.lastPolledAt = new Date(0); await reconcileMergeWait(wait.id, { fetchImpl: f.fetchImpl }); }
   assert.equal(f.posts(), 3); assert.equal(intent.attemptCount, 3); assert.equal(f.state.rows(mergeIntents).length, 1); assert.equal(intent.headSha, head);
 });
@@ -141,5 +187,7 @@ for (const change of ['cancel', 'delete', 'head', 'gate_version', 'wait', 'forei
     return real(url, init);
   };
   await parkForMerge(f.card, f.plan, { fetchImpl });
+  await authorize(f);
+  await executeAuthorizedMerge(f.state.rows(externalWaits)[0]!.id, { fetchImpl });
   assert.equal(f.posts(), 0);
 });
