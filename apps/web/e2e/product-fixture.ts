@@ -1,10 +1,5 @@
 import { expect, type Page, type Request, type Route } from '@playwright/test';
-import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
-
-// Render the real catalog, including every documented endpoint. The server's
-// source-only shared package needs its normal tsx loader outside Playwright.
-const help = JSON.parse(execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', "import { apiHelpCatalog } from './src/api-help.ts'; process.stdout.write(JSON.stringify(apiHelpCatalog()));"], { cwd: resolve(process.cwd(), '../server'), encoding: 'utf8' }));
+import { help } from './help-fixture';
 
 export const companyId = '11111111-1111-4111-8111-111111111111';
 export const secondCompanyId = '22222222-2222-4222-8222-222222222222';

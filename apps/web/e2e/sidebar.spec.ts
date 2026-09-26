@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { help } from './help-fixture';
 
 const preferenceKey = 'megacorps.sidebarOpen';
 
@@ -18,8 +19,7 @@ async function openShell(page: Page, width: number, saved = 'true') {
           ? { stats: {}, stages: {}, recentTaskLogs: [], recentApiEvents: [] }
           : path.endsWith('/api/dashboard/timeseries')
             ? { days: 30, points: [] }
-        : { service: 'MegaCorps', endpoints: [], adapters: [], auth: { mode: 'session' },
-            kanban: { stages: [], legacyAliases: {} }, cli: { commands: [] } };
+        : help;
     await route.fulfill({ json });
   });
   await page.goto('/help');
