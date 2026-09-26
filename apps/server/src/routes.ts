@@ -3119,7 +3119,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
       catch(error) {
         const [actor]=await db.select().from(agents).where(and(eq(agents.id,webhookTaskRun.agentId),eq(agents.companyId,card.companyId),isNull(agents.deletedAt))).limit(1);
-        if(actor && card.reviewerId===actor.id)await sendAgentFeedbackAndRequeue({card,agent:actor,kind:'review',message:normalizedResult.reason??String(error),taskRunId,runId:webhookTaskRun.heartbeatRunId??card.activeHeartbeatRunId,result:{sessionId:actor.currentSessionId??''}});
+        if(actor && card.reviewerId===actor.id)await sendAgentFeedbackAndRequeue({card,agent:actor,kind:'review',message:normalizedResult.reason??String(error),taskRunId,runId:webhookTaskRun.heartbeatRunId??card.activeHeartbeatRunId,output:parsedBody.data.report===undefined?[body.summary,body.output].filter(Boolean).join('\n\n'):JSON.stringify(parsedBody.data.report),result:{sessionId:actor.currentSessionId??''}});
         return reply.code(409).send({error:'recovery_action_rejected',message:normalizedResult.reason??String(error)});
       }
       await completeTaskRun(taskRunId,{status:'success',preserveCard:true,output:body.output??body.summary});
@@ -3134,7 +3134,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const reason = normalizedResult.reason ?? normalizedResult.verdictError ?? (conflictingReviewerHelp ? 'review_help_conflict: Send one input_required help request without an artifact verdict or another work request.' : 'review_verdict_missing: return one evidence-supported current verdict.');
       const actorId = webhookTaskRun?.agentId ?? callerAgent?.id ?? card.assigneeId;
       const [actor] = actorId ? await db.select().from(agents).where(and(eq(agents.id, actorId), eq(agents.companyId, card.companyId), isNull(agents.deletedAt))).limit(1) : [];
-      if (actor && (!webhookTaskRun || ['dispatch', 'review'].includes(webhookTaskRun.kind))) await sendAgentFeedbackAndRequeue({ card, agent: actor, kind: webhookTaskRun?.kind === 'review' ? 'review' : 'dispatch', message: reason, taskRunId, runId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId, result: { sessionId: actor.currentSessionId ?? '' } });
+      if (actor && (!webhookTaskRun || ['dispatch', 'review'].includes(webhookTaskRun.kind))) await sendAgentFeedbackAndRequeue({ card, agent: actor, kind: webhookTaskRun?.kind === 'review' ? 'review' : 'dispatch', message: reason, taskRunId, runId: webhookTaskRun?.heartbeatRunId ?? card.activeHeartbeatRunId, output: parsedBody.data.report === undefined ? [body.summary, body.output].filter(Boolean).join('\n\n') : JSON.stringify(parsedBody.data.report), result: { sessionId: actor.currentSessionId ?? '' } });
       return reply.code(409).send({ error: 'agent_report_invalid', message: reason });
     }
     const reviewRevisionRequested = webhookTaskRun?.kind === 'review' && normalizedResult.verdict === 'revision_requested';

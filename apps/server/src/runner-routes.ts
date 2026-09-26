@@ -154,7 +154,7 @@ async function createRunnerTaskCompletion(input: {
       recovery = await applyRecoveryReport(card,runAgentId,normalized.report!,input.run.id);
     } catch (error) {
       const reason = normalized.reason ?? String(error);
-      await sendAgentFeedbackAndRequeue({card,agent:actor,kind:'review',message:reason,taskRunId:input.run.id,runId:input.run.heartbeatRunId,result:{sessionId:actor.currentSessionId??''}});
+      await sendAgentFeedbackAndRequeue({card,agent:actor,kind:'review',message:reason,taskRunId:input.run.id,runId:input.run.heartbeatRunId,output:input.body.report===undefined?output:JSON.stringify(input.body.report),result:{sessionId:actor.currentSessionId??''}});
       throw httpError(409,reason,'recovery_action_rejected');
     }
     await settleOriginalHeartbeat(card,runAgentId,input.run.heartbeatRunId,input.run.id);
@@ -172,7 +172,7 @@ async function createRunnerTaskCompletion(input: {
   if (normalized.outcome === 'invalid' || conflictingReviewerHelp || (input.run.kind === 'review' && normalized.outcome === 'completed' && (normalized.verdictError || (!protocolGuidance && normalized.source === 'report' && !normalized.verdict)))) {
     const reason = normalized.reason ?? normalized.verdictError ?? (conflictingReviewerHelp ? 'review_help_conflict: Send one successful input_required help request without an artifact verdict or another work request.' : 'Return one evidence-supported current review verdict.');
     if (!actor || !['dispatch', 'review'].includes(input.run.kind)) throw httpError(409, reason, 'agent_report_invalid');
-    return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: input.run.kind === 'review' ? 'review' : 'dispatch', message: reason, taskRunId: input.run.id, runId: input.run.heartbeatRunId, result: { sessionId: actor.currentSessionId ?? '' } });
+    return sendAgentFeedbackAndRequeue({ card, agent: actor, kind: input.run.kind === 'review' ? 'review' : 'dispatch', message: reason, taskRunId: input.run.id, runId: input.run.heartbeatRunId, output: input.body.report === undefined ? output : JSON.stringify(input.body.report), result: { sessionId: actor.currentSessionId ?? '' } });
   }
   const collaborationRequest = normalized.report?.request?.kind === 'collaboration' ? normalized.report.request : null;
   const consumableCollaboration = collaborationRequest && normalized.outcome === 'input_required' && input.run.kind === 'dispatch' && !['failed', 'blocked', 'cancelled'].includes(input.body.status);
