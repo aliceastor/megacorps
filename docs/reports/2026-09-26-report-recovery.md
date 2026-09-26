@@ -4,7 +4,7 @@
 
 - Recover explicit terminal reports using bare JSON, json fences or megacorps-report fences, including CLI diff-only output. Tool-log braces no longer poison terminal parsing. A later malformed/rejected report cannot be replaced by an earlier approval; ambiguous CLI output remains rejected.
 - Persist bounded original rejected reports and precise field errors across native, runner and webhook completion paths. All roles receive a correction-only prompt with current authority/acceptance; formatting alone does not request execution or rescoring. Manager recovery retains its allowed action constraints.
-- Put current task/acceptance, dependency blockers, required tools and human constraints ahead of optional context. Replace unrelated company-card history with compact project/goal pointers. Preserve bounded ancestor scope and unresolved review checks. Enforce the context budget and explicitly mark omitted material.
+- Put bounded company mission, current task/acceptance, dependency blockers, required tools and human constraints ahead of optional context. Replace unrelated company-card history with compact project/goal pointers. Preserve bounded ancestor scope and unresolved review checks. Enforce the context budget and explicitly mark omitted material.
 - Compact accepted-review evidence while retaining reviewer/author/head identity, meaningful checks/limitations and authenticated detail links. Block reuse when recorded head differs from accepted head; label author-only evidence distinctly. Existing artifact/assignment/approval/merge receipt gates are unchanged.
 - Give Boss goal assessment its own report contract instead of appending professional-QA instructions. Help describes correction behavior, context/auth boundaries and assessment reports.
 
@@ -16,8 +16,8 @@ Controlled full-prompt comparison against60422b3 with identical reconstructed87-
 
 | Prompt | Before characters | After characters | Change |
 |---|---:|---:|---:|
-| Digby worker | 50691 | 29955 | -40.9% |
-| CTO review | 48472 | 25162 | -48.1% |
+| Digby worker | 50691 | 30001 | -40.8% |
+| CTO review | 48472 | 25208 | -48.0% |
 | Alice assessment | 14392 | 14579 | +1.3% |
 | Alice format correction | 14392 | 14010 | -2.7% |
 
@@ -33,6 +33,8 @@ Accepted-evidence test fixtures shrink5629→2533 characters and13186→7149; pa
 - Focused protocol and full transport-path tests cover original report retention, stale score exclusion, same-session/fresh-context correction and cleared repair state.
 - Independent parser/recovery/context review findings addressed with regression tests. The final helped-retry fix preserves bounded manager guidance only for its matching actor/stage; the 61-test focused recovery/context suite and server typecheck pass after this fix.
 - Raw-output replay and prompt benchmark scripts/results are ignored local audit artifacts, not committed transcripts or credentials.
+
+The first PostgreSQL CI pass found a missing company mission in focused task previews (1580 Server tests passed, one failed). The mission is restored with bounded output; existing-card and unsaved-draft regressions pass, and the original PostgreSQL assertion remains unchanged. The follow-up typecheck and 26-test focused suite pass. A superseded CI run was cancelled while correcting a test-only strict-null annotation.
 
 ## Release status
 

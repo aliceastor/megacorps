@@ -43,7 +43,7 @@ test('current acceptance is not crowded out by company history under the minimum
 });
 test('long company mission stays bounded without displacing task acceptance or blockers', async t => {
   const { state } = fixture(t);
-  state.rows(companies)[0].mission = 'COMPANY_MISSION_SENTINEL ' + 'Background company detail. '.repeat(1000);
+  state.rows(companies)[0]!.mission = 'COMPANY_MISSION_SENTINEL ' + 'Background company detail. '.repeat(1000);
   const prompt = await buildCompanyKanbanContext('c', { focusCardId: 'focus', budgetChars: 8000 });
   assert.match(prompt, /COMPANY_MISSION_SENTINEL/);
   assert.match(prompt, /KEEP_EXACT_ACCEPTANCE/);
