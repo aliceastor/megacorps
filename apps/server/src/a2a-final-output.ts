@@ -32,7 +32,7 @@ export function projectModelWarningChat(text: string): string | null {
 // Do not let the downstream report extractor select an earlier root from a
 // purported final answer. Syntax/schema errors in one root still belong to the
 // normal correction path; only trailing material makes its boundary ambiguous.
-function projectStandaloneCandidate(candidate: string): string {
+function standaloneCandidate(candidate: string): string | null {
   let depth = 0;
   let inString = false;
   let escaped = false;
@@ -49,12 +49,12 @@ function projectStandaloneCandidate(candidate: string): string {
     else if (char === '}') {
       depth -= 1;
       if (depth === 0) {
-        if (candidate.slice(index + 1).trim()) return AMBIGUOUS_OUTPUT;
+        if (candidate.slice(index + 1).trim()) return null;
         break;
       }
     }
   }
-  return decodeChatEnvelope(candidate);
+  return candidate;
 }
 
 // Hermes appends this exact verifier diagnostic after the assistant answer.
@@ -77,32 +77,59 @@ function withoutKnownVerifierFooter(text: string): string {
   return text.slice(0, start).trimEnd();
 }
 
-/** Project recognizable CLI output before report parsing or Direct Chat rendering.
- * Hermes currently prints an open Reasoning banner without a final delimiter.
- * Only an explicit terminal report or chat envelope is recoverable in that format;
- * arbitrary prose has no safe boundary and must not expose the transcript.
+/** Select only an explicit terminal boundary, never a parseable historical root.
+ * Invalid JSON remains a candidate so the normal report correction path handles it.
  */
-export function projectFinalText(text: string): string {
-  const warningChat = projectModelWarningChat(text);
-  if (warningChat !== null) return warningChat;
-  if (!/^(?:⚠️?[^\r\n]*\r?\n)*(?:\r?\n)*┌─ Reasoning ─+┐(?:\r?\n|$)/.test(text)) return decodeChatEnvelope(text);
+function terminalJsonCandidate(text: string, hasMarker: (body: string) => boolean): string | null {
   const end = withoutKnownVerifierFooter(text.trimEnd());
+  // Honor a whole standalone root before considering a last-line object: an
+  // incomplete outer report must not promote a nested report into the answer.
+  if (end.length <= 262_144 && end.trimStart().startsWith('{') && hasMarker(end)) {
+    const whole = standaloneCandidate(end.trim());
+    if (whole !== null) return whole;
+  }
   // Bound final-answer work independently of an arbitrarily large tool log.
   const tail = end.slice(-262_144);
   // Never reinterpret a chopped first line as a new standalone payload.
   const suffix = end.length > 262_144 ? tail.slice(tail.indexOf('\n') >= 0 ? tail.indexOf('\n') + 1 : tail.length) : tail;
   const lastLine = suffix.slice(suffix.lastIndexOf('\n') + 1).trim();
-  const hasAnswerMarker = (body: string) => body.includes('megacorps-report') || body.includes(CHAT_KIND);
-  if (lastLine.startsWith('{') && hasAnswerMarker(lastLine)) return projectStandaloneCandidate(lastLine);
+  if (lastLine.startsWith('{') && hasMarker(lastLine)) return standaloneCandidate(lastLine);
   if (lastLine === '```') {
     const lines = suffix.split(/\r?\n/);
     for (let index = lines.length - 2; index >= 0; index -= 1) {
       if (!/^\s*```/.test(lines[index]!)) continue;
-      if (!/^\s*```(?:json)?\s*$/i.test(lines[index]!)) break;
+      if (!/^\s*```(?:json|megacorps-report)?\s*$/i.test(lines[index]!)) break;
       const body = lines.slice(index + 1, -1).join('\n').trim();
-      if (body.startsWith('{') && hasAnswerMarker(body)) return projectStandaloneCandidate(body);
+      if (body.startsWith('{') && hasMarker(body)) return standaloneCandidate(body);
       break;
     }
   }
-  return AMBIGUOUS_OUTPUT;
+  return null;
+}
+
+/** Bounded report-only source for extraction and protocol-repair evidence.
+ * This never decodes chat envelopes or returns surrounding CLI output.
+ */
+export function terminalReportCandidate(text: string): string | null {
+  const candidate = terminalJsonCandidate(text, (body) => /"kind"\s*:\s*"megacorps-report"/.test(body));
+  if (candidate === null) return null;
+  try { return JSON.parse(candidate).kind === 'megacorps-report' ? candidate : null; }
+  catch {
+    // For malformed syntax, only the explicit root kind can identify the report;
+    // a nested report or a chat body is never repair evidence.
+    return /^\{\s*"kind"\s*:\s*"megacorps-report"/.test(candidate) ? candidate : null;
+  }
+}
+
+/** Project recognizable CLI output before report parsing or Direct Chat rendering.
+ * Hermes may print an open Reasoning banner or start directly with a tool diff.
+ * Only an explicit terminal report or chat envelope is recoverable in those formats;
+ * arbitrary prose has no safe boundary and must not expose the transcript.
+ */
+export function projectFinalText(text: string): string {
+  const warningChat = projectModelWarningChat(text);
+  if (warningChat !== null) return warningChat;
+  if (!/^(?:⚠️?[^\r\n]*\r?\n)*(?:\r?\n)*(?:┌─ Reasoning ─+┐|[ \t]*┊ review diff)(?:\r?\n|$)/.test(text)) return decodeChatEnvelope(text);
+  const candidate = terminalJsonCandidate(text, (body) => body.includes('megacorps-report') || body.includes(CHAT_KIND));
+  return candidate === null ? AMBIGUOUS_OUTPUT : decodeChatEnvelope(candidate);
 }

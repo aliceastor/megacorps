@@ -1,5 +1,6 @@
 import { agentReportSchema, type AgentReport, type AgentReportDelegation } from '@megacorps/shared';
 import { formatReportIssues, normalizeOptionalReportFields } from './report-validation.ts';
+import { terminalReportCandidate } from './a2a-final-output.ts';
 
 const REPORT_MARKER = 'megacorps-report';
 const DELEGATION_LINE_MAX = 500;
@@ -81,11 +82,12 @@ export function markedJsonCandidates(output: string | null | undefined, marker: 
 export function extractAgentReport(output: string | null | undefined): AgentReportExtraction | null {
   const text = output ?? '';
   if (!text.includes(REPORT_MARKER)) return null;
-  // Scan the whole response in source order, including bare JSON after fences.
-  // A trailing incomplete report is still present and must request correction.
-  const candidates = balancedJsonCandidates(text, REPORT_MARKER);
-  const candidate = candidates.at(-1);
-  if (!candidate || text.lastIndexOf(REPORT_MARKER) >= text.lastIndexOf(candidate) + candidate.length) {
+  // Reset JSON state at an explicit terminal boundary before considering the
+  // legacy prose format. Tool diffs can contain unmatched braces and quotes.
+  // A trailing malformed terminal candidate still goes through validation.
+  const terminal = terminalReportCandidate(text);
+  const candidate = terminal ?? balancedJsonCandidates(text, REPORT_MARKER).at(-1);
+  if (!candidate || (terminal === null && text.lastIndexOf(REPORT_MARKER) >= text.lastIndexOf(candidate) + candidate.length)) {
     return { error: 'report_json_parse_failed: final report is incomplete' };
   }
   let parsed: unknown;

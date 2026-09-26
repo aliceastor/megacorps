@@ -157,3 +157,16 @@ test('structuredDelegationPlan returns null without a report or delegations', ()
   assert.equal(structuredDelegationPlan('DELEGATE:\n- prose only'), null);
   assert.equal(structuredDelegationPlan(reportWith([])), null);
 });
+
+test('terminal bare report is not poisoned by braces in earlier Python diff strings', () => {
+  const output = `  ┊ review diff\n+start = t.rfind('{"kind"')\n+print(t[start:])\n\n${validReportJson}`;
+  assert.deepEqual(extractAgentReport(output), extractAgentReport(validReportJson));
+});
+
+test('terminal report boundary ignores diff braces while retaining the latest invalid report', () => {
+  const old = JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'Old', verdict: 'approved' });
+  for (const final of ['{"kind":"megacorps-report","status":"wrong"}', '{"kind":"megacorps-report","status":']) {
+    const result = extractAgentReport(`${old}\n+start = t.rfind('{"kind"')\n${final}`);
+    assert.ok(result && 'error' in result);
+  }
+});

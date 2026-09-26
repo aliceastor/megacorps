@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { projectFinalText } from './a2a-final-output.ts';
+import { projectFinalText, terminalReportCandidate } from './a2a-final-output.ts';
 import { extractAgentReport } from './agent-report.ts';
 import { normalizeA2aSendResult } from './a2a-client.ts';
 const banner = '┌─ Reasoning ─────────────────────┐';
@@ -158,4 +158,76 @@ test('unknown or altered terminal warnings and extra output are not discarded', 
     const parsed = extractAgentReport(projected);
     assert.ok(!parsed || 'error' in parsed);
   }
+});
+
+test('the instructed megacorps-report terminal fence preserves the complete validated report', () => {
+  const final = JSON.stringify({ ...report, status: 'completed', verdict: 'approved', score: 9,
+    workProducts: [{ type: 'report', title: 'Review evidence', summary: 'Verified the exact artifact revision.' }],
+  }, null, 2);
+  const output = `${banner}\n+const example = '{"kind"';\n\`\`\`megacorps-report\n${final}\n\`\`\``;
+  assert.equal(projectFinalText(output), final);
+  assert.deepEqual(extractAgentReport(projectFinalText(output)), extractAgentReport(final));
+});
+
+const diffPrefix = `${modelWarning}\n  ┊ review diff\na/helper.py → b/helper.py\n@@ -0,0 +1,2 @@\n+start = t.rfind('{"kind"')\n+print(t[start:])\n`;
+
+test('a bare terminal report after a CLI Python diff is isolated before report validation', () => {
+  const final = JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'Exact review evidence retained', verdict: 'approved', score: 9 });
+  const output = `${diffPrefix}\n${final}`;
+  assert.equal(projectFinalText(output), final);
+  assert.deepEqual(extractAgentReport(projectFinalText(output)), extractAgentReport(final));
+});
+
+test('a diff-only CLI transcript cannot expose private output when its terminal answer is ambiguous', () => {
+  for (const latest of ['Unframed final answer', `${json} trailing output`, `${json}\n{"status":"wrong"}`, `${json}\n\`\`\`python\nprint("done")\n\`\`\``]) {
+    assert.match(projectFinalText(`${diffPrefix}\n${latest}`), /a2a_final_output_ambiguous/);
+  }
+});
+
+test('latest rejected or malformed report after a CLI diff takes precedence over old approval', () => {
+  const old = JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'Old approval', verdict: 'approved' });
+  const rejected = JSON.stringify({ kind: 'megacorps-report', status: 'completed', summary: 'Current rejection', verdict: 'revision_requested' });
+  for (const latest of [rejected, '{"kind":"megacorps-report","status":"wrong"}', '{"kind":"megacorps-report","status":']) {
+    for (const frame of [(body: string) => body, (body: string) => `\`\`\`megacorps-report\n${body}\n\`\`\``]) {
+      const output = `${diffPrefix}\n${old}\n${frame(latest)}`;
+      assert.equal(projectFinalText(output), latest);
+      const result = extractAgentReport(projectFinalText(output));
+      assert.ok(result);
+      if (latest === rejected) assert.ok('report' in result && result.report.verdict === 'revision_requested');
+      else assert.ok('error' in result);
+    }
+  }
+});
+
+test('report fence recovery stays bounded with large CLI logs and handles the known footer', () => {
+  const output = `${banner}\n${'large tool log {\n'.repeat(20_000)}\`\`\`megacorps-report\n${json}\n\`\`\`\n\n${verifierFooter}`;
+  assert.equal(projectFinalText(output), json);
+});
+
+
+test('terminal report evidence excludes chat envelopes with nested report objects', () => {
+  const envelope = JSON.stringify({ kind: 'megacorps-chat-response', body: report });
+  assert.equal(terminalReportCandidate(`${diffPrefix}\n${envelope}`), null);
+});
+
+test('terminal report evidence preserves a standalone multiline object', () => {
+  const pretty = JSON.stringify(report, null, 2);
+  assert.equal(terminalReportCandidate(pretty), pretty);
+});
+
+test('terminal report evidence never chooses an older answer after ambiguous trailing text', () => {
+  for (const suffix of ['later text', '{"status":"wrong"}', '```python\nprint("done")\n```']) {
+    assert.equal(terminalReportCandidate(`${diffPrefix}\n${json}\n${suffix}`), null);
+  }
+  assert.equal(terminalReportCandidate(`${json} ${json}`), null);
+  assert.equal(terminalReportCandidate(`${diffPrefix}\n${json}\n${json}`), json);
+  const truncated = '{"kind":"megacorps-report","status":';
+  assert.equal(terminalReportCandidate(`${diffPrefix}\n${json}\n${truncated}`), truncated);
+});
+
+test('a truncated standalone report cannot promote its nested report to the final answer', () => {
+  const outer = `{\n"kind":"megacorps-report",\n"status":"failed",\n"report":\n${json}`;
+  assert.equal(terminalReportCandidate(outer), outer);
+  const result = extractAgentReport(outer);
+  assert.ok(result && 'error' in result);
 });
