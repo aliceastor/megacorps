@@ -80,6 +80,7 @@ export async function buildFocusedKanbanContext(input: {
   const sections = [
     '## Current task and acceptance',
     `Company: ${input.company?.name ?? companyId}; card=${card.id}; stage=${card.columnStatus ?? 'todo'}`,
+    `Mission: ${clip(input.company?.mission ?? 'No mission configured.', 600)}`,
     `Title: ${card.title}\nAssignee: ${agentName(card.assigneeId)}; reviewer: ${agentName(card.reviewerId)}; requires approval: ${card.requiresApproval ? 'yes' : 'no'}`,
     `Project: ${input.projects.find(p => p.id === card.projectId)?.name ?? card.projectId ?? 'none'}; projectId=${card.projectId ?? 'none'}`,
     essentialBrief ? clip(essentialBrief, Math.max(1400, Math.floor(budget * .25))) : '',

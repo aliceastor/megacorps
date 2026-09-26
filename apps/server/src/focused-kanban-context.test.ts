@@ -7,7 +7,7 @@ import { buildCompanyKanbanContext } from './dispatch.ts';
 function fixture(t: Parameters<typeof memoryDb>[0]) {
   const focus: any = { id: 'focus', companyId: 'c', projectId: 'p', title: 'Research APK', body: 'CURRENT_OBJECTIVE\n## Acceptance\nKEEP_EXACT_ACCEPTANCE', columnStatus: 'todo', parentCardId: 'parent', dependencyCardIds: ['dependency'], tags: [], lastError: 'CURRENT_BLOCKER', reviewFeedback: 'CURRENT_REVIEW_FEEDBACK' };
   const state = memoryDb(t, [
-    [companies, [{ id: 'c', name: 'Firm' }]],
+    [companies, [{ id: 'c', name: 'Firm', mission: 'COMPANY_MISSION_SENTINEL' }]],
     [projects, [{ id: 'p', companyId: 'c', name: 'Research', repoUrl: 'https://git.example/firm/research' }, { id: 'other-project', companyId: 'c', name: 'Other project' }]],
     [goals, [{ id: 'other-goal', companyId: 'c', projectId: 'other-project', title: 'Other goal', body: 'UNRELATED_GOAL_BODY'.repeat(200) }]],
     [kanbanCards, [
@@ -27,7 +27,7 @@ function fixture(t: Parameters<typeof memoryDb>[0]) {
 test('focused injection preserves current scope, blockers and evidence without unrelated board rows', async t => {
   fixture(t);
   const prompt = await buildCompanyKanbanContext('c', { focusCardId: 'focus' });
-  for (const required of ['CURRENT_OBJECTIVE', 'KEEP_EXACT_ACCEPTANCE', 'CURRENT_BLOCKER', 'CURRENT_REVIEW_FEEDBACK', 'CURRENT_HUMAN_INSTRUCTION', 'CURRENT_EVIDENCE', 'PARENT_OBJECTIVE', 'REQUIRED_DEPENDENCY', 'REQUIRED_CHILD', 'Other project', 'Other goal']) assert.ok(prompt.includes(required), required);
+  for (const required of ['COMPANY_MISSION_SENTINEL', 'CURRENT_OBJECTIVE', 'KEEP_EXACT_ACCEPTANCE', 'CURRENT_BLOCKER', 'CURRENT_REVIEW_FEEDBACK', 'CURRENT_HUMAN_INSTRUCTION', 'CURRENT_EVIDENCE', 'PARENT_OBJECTIVE', 'REQUIRED_DEPENDENCY', 'REQUIRED_CHILD', 'Other project', 'Other goal']) assert.ok(prompt.includes(required), required);
   assert.doesNotMatch(prompt, /UNRELATED_HISTORY_|OLD_INSTRUCTIONS|UNRELATED_GOAL_BODY|FOREIGN_SECRET/);
   assert.match(prompt, /\/api\/cards\/focus\/context/);
   assert.match(prompt, /authenticated.*(?:session|user)/i);
@@ -40,4 +40,21 @@ test('current acceptance is not crowded out by company history under the minimum
   assert.match(prompt, /KEEP_EXACT_ACCEPTANCE/);
   assert.match(prompt, /CURRENT_BLOCKER/);
   assert.match(prompt, /REQUIRED_DEPENDENCY/);
+});
+test('long company mission stays bounded without displacing task acceptance or blockers', async t => {
+  const { state } = fixture(t);
+  state.rows(companies)[0].mission = 'COMPANY_MISSION_SENTINEL ' + 'Background company detail. '.repeat(1000);
+  const prompt = await buildCompanyKanbanContext('c', { focusCardId: 'focus', budgetChars: 8000 });
+  assert.match(prompt, /COMPANY_MISSION_SENTINEL/);
+  assert.match(prompt, /KEEP_EXACT_ACCEPTANCE/);
+  assert.match(prompt, /CURRENT_BLOCKER/);
+  assert.match(prompt, /REQUIRED_DEPENDENCY/);
+  assert.ok(prompt.length <= 8000);
+});
+test('unsaved draft preview retains company mission without requiring a persisted card', async t => {
+  const { focus } = fixture(t);
+  const prompt = await buildCompanyKanbanContext('c', { draftFocusCard: { ...focus, id: 'unsaved-preview' } });
+  assert.match(prompt, /COMPANY_MISSION_SENTINEL/);
+  assert.match(prompt, /card=unsaved-preview/);
+  assert.match(prompt, /KEEP_EXACT_ACCEPTANCE/);
 });
