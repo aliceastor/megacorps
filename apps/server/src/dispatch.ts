@@ -1,3 +1,4 @@
+import { buildFocusedKanbanContext, compactReportContext } from './focused-kanban-context.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { formatTaskState, taskStateReference } from './task-state-context.ts';
 import { agentRemoteWork, refreshAgentRemoteCapacity, sweepA2aRemoteReconciliation } from './a2a-remote-reconciliation.ts';
@@ -47,7 +48,7 @@ import { extractAgentReport, structuredDelegationPlan } from './agent-report.ts'
 import { normalizeAgentResult, parkPermissionBlockedResult, persistAgentWorkProducts, settleOriginalHeartbeat } from './agent-results.ts';
 import { processCollaborationRequest } from './collaboration-requests.ts';
 import { sanitizeCompanyOutput } from './output-secrets.ts';
-import { finishProtocolHelp, protocolHelpOrigin, protocolRepairSession, recordProtocolFailure, resetProtocolRepair } from './protocol-repair.ts';
+import { finishProtocolHelp, protocolHelpOrigin, protocolRepairPrompt, protocolRepairSession, recordProtocolFailure, resetProtocolRepair } from './protocol-repair.ts';
 import { applyRecoveryReport, isRecoveryReview, isStructuredReviewerHelp, recoveryMutationAllowed, requestCardRecovery, recoveryPrompt } from './card-recovery.ts';
 import { informationalProjectAuthority } from './informational-project.ts';
 import { agentReportGuidance } from './agent-report-guidance.ts';
@@ -2699,7 +2700,7 @@ export async function sendAgentFeedbackAndRequeue(input: {
   output?: string | null;
   result?: { sessionId: string; turnId?: string | null; costUsd?: number; durationSeconds?: number };
 }): Promise<CardRow> {
-  const repair = await recordProtocolFailure({ card: input.card, actor: input.agent, kind: input.kind, runKey: input.taskRunId ?? input.runId ?? 'unkeyed', taskRunId: input.taskRunId, sessionId: input.result?.sessionId, reason: input.message });
+  const repair = await recordProtocolFailure({ card: input.card, actor: input.agent, kind: input.kind, runKey: input.taskRunId ?? input.runId ?? 'unkeyed', taskRunId: input.taskRunId, sessionId: input.result?.sessionId, reason: input.message, output: input.output });
   if (!repair.duplicate) {
     await db.update(agents).set({ currentSessionId: repair.mode === 'same_session' ? input.result?.sessionId : null, isBusy: false }).where(eq(agents.id, input.agent.id));
     if (input.runId) await db.update(heartbeatRuns).set({ status: 'failed', completedAt: new Date(), error: input.message, durationSeconds: input.result?.durationSeconds, costUsd: input.result?.costUsd?.toString() }).where(eq(heartbeatRuns.id, input.runId));
@@ -2982,7 +2983,7 @@ export async function reviewMessageDelegation(cardId: string, options: { taskRun
     const adapterSessionId = adapterSession?.adapterSessionId ?? null;
     const executionAgent = await buildExecutionAgent(reviewer, adapterSessionId);
     const prompt = await buildMessageReviewPrompt(card, report, request, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'message_review' });
-    const task = { id: card.id, title: `Review delegated report: ${card.title}`, body: prompt, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent: reviewer, kind: 'message_review' }), taskRunId: taskRun.id, reportingMode: 'review' as const };
+    const task = { id: card.id, title: `Review delegated report: ${card.title}`, body: prompt, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent: reviewer, kind: 'message_review' }), taskRunId: taskRun.id, reportingMode: await isBossAssessment(card.companyId, reviewer.id) ? 'assessment' as const : 'review' as const };
     await recordPromptLog({
       companyId: card.companyId,
       agentId: reviewer.id,
@@ -3816,7 +3817,7 @@ export async function reviewCard(cardId: string, options: { taskRunId?: string |
     }
     const parentAssessment = reviewMode === 'quality' ? await captureParentAssessment(promptCard, reviewer.id) : null;
     const reviewPrompt = await buildReviewPrompt(promptCard, { continuation: Boolean(adapterSessionId), since: adapterSession?.updatedAt ?? null, kind: 'review' }) + reviewIdentityContext(reviewIdentity) + (parentAssessment ? `\n\n${parentAssessment.prompt}` : '');
-    const reviewTask = { id: card.id, title: `Review: ${card.title}`, body: reviewPrompt, reportingMode: isRecoveryReview(card, reviewer.id) ? 'recovery' as const : 'review' as const, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent: reviewer, kind: 'review' }), taskRunId: options.taskRunId };
+    const reviewTask = { id: card.id, title: `Review: ${card.title}`, body: reviewPrompt, reportingMode: isRecoveryReview(card, reviewer.id) ? 'recovery' as const : await isBossAssessment(card.companyId, reviewer.id) ? 'assessment' as const : 'review' as const, timeoutSeconds: await cardTaskTimeoutSeconds(card, { agent: reviewer, kind: 'review' }), taskRunId: options.taskRunId };
     await recordPromptLog({
       companyId: card.companyId,
       agentId: reviewer.id,
@@ -4562,6 +4563,15 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
   const includeGoals = options.includeGoals !== false;
   const includeInvocationPositionPrompt = options.includeInvocationPositionPrompt !== false;
   const includeFocusProjectRepo = options.includeFocusProjectRepo !== false;
+  if ((options.focusCardId || options.draftFocusCard) && focusCard) {
+    const assignee = focusCard.assigneeId ? agentById.get(focusCard.assigneeId) : undefined;
+    const runtime = assignee?.runtimeId ? runtimeById.get(assignee.runtimeId) : undefined;
+    return buildFocusedKanbanContext({ companyId, company, card: focusCard, cards: companyCards, agents: visibleAgents,
+      projects: companyProjects, goals: companyGoals, budget, includeGoals,
+      structure: companyStructureLines({ agents: visibleAgents, departmentById, positionById }),
+      repository: includeFocusProjectRepo ? projectRepoLines(company, focusCard.projectId ? projectById.get(focusCard.projectId) : null, runtime, assignee ?? null) : [],
+    });
+  }
 
   addContextSection(state, 'Company', [
     `Name: ${company?.name ?? 'unknown'}`,
@@ -4621,88 +4631,6 @@ export async function buildCompanyKanbanContext(companyId: string, options: Kanb
       `Assigned open work:\n${assigned.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
       `Review queue:\n${reviews.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
     ].join('\n'), 9000);
-  }
-
-  if (focusCard) {
-    const parent = focusCard.parentCardId ? companyCards.find((card) => card.id === focusCard.parentCardId) : undefined;
-    const ancestors = ancestorChain(focusCard, companyCards);
-    const children = companyCards.filter((card) => card.parentCardId === focusCard.id);
-    const deps = (focusCard.dependencyCardIds ?? []).map((id) => companyCards.find((card) => card.id === id)).filter((card): card is CardRow => Boolean(card));
-    const focusAssignee = focusCard.assigneeId ? agentById.get(focusCard.assigneeId) : undefined;
-    const focusReviewer = focusCard.reviewerId ? agentById.get(focusCard.reviewerId) : undefined;
-    const focusAssigneeRuntime = focusAssignee?.runtimeId ? runtimeById.get(focusAssignee.runtimeId) : undefined;
-    const requiredTools = await db.select({ cardTool: cardRequiredTools, tool: toolRegistry })
-      .from(cardRequiredTools)
-      .innerJoin(toolRegistry, eq(cardRequiredTools.toolId, toolRegistry.id))
-      .where(eq(cardRequiredTools.cardId, focusCard.id));
-    addContextSection(state, 'Focus Task Full Context', [
-      `ID: ${focusCard.id}`,
-      `Title: ${focusCard.title}`,
-      `Stage: ${focusCard.columnStatus ?? 'todo'}`,
-      `Priority: ${focusCard.priority ?? 0}`,
-      `Decision mode: ${focusCard.decisionMode ?? 'not set'}`,
-      `Rollup status: ${focusCard.rollupStatus ?? 'not set'}`,
-      'Current workflow: split independent deliverables into child cards through report.children (bounded by the org chart: direct reports only, a few live children, one round at a time) and delegate help inside a card through DELEGATE; the completion protocol carries the exact rules.',
-      parent || children.length > 0 ? `Child-card policy: ${focusCard.requiredChildPolicy ?? 'all_required_accepted'} / ${focusCard.childRequirementLevel ?? 'required'}` : '',
-      `Estimated weight: ${focusCard.estimatedWeight ?? 'not set'}`,
-      `Estimated duration minutes: ${focusCard.estimatedDurationMinutes ?? 'not set'}`,
-      `Task budget limit: ${focusCard.taskBudgetLimit ?? 'not set'}`,
-      `Department: ${focusCard.departmentId ? departmentById.get(focusCard.departmentId)?.name ?? focusCard.departmentId : 'none'}`,
-      `Project: ${focusCard.projectId ? projectById.get(focusCard.projectId)?.name ?? focusCard.projectId : 'none'}`,
-      includeFocusProjectRepo ? `Project repo:\n${projectRepoLines(company, focusCard.projectId ? projectById.get(focusCard.projectId) : null, focusAssigneeRuntime, focusAssignee ?? null).join('\n')}` : '',
-      `Goal: ${focusCard.goalId ? goalById.get(focusCard.goalId)?.title ?? focusCard.goalId : 'none'}`,
-      `Applicable goals:\n${applicableGoals(companyGoals, { departmentId: focusCard.departmentId, projectId: focusCard.projectId, selectedGoalId: focusCard.goalId }).map((goal) => formatGoal(goal)).join('\n') || 'none'}`,
-      `Assignee: ${focusAssignee?.name ?? (focusCard.assigneeId ? 'unavailable' : 'unassigned')}`,
-      `Reviewer: ${focusReviewer?.name ?? (focusCard.reviewerId ? 'unavailable' : 'none')}`,
-      parent ? `Legacy parent card (read-only): ${compactCardLine(parent, agentById)}` : '',
-      children.length > 0 ? `Existing child cards (reference; follow current role and delegation instructions):\n${children.map((card) => compactCardLine(card, agentById)).join('\n')}` : '',
-      `Dependencies:\n${deps.map((card) => compactCardLine(card, agentById)).join('\n') || 'none'}`,
-      `Requires approval: ${focusCard.requiresApproval ? 'yes' : 'no'}`,
-      `Retry: ${focusCard.retryCount ?? 0}/${focusCard.maxRetries ?? 3}`,
-      `Review revisions: ${focusCard.revisionCount ?? 0}/${focusCard.maxRevisions ?? 3}`,
-      `Required deterministic tools:\n${requiredTools.map(({ cardTool, tool }) => `- ${tool.name}@${tool.version}: ${tool.description ?? 'no description'}${cardTool.reason ? ` (reason: ${cardTool.reason})` : ''}`).join('\n') || 'none'}`,
-      `Session: ${focusCard.sessionId ?? 'none'}`,
-      `Cost USD: ${focusCard.costUsd ?? '0'}`,
-      'Body:',
-      clipText(focusCard.body, 8000),
-      focusCard.reviewFeedback ? `Review feedback:\n${clipText(focusCard.reviewFeedback, 4000)}` : '',
-      focusCard.executionLog ? `Latest execution output:\n${clipText(focusCard.executionLog, 6000)}` : '',
-    ].filter(Boolean).join('\n'), 14000);
-
-    if (ancestors.length > 0) {
-      addContextSection(state, 'Upstream Task Chain Full Context', [
-        `Path: ${[...ancestors, focusCard].map((card) => card.title).join(' > ')}`,
-        ...ancestors.map((ancestor, index) => [
-          `## Ancestor ${index + 1}: ${ancestor.title}`,
-          `ID: ${ancestor.id}`,
-          `Stage: ${ancestor.columnStatus ?? 'todo'}`,
-          `Decision mode: ${ancestor.decisionMode ?? 'not set'}`,
-          `Assignee: ${ancestor.assigneeId ? agentById.get(ancestor.assigneeId)?.name ?? 'unavailable' : 'unassigned'}`,
-          `Reviewer: ${ancestor.reviewerId ? agentById.get(ancestor.reviewerId)?.name ?? 'unavailable' : 'none'}`,
-          `Body:\n${clipText(ancestor.body, 5000)}`,
-          ancestor.executionLog ? `Latest execution output:\n${clipText(ancestor.executionLog, 4000)}` : '',
-          ancestor.reviewFeedback ? `Review feedback:\n${clipText(ancestor.reviewFeedback, 2500)}` : '',
-        ].filter(Boolean).join('\n')),
-      ].join('\n\n'), 16000);
-    }
-
-    const [messages, actions, logs] = await Promise.all([
-      db.select().from(cardComments).where(eq(cardComments.cardId, focusCard.id)).orderBy(desc(cardComments.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
-      db.select().from(cardActions).where(eq(cardActions.cardId, focusCard.id)).orderBy(desc(cardActions.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
-      db.select().from(taskLogs).where(eq(taskLogs.cardId, focusCard.id)).orderBy(desc(taskLogs.createdAt)).limit(KANBAN_CONTEXT_RECORD_LIMIT),
-    ]);
-    addContextSection(state, 'Focus Task Message Board Latest', messages.reverse().map((message) => {
-      const author = message.agentId ? agentById.get(message.agentId)?.name ?? message.agentId : message.authorType;
-      return `- ${formatDate(message.createdAt)} | ${author} | ${message.action}: ${clipText(message.body, 900)}`;
-    }).join('\n') || 'none', 7000);
-    addContextSection(state, 'Focus Task Action Timeline Latest', actions.reverse().map((action) => [
-      `- ${formatDate(action.createdAt)} | ${action.actorType}:${action.actorId} | ${action.action} | ${action.fromStatus ?? 'none'} -> ${action.toStatus ?? 'none'}`,
-      action.detail ? `  detail: ${clipText(action.detail, 700)}` : '',
-    ].filter(Boolean).join('\n')).join('\n') || 'none', 6000);
-    addContextSection(state, 'Focus Task Lifecycle Latest', logs.reverse().map((log) => [
-      `- ${formatDate(log.createdAt)} | ${log.type}/${log.status}: ${clipText(log.message, 700)}`,
-      log.output ? `  output: ${clipText(log.output, 900)}` : '',
-    ].filter(Boolean).join('\n')).join('\n') || 'none', 7000);
   }
 
   const scopedRuns = scopedToProject ? recentRuns.filter((run) => {
@@ -4795,7 +4723,7 @@ async function buildKanbanDeltaContext(card: CardRow, options: PromptBuildOption
     requiresApproval: Boolean(card.requiresApproval),
     sections: [
     { title: 'Last error', entries: card.lastError ? [promptDiagnostic(card.lastError)] : [] },
-    { title: 'Review feedback', entries: card.reviewFeedback ? [clipText(card.reviewFeedback, 2500)] : [] },
+    { title: 'Review feedback', entries: card.reviewFeedback ? [compactReportContext(card.reviewFeedback, 2500)] : [] },
     { title: 'Parent chain', entries: ancestors.length ? ancestors.map(reference) : card.parentCardId ? [`- Parent unavailable: ${card.parentCardId}`] : [] },
     { title: 'Child cards', entries: children.length ? [`Acceptance policy: ${card.requiredChildPolicy ?? 'all_required_accepted'}`, ...children.map(reference)] : [] },
     { title: 'Dependencies', entries: (card.dependencyCardIds ?? []).map(id => { const dependency = deps.find(item => item.id === id); return dependency ? reference(dependency) : `- Dependency unavailable: ${id}`; }) },
@@ -5164,8 +5092,8 @@ async function buildReviewPromptCore(card: CardRow, options: PromptBuildOptions 
     `ID: ${child.id}`,
     `Status: ${child.columnStatus ?? 'todo'}`,
     `Assignee: ${child.assigneeId ?? 'none'}`,
-    child.executionLog ? `Execution output:\n${clipText(child.executionLog, 3000)}` : 'Execution output: none',
-    child.reviewFeedback ? `Review feedback:\n${clipText(child.reviewFeedback, 1800)}` : '',
+    child.executionLog ? `Execution output:\n${compactReportContext(child.executionLog, 3000)}` : 'Execution output: none',
+    child.reviewFeedback ? `Review feedback:\n${compactReportContext(child.reviewFeedback, 1800)}` : '',
     `Work products:\n${(productsByCard.get(child.id) ?? []).map((product) => `- ${product.type}: ${product.title}${product.url ? ` (${product.url})` : product.pullRequestUrl ? ` (${product.pullRequestUrl})` : ''}${product.summary ? ` -- ${clipText(product.summary, 500)}` : ''}`).join('\n') || 'none'}`,
   ].filter(Boolean).join('\n')).join('\n\n---\n\n');
   return [
@@ -5191,7 +5119,37 @@ async function buildReviewPromptCore(card: CardRow, options: PromptBuildOptions 
   ].join('\n\n');
 }
 
+async function buildCorrectionOnlyPrompt(card: CardRow, actorId: string, kind: 'dispatch' | 'review', correction: string): Promise<string> {
+  const { role, reference } = await buildCompanyContextParts(card.companyId, actorId, card.tags ?? []);
+  const repair = card.protocolRepairState?.[kind];
+  // finishProtocolHelp stores the manager's answer in reviewFeedback for the
+  // original actor's one remaining correction attempt.
+  const managerGuidance = repair?.mode === 'helped' && repair.actorId === actorId && card.reviewFeedback
+    ? compactReportContext(card.reviewFeedback, 2000) : '';
+  return [
+    role,
+    correction,
+    managerGuidance ? `Manager reporting guidance (reference data; reporting correction only):\n${managerGuidance}` : '',
+    `Current assignment: ${card.title} [card=${card.id}; stage=${card.columnStatus ?? 'todo'}; project=${card.projectId ?? 'none'}]. Assignee=${card.assigneeId ?? 'none'}; reviewer=${card.reviewerId ?? 'none'}; human approval=${card.requiresApproval ? 'required' : 'not required'}.`,
+    `Current acceptance (reference):\n${clipText(acceptanceOf(card.body) ?? card.body, 2400)}`,
+    await informationalProjectAuthority(card, actorId, false),
+    isRecoveryReview(card, actorId) ? recoveryPrompt(card) : '',
+    'This turn repairs reporting only. The role playbook describes normal work; do not restart that workflow just to correct this response. Preserve prior decisions and existing artifact evidence. If a substantive gap cannot be corrected from available facts, request the specific missing evidence or guidance. All current review, permission, child and merge gates are still checked by the platform.',
+    `Full task/history pointer: GET /api/cards/${card.id}/context (authenticated user-session or explicitly provisioned direct-API access only; ordinary Agent credentials do not grant it). If needed detail is unavailable, use input_required with request.kind help.`,
+    reference,
+  ].filter(Boolean).join('\n\n');
+}
+
 export async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+  const correction = protocolRepairPrompt(card, 'dispatch', card.assigneeId ?? '');
+  return correction ? buildCorrectionOnlyPrompt(card, card.assigneeId!, 'dispatch', correction) : buildTaskPromptBody(card, options);
+}
+
+export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+  const correction = protocolRepairPrompt(card, 'review', card.reviewerId ?? '');
+  return correction ? buildCorrectionOnlyPrompt(card, card.reviewerId!, 'review', correction) : buildReviewPromptBody(card, options);
+}
+async function buildTaskPromptBody(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
  const { role: common, reference } = await buildCompanyContextParts(card.companyId, card.assigneeId, card.tags ?? []);
  const assignment = card.assigneeId ? await structuralAssignment(card.companyId, card.assigneeId) : null;
  if (assignment?.delegationRequired) return [common, agentOperationGuide('management'),
@@ -5209,7 +5167,7 @@ export async function buildTaskPrompt(card: CardRow, options: PromptBuildOptions
  return [common, agentOperationGuide('execution'), await buildTaskPromptCore(card, { ...options, referenceContext: reference })].join('\n\n');
 }
 
-export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
+async function buildReviewPromptBody(card: CardRow, options: PromptBuildOptions = {}): Promise<string> {
  const { role: common, reference } = await buildCompanyContextParts(card.companyId, card.reviewerId, card.tags ?? []);
  if (isRecoveryReview(card, card.reviewerId ?? undefined)) return [common, agentApiDiscovery,
    `Repair the blocker for ${card.id}: ${card.title}. Original goal and acceptance:\n${card.body}`,
@@ -5226,7 +5184,7 @@ export async function buildReviewPrompt(card: CardRow, options: PromptBuildOptio
    GOAL_ASSESSMENT_EVIDENCE_GUIDANCE,
    `Acceptance: ${acceptanceOf(card.body) ?? card.body}`,
    card.reviewerId ? await informationalProjectAuthority(card, card.reviewerId, false) : '',
-   `Department result:\n${clipText(card.executionLog, 12000)}`,
+   `Department result:\n${compactReportContext(card.executionLog, 12000)}`,
    card.rollupStatus !== 'integrating' ? await acceptedReviewerEvidencePacket(card) : '',
    await integrationSection(card),
    reference,

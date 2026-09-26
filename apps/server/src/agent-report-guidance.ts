@@ -1,10 +1,10 @@
-export type ReportingMode = 'execution' | 'management' | 'review' | 'recovery';
+export type ReportingMode = 'execution' | 'management' | 'review' | 'assessment' | 'recovery';
 
 /** One role/stage contract, shared by native adapters and API documentation. */
 export function agentReportGuidance(mode: ReportingMode): string {
   const example = mode === 'management'
     ? { kind: 'megacorps-report', status: 'progress', summary: 'Replace with current coordination facts.', children: [] }
-    : mode === 'review'
+    : (mode === 'review' || mode === 'assessment')
       ? { kind: 'megacorps-report', status: 'completed', summary: 'The required verification evidence is missing; supply the stated checks before resubmission.', verdict: 'revision_requested' }
       : mode === 'recovery'
         ? { kind: 'megacorps-report', status: 'completed', summary: 'Return the task with a concrete correction.', recovery: { action: 'rework', reason: 'Reported evidence does not match the assigned project.', instructions: 'Produce the deliverable in the assigned project and report its actual PR and head revision for review.' } }
@@ -16,6 +16,7 @@ export function agentReportGuidance(mode: ReportingMode): string {
     mode === 'execution' ? 'Execute the assignment. Report progress, completed work with actual workProducts, or a concrete help/permission request. Review decisions and management actions belong to their assigned stages.' : '',
     mode === 'management' ? 'Coordinate and delegate independent deliverables through children to eligible direct reports supplied in the prompt. Each child needs title (bounded deliverable), body (complete scope and acceptance evidence), and assigneeSlug (an eligible supplied recipient). The empty children array in the non-action example creates no assignments. Use progress while waiting. Assess the goal only after verified child acceptance; never invent evidence or execute work forbidden by your role.' : '',
     mode === 'review' ? 'Inspect the actual artifact against acceptance criteria. Return verdict approved | revision_requested | escalate. Missing evidence requires concrete rework or help. Only evidence-supported approval is valid. Include findings only for actual defects: severity P0 | P1 | P2, title, evidence, requiredFix. Follow any required panel contract supplied in the assignment.' : '',
+    mode === 'assessment' ? 'This is a goal assessment using supplied evidence. Reuse prior checks only when the current accepted-evidence packet confirms their scope and artifact identity; otherwise preserve their unverified status. Return verdict approved | revision_requested | escalate for goal coverage, preserving reviewer checks, original authors, exact artifact revisions and limitations. Never clone, run tests, implement, redo professional QA or assign another quality score. Changed artifacts or missing evidence require targeted reviewer help; an earlier approval does not cover new work.' : '',
     mode === 'recovery' ? 'Return one completed recovery decision using recovery.action fix_card | rework | raise_to_human and a concrete reason. Follow the permitted patch fields in this assignment. If you cannot resolve the blocker, use raise_to_human and explain the decision needed. Recovery is guidance, never artifact approval; Boss coordinates only.' : '',
     'Example shape only: replace all example values with current facts and choose the status/action supported by the evidence:',
     '```json', JSON.stringify(example), '```',
