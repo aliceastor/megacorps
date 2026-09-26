@@ -33,10 +33,11 @@ Files: dispatch.ts (root ownership), new focused-kanban-context.ts/tests if usef
 ## Task 4 — Integration and release verification
 - [x] Focused real parser, prompt, repair, evidence and acceptance tests; server typecheck.
 - [x] Independent review of parser safety and prompt omissions; fix material findings.
-- [ ] Full workspace tests/typecheck/build with existing local test harness and required CI incl PostgreSQL/browser/Docker.
-- [ ] Commit coherent fixes; push following existing authorized delivery workflow. Redeploy verified image using existing Portainer scripts, inspect health and prompt previews; do not claim a fresh live lifecycle run unless actually performed.
-- [ ] Write release report with exact commit, checks, raw-output replay results, prompt sizes and limits.
+- [x] Full workspace tests/typecheck/build with existing local test harness and required CI incl PostgreSQL/browser/Docker.
+- [x] Commit coherent fixes; push following existing authorized delivery workflow. Redeploy verified image using existing Portainer scripts, inspect health and prompt previews; do not claim a fresh live lifecycle run unless actually performed.
+- [x] Write release report with exact commit, checks, raw-output replay results, prompt sizes and limits.
 
 Run local targeted tests after loading .superpowers/sdd/environment.ps1:
 `node --test --import tsx apps/server/src/a2a-final-output.test.ts apps/server/src/agent-report.test.ts apps/server/src/protocol-repair.test.ts apps/server/src/reviewer-evidence.test.ts`
 Use existing TEST_DATABASE_URL setup for Postgres integration, never production DB.
+Release evidence: docs/reports/2026-09-26-report-recovery.md. Code d16f27d passed full CI including PostgreSQL, 148 browser checks and both Docker jobs, then deployed and verified in Portainer on 2026-09-26. No fresh paid model lifecycle was claimed.
